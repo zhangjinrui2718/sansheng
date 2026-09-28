@@ -18,7 +18,7 @@ interface RuntimeConfig {
 
 interface Props {
   config: RuntimeConfig | null;
-  ping: string;
+  serverTime: string;
   route: "chat" | "settings";
   onRoute: (r: "chat" | "settings") => void;
   currentUsage: { input: number; output: number; costUsd: number };
@@ -28,7 +28,7 @@ interface Props {
 
 export function TopBar({
   config,
-  ping,
+  serverTime,
   route,
   onRoute,
   currentUsage,
@@ -83,20 +83,17 @@ export function TopBar({
       <div className="flex items-center gap-3">
         <CostDisplay current={currentUsage} total={totalUsage} />
         <span className="sansheng-text-mute" style={{ fontSize: 11 }}>·</span>
-        <div
-          className="flex items-center gap-2"
-          style={{ fontSize: 11, color: "var(--bone-mute)" }}
-        >
+        <div className="flex items-center gap-2" style={{ fontSize: 11 }}>
           <span
             className="inline-block rounded-full"
             style={{
               width: 6,
               height: 6,
-              background: ping.includes("ok") ? "var(--bamboo)" : "var(--ochre)",
+              background: serverTime !== "—" ? "var(--bamboo)" : "var(--ochre)",
               boxShadow: "0 0 0 2px var(--jade-soft)",
             }}
           />
-          <span className="font-mono">{ping}</span>
+          <span className="font-mono sansheng-text-dim">{serverTime}</span>
         </div>
       </div>
     </header>
@@ -118,7 +115,7 @@ function CostDisplay({
           ▸ in {current.input}/out {current.output} · ${current.costUsd.toFixed(4)}
         </span>
       ) : (
-        <span className="font-mono sansheng-text-mute">idle</span>
+        <span className="font-mono sansheng-text-mute">本轮 idle</span>
       )}
       {total.input + total.output > 0 && (
         <>

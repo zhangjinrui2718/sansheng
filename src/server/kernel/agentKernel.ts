@@ -87,6 +87,16 @@ export class AgentKernel {
     });
 
     this.session = session;
+
+    // 等 session 真正 idle 后再 emit ready;createAgentSession() 返回时
+    // Pi SDK 还在做内部初始化(tool 注册 / system prompt 构建),此时 prompt() 会拋
+    // "Agent is already processing"。等 isIdle=true 才安全。
+    for (let i = 0; i < 100; i++) {
+      // 最多 5s:每 50ms 检查一次
+      if (session.isIdle) break;
+      await new Promise((r) => setTimeout(r, 50));
+    }
+
     sink({
       type: "ready",
       conversationId: this.conversationId,
@@ -107,6 +117,10 @@ export class AgentKernel {
       } else {
         throw new Error("kernel not started");
       }
+    }
+    // 保险:再 poll 一次 session.isIdle,避免极端情况(刚启动有隐式后台 prompt)
+    for (let i = 0; i < 100 && !this.session!.isIdle; i++) {
+      await new Promise((r) => setTimeout(r, 50));
     }
     await this.session!.prompt(text);
   }

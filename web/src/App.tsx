@@ -26,7 +26,7 @@ interface RuntimeConfig {
 export function App() {
   const [route, setRoute] = useState<"chat" | "settings">("chat");
   const [cfg, setCfg] = useState<RuntimeConfig | null>(null);
-  const [ping, setPing] = useState<string>("—");
+  const [serverTime, setServerTime] = useState<string>("—");
   const loadSettings = useSettingsStore((s) => s.loadSettings);
   const settings = useSettingsStore((s) => s.settings);
   const totalUsage = useChatStore((s) => s.totalUsage);
@@ -42,8 +42,14 @@ export function App() {
     const tick = () =>
       fetch("/api/health")
         .then((r) => r.json())
-        .then((d) => setPing(`${d.ts} · ${d.ok ? "ok" : "?"}`))
-        .catch(() => setPing("—"));
+        .then((d) => {
+          const t = new Date(d.ts);
+          const hh = String(t.getHours()).padStart(2, "0");
+          const mm = String(t.getMinutes()).padStart(2, "0");
+          const ss = String(t.getSeconds()).padStart(2, "0");
+          setServerTime(`${hh}:${mm}:${ss}`);
+        })
+        .catch(() => setServerTime("—"));
     tick();
     const id = setInterval(tick, 5000);
     return () => clearInterval(id);
@@ -59,7 +65,7 @@ export function App() {
     <div className="sansheng-shell">
       <TopBar
         config={cfg}
-        ping={ping}
+        serverTime={serverTime}
         route={route}
         onRoute={setRoute}
         currentUsage={currentUsage}

@@ -38,8 +38,7 @@ export function ChatSurface() {
     if (!text) return;
     if (status === "streaming") return;
     if (!kernelReady) {
-      // kernel 还在启动,直接弹提示而不发请求
-      alert("Sansheng kernel 还在初始化,请稍候(连上后状态栏会变绿)");
+      alert("Sansheng kernel 还没初始化好,状态栏变绿后再发。WS 连接出问题可在 DevTools 看 console。");
       return;
     }
     if (!settings?.hasApiKey) {
