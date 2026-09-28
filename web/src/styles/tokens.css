@@ -1,0 +1,38 @@
+/* Sansheng · design tokens (CSS variables) */
+:root {
+  --ink-0: #0B0F14;
+  --ink-1: #0F141B;
+  --ink-2: #151C24;
+  --ink-3: #1C2530;
+  --ink-4: #26303D;
+
+  --bone: #E8E4D9;
+  --bone-dim: #B7AE9D;
+  --bone-mute: #7E776B;
+
+  --jade: #5E8B7E;
+  --jade-soft: rgba(94, 139, 126, 0.18);
+  --ochre: #C76B4A;
+  --cinnabar: #E5484D;
+  --bamboo: #7BA876;
+  --amber: #D49A3A;
+
+  --ease-out: cubic-bezier(0.2, 0.7, 0.2, 1);
+  --duration-120: 120ms;
+  --duration-160: 160ms;
+  --duration-200: 200ms;
+
+  --shadow-ink-sm: 0 1px 2px rgba(11, 15, 20, 0.5);
+  --shadow-ink: 0 2px 8px rgba(11, 15, 20, 0.55), 0 1px 2px rgba(11, 15, 20, 0.4);
+  --shadow-ink-lg: 0 8px 24px rgba(11, 15, 20, 0.6), 0 2px 4px rgba(11, 15, 20, 0.45);
+  --shadow-jade-glow: 0 0 0 3px var(--jade-soft);
+
+  --gutter: 24px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    animation-duration: 0.001ms !important;
+    transition-duration: 0.001ms !important;
+  }
+}

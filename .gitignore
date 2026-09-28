@@ -1,0 +1,26 @@
+# Pi runtime local state — never versioned
+.pi/
+.pi/**
+
+# Node
+node_modules/
+**/node_modules/
+**/dist/
+**/*.tsbuildinfo
+npm-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Loop runtime state under any project — never versioned (per plan)
+.pi/loop/
+
+# Test / coverage
+coverage/
+*.lcov

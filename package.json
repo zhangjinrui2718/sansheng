@@ -1,0 +1,66 @@
+{
+  "name": "sansheng",
+  "version": "0.1.0",
+  "description": "三生 · A multi-agent personal assistant with thought, communication, and action — npm-installable, browser-served.",
+  "type": "module",
+  "private": false,
+  "license": "MIT",
+  "bin": {
+    "sansheng": "./dist/cli/index.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "dev:server": "tsx watch src/server/index.ts",
+    "dev:web": "vite",
+    "dev": "npm-run-all -p dev:server dev:web",
+    "build:server": "tsc -p tsconfig.server.json",
+    "build:web": "vite build",
+    "build": "npm-run-all build:server build:web",
+    "start": "node dist/cli/index.js start",
+    "typecheck": "tsc -p tsconfig.server.json --noEmit && tsc -p tsconfig.web.json --noEmit",
+    "test": "vitest --run",
+    "test:watch": "vitest",
+    "prepublishOnly": "npm run build"
+  },
+  "dependencies": {
+    "@earendil-works/pi-ai": "^0.87.1",
+    "@earendil-works/pi-coding-agent": "0.87.1",
+    "@hono/node-server": "^1.13.7",
+    "@sinclair/typebox": "^0.34.13",
+    "better-sqlite3": "^11.7.0",
+    "commander": "^12.1.0",
+    "hono": "^4.6.14",
+    "node-notifier": "^10.0.1",
+    "open": "^10.1.1",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-router-dom": "^6.30.6",
+    "sqlite-vec": "^0.1.6",
+    "ws": "^8.18.0",
+    "zustand": "^4.5.7"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.12",
+    "@types/node": "^22.10.2",
+    "@types/node-notifier": "^8.0.5",
+    "@types/react": "^18.3.31",
+    "@types/react-dom": "^18.3.7",
+    "@types/ws": "^8.5.13",
+    "@vitejs/plugin-react": "^4.3.4",
+    "autoprefixer": "^10.4.20",
+    "npm-run-all": "^4.1.5",
+    "postcss": "^8.4.49",
+    "tailwindcss": "^3.4.17",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vite": "^5.4.11",
+    "vitest": "^2.1.8"
+  }
+}
