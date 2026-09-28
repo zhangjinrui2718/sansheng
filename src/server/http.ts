@@ -116,6 +116,14 @@ export function createApp(opts: AppOptions): Hono {
     });
   });
 
+  // 强制重置 kernel(stuck 恢复用)
+  app.post("/api/kernel/reset", async (c) => {
+    // 找第一个连着的 ws 拿 sink;没有就用空 sink(写到 log 即可)
+    const sink = (e: any) => log.muted(`reset-event: ${e.type}`);
+    await opts.kernel.reset(sink as any);
+    return c.json({ ok: true, conversationId: opts.kernel.getConversationId() });
+  });
+
   // —— 静态文件:生产构建产物(dist/web) ——
   const webRoot = resolve(__dirname, "../../dist/web");
   if (existsSync(webRoot)) {

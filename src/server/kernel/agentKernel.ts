@@ -108,6 +108,33 @@ export class AgentKernel {
     this.session.subscribe(this.makeHandler(sink));
   }
 
+  /**
+   * 强制重置 kernel(用于 stuck 状态恢复)。
+   * - 如果 session 还在 streaming,先 abort
+   * - dispose 旧 session,清掉内部状态
+   * - 下次 prompt 会重新 start()
+   */
+  async reset(sink: EventSink): Promise<void> {
+    log.warn("kernel reset requested");
+    if (this.session) {
+      try {
+        if ((this.session as any).isStreaming) {
+          try { this.session.abort(); } catch {}
+          await new Promise((r) => setTimeout(r, 500));
+        }
+        this.session.dispose?.();
+      } catch (err) {
+        log.warn("session dispose failed:", err);
+      }
+      this.session = null;
+      this.model = null;
+      this.currentMessageId = null;
+      this.toolStartAt.clear();
+    }
+    sink({ type: "interrupt", conversationId: this.conversationId });
+    await this.start(sink);
+  }
+
   async prompt(text: string, sink?: EventSink): Promise<void> {
     // sink 可选;为空时假设 kernel 已 start(常规路径)。
     if (!this.session) {
