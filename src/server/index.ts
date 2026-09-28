@@ -23,6 +23,10 @@ export interface ServerOptions {
 export async function startServer(opts: ServerOptions): Promise<void> {
   ensureDirs();
   process.env.SANSHENG_DATA = opts.dataDir;
+  // Pi SDK 在没网络或网络慢时会卡 ModelRuntime.refresh(~15s timeout),
+  // 导致 createAgentSession() 长时间挂起、ready 发不出来。
+  // Sansheng 用本地 catalog(provider+model 都在 builtin),不需要远程刷新。
+  process.env.PI_OFFLINE = process.env.PI_OFFLINE ?? "1";
 
   const settingsStore = new SettingsStore(join(opts.dataDir, "settings.json"));
   const settings = settingsStore.load();

@@ -87,7 +87,7 @@ export async function runStart(opts: StartOptions): Promise<void> {
     const child = spawn(process.execPath, [entry, "--host", opts.host, "--port", opts.port], {
       detached: true,
       stdio: ["ignore", logFd, logFd],
-      env: { ...process.env, SANSHENG_DATA: opts.data ?? dataDir(), SANSHENG_DAEMON: "1" },
+      env: { ...process.env, SANSHENG_DATA: opts.data ?? dataDir(), SANSHENG_DAEMON: "1", PI_OFFLINE: "1" },
     });
     child.unref();
     writeFileSync(PID_FILE(), String(child.pid ?? ""));

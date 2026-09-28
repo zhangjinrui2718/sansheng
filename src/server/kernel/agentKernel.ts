@@ -79,12 +79,18 @@ export class AgentKernel {
     this.model = m;
     log.info(`kernel start: provider=${this.settings.provider} model=${this.settings.modelId} cwd=${this.cwd}`);
 
-    const { session } = await createAgentSession({
+    // createAgentSession 内部会调 ModelRuntime.refresh()(拉 model catalog),
+    // PI_OFFLINE=1 下会跳过,但保险起见加 8s 硬超时,避免任何阻塞。
+    const createPromise = createAgentSession({
       model: m,
       cwd: this.cwd,
       agentDir: this.agentDir,
       thinkingLevel: this.settings.thinkingLevel,
     });
+    const timeoutPromise = new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error("createAgentSession timeout (8s) — ModelRuntime refresh hung?")), 8000),
+    );
+    const { session } = await Promise.race([createPromise, timeoutPromise]);
 
     this.session = session;
 
