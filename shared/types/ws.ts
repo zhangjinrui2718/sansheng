@@ -28,7 +28,8 @@ export type ServerEvent =
       usage?: { input: number; output: number; costUsd: number };
     }
   | { type: "error"; conversationId: string; error: { code: string; message: string } }
-  | { type: "interrupt"; conversationId: string };
+  | { type: "interrupt"; conversationId: string }
+  | { type: "conversation_reset"; conversationId: string };
 
 export type ClientCommand =
   | { type: "send"; content: string }

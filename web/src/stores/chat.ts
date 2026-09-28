@@ -41,6 +41,8 @@ export interface ChatState {
   reset(): void;
   applyEvent(e: ServerEvent): void;
   appendUserTurn(text: string): void;
+  /** 新建对话:调后端 + 清本地状态 */
+  newConversation(): Promise<void>;
 }
 
 const newTurn = (id: string, role: Role): Turn => ({
@@ -77,6 +79,26 @@ export const useChatStore = create<ChatState>((set, get) => ({
   appendUserTurn(text: string) {
     const t = newTurn(`u_${Date.now().toString(36)}`, "user");
     set((s) => ({ turns: [...s.turns, { ...t, blocks: [{ kind: "text", text }] }] }));
+  },
+
+  async newConversation() {
+    try {
+      const r = await fetch("/api/conversation/new", { method: "POST" });
+      const data = (await r.json()) as { conversationId?: string };
+      set((s) => ({
+        conversationId: data.conversationId ?? null,
+        turns: [],
+        currentTurn: null,
+        currentUsage: { input: 0, output: 0, costUsd: 0 },
+        error: null,
+        status: "idle",
+        // kernelReady 保持:后端 invalidate 了 session,下次 send 会重建;
+        // 但 provider/model 不变,所以不清 kernelReady,避免 UI 闪 "未连接"
+        kernelReady: s.kernelReady,
+      }));
+    } catch {
+      // 忽略,UI 保持原状
+    }
   },
 
   applyEvent(e: ServerEvent) {
@@ -187,6 +209,16 @@ export const useChatStore = create<ChatState>((set, get) => ({
         return;
       case "interrupt":
         set({ status: "idle" });
+        return;
+      case "conversation_reset":
+        set({
+          conversationId: e.conversationId,
+          turns: [],
+          currentTurn: null,
+          currentUsage: { input: 0, output: 0, costUsd: 0 },
+          error: null,
+          status: "idle",
+        });
         return;
     }
   },

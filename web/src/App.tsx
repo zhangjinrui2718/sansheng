@@ -4,7 +4,7 @@ import { HistoryRail } from "./components/shell/HistoryRail";
 import { AgentPanel } from "./components/shell/AgentPanel";
 import { ChatSurface } from "./components/chat/ChatSurface";
 import { SettingsPanel } from "./components/settings/SettingsPanel";
-import { useSettingsStore } from "./stores/settings";
+import { useSettingsStore, activeProviderOf } from "./stores/settings";
 import { useChatStore } from "./stores/chat";
 
 interface RuntimeConfig {
@@ -61,7 +61,8 @@ export function App() {
     loadSettings();
   }, [loadSettings]);
 
-  const needsSetup = !settings?.hasApiKey;
+  const active = activeProviderOf(settings);
+  const needsSetup = !settings || settings.providers.length === 0 || !active?.hasApiKey;
 
   return (
     <div className="sansheng-shell">

@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { ChatSocket } from "@/lib/ws";
 import { useChatStore } from "@/stores/chat";
-import { useSettingsStore } from "@/stores/settings";
+import { useSettingsStore, activeProviderOf } from "@/stores/settings";
 import { MessageList } from "./MessageList";
 import { ChatComposer } from "./ChatComposer";
 import type { ServerEvent } from "@shared/types/ws";
@@ -17,6 +17,7 @@ export function ChatSurface() {
   const modelId = useChatStore((s) => s.modelId);
   const conversationId = useChatStore((s) => s.conversationId);
   const settings = useSettingsStore((s) => s.settings);
+  const hasKey = !!activeProviderOf(settings)?.hasApiKey;
 
   useEffect(() => {
     const sock = new ChatSocket();
@@ -41,7 +42,7 @@ export function ChatSurface() {
       // 不再 alert — 直接在 UI 上显示重试入口
       return;
     }
-    if (!settings?.hasApiKey) {
+    if (!hasKey) {
       return;
     }
     useChatStore.getState().appendUserTurn(text);
@@ -132,10 +133,10 @@ export function ChatSurface() {
         value={input}
         onChange={setInput}
         onSubmit={send}
-        disabled={status === "streaming" || !kernelReady || !settings?.hasApiKey}
+        disabled={status === "streaming" || !kernelReady || !hasKey}
         placeholder={!kernelReady
           ? "kernel 还没就绪,看上方状态 / 点 ↻ 重置"
-          : !settings?.hasApiKey
+          : !hasKey
             ? "请先在「设置」配置 API Key"
             : "说点什么 · Enter 发送 · Shift+Enter 换行"}
       />

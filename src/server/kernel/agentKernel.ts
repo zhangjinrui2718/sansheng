@@ -8,7 +8,6 @@
  * - token usage 累积 + cost 估算
  */
 import { createAgentSession, type AgentSession } from "@earendil-works/pi-coding-agent";
-import { getBuiltinModel, type BuiltinProvider } from "@earendil-works/pi-ai/providers/all";
 import type { Model } from "@earendil-works/pi-ai";
 import { SettingsStore, type Settings } from "../settings/store.js";
 import { estimateCost } from "../providers/cost.js";
@@ -27,7 +26,8 @@ export type ServerEvent =
   | { type: "tool_end"; conversationId: string; messageId: string; tool: { id: string; name: string; result: unknown; isError: boolean; durationMs?: number } }
   | { type: "agent_end"; conversationId: string; ts: number; usage?: { input: number; output: number; costUsd: number } }
   | { type: "error"; conversationId: string; error: { code: string; message: string } }
-  | { type: "interrupt"; conversationId: string };
+  | { type: "interrupt"; conversationId: string }
+  | { type: "conversation_reset"; conversationId: string };
 
 export type EventSink = (e: ServerEvent) => void;
 
@@ -53,31 +53,64 @@ export class AgentKernel {
     return this.session !== null;
   }
 
+  /**
+   * 使当前 session 失效(不重建)。用于 settings 变更后:
+   * 下一次 ensureStarted/prompt 会用新的 active provider 重新 start()。
+   */
+  invalidate(): void {
+    if (this.session) {
+      try {
+        if ((this.session as any).isStreaming) this.session.abort();
+        this.session.dispose?.();
+      } catch (err) {
+        log.warn("invalidate dispose failed:", err);
+      }
+      this.session = null;
+      this.model = null;
+      this.currentMessageId = null;
+      this.toolStartAt.clear();
+      log.info("kernel invalidated (settings changed) — will rebuild on next prompt");
+    }
+  }
+
   getConversationId(): string {
     return this.conversationId;
   }
 
-  /** 用当前 Settings 创建或重建 Session;Settings 变更后调用 */
+  /** 当前 active provider / model 信息(供 ws ping 回报 ready) */
+  activeInfo(): { provider: string; modelId: string } | null {
+    if (this.model) return { provider: this.model.provider, modelId: this.model.id };
+    const active = this.settingsStore.activeProvider();
+    return active ? { provider: active.provider, modelId: active.modelId } : null;
+  }
+
+  /** 用当前 Settings 的 active provider 创建或重建 Session;Settings 变更后调用 */
   async start(sink: EventSink): Promise<void> {
     if (this.session) return; // already started
     this.settings = this.settingsStore.load();
+    const active = this.settingsStore.activeProvider();
+    if (!active) {
+      const msg = "尚未配置任何 provider;请到「设置」添加一个";
+      sink({ type: "error", conversationId: this.conversationId, error: { code: "no_provider", message: msg } });
+      throw new Error(msg);
+    }
     const m = resolveModel({
-      provider: this.settings.provider,
-      modelId: this.settings.modelId,
-      apiKey: this.settings.apiKey,
-      baseUrl: this.settings.baseUrl,
+      provider: active.provider,
+      modelId: active.modelId,
+      apiKey: active.apiKey,
+      baseUrl: active.baseUrl,
     });
     if (!m) {
-      const noKey = !this.settings.apiKey;
+      const noKey = !active.apiKey;
       const code = noKey ? "no_api_key" : "no_model";
       const msg = noKey
-        ? `provider=${this.settings.provider} 需要 API Key;请到「设置」填写`
-        : `model ${this.settings.provider}/${this.settings.modelId} 不可用;请检查 provider/model 拼写`;
+        ? `provider=${active.provider} 需要 API Key;请到「设置」填写`
+        : `model ${active.provider}/${active.modelId} 不可用;请检查 provider/model 拼写`;
       sink({ type: "error", conversationId: this.conversationId, error: { code, message: msg } });
       throw new Error(msg);
     }
     this.model = m;
-    log.info(`kernel start: provider=${this.settings.provider} model=${this.settings.modelId} cwd=${this.cwd}`);
+    log.info(`kernel start: provider=${active.provider} model=${active.modelId} cwd=${this.cwd}`);
 
     // createAgentSession 内部会调 ModelRuntime.refresh()(拉 model catalog),
     // PI_OFFLINE=1 下会跳过,但保险起见加 8s 硬超时,避免任何阻塞。
@@ -85,7 +118,7 @@ export class AgentKernel {
       model: m,
       cwd: this.cwd,
       agentDir: this.agentDir,
-      thinkingLevel: this.settings.thinkingLevel,
+      thinkingLevel: active.thinkingLevel,
     });
     const timeoutPromise = new Promise<never>((_, reject) =>
       setTimeout(() => reject(new Error("createAgentSession timeout (8s) — ModelRuntime refresh hung?")), 8000),
@@ -106,12 +139,37 @@ export class AgentKernel {
     sink({
       type: "ready",
       conversationId: this.conversationId,
-      modelId: this.settings.modelId,
-      provider: this.settings.provider,
+      modelId: this.model?.id ?? active.modelId,
+      provider: this.model?.provider ?? active.provider,
     });
 
     // subscribe 把 Pi 事件翻译成 ServerEvent
     this.session.subscribe(this.makeHandler(sink));
+  }
+
+  /**
+   * 新建会话:丢弃当前 session,生成新 conversationId,重置计数。
+   * 下一次 prompt 会重新 start()。M2 持久化后这里会先归档旧会话。
+   */
+  async newConversation(sink: EventSink): Promise<string> {
+    if (this.session) {
+      try {
+        if ((this.session as any).isStreaming) this.session.abort();
+        this.session.dispose?.();
+      } catch (err) {
+        log.warn("dispose on newConversation failed:", err);
+      }
+      this.session = null;
+    }
+    this.model = null;
+    this.currentMessageId = null;
+    this.toolStartAt.clear();
+    this.inputTokens = 0;
+    this.outputTokens = 0;
+    this.conversationId = `conv_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
+    log.info(`new conversation: ${this.conversationId}`);
+    sink({ type: "conversation_reset", conversationId: this.conversationId });
+    return this.conversationId;
   }
 
   /**

@@ -7,11 +7,9 @@
  *   { type: "interrupt" }
  *   { type: "ping" }
  *
- * Server → Client:
- *   复用 agentKernel 里的 ServerEvent 类型
+ * Server → Client: 复用 agentKernel 的 ServerEvent
  */
-import type { Server } from "node:http";
-import type { IncomingMessage } from "node:http";
+import type { Server, IncomingMessage } from "node:http";
 import type { Duplex } from "node:stream";
 import { WebSocketServer, WebSocket } from "ws";
 import { log } from "../shared/log.js";
@@ -31,23 +29,16 @@ export function attachWebSocket(server: Server, kernel: AgentKernel): WebSocketS
       socket.destroy();
       return;
     }
-    wss.handleUpgrade(req, socket, head, (ws) => {
-      wss.emit("connection", ws, req);
-    });
+    wss.handleUpgrade(req, socket, head, (ws) => wss.emit("connection", ws, req));
   });
 
   wss.on("connection", (ws: WebSocket) => {
     log.muted(`ws connected (clients=${wss.clients.size})`);
     const sink = (e: ServerEvent) => send(ws, e);
 
-    // 每个连接独立跟踪 kernel 状态;用户改了 settings 后,会自动触发 (re)start
-    let kernelReady = kernel.isReady();
-    const ensureStarted = (): Promise<void> => {
-      if (kernelReady) return Promise.resolve();
-      return kernel.start(sink).then(() => {
-        kernelReady = true;
-      });
-    };
+    // 每次都实时查 kernel.isReady(),不缓存(settings 变更会 invalidate kernel)
+    const ensureStarted = (): Promise<void> =>
+      kernel.isReady() ? Promise.resolve() : kernel.start(sink);
 
     // 连接时主动启动一次
     ensureStarted().catch((err) => {
@@ -72,16 +63,16 @@ export function attachWebSocket(server: Server, kernel: AgentKernel): WebSocketS
       }
 
       if (cmd.type === "ping") {
-        // ping 也顺便 ensureStarted,让用户改了 settings 后 ping 一下就能收到新的 ready
         ensureStarted()
-          .then(() =>
+          .then(() => {
+            const active = kernel.activeInfo();
             send(ws, {
               type: "ready",
               conversationId: kernel.getConversationId(),
-              modelId: (kernel as any).settings?.modelId ?? "?",
-              provider: (kernel as any).settings?.provider ?? "?",
-            }),
-          )
+              modelId: active?.modelId ?? "?",
+              provider: active?.provider ?? "?",
+            });
+          })
           .catch((err) =>
             send(ws, {
               type: "error",
@@ -91,16 +82,18 @@ export function attachWebSocket(server: Server, kernel: AgentKernel): WebSocketS
           );
         return;
       }
+
       if (cmd.type === "interrupt") {
         kernel.abort();
         send(ws, { type: "interrupt", conversationId: kernel.getConversationId() });
         return;
       }
+
       if (cmd.type === "send") {
         if (typeof cmd.content !== "string" || !cmd.content.trim()) return;
-        // 确保 kernel 已 ready;用户改 settings 后 send 会自动触发 (re)start
+        // ensureStarted 后 prompt;把 sink 传给 prompt 以便极端情况下自启动
         ensureStarted()
-          .then(() => kernel.prompt(cmd.content!))
+          .then(() => kernel.prompt(cmd.content, sink))
           .catch((err) =>
             send(ws, {
               type: "error",

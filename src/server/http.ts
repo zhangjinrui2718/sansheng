@@ -1,7 +1,8 @@
 /**
  * Sansheng Hono app factory.
  * M0 健康检查 + 静态文件。
- * M1 加入 /api/settings、/api/providers、/api/chat,并 attach WebSocket。
+ * M1 /api/settings、/api/providers、WS。
+ * M1.5 多 provider + 新建对话。
  * M3+ 注入多 agent / blackboard / artifacts 路由。
  */
 import { Hono } from "hono";
@@ -9,11 +10,11 @@ import { serveStatic } from "@hono/node-server/serve-static";
 import { existsSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { log } from "../shared/log.js";
-import { SettingsStore, type Settings } from "./settings/store.js";
-import { listProviders } from "./providers/registry.js";
-import type { AgentKernel } from "./kernel/agentKernel.js";
 import type { Server } from "node:http";
+import { log } from "../shared/log.js";
+import { SettingsStore, genProviderId, isMaskedApiKey, type ProviderConfig, type ThinkingLevel } from "./settings/store.js";
+import { listProviders } from "./providers/registry.js";
+import type { AgentKernel, ServerEvent } from "./kernel/agentKernel.js";
 import { attachWebSocket } from "./ws.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -26,8 +27,29 @@ export interface AppOptions {
   settingsStore: SettingsStore;
 }
 
+/** 把内部 Settings 转成对外(掩码 apiKey)的 SettingsPublic */
+function toPublic(s: ReturnType<SettingsStore["load"]>) {
+  return {
+    providers: s.providers.map((p) => ({
+      id: p.id,
+      label: p.label,
+      provider: p.provider,
+      modelId: p.modelId,
+      apiKey: maskApiKey(p.apiKey),
+      hasApiKey: p.apiKey.length > 0,
+      baseUrl: p.baseUrl,
+      thinkingLevel: p.thinkingLevel,
+    })),
+    activeProviderId: s.activeProviderId,
+    cwd: s.cwd,
+    personaName: s.personaName,
+    costBudgetUsd: s.costBudgetUsd,
+  };
+}
+
 export function createApp(opts: AppOptions): Hono {
   const app = new Hono();
+  const settingsStore = opts.settingsStore;
 
   // —— Logger middleware ——
   app.use("*", async (c, next) => {
@@ -37,117 +59,107 @@ export function createApp(opts: AppOptions): Hono {
     log.muted(`${c.req.method} ${c.req.path} → ${c.res.status} (${ms}ms)`);
   });
 
-  const settingsStore = opts.settingsStore;
-
   // —— 健康检查 ——
   app.get("/api/health", (c) =>
-    c.json({
-      ok: true,
-      name: "sansheng",
-      version: "0.1.0",
-      ts: Date.now(),
-      dataDir: opts.dataDir,
-    }),
+    c.json({ ok: true, name: "sansheng", version: "0.1.0", ts: Date.now(), dataDir: opts.dataDir }),
   );
 
   // —— 配置(meta) ——
   app.get("/api/config", (c) => {
     const cfg = settingsStore.load();
+    const active = settingsStore.activeProvider();
     return c.json({
       name: "sansheng",
       version: "0.1.0",
       host: process.env.SANSHENG_HOST ?? "127.0.0.1",
       port: Number(process.env.SANSHENG_PORT ?? 2718),
-      features: {
-        multiAgent: false,
-        persistence: false,
-        artifacts: false,
-        harness: false,
-        scheduler: false,
-        chat: true,
-      },
+      features: { multiAgent: false, persistence: false, artifacts: false, harness: false, scheduler: false, chat: true },
       kernelReady: opts.kernel.isReady(),
       conversationId: opts.kernel.getConversationId(),
       personaName: cfg.personaName,
+      activeProvider: active ? { label: active.label, provider: active.provider, modelId: active.modelId } : null,
+      hasAnyProvider: cfg.providers.length > 0,
     });
   });
 
-  // —— Settings: GET ——
-  // 返回时把 apiKey 屏蔽(只给前几位 + ***)
-  app.get("/api/settings", (c) => {
-    const s = settingsStore.load();
-    return c.json({
-      ...s,
-      apiKey: maskApiKey(s.apiKey),
-      hasApiKey: s.apiKey.length > 0,
-    });
-  });
+  // —— Settings: GET(掩码 apiKey) ——
+  app.get("/api/settings", (c) => c.json(toPublic(settingsStore.load())));
 
-  // —— Settings: PUT ——
+  // —— Settings: PUT(整体替换 providers + 全局字段) ——
   app.put("/api/settings", async (c) => {
-    const body = (await c.req.json().catch(() => null)) as Partial<Settings> | null;
+    const body = (await c.req.json().catch(() => null)) as {
+      providers?: Array<Partial<ProviderConfig>>;
+      activeProviderId?: string;
+      cwd?: string;
+      personaName?: string;
+      costBudgetUsd?: number;
+    } | null;
     if (!body) return c.json({ error: "invalid body" }, 400);
+
     const cur = settingsStore.load();
-    // 如果 apiKey 是 masked 形式(全星号 或 包含 **** 中间片段),保留旧值
-    // 避免"用户重新保存时不小心把显示用的 masked 串当成真 key 覆盖了真 key"
-    let apiKey = body.apiKey ?? cur.apiKey;
-    if (body.apiKey && isMaskedApiKey(body.apiKey)) {
-      // 特殊场景:如果当前的 key 本身也是 masked placeholder(比如上一轮 bug 留下的 "sk-c****OYzo"),
-      // 而且用户这次 PUT 没真的输入新 key(就是传了同样的 masked 串),
-      // 说明用户没意识到这是个假值 — 我们清空它,让用户必须真的输入新 key
-      if (isMaskedApiKey(cur.apiKey) && apiKey === cur.apiKey) {
-        apiKey = ""; // 清掉残留的假值
-        log.warn("clearing stale masked apiKey in settings.json");
-      } else {
-        apiKey = cur.apiKey; // 保留用户输入前的真值
-      }
+    const curById = new Map(cur.providers.map((p) => [p.id, p]));
+
+    const nextProviders: ProviderConfig[] = (body.providers ?? []).map((p) => {
+      const existing = p.id ? curById.get(p.id) : undefined;
+      // apiKey: 用户没填(undefined)或填的是掩码串 → 保留旧真值;填了新真值 → 用它
+      let apiKey = existing?.apiKey ?? "";
+      if (p.apiKey !== undefined && !isMaskedApiKey(p.apiKey)) apiKey = p.apiKey;
+      return {
+        id: p.id || genProviderId(),
+        label: p.label || p.provider || "未命名",
+        provider: p.provider || "",
+        modelId: p.modelId || "",
+        apiKey,
+        baseUrl: p.baseUrl || undefined,
+        thinkingLevel: (p.thinkingLevel as ThinkingLevel) ?? "medium",
+      };
+    });
+
+    let activeProviderId = body.activeProviderId ?? cur.activeProviderId;
+    if (!nextProviders.find((p) => p.id === activeProviderId)) {
+      activeProviderId = nextProviders[0]?.id ?? "";
     }
-    const next: Settings = {
+
+    const next = {
       ...cur,
-      ...body,
-      apiKey,
+      providers: nextProviders,
+      activeProviderId,
+      cwd: body.cwd ?? cur.cwd,
+      personaName: body.personaName ?? cur.personaName,
+      costBudgetUsd: body.costBudgetUsd ?? cur.costBudgetUsd,
     };
     settingsStore.save(next);
-    return c.json({ ok: true, settings: { ...next, apiKey: maskApiKey(next.apiKey), hasApiKey: next.apiKey.length > 0 } });
+
+    // provider 配置变了 → 让 kernel 下次重新 start
+    opts.kernel.invalidate();
+    return c.json({ ok: true, settings: toPublic(next) });
   });
 
-  // —— Providers catalog ——
+  // —— Providers catalog(Pi builtin) ——
   app.get("/api/providers", (c) => c.json({ providers: listProviders() }));
 
-  // —— Test connection (PING via API key;后续 M1+ 加真发消息) ——
-  app.post("/api/settings/test", async (c) => {
-    const body = (await c.req.json().catch(() => null)) as Partial<Settings> | null;
-    if (!body?.apiKey || !body.provider) return c.json({ ok: false, error: "missing fields" }, 400);
-    return c.json({
-      ok: true,
-      message: "API key saved; runtime test will run on next /ws send",
-      provider: body.provider,
-      modelId: body.modelId,
-    });
+  // —— 新建对话 ——
+  app.post("/api/conversation/new", (c) => {
+    const sink = (e: ServerEvent) => log.muted(`new-conv event: ${e.type}`);
+    // newConversation 是同步逻辑(dispose + 换 id),用 void 触发即可
+    void opts.kernel.newConversation(sink);
+    return c.json({ ok: true, conversationId: opts.kernel.getConversationId() });
   });
 
-  // 强制重置 kernel(stuck 恢复用)
+  // —— 强制重置 kernel(stuck 恢复用) ——
   app.post("/api/kernel/reset", async (c) => {
-    // 找第一个连着的 ws 拿 sink;没有就用空 sink(写到 log 即可)
-    const sink = (e: any) => log.muted(`reset-event: ${e.type}`);
-    await opts.kernel.reset(sink as any);
+    const sink = (e: ServerEvent) => log.muted(`reset-event: ${e.type}`);
+    await opts.kernel.reset(sink);
     return c.json({ ok: true, conversationId: opts.kernel.getConversationId() });
   });
 
   // —— 静态文件:生产构建产物(dist/web) ——
   const webRoot = resolve(__dirname, "../../dist/web");
   if (existsSync(webRoot)) {
-    app.use(
-      "/*",
-      serveStatic({
-        root: webRoot,
-      }),
-    );
+    app.use("/*", serveStatic({ root: webRoot }));
     app.get("*", (c) => {
       const htmlPath = join(webRoot, "index.html");
-      if (existsSync(htmlPath)) {
-        return c.html(readFileSync(htmlPath, "utf-8"));
-      }
+      if (existsSync(htmlPath)) return c.html(readFileSync(htmlPath, "utf-8"));
       return c.text("not built", 404);
     });
   } else {
@@ -161,7 +173,6 @@ export function createApp(opts: AppOptions): Hono {
     );
   }
 
-  // —— 404 ——
   app.notFound((c) => c.json({ error: "not_found", path: c.req.path }, 404));
 
   // —— Attach WebSocket ——
@@ -174,13 +185,4 @@ function maskApiKey(k: string): string {
   if (!k) return "";
   if (k.length <= 8) return "****";
   return `${k.slice(0, 4)}****${k.slice(-4)}`;
-}
-
-/** 判断一个字符串是否是我们生成的 mask placeholder,防止它被当成真 key 写回去 */
-function isMaskedApiKey(s: string): boolean {
-  if (!s) return true; // 空串也算"没改"
-  if (s === "****") return true;
-  if (/^\*+$/.test(s)) return true; // 全是星号
-  if (s.includes("****")) return true; // 包含我们的 mask 分隔符 "****"
-  return false;
 }

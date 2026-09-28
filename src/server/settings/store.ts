@@ -1,9 +1,12 @@
 /**
  * Sansheng Settings · 持久化到 ~/.sansheng/settings.json (明文,M2 再迁 SQLite)
- * 包含 LLM provider / model / api key / thinking level / 默认 cwd 等。
+ *
+ * M1.5: 支持多 provider。settings.providers[] 存所有配置,activeProviderId 指定当前用哪个。
+ * 兼容旧的单 provider 格式(load 时自动迁移)。
  */
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { randomBytes } from "node:crypto";
 import { log } from "../../shared/log.js";
 
 function isMaskedApiKey(s: string): boolean {
@@ -14,26 +17,36 @@ function isMaskedApiKey(s: string): boolean {
   return false;
 }
 
+export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high";
+
+export interface ProviderConfig {
+  id: string;
+  label: string;
+  provider: string;
+  modelId: string;
+  apiKey: string;
+  baseUrl?: string;
+  thinkingLevel: ThinkingLevel;
+}
+
 export interface Settings {
-  provider: string;          // "anthropic" | "openai" | 自定义
-  modelId: string;          // 模型 id,如 "claude-opus-4-5"
-  apiKey: string;           // 明文(M1),M2 改 AES-256-GCM
-  baseUrl?: string;         // 可选,自定义 gateway
-  thinkingLevel: "off" | "minimal" | "low" | "medium" | "high";
-  cwd: string;              // Agent 默认工作目录
-  personaName: string;       // 显示名,默认 "三生"
-  agentDir?: string;         // Pi agentDir,默认 ~/.sansheng/pi
-  /** 后续 M2+ 用 */
+  providers: ProviderConfig[];
+  activeProviderId: string;
+  cwd: string;
+  personaName: string;
+  agentDir?: string;
   costBudgetUsd?: number;
   monthlySpentUsd?: number;
   lastResetAt?: number;
 }
 
+export function genProviderId(): string {
+  return `prov_${randomBytes(4).toString("hex")}`;
+}
+
 const DEFAULTS: Settings = {
-  provider: "anthropic",
-  modelId: "claude-opus-4-5",
-  apiKey: "",
-  thinkingLevel: "medium",
+  providers: [],
+  activeProviderId: "",
   cwd: process.env.HOME ?? "/root",
   personaName: "三生",
 };
@@ -45,27 +58,86 @@ export class SettingsStore {
   load(): Settings {
     if (this.cache) return this.cache;
     if (!existsSync(this.file)) {
-      this.cache = { ...DEFAULTS };
+      this.cache = { ...DEFAULTS, providers: [] };
       return this.cache;
     }
     try {
-      const raw = JSON.parse(readFileSync(this.file, "utf-8")) as Partial<Settings>;
-      const merged = { ...DEFAULTS, ...raw } as Settings;
-      // 防御:如果磁盘上的 apiKey 正好是我们生成的 masked placeholder
-      // (例如上一轮 bug 留下的 "sk-c****OYzo"),load 时清掉,避免用假值调 LLM
-      if (isMaskedApiKey(merged.apiKey)) {
-        log.warn(`settings.json apiKey is a masked placeholder ("${merged.apiKey}"), clearing it`);
-        merged.apiKey = "";
-        // 顺便把文件也清掉
+      const raw = JSON.parse(readFileSync(this.file, "utf-8")) as Record<string, unknown>;
+      const wasLegacy = !Array.isArray(raw.providers);
+      this.cache = this.migrate(raw);
+      // 旧格式迁移后写回磁盘,避免每次启动重复迁移
+      if (wasLegacy) {
         try {
-          writeFileSync(this.file, JSON.stringify(merged, null, 2), { mode: 0o600 });
-        } catch {}
+          writeFileSync(this.file, JSON.stringify(this.cache, null, 2), { mode: 0o600 });
+          log.info("persisted migrated settings.json (legacy → multi-provider)");
+        } catch (err) {
+          log.warn("failed to persist migrated settings:", err);
+        }
       }
-      this.cache = merged;
     } catch {
-      this.cache = { ...DEFAULTS };
+      this.cache = { ...DEFAULTS, providers: [] };
     }
     return this.cache;
+  }
+
+  /** 把磁盘上的 JSON(可能是旧单-provider 格式)规整成新格式 */
+  private migrate(raw: Record<string, unknown>): Settings {
+    const cwd = (raw.cwd as string) ?? DEFAULTS.cwd;
+    const personaName = (raw.personaName as string) ?? DEFAULTS.personaName;
+    const agentDir = raw.agentDir as string | undefined;
+
+    // 新格式:已有 providers 数组
+    if (Array.isArray(raw.providers)) {
+      const providers = (raw.providers as ProviderConfig[]).map((p) => this.sanitizeProvider(p));
+      let activeProviderId = (raw.activeProviderId as string) ?? "";
+      if (!providers.find((p) => p.id === activeProviderId)) {
+        activeProviderId = providers[0]?.id ?? "";
+      }
+      return {
+        providers,
+        activeProviderId,
+        cwd,
+        personaName,
+        agentDir,
+        costBudgetUsd: raw.costBudgetUsd as number | undefined,
+        monthlySpentUsd: raw.monthlySpentUsd as number | undefined,
+        lastResetAt: raw.lastResetAt as number | undefined,
+      };
+    }
+
+    // 旧格式:单 provider 字段 → 迁移成 providers[0]
+    const legacyProvider = raw.provider as string | undefined;
+    const legacyModel = raw.modelId as string | undefined;
+    const legacyKey = raw.apiKey as string | undefined;
+    if (legacyProvider && legacyModel) {
+      const id = genProviderId();
+      const provider: ProviderConfig = {
+        id,
+        label: legacyProvider,
+        provider: legacyProvider,
+        modelId: legacyModel,
+        // 旧值若是 masked placeholder,清空
+        apiKey: legacyKey && !isMaskedApiKey(legacyKey) ? legacyKey : "",
+        baseUrl: raw.baseUrl as string | undefined,
+        thinkingLevel: (raw.thinkingLevel as ThinkingLevel) ?? "medium",
+      };
+      log.info(`migrated legacy single-provider settings → providers[0] (${legacyProvider}/${legacyModel})`);
+      return { providers: [provider], activeProviderId: id, cwd, personaName, agentDir };
+    }
+
+    return { providers: [], activeProviderId: "", cwd, personaName, agentDir };
+  }
+
+  private sanitizeProvider(p: Partial<ProviderConfig>): ProviderConfig {
+    return {
+      id: p.id || genProviderId(),
+      label: p.label || p.provider || "未命名",
+      provider: p.provider || "",
+      modelId: p.modelId || "",
+      apiKey: p.apiKey && !isMaskedApiKey(p.apiKey) ? p.apiKey : "",
+      baseUrl: p.baseUrl || undefined,
+      thinkingLevel: p.thinkingLevel ?? "medium",
+    };
   }
 
   save(s: Settings): void {
@@ -75,14 +147,15 @@ export class SettingsStore {
     this.cache = s;
   }
 
-  update(patch: Partial<Settings>): Settings {
-    const cur = this.load();
-    const next = { ...cur, ...patch };
-    this.save(next);
-    return next;
+  /** 返回当前激活的 provider 配置(可能为 undefined) */
+  activeProvider(): ProviderConfig | undefined {
+    const s = this.load();
+    return s.providers.find((p) => p.id === s.activeProviderId) ?? s.providers[0];
   }
 
   reset(): void {
-    this.save({ ...DEFAULTS });
+    this.save({ ...DEFAULTS, providers: [] });
   }
 }
+
+export { isMaskedApiKey };

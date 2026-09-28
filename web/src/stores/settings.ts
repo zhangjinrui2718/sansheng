@@ -1,8 +1,9 @@
 /**
- * Sansheng Settings Store · 缓存 /api/settings、/api/providers 的拉取结果
+ * Sansheng Settings Store · 缓存 /api/settings、/api/providers
+ * M1.5: 多 provider(providers[] + activeProviderId)
  */
 import { create } from "zustand";
-import type { SettingsPublic, ProviderInfo } from "@shared/types/settings";
+import type { SettingsPublic, ProviderInfo, ProviderConfig } from "@shared/types/settings";
 
 interface SettingsState {
   settings: SettingsPublic | null;
@@ -10,11 +11,11 @@ interface SettingsState {
   loaded: boolean;
 
   loadSettings(): Promise<void>;
-  saveSettings(patch: Partial<SettingsPublic>): Promise<void>;
   loadProviders(): Promise<void>;
+  saveSettings(next: SettingsPublic): Promise<void>;
 }
 
-export const useSettingsStore = create<SettingsState>((set, get) => ({
+export const useSettingsStore = create<SettingsState>((set) => ({
   settings: null,
   providers: [],
   loaded: false,
@@ -31,13 +32,19 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
     set({ providers: data.providers });
   },
 
-  async saveSettings(patch: Partial<SettingsPublic>) {
+  async saveSettings(next: SettingsPublic) {
     const r = await fetch("/api/settings", {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(patch),
+      body: JSON.stringify(next),
     });
     const data = await r.json();
     set({ settings: data.settings });
   },
 }));
+
+/** 当前激活的 provider 配置(可能 undefined) */
+export function activeProviderOf(s: SettingsPublic | null): ProviderConfig | undefined {
+  if (!s) return undefined;
+  return s.providers.find((p) => p.id === s.activeProviderId) ?? s.providers[0];
+}
