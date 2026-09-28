@@ -88,9 +88,10 @@ export function createApp(opts: AppOptions): Hono {
     const body = (await c.req.json().catch(() => null)) as Partial<Settings> | null;
     if (!body) return c.json({ error: "invalid body" }, 400);
     const cur = settingsStore.load();
-    // 如果 apiKey 是 masked placeholder,保留旧值
+    // 如果 apiKey 是 masked 形式(全星号 或 包含 **** 中间片段),保留旧值
+    // 避免"用户重新保存时不小心把显示用的 masked 串当成真 key 覆盖了真 key"
     let apiKey = body.apiKey ?? cur.apiKey;
-    if (body.apiKey && /^\*+$/.test(body.apiKey)) apiKey = cur.apiKey;
+    if (body.apiKey && isMaskedApiKey(body.apiKey)) apiKey = cur.apiKey;
     const next: Settings = {
       ...cur,
       ...body,
@@ -155,4 +156,13 @@ function maskApiKey(k: string): string {
   if (!k) return "";
   if (k.length <= 8) return "****";
   return `${k.slice(0, 4)}****${k.slice(-4)}`;
+}
+
+/** 判断一个字符串是否是我们生成的 mask placeholder,防止它被当成真 key 写回去 */
+function isMaskedApiKey(s: string): boolean {
+  if (!s) return true; // 空串也算"没改"
+  if (s === "****") return true;
+  if (/^\*+$/.test(s)) return true; // 全是星号
+  if (s.includes("****")) return true; // 包含我们的 mask 分隔符 "****"
+  return false;
 }

@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { useSettingsStore } from "@/stores/settings";
+import type { SettingsPublic } from "@shared/types/settings";
 
 /**
  * Settings Panel · provider + model + API key + thinking level
@@ -51,15 +52,17 @@ export function SettingsPanel() {
     setSaving(true);
     setSaved(null);
     try {
-      await saveSettings({
+      // 只有用户输入了新内容才发 apiKey;否则不发,服务端保留旧值
+      const patch: Partial<SettingsPublic> = {
         provider: providerId,
         modelId,
-        apiKey: apiKey || settings?.apiKey || "",
         thinkingLevel,
         cwd,
         personaName,
         baseUrl: baseUrl || undefined,
-      });
+      };
+      if (apiKey) patch.apiKey = apiKey;
+      await saveSettings(patch);
       setSaved("ok");
       setApiKey("");
       setTimeout(() => setSaved(null), 1500);
@@ -142,7 +145,7 @@ export function SettingsPanel() {
           <input
             type="password"
             className="sansheng-input"
-            placeholder={settings?.hasApiKey ? `当前:${settings.apiKey || "(已存)"}` : "sk-..."}
+            placeholder={settings?.hasApiKey ? "(已保存,留空保持不变)" : "sk-..."}
             value={apiKey}
             onChange={(e) => setApiKey(e.target.value)}
             style={inputStyle}
