@@ -4,6 +4,15 @@
  */
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { log } from "../../shared/log.js";
+
+function isMaskedApiKey(s: string): boolean {
+  if (!s) return true;
+  if (s === "****") return true;
+  if (/^\*+$/.test(s)) return true;
+  if (s.includes("****")) return true;
+  return false;
+}
 
 export interface Settings {
   provider: string;          // "anthropic" | "openai" | 自定义
@@ -40,8 +49,19 @@ export class SettingsStore {
       return this.cache;
     }
     try {
-      const raw = JSON.parse(readFileSync(this.file, "utf-8"));
-      this.cache = { ...DEFAULTS, ...raw } as Settings;
+      const raw = JSON.parse(readFileSync(this.file, "utf-8")) as Partial<Settings>;
+      const merged = { ...DEFAULTS, ...raw } as Settings;
+      // 防御:如果磁盘上的 apiKey 正好是我们生成的 masked placeholder
+      // (例如上一轮 bug 留下的 "sk-c****OYzo"),load 时清掉,避免用假值调 LLM
+      if (isMaskedApiKey(merged.apiKey)) {
+        log.warn(`settings.json apiKey is a masked placeholder ("${merged.apiKey}"), clearing it`);
+        merged.apiKey = "";
+        // 顺便把文件也清掉
+        try {
+          writeFileSync(this.file, JSON.stringify(merged, null, 2), { mode: 0o600 });
+        } catch {}
+      }
+      this.cache = merged;
     } catch {
       this.cache = { ...DEFAULTS };
     }

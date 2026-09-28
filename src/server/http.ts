@@ -91,7 +91,17 @@ export function createApp(opts: AppOptions): Hono {
     // 如果 apiKey 是 masked 形式(全星号 或 包含 **** 中间片段),保留旧值
     // 避免"用户重新保存时不小心把显示用的 masked 串当成真 key 覆盖了真 key"
     let apiKey = body.apiKey ?? cur.apiKey;
-    if (body.apiKey && isMaskedApiKey(body.apiKey)) apiKey = cur.apiKey;
+    if (body.apiKey && isMaskedApiKey(body.apiKey)) {
+      // 特殊场景:如果当前的 key 本身也是 masked placeholder(比如上一轮 bug 留下的 "sk-c****OYzo"),
+      // 而且用户这次 PUT 没真的输入新 key(就是传了同样的 masked 串),
+      // 说明用户没意识到这是个假值 — 我们清空它,让用户必须真的输入新 key
+      if (isMaskedApiKey(cur.apiKey) && apiKey === cur.apiKey) {
+        apiKey = ""; // 清掉残留的假值
+        log.warn("clearing stale masked apiKey in settings.json");
+      } else {
+        apiKey = cur.apiKey; // 保留用户输入前的真值
+      }
+    }
     const next: Settings = {
       ...cur,
       ...body,
