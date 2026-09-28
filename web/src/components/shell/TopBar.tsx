@@ -23,7 +23,7 @@ interface Props {
   onRoute: (r: "chat" | "settings") => void;
   currentUsage: { input: number; output: number; costUsd: number };
   totalUsage: { input: number; output: number; costUsd: number };
-  status: "idle" | "streaming" | "error";
+  status: "idle" | "streaming" | "error" | "connecting";
 }
 
 export function TopBar({

@@ -24,3 +24,7 @@ pnpm-debug.log*
 # Test / coverage
 coverage/
 *.lcov
+
+# GitHub PAT (per-user; never commit)
+ghp_*
+

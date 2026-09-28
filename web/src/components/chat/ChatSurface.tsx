@@ -17,6 +17,7 @@ export function ChatSurface() {
   const socketRef = useRef<ChatSocket | null>(null);
   const apply = useChatStore((s) => s.applyEvent);
   const status = useChatStore((s) => s.status);
+  const kernelReady = useChatStore((s) => s.kernelReady);
   const settings = useSettingsStore((s) => s.settings);
   const modelId = useChatStore((s) => s.modelId);
   const provider = useChatStore((s) => s.provider);
@@ -36,6 +37,11 @@ export function ChatSurface() {
     const text = input.trim();
     if (!text) return;
     if (status === "streaming") return;
+    if (!kernelReady) {
+      // kernel 还在启动,直接弹提示而不发请求
+      alert("Sansheng kernel 还在初始化,请稍候(连上后状态栏会变绿)");
+      return;
+    }
     if (!settings?.hasApiKey) {
       alert("请先在「设置」配置 API Key");
       return;

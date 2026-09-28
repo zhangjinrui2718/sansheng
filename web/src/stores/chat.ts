@@ -24,18 +24,20 @@ export interface Turn {
   errorText?: string;
 }
 
+export type ChatStatus = "idle" | "streaming" | "error" | "connecting";
+
 export interface ChatState {
   conversationId: string | null;
   modelId: string | null;
   provider: string | null;
-  status: "idle" | "streaming" | "error";
+  status: ChatStatus;
+  kernelReady: boolean;
   turns: Turn[];
   currentTurn: Turn | null;
   currentUsage: { input: number; output: number; costUsd: number };
   totalUsage: { input: number; output: number; costUsd: number };
   error: { code: string; message: string } | null;
 
-  // mutations
   reset(): void;
   applyEvent(e: ServerEvent): void;
   appendUserTurn(text: string): void;
@@ -53,7 +55,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
   conversationId: null,
   modelId: null,
   provider: null,
-  status: "idle",
+  status: "connecting",
+  kernelReady: false,
   turns: [],
   currentTurn: null,
   currentUsage: { input: 0, output: 0, costUsd: 0 },
@@ -61,13 +64,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
   error: null,
 
   reset() {
-    set({
+    set((s) => ({
       turns: [],
       currentTurn: null,
       currentUsage: { input: 0, output: 0, costUsd: 0 },
       error: null,
       status: "idle",
-    });
+      kernelReady: s.kernelReady,
+    }));
   },
 
   appendUserTurn(text: string) {
@@ -85,6 +89,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           provider: e.provider,
           error: null,
           status: "idle",
+          kernelReady: true,
         });
         return;
       case "agent_start":
@@ -96,9 +101,6 @@ export const useChatStore = create<ChatState>((set, get) => ({
         return;
       }
       case "message_start": {
-        const cur = get().currentTurn;
-        if (!cur) return;
-        // if the role matches; user input is shown but not "started" via WS
         return;
       }
       case "delta": {

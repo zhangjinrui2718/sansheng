@@ -8,7 +8,7 @@
  *   { type: "ping" }
  *
  * Server → Client:
- *   复用 agentKernel 里的 ServerEvent 类型(写在这里一份方便导入)
+ *   复用 agentKernel 里的 ServerEvent 类型
  */
 import type { Server } from "node:http";
 import type { IncomingMessage } from "node:http";
@@ -40,8 +40,17 @@ export function attachWebSocket(server: Server, kernel: AgentKernel): WebSocketS
     log.muted(`ws connected (clients=${wss.clients.size})`);
     const sink = (e: ServerEvent) => send(ws, e);
 
-    // ensure kernel started
-    kernel.start(sink).catch((err) => {
+    // 每个连接独立跟踪 kernel 状态;用户改了 settings 后,会自动触发 (re)start
+    let kernelReady = kernel.isReady();
+    const ensureStarted = (): Promise<void> => {
+      if (kernelReady) return Promise.resolve();
+      return kernel.start(sink).then(() => {
+        kernelReady = true;
+      });
+    };
+
+    // 连接时主动启动一次
+    ensureStarted().catch((err) => {
       send(ws, {
         type: "error",
         conversationId: kernel.getConversationId(),
@@ -63,7 +72,23 @@ export function attachWebSocket(server: Server, kernel: AgentKernel): WebSocketS
       }
 
       if (cmd.type === "ping") {
-        send(ws, { type: "ready", conversationId: kernel.getConversationId(), modelId: "?", provider: "?" });
+        // ping 也顺便 ensureStarted,让用户改了 settings 后 ping 一下就能收到新的 ready
+        ensureStarted()
+          .then(() =>
+            send(ws, {
+              type: "ready",
+              conversationId: kernel.getConversationId(),
+              modelId: (kernel as any).settings?.modelId ?? "?",
+              provider: (kernel as any).settings?.provider ?? "?",
+            }),
+          )
+          .catch((err) =>
+            send(ws, {
+              type: "error",
+              conversationId: kernel.getConversationId(),
+              error: { code: "start_failed", message: err?.message ?? String(err) },
+            }),
+          );
         return;
       }
       if (cmd.type === "interrupt") {
@@ -73,8 +98,9 @@ export function attachWebSocket(server: Server, kernel: AgentKernel): WebSocketS
       }
       if (cmd.type === "send") {
         if (typeof cmd.content !== "string" || !cmd.content.trim()) return;
-        kernel
-          .prompt(cmd.content)
+        // 确保 kernel 已 ready;用户改 settings 后 send 会自动触发 (re)start
+        ensureStarted()
+          .then(() => kernel.prompt(cmd.content!))
           .catch((err) =>
             send(ws, {
               type: "error",

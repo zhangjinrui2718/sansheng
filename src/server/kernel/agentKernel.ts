@@ -68,8 +68,12 @@ export class AgentKernel {
       baseUrl: this.settings.baseUrl,
     });
     if (!m) {
-      const msg = `model not configured: provider=${this.settings.provider} model=${this.settings.modelId}; set API key in Settings`;
-      sink({ type: "error", conversationId: this.conversationId, error: { code: "no_model", message: msg } });
+      const noKey = !this.settings.apiKey;
+      const code = noKey ? "no_api_key" : "no_model";
+      const msg = noKey
+        ? `provider=${this.settings.provider} 需要 API Key;请到「设置」填写`
+        : `model ${this.settings.provider}/${this.settings.modelId} 不可用;请检查 provider/model 拼写`;
+      sink({ type: "error", conversationId: this.conversationId, error: { code, message: msg } });
       throw new Error(msg);
     }
     this.model = m;
@@ -94,9 +98,17 @@ export class AgentKernel {
     this.session.subscribe(this.makeHandler(sink));
   }
 
-  async prompt(text: string): Promise<void> {
-    if (!this.session) throw new Error("kernel not started");
-    await this.session.prompt(text);
+  async prompt(text: string, sink?: EventSink): Promise<void> {
+    // sink 可选;为空时假设 kernel 已 start(常规路径)。
+    if (!this.session) {
+      if (sink) {
+        // 还没 start 过,可能是用户改了 settings 后第一次发 — 触发一次 start
+        await this.start(sink);
+      } else {
+        throw new Error("kernel not started");
+      }
+    }
+    await this.session!.prompt(text);
   }
 
   /** 主动中断当前正在进行的 run */
