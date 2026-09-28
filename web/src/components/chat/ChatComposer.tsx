@@ -5,6 +5,7 @@ interface Props {
   onChange: (v: string) => void;
   onSubmit: (text: string) => void;
   disabled?: boolean;
+  placeholder?: string;
 }
 
 export function ChatComposer({ value, onChange, onSubmit, disabled }: Props) {
