@@ -23,6 +23,9 @@ export class Storage {
     if (result.applied.length > 0) {
       log.info(`storage: applied migrations ${result.applied.join(", ")}`);
     }
+    // B1 additive safety: idempotently ensure blackboards.artifacts_json exists
+    // (handles cases where migration 005 didn't run — e.g., legacy DBs upgraded in place).
+    ensureBlackboardArtifactsColumn(this.db);
   }
 
   close(): void {
@@ -34,4 +37,24 @@ export class Storage {
       log.warn("storage close failed:", err);
     }
   }
+}
+
+/**
+ * B1 · ensure `blackboards.artifacts_json` column exists.
+ *
+ * Idempotent — safe to call multiple times. Uses PRAGMA table_info to detect
+ * the column, then ALTER TABLE if missing. Default `'[]'` matches migration 005.
+ *
+ * This complements migration 005 for:
+ *   - DBs created on older migrations where 005 didn't run yet
+ *   - In-memory test DBs that skip the full migration runner
+ *   - Recovery scenarios where a row needs the column added
+ */
+export function ensureBlackboardArtifactsColumn(db: Database.Database): void {
+  const cols = db
+    .prepare(`PRAGMA table_info(blackboards)`)
+    .all() as Array<{ name: string }>;
+  const has = cols.some((c) => c.name === "artifacts_json");
+  if (has) return;
+  db.exec(`ALTER TABLE blackboards ADD COLUMN artifacts_json TEXT DEFAULT '[]'`);
 }

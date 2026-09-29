@@ -36,5 +36,14 @@ export {
   getActiveBlackboard,
   listBlackboards,
   markBlackboardStatus,
+  upsertArtifact,
+  getArtifact,
+  listArtifacts,
+  updateArtifactStatus,
+  migrateBlackboardArtifacts,
+  applyLegacyMigration,
+  validateArtifact,
+  GLOBAL_BLACKBOARD_ID,
 } from "./repo/blackboards.js";
+export type { ListArtifactsOptions } from "./repo/blackboards.js";
 export { piMessagesToBlocks } from "./util/blocks.js";

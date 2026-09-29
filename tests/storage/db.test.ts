@@ -12,8 +12,9 @@ describe("storage/migrations", () => {
     expect(result.applied).toContain(2);
     expect(result.applied).toContain(3); // M3a: agent_states
     expect(result.applied).toContain(4); // M3b: blackboards
+    expect(result.applied).toContain(5); // M3+ B1: blackboards.artifacts_json column
     const version = (db.prepare(`SELECT MAX(version) as v FROM schema_version`).get() as { v: number }).v;
-    expect(version).toBe(4);
+    expect(version).toBe(5);
     db.close();
   });
 

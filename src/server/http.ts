@@ -32,6 +32,7 @@ import {
   createToolRegistry,
   type CreateToolRegistryOptions,
 } from "./tools/integration.js";
+import { registerBlackboardArtifactRoutes } from "./http/blackboardRoutes.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = import.meta.dirname ?? join(__filename, "..");
@@ -211,6 +212,9 @@ export async function createApp(opts: AppOptions): Promise<Hono> {
     // M3b 占位:M3c 会接 ws 推送的 agents 快照/数据库中 agent_states 聚合
     return c.json({ agents: [] });
   });
+
+  // —— M3+ B1: BlackboardArtifact v3 路由(extracted to blackboardRoutes.ts) ——
+  registerBlackboardArtifactRoutes(app, opts.storage);
 
   app.get("/api/memory/fragments", (c) => {
     const kind = c.req.query("kind");
