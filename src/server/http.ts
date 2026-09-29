@@ -40,6 +40,11 @@ export interface AppOptions {
   storage: Storage;
 }
 
+/** 从任意 throw 值取可读错误信息。 */
+function errMsg(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
 /** 把内部 Settings 转成对外(掩码 apiKey)的 SettingsPublic */
 function toPublic(s: ReturnType<SettingsStore["load"]>) {
   return {
@@ -167,16 +172,27 @@ export function createApp(opts: AppOptions): Hono {
   });
 
   // —— M3b: Blackboard / Agents / Memory 读路由 ——
+  // 全部 try/catch 兑底:storage 缺失表 / sqlite-vec 未加载 / 任意 throw 都返回 JSON 500,不走 SPA fallback HTML。
   app.get("/api/blackboard/:id", (c) => {
     const conversationId = c.req.param("id");
-    const bb = getActiveBlackboard(opts.storage.db, conversationId);
-    return c.json({ blackboard: bb });
+    try {
+      const bb = getActiveBlackboard(opts.storage.db, conversationId);
+      return c.json({ blackboard: bb });
+    } catch (err) {
+      log.warn(`blackboard[${conversationId}] failed:`, err);
+      return c.json({ blackboard: null, error: "storage_error", message: errMsg(err) }, 500);
+    }
   });
 
   app.get("/api/blackboards/:id", (c) => {
     const conversationId = c.req.param("id");
-    const list = listBlackboards(opts.storage.db, conversationId, 20);
-    return c.json({ blackboards: list });
+    try {
+      const list = listBlackboards(opts.storage.db, conversationId, 20);
+      return c.json({ blackboards: list });
+    } catch (err) {
+      log.warn(`blackboards[${conversationId}] failed:`, err);
+      return c.json({ blackboards: [], error: "storage_error", message: errMsg(err) }, 500);
+    }
   });
 
   app.get("/api/agents/:id", (c) => {
@@ -187,10 +203,15 @@ export function createApp(opts: AppOptions): Hono {
   app.get("/api/memory/fragments", (c) => {
     const kind = c.req.query("kind");
     const limit = Math.min(Number(c.req.query("limit") ?? "100"), 500);
-    const fragments = kind
-      ? listFragmentsByKind(opts.storage.db, kind as never, limit)
-      : listFragmentsAll(opts.storage.db, limit);
-    return c.json({ fragments });
+    try {
+      const fragments = kind
+        ? listFragmentsByKind(opts.storage.db, kind as never, limit)
+        : listFragmentsAll(opts.storage.db, limit);
+      return c.json({ fragments });
+    } catch (err) {
+      log.warn(`memory/fragments failed:`, err);
+      return c.json({ fragments: [], error: "storage_error", message: errMsg(err) }, 500);
+    }
   });
 
   // ============== M2:持久化路由 ==============
