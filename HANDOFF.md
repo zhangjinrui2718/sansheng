@@ -281,6 +281,44 @@ cd /root/projects/sansheng && \
 
 ---
 
+## CLI bin path 修复 (2026-09-29 17:05 UTC) · 重要
+
+Commit: `6c4b176 fix(cli): correct bin path to dist/src/cli/index.js`
+
+**根因**:`tsconfig.server.json` 的 `rootDir: ./src` 让 tsc 输出保留 `src/` 在路径中(产物 `dist/src/cli/index.js`)。原 bin 写的是 `./dist/cli/index.js`(不存在)。
+
+**症状**:
+- `npm start` 能用(走 `node dist/src/cli/index.js start`,路径对)
+- `sansheng start` **不能**用 → `command not found`
+- `npx sansheng` 也不能用
+
+**已验证**:
+- `npm link` 注册后 → `which sansheng` 找到
+- `sansheng --help` 打印所有子命令:start / stop / status / logs / reset
+
+**默认端口**:**2718**(不是 7868,看 `src/cli/index.ts:18` 的 `.option("-p, --port <port>", ..., "2718")`)
+
+**另一台机器验证步骤**:
+```bash
+cd<your-sansheng-clone>
+git pull origin master         # → 拉到 6c4b176
+npm install
+npm link                       # ⚠️ 必须!否则 sansheng start 会 “command not found”
+npm run typecheck              # → 0 error
+npm test                       # → 53 passed
+npm run build                  # → built in 2.x
+sansheng start                 # 起 server,默认 :2718
+# 或:sansheng start -p 8888   # 自定义端口
+# 或:sansheng start --daemon   # 后台
+# 浏览器打开 http://localhost:2718
+```
+
+### 教训(写入 MEMORY)
+- 修改 package.json bin 后必 `npm link`(或 `npm rebuild`)重注册
+- CLI 默认值(port / host / config)**不要猜**,要查 `src/cli/{index,commands}.ts` 的 `.option(..., default)` 字符串
+
+---
+
 ## M4 fs 工具完成 (2026-09-29 16:50 UTC)
 
 Commit: `2aa4a18 M4: fs tools (read/write/list/stat) + sandbox + registry + 18 tests`
