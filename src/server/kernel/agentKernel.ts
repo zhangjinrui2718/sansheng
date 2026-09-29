@@ -9,10 +9,21 @@
  */
 import { createAgentSession, type AgentSession } from "@earendil-works/pi-coding-agent";
 import type { Model } from "@earendil-works/pi-ai";
+import { nanoid } from "nanoid";
 import { SettingsStore, type Settings } from "../settings/store.js";
 import { estimateCost } from "../providers/cost.js";
 import { log } from "../../shared/log.js";
 import { resolveModel } from "../providers/registry.js";
+import {
+  Storage,
+  embedText,
+  extractFragments,
+  insertFragment,
+  insertMessage,
+  recordMessageUsage,
+  upsertConversation,
+  upsertFragmentEmbedding,
+} from "../storage/index.js";
 
 export type ServerEvent =
   | { type: "ready"; conversationId: string; modelId: string; provider: string }
@@ -40,11 +51,25 @@ export class AgentKernel {
   private toolStartAt: Map<string, number> = new Map();
   private currentMessageId: string | null = null;
   private settings: Settings;
+  /** M2:正在流式写的 assistant message buffer(message_start → message_end) */
+  private buf: {
+    messageId: string;
+    turnIndex: number;
+    textDeltas: string[];
+    thinkingDeltas: string[];
+    toolCalls: Array<{ id: string; name: string; args?: unknown; result?: unknown; isError?: boolean; durationMs?: number }>;
+    startedAt: number;
+  } | null = null;
+  /** M2:当前 turn_index(从 turn_start 事件拿) */
+  private currentTurnIndex = 0;
+  /** M2:当前正在发/等的 user 文本(prompt() 时 buffer 起来,message_start(user) 时消费) */
+  private pendingUserText: string | null = null;
 
   constructor(
     private readonly settingsStore: SettingsStore,
     private readonly agentDir: string,
     private readonly cwd: string,
+    private readonly storage: Storage,
   ) {
     this.settings = settingsStore.load();
   }
@@ -69,6 +94,9 @@ export class AgentKernel {
       this.model = null;
       this.currentMessageId = null;
       this.toolStartAt.clear();
+      this.buf = null;
+      this.pendingUserText = null;
+      this.currentTurnIndex = 0;
       log.info("kernel invalidated (settings changed) — will rebuild on next prompt");
     }
   }
@@ -143,6 +171,18 @@ export class AgentKernel {
       provider: this.model?.provider ?? active.provider,
     });
 
+    // M2:持久化当前会话元数据(以便历史列表 / API 能列出)
+    try {
+      upsertConversation(this.storage.db, {
+        id: this.conversationId,
+        cwd: this.cwd,
+        modelId: this.model?.id ?? active.modelId,
+        provider: this.model?.provider ?? active.provider,
+      });
+    } catch (err) {
+      log.warn("storage: upsertConversation failed:", err);
+    }
+
     // subscribe 把 Pi 事件翻译成 ServerEvent
     this.session.subscribe(this.makeHandler(sink));
   }
@@ -166,6 +206,10 @@ export class AgentKernel {
     this.toolStartAt.clear();
     this.inputTokens = 0;
     this.outputTokens = 0;
+    // M2:清掉上一次的 buffer / pending user text
+    this.buf = null;
+    this.pendingUserText = null;
+    this.currentTurnIndex = 0;
     this.conversationId = `conv_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
     log.info(`new conversation: ${this.conversationId}`);
     sink({ type: "conversation_reset", conversationId: this.conversationId });
@@ -213,6 +257,8 @@ export class AgentKernel {
     for (let i = 0; i < 100 && !this.session!.isIdle; i++) {
       await new Promise((r) => setTimeout(r, 50));
     }
+    // M2:buffer 起来,handler 在 message_start(role=user) 时落库
+    this.pendingUserText = text;
     await this.session!.prompt(text);
   }
 
@@ -250,6 +296,8 @@ export class AgentKernel {
             sink({ type: "turn_start", conversationId: this.conversationId, turnIndex: event.turnIndex, ts: Date.now() });
             this.inputTokens = 0;
             this.outputTokens = 0;
+            // M2:追踪 turn_index 用于消息落库
+            this.currentTurnIndex = event.turnIndex ?? this.currentTurnIndex;
             break;
           case "turn_end":
             break;
@@ -257,10 +305,45 @@ export class AgentKernel {
             const msg = event.message;
             const mid: string = (msg && (msg as any).id) || `m_${Date.now().toString(36)}`;
             this.currentMessageId = mid;
+            const role: "user" | "assistant" = (msg && (msg as any).role) || "assistant";
+
+            // M2:落库 user / assistant message
+            if (role === "user") {
+              const text = this.pendingUserText ?? "";
+              this.pendingUserText = null;
+              try {
+                insertMessage(this.storage.db, {
+                  id: mid,
+                  conversationId: this.conversationId,
+                  turnIndex: this.currentTurnIndex,
+                  role: "user",
+                  content: text,
+                  toolCalls: null,
+                  thinking: null,
+                  usageInput: 0,
+                  usageOutput: 0,
+                  costUsd: 0,
+                  createdAt: Date.now(),
+                });
+                recordMessageUsage(this.storage.db, this.conversationId, 0, 0, 0);
+              } catch (err) {
+                log.warn("storage: insertMessage(user) failed:", err);
+              }
+            } else {
+              this.buf = {
+                messageId: mid,
+                turnIndex: this.currentTurnIndex,
+                textDeltas: [],
+                thinkingDeltas: [],
+                toolCalls: [],
+                startedAt: Date.now(),
+              };
+            }
+
             sink({
               type: "message_start",
               conversationId: this.conversationId,
-              message: { role: (msg && (msg as any).role) || "assistant", id: mid },
+              message: { role, id: mid },
             });
             break;
           }
@@ -269,6 +352,7 @@ export class AgentKernel {
             const text = update?.delta ?? update?.text ?? "";
             // assistantMessageEvent.type: "text" | "thinking" | "tool_use"
             if (update?.type === "thinking" || update?.thinking) {
+              if (this.buf) this.buf.thinkingDeltas.push(update.thinking ?? text);
               sink({
                 type: "thinking_delta",
                 conversationId: this.conversationId,
@@ -276,6 +360,7 @@ export class AgentKernel {
                 text: update.thinking ?? text,
               });
             } else {
+              if (this.buf) this.buf.textDeltas.push(text);
               sink({
                 type: "delta",
                 conversationId: this.conversationId,
@@ -292,6 +377,42 @@ export class AgentKernel {
             const output = usage?.output ?? 0;
             this.inputTokens += input;
             this.outputTokens += output;
+
+            // M2:落库 assistant message
+            if (this.buf) {
+              const text = this.buf.textDeltas.join("");
+              const thinking = this.buf.thinkingDeltas.join("");
+              const toolCalls = this.buf.toolCalls.length
+                ? JSON.stringify(this.buf.toolCalls)
+                : null;
+              const costUsd = estimateCost(this.model ?? undefined, {
+                input: this.inputTokens,
+                output: this.outputTokens,
+              });
+              try {
+                insertMessage(this.storage.db, {
+                  id: this.buf.messageId,
+                  conversationId: this.conversationId,
+                  turnIndex: this.buf.turnIndex,
+                  role: "assistant",
+                  content: text,
+                  toolCalls,
+                  thinking,
+                  usageInput: input,
+                  usageOutput: output,
+                  costUsd,
+                  createdAt: Date.now(),
+                });
+                recordMessageUsage(this.storage.db, this.conversationId, input, output, costUsd);
+              } catch (err) {
+                log.warn("storage: insertMessage(assistant) failed:", err);
+              }
+              // 异步 fragment 提取(不阻塞 streaming)
+              const bufRef = this.buf;
+              this.buf = null;
+              void this.extractAndStoreFragments(text, bufRef.messageId, thinking);
+            }
+
             sink({
               type: "message_end",
               conversationId: this.conversationId,
@@ -302,6 +423,10 @@ export class AgentKernel {
           }
           case "tool_execution_start":
             this.toolStartAt.set(event.toolCallId, Date.now());
+            // M2:把工具调用记到 buf.toolCalls
+            if (this.buf) {
+              this.buf.toolCalls.push({ id: event.toolCallId, name: event.toolName, args: event.args });
+            }
             sink({
               type: "tool_start",
               conversationId: this.conversationId,
@@ -315,6 +440,15 @@ export class AgentKernel {
           case "tool_execution_end": {
             const start = this.toolStartAt.get(event.toolCallId);
             const durationMs = start ? Date.now() - start : undefined;
+            // M2:补 toolCalls 的 result / isError / durationMs
+            if (this.buf) {
+              const tc = this.buf.toolCalls.find((t) => t.id === event.toolCallId);
+              if (tc) {
+                tc.result = event.result;
+                tc.isError = !!event.isError;
+                if (durationMs !== undefined) tc.durationMs = durationMs;
+              }
+            }
             sink({
               type: "tool_end",
               conversationId: this.conversationId,
@@ -345,5 +479,62 @@ export class AgentKernel {
         log.warn("event handler error:", err);
       }
     };
+  }
+
+  /**
+   * 启发式提取 fragment → 写 fragments 表 → 异步 embed。
+   * 不抛错:embed 失败只 warn,不影响 streaming。
+   */
+  private async extractAndStoreFragments(text: string, messageId: string, thinking?: string): Promise<void> {
+    if (!text && !thinking) return;
+    let frags;
+    try {
+      frags = extractFragments({ role: "assistant", content: text, thinking });
+    } catch (err) {
+      log.warn("fragment: extractor failed:", err);
+      return;
+    }
+    for (const f of frags) {
+      const id = nanoid();
+      try {
+        insertFragment(this.storage.db, {
+          id,
+          kind: f.kind,
+          content: f.content,
+          sourceConversationId: this.conversationId,
+          sourceMessageId: messageId,
+          importance: f.importance,
+          decayFactor: 0.95,
+          accessCount: 0,
+          lastAccessedAt: null,
+          createdAt: Date.now(),
+          metadata: null,
+        });
+      } catch (err) {
+        log.warn(`fragment: insert failed (${f.kind}):`, err);
+        continue;
+      }
+      // 异步 embed,不阻塞主流程
+      void (async () => {
+        const provider = this.settingsStore.activeProvider();
+        if (!provider?.apiKey) return;
+        try {
+          const emb = await embedText(f.content, {
+            baseUrl: provider.baseUrl ?? "",
+            apiKey: provider.apiKey,
+            model: "text-embedding-3-small",
+          });
+          if (emb) {
+            try {
+              upsertFragmentEmbedding(this.storage.db, id, emb);
+            } catch (err) {
+              log.warn(`fragment: upsert embedding failed:`, err);
+            }
+          }
+        } catch (err) {
+          log.warn(`fragment: embedText threw:`, err);
+        }
+      })();
+    }
   }
 }

@@ -11,6 +11,7 @@ import { ensureDirs } from "../cli/commands.js";
 import { SettingsStore } from "./settings/store.js";
 import { AgentKernel } from "./kernel/agentKernel.js";
 import { attachWebSocket } from "./ws.js";
+import { Keyring, Storage } from "./storage/index.js";
 import { join } from "node:path";
 import type { Server } from "node:http";
 
@@ -28,13 +29,17 @@ export async function startServer(opts: ServerOptions): Promise<void> {
   // Sansheng 用本地 catalog(provider+model 都在 builtin),不需要远程刷新。
   process.env.PI_OFFLINE = process.env.PI_OFFLINE ?? "1";
 
-  const settingsStore = new SettingsStore(join(opts.dataDir, "settings.json"));
+  // M2:Keyring(apiKey 加密)+ Storage(SQLite 持久化)
+  const keyring = new Keyring(join(opts.dataDir, ".keyring"));
+  const storage = new Storage(join(opts.dataDir, "sansheng.db"));
+
+  const settingsStore = new SettingsStore(join(opts.dataDir, "settings.json"), keyring);
   const settings = settingsStore.load();
   const agentDir = join(opts.dataDir, "pi");
-  const kernel = new AgentKernel(settingsStore, agentDir, settings.cwd);
+  const kernel = new AgentKernel(settingsStore, agentDir, settings.cwd, storage);
 
   // 先建一个 placeholder app 占 fetch,只是为了 listen
-  const placeholder = createApp({ dataDir: opts.dataDir, kernel, httpServer: createServer(), settingsStore });
+  const placeholder = createApp({ dataDir: opts.dataDir, kernel, httpServer: createServer(), settingsStore, storage });
   const httpServer = serve(
     { fetch: placeholder.fetch, port: opts.port, hostname: opts.host },
     (info) => {
@@ -56,10 +61,27 @@ export async function startServer(opts: ServerOptions): Promise<void> {
   if (process.env.SANSHENG_DAEMON === "1") {
     process.on("SIGTERM", () => {
       log.muted("SIGTERM received, closing server");
-      httpServer.close();
+      try {
+        httpServer.close();
+        storage.close();
+      } catch (err) {
+        log.warn("shutdown close failed:", err);
+      }
       process.exit(0);
     });
   }
+
+  // 进程退出兜底关 SQLite
+  const closeStorage = () => {
+    try {
+      storage.close();
+    } catch {}
+  };
+  process.on("exit", closeStorage);
+  process.on("SIGINT", () => {
+    closeStorage();
+    process.exit(0);
+  });
 }
 
 // 作为独立模块被 fork 启动时

@@ -303,7 +303,93 @@ export function SettingsPanel() {
         {saved === "ok" && <span className="sansheng-text-jade" style={{ fontSize: 12 }}>✓ 已保存,下次发消息生效</span>}
         {saved === "err" && <span className="sansheng-text-cinnabar" style={{ fontSize: 12 }}>✗ 保存失败</span>}
       </div>
+
+      {/* —— 危险区:M2 重置按钮 —— */}
+      <ResetSection />
     </div>
+  );
+}
+
+/** 危险区:重置 Sansheng */
+function ResetSection() {
+  const [busy, setBusy] = useState(false);
+  const [done, setDone] = useState<null | "ok" | "err">(null);
+  const [info, setInfo] = useState<string>("");
+
+  async function onReset() {
+    if (busy) return;
+    const ok = window.confirm(
+      "确认重置 Sansheng?\n\n将删除:所有对话 / 配置 / API key / 记忆片段。\n日志会保留。\n\n需要重启 server 才能重新初始化。",
+    );
+    if (!ok) return;
+    setDone(null);
+    setInfo("");
+    setBusy(true);
+    try {
+      const r = await fetch("/api/reset", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ confirm: "reset" }),
+      });
+      const data = (await r.json().catch(() => null)) as
+        | { ok?: boolean; removed?: string[]; failed?: string[]; error?: string }
+        | null;
+      if (!r.ok || !data?.ok) {
+        setDone("err");
+        setInfo(data?.error ?? `HTTP ${r.status}`);
+        return;
+      }
+      setDone("ok");
+      setInfo(
+        `已删除 ${data.removed?.length ?? 0} 项${data.failed?.length ? `,失败 ${data.failed.length}` : ""}。请运行 sansheng stop && sansheng start`,
+      );
+    } catch (err) {
+      setDone("err");
+      setInfo(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <section
+      className="sansheng-card-elevated p-4"
+      style={{ border: "1px solid var(--cinnabar)", borderColor: "rgba(199, 107, 74, 0.35)" }}
+    >
+      <h2
+        className="font-serif mb-2"
+        style={{ color: "var(--cinnabar)", fontSize: 14, letterSpacing: ".04em" }}
+      >
+        危险区
+      </h2>
+      <p className="sansheng-text-mute mb-3" style={{ fontSize: 11, lineHeight: 1.6 }}>
+        重置将删除数据库、密钥环、设置与 Pi 会话目录(日志保留)。需要手动 <code>stop && start</code>。
+      </p>
+      <div className="flex items-center gap-3">
+        <button
+          onClick={onReset}
+          disabled={busy}
+          className="sansheng-button"
+          style={{
+            padding: "8px 16px",
+            color: "var(--cinnabar)",
+            borderColor: "var(--cinnabar)",
+          }}
+        >
+          {busy ? "重置中…" : "重置 Sansheng"}
+        </button>
+        {done === "ok" && (
+          <span className="sansheng-text-jade" style={{ fontSize: 12 }}>
+            ✓ {info}
+          </span>
+        )}
+        {done === "err" && (
+          <span className="sansheng-text-cinnabar" style={{ fontSize: 12 }}>
+            ✗ {info}
+          </span>
+        )}
+      </div>
+    </section>
   );
 }
 

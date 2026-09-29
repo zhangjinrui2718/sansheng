@@ -43,6 +43,38 @@ export interface ChatState {
   appendUserTurn(text: string): void;
   /** 新建对话:调后端 + 清本地状态 */
   newConversation(): Promise<void>;
+  /** M2:从后端加载一个历史对话的快照(覆盖本地状态) */
+  loadConversation(snapshot: ConversationSnapshot): void;
+}
+
+/** 从 /api/conversations/:id 返回的数据 */
+export interface ConversationSnapshot {
+  conversation: {
+    id: string;
+    title: string | null;
+    cwd: string | null;
+    modelId: string | null;
+    provider: string | null;
+    createdAt: number;
+    lastActiveAt: number;
+    messageCount: number;
+    totalInputTokens: number;
+    totalOutputTokens: number;
+    totalCostUsd: number;
+  };
+  messages: Array<{
+    id: string;
+    conversationId: string;
+    turnIndex: number;
+    role: "user" | "assistant" | "tool" | "system";
+    content: string;
+    toolCalls: string | null;
+    thinking: string | null;
+    usageInput: number;
+    usageOutput: number;
+    costUsd: number;
+    createdAt: number;
+  }>;
 }
 
 const newTurn = (id: string, role: Role): Turn => ({
@@ -99,6 +131,62 @@ export const useChatStore = create<ChatState>((set, get) => ({
     } catch {
       // 忽略,UI 保持原状
     }
+  },
+
+  loadConversation(snapshot: ConversationSnapshot) {
+    const { conversation, messages } = snapshot;
+    // 每个 message → 一个 turn;blocks 从 content + toolCalls 还原
+    const turns: Turn[] = messages.map((m) => {
+      const blocks: Block[] = [];
+      if (m.thinking) blocks.push({ kind: "thinking", text: m.thinking });
+      if (m.content) blocks.push({ kind: "text", text: m.content });
+      if (m.toolCalls) {
+        try {
+          const parsed = JSON.parse(m.toolCalls) as Array<{
+            id: string;
+            name: string;
+            args?: unknown;
+            result?: unknown;
+            isError?: boolean;
+            durationMs?: number;
+          }>;
+          for (const tc of parsed) {
+            blocks.push({ kind: "tool", tool: tc });
+          }
+        } catch {
+          // 解析失败,丢弃 toolCalls
+        }
+      }
+      // user / assistant / tool / system
+      const role = m.role === "tool" ? "assistant" : m.role === "system" ? "system" : (m.role as Role);
+      return {
+        id: m.id,
+        role,
+        blocks,
+        startedAt: m.createdAt,
+        endedAt: m.createdAt,
+        usage: { input: m.usageInput, output: m.usageOutput },
+        isStreaming: false,
+      };
+    });
+
+    set((s) => ({
+      conversationId: conversation.id,
+      turns,
+      currentTurn: null,
+      currentUsage: { input: 0, output: 0, costUsd: 0 },
+      totalUsage: {
+        input: conversation.totalInputTokens,
+        output: conversation.totalOutputTokens,
+        costUsd: conversation.totalCostUsd,
+      },
+      error: null,
+      status: "idle",
+      // 加载历史:kernel 没有为这个 conversationId 开工,标 false 让 UI 提示
+      kernelReady: false,
+      modelId: conversation.modelId ?? s.modelId,
+      provider: conversation.provider ?? s.provider,
+    }));
   },
 
   applyEvent(e: ServerEvent) {

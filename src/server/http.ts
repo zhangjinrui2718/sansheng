@@ -7,7 +7,7 @@
  */
 import { Hono } from "hono";
 import { serveStatic } from "@hono/node-server/serve-static";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, rmSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Server } from "node:http";
@@ -16,6 +16,14 @@ import { SettingsStore, genProviderId, isMaskedApiKey, type ProviderConfig, type
 import { listProviders } from "./providers/registry.js";
 import type { AgentKernel, ServerEvent } from "./kernel/agentKernel.js";
 import { attachWebSocket } from "./ws.js";
+import { Storage } from "./storage/index.js";
+import {
+  getConversation,
+  listConversations,
+  listMessagesByConversation,
+  listProfile,
+  upsertProfile,
+} from "./storage/index.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = import.meta.dirname ?? join(__filename, "..");
@@ -25,6 +33,7 @@ export interface AppOptions {
   kernel: AgentKernel;
   httpServer: Server;
   settingsStore: SettingsStore;
+  storage: Storage;
 }
 
 /** 把内部 Settings 转成对外(掩码 apiKey)的 SettingsPublic */
@@ -151,6 +160,106 @@ export function createApp(opts: AppOptions): Hono {
     const sink = (e: ServerEvent) => log.muted(`reset-event: ${e.type}`);
     await opts.kernel.reset(sink);
     return c.json({ ok: true, conversationId: opts.kernel.getConversationId() });
+  });
+
+  // ============== M2:持久化路由 ==============
+
+  // 列出最近会话(供 HistoryRail 用)
+  app.get("/api/conversations", (c) => {
+    const limit = parseInt(c.req.query("limit") ?? "50", 10);
+    const safeLimit = Number.isFinite(limit) ? Math.min(Math.max(limit, 1), 200) : 50;
+    try {
+      const conversations = listConversations(opts.storage.db, safeLimit);
+      return c.json({ conversations });
+    } catch (err) {
+      log.warn("list conversations failed:", err);
+      return c.json({ error: "storage_error" }, 500);
+    }
+  });
+
+  // 获取单个会话 + 它的全部 messages
+  app.get("/api/conversations/:id", (c) => {
+    const id = c.req.param("id");
+    try {
+      const conversation = getConversation(opts.storage.db, id);
+      if (!conversation) return c.json({ error: "not_found" }, 404);
+      const messages = listMessagesByConversation(opts.storage.db, id);
+      return c.json({ conversation, messages });
+    } catch (err) {
+      log.warn("get conversation failed:", err);
+      return c.json({ error: "storage_error" }, 500);
+    }
+  });
+
+  // 列出 user profile(全部键值;M5/M7 才会用到,这里先暴露)
+  app.get("/api/profile", (c) => {
+    try {
+      const profile = listProfile(opts.storage.db);
+      return c.json({ profile });
+    } catch (err) {
+      log.warn("list profile failed:", err);
+      return c.json({ error: "storage_error" }, 500);
+    }
+  });
+
+  // upsert 一条 profile
+  app.put("/api/profile/:key", async (c) => {
+    const key = c.req.param("key");
+    const body = (await c.req.json().catch(() => null)) as {
+      value?: string;
+      confidence?: number;
+    } | null;
+    if (!body || typeof body.value !== "string" || !body.value) {
+      return c.json({ error: "value required" }, 400);
+    }
+    try {
+      const confidence =
+        typeof body.confidence === "number" && body.confidence >= 0 && body.confidence <= 1
+          ? body.confidence
+          : 0.7;
+      upsertProfile(opts.storage.db, key, body.value, confidence);
+      return c.json({ ok: true });
+    } catch (err) {
+      log.warn("upsert profile failed:", err);
+      return c.json({ error: "storage_error" }, 500);
+    }
+  });
+
+  // 重置 Sansheng:删 db / keyring / settings / pi 目录(留 logs)
+  app.post("/api/reset", async (c) => {
+    const body = (await c.req.json().catch(() => null)) as { confirm?: string } | null;
+    if (body?.confirm !== "reset") {
+      return c.json({ error: "confirmation required (pass {confirm:\"reset\"})" }, 400);
+    }
+    const targets = [
+      join(opts.dataDir, "sansheng.db"),
+      join(opts.dataDir, "sansheng.db-wal"),
+      join(opts.dataDir, "sansheng.db-shm"),
+      join(opts.dataDir, ".keyring"),
+      join(opts.dataDir, "settings.json"),
+      join(opts.dataDir, "pi"),
+    ];
+    const removed: string[] = [];
+    const failed: string[] = [];
+    // 先关 storage(SQLite) 释放文件句柄,不然 rm 会 win32/某些 fs 上失败
+    try {
+      opts.storage.close();
+    } catch (err) {
+      log.warn("storage close before reset:", err);
+    }
+    for (const t of targets) {
+      try {
+        if (existsSync(t)) {
+          rmSync(t, { recursive: true, force: true });
+          removed.push(t);
+        }
+      } catch (err) {
+        failed.push(t);
+        log.warn(`reset: failed to remove ${t}:`, err);
+      }
+    }
+    log.warn(`reset via /api/reset: removed=${removed.length} failed=${failed.length}`);
+    return c.json({ ok: true, removed, failed });
   });
 
   // —— 静态文件:生产构建产物(dist/web) ——

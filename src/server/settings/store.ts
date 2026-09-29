@@ -1,13 +1,16 @@
 /**
- * Sansheng Settings · 持久化到 ~/.sansheng/settings.json (明文,M2 再迁 SQLite)
+ * Sansheng Settings · 持久化到 ~/.sansheng/settings.json
  *
  * M1.5: 支持多 provider。settings.providers[] 存所有配置,activeProviderId 指定当前用哪个。
- * 兼容旧的单 provider 格式(load 时自动迁移)。
+ *        兼容旧的单 provider 格式(load 时自动迁移)。
+ * M2:    apiKey 在磁盘上用 Keyring 加密;内存里永远保持明文方便 kernel / UI 读取。
+ *        启动时检测到明文残留会一次性升级为加密格式。
  */
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { randomBytes } from "node:crypto";
 import { log } from "../../shared/log.js";
+import { Keyring, isEncrypted } from "../storage/index.js";
 
 function isMaskedApiKey(s: string): boolean {
   if (!s) return true;
@@ -53,7 +56,10 @@ const DEFAULTS: Settings = {
 
 export class SettingsStore {
   private cache: Settings | null = null;
-  constructor(private readonly file: string) {}
+  constructor(
+    private readonly file: string,
+    private readonly keyring: Keyring | null,
+  ) {}
 
   load(): Settings {
     if (this.cache) return this.cache;
@@ -61,22 +67,61 @@ export class SettingsStore {
       this.cache = { ...DEFAULTS, providers: [] };
       return this.cache;
     }
+    let parsed: Settings;
+    let wasLegacy = false;
     try {
       const raw = JSON.parse(readFileSync(this.file, "utf-8")) as Record<string, unknown>;
-      const wasLegacy = !Array.isArray(raw.providers);
-      this.cache = this.migrate(raw);
-      // 旧格式迁移后写回磁盘,避免每次启动重复迁移
-      if (wasLegacy) {
-        try {
-          writeFileSync(this.file, JSON.stringify(this.cache, null, 2), { mode: 0o600 });
-          log.info("persisted migrated settings.json (legacy → multi-provider)");
-        } catch (err) {
-          log.warn("failed to persist migrated settings:", err);
-        }
-      }
+      wasLegacy = !Array.isArray(raw.providers);
+      parsed = this.migrate(raw);
     } catch {
-      this.cache = { ...DEFAULTS, providers: [] };
+      parsed = { ...DEFAULTS, providers: [] };
+      this.cache = parsed;
+      return this.cache;
     }
+
+    // 解密:内存里绝不存密文(apiKey 永远是 plain)。同时检测明文残留 → 升级到加密。
+    let anyWasPlain = false;
+    if (this.keyring) {
+      parsed = {
+        ...parsed,
+        providers: parsed.providers.map((p) => {
+          if (!p.apiKey) return p;
+          if (isMaskedApiKey(p.apiKey)) return p;
+          if (isEncrypted(p.apiKey)) {
+            try {
+              const decrypted = this.keyring!.decrypt(p.apiKey);
+              // 防御:解密结果是 masked/空 → 视为损坏,清空
+              if (!decrypted || isMaskedApiKey(decrypted)) {
+                log.warn(`settings: failed to decrypt apiKey for provider ${p.id} — cleared`);
+                return { ...p, apiKey: "" };
+              }
+              return { ...p, apiKey: decrypted };
+            } catch (err) {
+              log.warn(`settings: decrypt error for provider ${p.id}:`, err);
+              return { ...p, apiKey: "" };
+            }
+          }
+          // 明文 apiKey → 记下来,稍后升级到加密
+          anyWasPlain = true;
+          return p;
+        }),
+      };
+    } else {
+      log.warn("settings: no Keyring configured — apiKey will be stored in plaintext");
+    }
+
+    this.cache = parsed;
+
+    // 升级:legacy 格式 OR 明文残留 → 重新写盘(这次会走加密)
+    if (wasLegacy || anyWasPlain) {
+      try {
+        this.save(parsed);
+        log.info(`persisted settings.json (legacy=${wasLegacy}, upgradedPlaintext=${anyWasPlain})`);
+      } catch (err) {
+        log.warn("failed to persist upgraded settings:", err);
+      }
+    }
+
     return this.cache;
   }
 
@@ -143,7 +188,24 @@ export class SettingsStore {
   save(s: Settings): void {
     const dir = join(this.file, "..");
     if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-    writeFileSync(this.file, JSON.stringify(s, null, 2), { mode: 0o600 });
+
+    const onDisk: Settings = {
+      ...s,
+      providers: s.providers.map((p) => {
+        if (!p.apiKey) return p;
+        if (isMaskedApiKey(p.apiKey)) {
+          throw new Error(`refusing to save masked apiKey for provider ${p.id} as encrypted`);
+        }
+        if (this.keyring) {
+          if (isEncrypted(p.apiKey)) return p; // 已经加密(可能 UI 拷贝回填)
+          return { ...p, apiKey: this.keyring.encrypt(p.apiKey) };
+        }
+        // 没有 keyring → 明文直存(警告已在 load 时打)
+        return p;
+      }),
+    };
+
+    writeFileSync(this.file, JSON.stringify(onDisk, null, 2), { mode: 0o600 });
     this.cache = s;
   }
 

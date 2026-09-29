@@ -191,7 +191,7 @@ export async function runLogs(opts: { lines: string; follow: boolean }): Promise
 export async function runReset(opts: { yes: boolean }): Promise<void> {
   const d = dataDir();
   if (!opts.yes) {
-    log.warn(`About to wipe ${d}`);
+    log.warn(`About to wipe data files in ${d} (logs kept)`);
     log.warn(`Type 'yes' within 5s to confirm:`);
     process.stdin.setRawMode?.(true);
     process.stdin.resume();
@@ -217,10 +217,27 @@ export async function runReset(opts: { yes: boolean }): Promise<void> {
       return;
     }
   }
-  try {
-    rmSync(d, { recursive: true, force: true });
-    log.ok(`wiped ${d}`);
-  } catch (err) {
-    log.error("reset failed:", err);
+
+  // M2:精细化删除(留 logs)— 与 /api/reset 保持一致
+  const targets = [
+    join(d, "sansheng.db"),
+    join(d, "sansheng.db-wal"),
+    join(d, "sansheng.db-shm"),
+    join(d, ".keyring"),
+    join(d, "settings.json"),
+    join(d, "pi"),
+  ];
+  const removed: string[] = [];
+  for (const t of targets) {
+    try {
+      if (existsSync(t)) {
+        rmSync(t, { recursive: true, force: true });
+        removed.push(t);
+        log.muted(`  removed: ${t}`);
+      }
+    } catch (err) {
+      log.warn(`failed to remove ${t}:`, err);
+    }
   }
+  log.ok(`reset complete (${removed.length} paths removed). logs/ kept.`);
 }
