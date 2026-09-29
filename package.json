@@ -23,7 +23,7 @@
     "build:server": "tsc -p tsconfig.server.json",
     "build:web": "vite build",
     "build": "npm-run-all build:server build:web",
-    "start": "node dist/cli/index.js start",
+    "start": "node dist/src/cli/index.js start",
     "typecheck": "tsc -p tsconfig.server.json --noEmit && tsc -p tsconfig.web.json --noEmit",
     "test": "vitest --run",
     "test:watch": "vitest",

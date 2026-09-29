@@ -294,7 +294,8 @@ export function createApp(opts: AppOptions): Hono {
   });
 
   // —— 静态文件:生产构建产物(dist/web) ——
-  const webRoot = resolve(__dirname, "../../dist/web");
+  // tsc rootDir=. → dist/src/server/http.js,需走三级上级到工程根
+  const webRoot = resolve(__dirname, "../../../dist/web");
   if (existsSync(webRoot)) {
     app.use("/*", serveStatic({ root: webRoot }));
     app.get("*", (c) => {
