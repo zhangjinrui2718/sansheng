@@ -281,6 +281,26 @@ cd /root/projects/sansheng && \
 
 ---
 
+## M4 integration 派遣中 (2026-09-29 17:11 UTC)
+
+runId: `del_mumgkbck_5d7p`(worker,model=balanced,timeout=45min)
+
+**Scope**(硬锁):
+- ✅ `src/server/tools/integration.ts` — `createToolRegistry()` 注册 6 个工具(fs.readFile/writeFile/listDir/stat + http.fetch/postJson)
+- ✅ `src/server/tools/integration.test.ts` — 6-10 case
+- ✅ `src/server/http.ts` 加 `GET /api/tools/list` + `POST /api/tools/invoke`
+- ❌ 不改 fs/http/netSandbox/registry/sandbox 源代码(本任务只是组装)
+- ❌ 不接 WS / agent runner / cancelToken(M5+)
+- ❌ 不碰 M5/M6/UI / 不加新依赖
+
+**验证必跑**:typecheck 0 / test ≥76(原 70 + 6-10 new) / build OK / node sanity / curl /api/tools/list + /api/tools/invoke / git status clean
+
+**Report 必含**:10 项(commit + typecheck + test + build + sanity + 2 curl + 文件路径 + open questions)
+
+预计完成 ~17:50 UTC,notification 自动到达。
+
+---
+
 ## Memory Fragments bug fix (2026-09-29 17:08 UTC) · 重要
 
 Commit: `40e0589 fix(http): add global onError handler returning JSON 500 (not HTML)`
