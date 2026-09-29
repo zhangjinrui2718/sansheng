@@ -30,7 +30,24 @@ export type ServerEvent =
   | { type: "error"; conversationId: string; error: { code: string; message: string } }
   | { type: "interrupt"; conversationId: string }
   | { type: "conversation_reset"; conversationId: string }
-  | { type: "title_changed"; conversationId: string; title: string };
+  | { type: "title_changed"; conversationId: string; title: string }
+  // M3c: Communicator / MessageBus
+  | {
+      type: "bus_event";
+      message: import("./agents.js").BusMessage;
+    }
+  | {
+      type: "communicator_thinking";
+      conversationId: string;
+      status: "idle" | "thinking" | "tool_use";
+    }
+  | {
+      type: "pending_question";
+      conversationId: string;
+      questionId: string;
+      payload: string;
+      fromRole: import("./agents.js").RoleId;
+    };
 
 export type ClientCommand =
   | { type: "send"; content: string; conversationId?: string }
@@ -39,4 +56,8 @@ export type ClientCommand =
   | { type: "load_conversation"; conversationId: string }
   // M3b: 多 agent / Blackboard
   | { type: "plan"; goal: string; conversationId: string }
-  | { type: "abort_plan" };
+  | { type: "abort_plan" }
+  // M3c: Communicator ↔ MessageBus
+  | { type: "answer_question"; questionId: string; payload: string; conversationId: string }
+  | { type: "cancel_question"; questionId: string; conversationId: string }
+  | { type: "bus_replay"; conversationId: string; fromTs: number };

@@ -22,13 +22,30 @@ export interface HarnessConfig {
 }
 
 const DEFAULT_CONFIG: HarnessConfig = {
-  systemPrompts: { planner: "", executor: "", critic: "", memory: "", reflection: "" },
+  systemPrompts: {
+    communicator: "",
+    planner: "",
+    executor: "",
+    critic: "",
+    memory: "",
+    reflection: "",
+  },
   enabledTools: ["fs_read", "fs_write", "shell", "http"],
   redLines: ["禁止修改 .ssh/", "禁止外发邮件"],
   budget: { maxIterations: 5, perStepTimeoutMs: 60000, maxCostUsd: 0.5 },
 };
 
 const DEFAULT_PROMPTS: Record<RoleKind, string> = {
+  communicator: `# Communicator (沟通员)
+你的职责:
+- 接收用户消息,先判断是 chat(闲聊直接答)/ task(转 Planner 跑多 agent)/ feedback(更新用户画像)
+- Worker 通过 MessageBus 提问时,先尽力自查(查代码 / 调工具);答不了再升级用户
+- 用对话风格落平衡(简短、口语化,不要长篇暴露)
+
+约束:
+- 一次只发一条 chat 回复;task 转发后等 worker 回报再回话
+- 升级用户前先尝试自查(读 README / 看相关文件)
+- 保持角色一致:用「三生」第一人称`,
   planner: `# Planner (规划师)
 你的职责:
 - 阅读用户目标和当前 Blackboard

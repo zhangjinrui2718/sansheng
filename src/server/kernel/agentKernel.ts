@@ -13,6 +13,15 @@ import { nanoid } from "nanoid";
 import { SettingsStore, type Settings, type ProviderConfig } from "../settings/store.js";
 import { estimateCost } from "../providers/cost.js";
 import { log } from "../../shared/log.js";
+import { MessageBus } from "../agents/messageBus.js";
+import { Communicator } from "../agents/communicator.js";
+import type { BusMessage as BusMessageFromTypes } from "@shared/types/agents";
+import type { RunnerSettings } from "../agents/runner.js";
+import { loadHarness } from "../harness/loader.js";
+import { appendBusMessage, loadBusMessages } from "../agents/busPersister.js";
+
+/** 本文件用到 BusMessage 类型 */
+type BusMessage = BusMessageFromTypes;
 import { resolveModel } from "../providers/registry.js";
 import {
   Storage,
@@ -47,7 +56,17 @@ export type ServerEvent =
   | { type: "conversation_reset"; conversationId: string }
   // M3b: 多 agent Blackboard 流
   | { type: "blackboard_update"; blackboard: import("@shared/types/agents").Blackboard; agents: Record<string, import("@shared/types/agents").AgentRunSummary> }
-  | { type: "plan_done"; blackboard: import("@shared/types/agents").Blackboard };
+  | { type: "plan_done"; blackboard: import("@shared/types/agents").Blackboard }
+  // M3c: Communicator / MessageBus
+  | { type: "bus_event"; message: import("@shared/types/agents").BusMessage }
+  | { type: "communicator_thinking"; conversationId: string; status: "idle" | "thinking" | "tool_use" }
+  | {
+      type: "pending_question";
+      conversationId: string;
+      questionId: string;
+      payload: string;
+      fromRole: import("@shared/types/agents").RoleId;
+    };
 
 export type EventSink = (e: ServerEvent) => void;
 
@@ -75,6 +94,12 @@ export class AgentKernel {
   private kernelStartedAt = Date.now();
   /** M2:当前正在发/等的 user 文本(prompt() 时 buffer 起来,message_start(user) 时消费) */
   private pendingUserText: string | null = null;
+  /** M3c: MessageBus + Communicator(每会话 1 个,resume 时重建) */
+  private bus: MessageBus = new MessageBus();
+  private communicator: Communicator | null = null;
+  private pendingQuestions = new Map<string, string>(); // questionId → conversationId
+  /** bus 的所有 BusMessage 都走这个 subscriber → 推 ws + 落 jsonl */
+  private busUnsubscribe: (() => void) | null = null;
 
   constructor(
     private readonly settingsStore: SettingsStore,
@@ -128,6 +153,72 @@ export class AgentKernel {
     return active ? { provider: active.provider, modelId: active.modelId } : null;
   }
 
+  /**
+   * M3c: 初始化 Communicator + Bus(在 start() 末尾调用)。
+   * Communicator 永远在线 → kernel 一启动就建好。
+   */
+  private ensureCommunicator(sink: EventSink): Communicator {
+    if (this.communicator) return this.communicator;
+    const dataDir = process.env.SANSHENG_DATA ?? this.agentDir.replace(/\/pi$/, "");
+    const harness = loadHarness(dataDir);
+    const active = this.settingsStore.activeProvider();
+    const settings: RunnerSettings = {
+      provider: active?.provider ?? "fake",
+      apiKey: active?.apiKey ?? "sk-fake",
+      modelId: active?.modelId ?? "fake-model",
+      thinkingLevel: active?.thinkingLevel ?? "off",
+    };
+    const comm = new Communicator({
+      bus: this.bus,
+      settings,
+      agentDir: `${this.agentDir}/communicator`,
+      cwd: this.cwd,
+      systemPrompt: harness.systemPrompts.communicator ?? "",
+      // kernel 层拿不到模型时(无 API key)降级为 disableLlm
+      disableLlm: !active?.apiKey,
+    });
+    // bus 订阅:每条新 BusMessage → 推 ws(bus_event)+ 落 jsonl
+    if (!this.busUnsubscribe) {
+      this.busUnsubscribe = this.bus.subscribe((msg) => {
+        sink({ type: "bus_event", message: msg });
+        void appendBusMessage(dataDir, msg.conversationId, msg);
+      });
+    }
+    this.communicator = comm;
+    return comm;
+  }
+
+  /**
+   * M3c:ws 层调这个把用户回答喂给挂起的 questionId。
+   */
+  answerPendingQuestion(questionId: string, payload: string): boolean {
+    if (!this.communicator) return false;
+    return this.communicator.answerPending(questionId, payload);
+  }
+
+  /** M3c:ws 层调这个取消一个挂起的 question。 */
+  cancelPendingQuestion(questionId: string): boolean {
+    if (!this.communicator) return false;
+    return this.communicator.cancelPending(questionId);
+  }
+
+  /** M3c:ws 层调这个从 jsonl 重放 bus 流(给浏览器的 timeline)。 */
+  async replayBus(conversationId: string, fromTs: number): Promise<BusMessage[]> {
+    const dataDir = process.env.SANSHENG_DATA ?? this.agentDir.replace(/\/pi$/, "");
+    const all = await loadBusMessages(dataDir, conversationId);
+    return all.filter((m) => m.ts >= fromTs);
+  }
+
+  /** 拿到当前 kernel 的 bus(供 ws 层 / 测试用)。 */
+  getBus(): MessageBus {
+    return this.bus;
+  }
+
+  /** 拿到当前 kernel 的 Communicator。 */
+  getCommunicator(): Communicator | null {
+    return this.communicator;
+  }
+
   /** 用当前 Settings 的 active provider 创建或重建 Session;Settings 变更后调用 */
   async start(sink: EventSink): Promise<void> {
     if (this.session) return; // already started
@@ -171,6 +262,12 @@ export class AgentKernel {
 
     // subscribe 把 Pi 事件翻译成 ServerEvent
     this.session.subscribe(this.makeHandler(sink));
+    // M3c: 初始化 Communicator + bus(走非 LLM fallback 时 no-op)
+    try {
+      this.ensureCommunicator(sink);
+    } catch (err) {
+      log.warn("kernel: ensureCommunicator failed:", err);
+    }
   }
 
   /**
@@ -380,18 +477,88 @@ export class AgentKernel {
     if (!this.session) {
       if (sink) {
         // 还没 start 过,可能是用户改了 settings 后第一次发 — 触发一次 start
-        await this.start(sink);
+        // start 可能 fail(如没 provider),它会 sink 错误再 throw。这里吞掉 throw,
+        // 让后续 Communicator / fallback 路径仍能尝试(M3c + PI_OFFLINE 场景)。
+        try {
+          await this.start(sink);
+        } catch (err) {
+          log.warn("kernel: lazy start failed (continuing to communicator):", (err as Error).message ?? err);
+        }
       } else {
         throw new Error("kernel not started");
       }
     }
+    const effectiveSink = sink ?? ((_e: ServerEvent) => {});
+
+    // M3c: 先过 Communicator → decide(chat/task/feedback)
+    try {
+      this.ensureCommunicator(effectiveSink);
+    } catch (err) {
+      log.warn("kernel: ensureCommunicator failed:", err);
+    }
+    const comm = this.communicator;
+    if (comm) {
+      try {
+        const decision = await comm.routeUserMessage(text, this.conversationId, (e) => {
+          // Communicator → ServerEvent 翻译
+          switch (e.type) {
+            case "thinking":
+              effectiveSink({
+                type: "communicator_thinking",
+                conversationId: this.conversationId,
+                status: e.status,
+              });
+              break;
+            case "delta":
+            case "done":
+            case "bus_event":
+            case "error":
+            case "pending_question":
+              // done/delta:不直接喂给 session.prompt(),只 log 或 bus_event
+              // pending_question:升级用户
+              if (e.type === "bus_event") {
+                effectiveSink({ type: "bus_event", message: e.message });
+              } else if (e.type === "pending_question") {
+                this.pendingQuestions.set(e.questionId, this.conversationId);
+                effectiveSink({
+                  type: "pending_question",
+                  conversationId: this.conversationId,
+                  questionId: e.questionId,
+                  payload: e.payload,
+                  fromRole: e.fromRole,
+                });
+              } else if (e.type === "error") {
+                log.warn(`communicator ${e.code}: ${e.message}`);
+              }
+              break;
+            default: {
+              const _exhaustive: never = e;
+              void _exhaustive;
+            }
+          }
+        });
+        // 如果 Communicator 决定 task,降级让 kernel Pi session 负责答(产品化:转 M3b Orchestrator)
+        // M3c 简化实现:task 也走 Pi session 直答 — 完整 Orchestrator 在 M3b 由 /plan 显式触发
+        log.muted(
+          `communicator decide: kind=${decision.kind} conv=${this.conversationId}`,
+        );
+      } catch (err) {
+        log.warn("communicator routeUserMessage failed; falling back to direct Pi:", err);
+      }
+    }
     // 保险:再 poll 一次 session.isIdle,避免极端情况(刚启动有隐式后台 prompt)
-    for (let i = 0; i < 100 && !this.session!.isIdle; i++) {
-      await new Promise((r) => setTimeout(r, 50));
+    if (this.session) {
+      for (let i = 0; i < 100 && !this.session.isIdle; i++) {
+        await new Promise((r) => setTimeout(r, 50));
+      }
     }
     // M2:buffer 起来,handler 在 message_start(role=user) 时落库
     this.pendingUserText = text;
-    await this.session!.prompt(text);
+    // M3c: 只有 session 存在时才回退 Pi session(M3c + PI_OFFLINE 场景下 kernel 无 session,
+    // Communicator 自己已经在 sink emit 了 delta/done,不需要再补一次)
+    if (this.session) {
+      await this.session.prompt(text);
+    }
   }
 
   /** 主动中断当前正在进行的 run */

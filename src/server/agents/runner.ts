@@ -20,7 +20,8 @@ import type { Model } from "@earendil-works/pi-ai";
 import { nanoid } from "nanoid";
 import { resolveModel } from "../providers/registry.js";
 import { log } from "../../shared/log.js";
-import type { RoleKind, AgentRunSummary } from "@shared/types/agents";
+import type { RoleKind, AgentRunSummary, RoleId } from "@shared/types/agents";
+import type { MessageBus } from "./messageBus.js";
 
 export interface RunnerSettings {
   provider: string;
@@ -40,6 +41,9 @@ export class AgentRunner {
   session: AgentSession | null = null;
   private readonly runnerId = nanoid();
 
+  /** M3c: 可选 MessageBus 注入;注入后 ask() 会代理到 bus */
+  bus?: MessageBus;
+
   constructor(
     role: RoleKind,
     private settings: RunnerSettings,
@@ -50,6 +54,32 @@ export class AgentRunner {
   ) {
     this.role = role;
   }
+
+  /**
+   * M3c: 通过 MessageBus 问 Communicator(或升级用户)。
+   * - bus 未注入 → throw
+   * - 默认 5 分钟 timeout,可在 options 覆盖
+   * 返回 reply payload(string)
+   */
+  async ask(
+    payload: string,
+    options?: { context?: Record<string, unknown>; timeoutMs?: number },
+  ): Promise<string> {
+    if (!this.bus) {
+      throw new Error(`AgentRunner(${this.role}).ask: bus not injected`);
+    }
+    const conversationId = this.lastConversationId ?? "unknown";
+    return this.bus.ask({
+      fromRole: this.role as RoleId,
+      conversationId,
+      payload,
+      ...(options?.context !== undefined ? { context: options.context } : {}),
+      ...(options?.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}),
+    });
+  }
+
+  /** 暴露当前 conversationId(由外层设置;通常 ws 层在创建 runner 时塞入) */
+  lastConversationId: string | null = null;
 
   async start(): Promise<void> {
     const model = resolveModel(this.settings as unknown as Parameters<typeof resolveModel>[0]);

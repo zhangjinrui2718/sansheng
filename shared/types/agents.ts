@@ -3,7 +3,7 @@
  * M0/M1 占位 → M3a 增补 → M3b 落地 Blackboard + PlanStep + EvidenceItem 等结构。
  */
 
-export type RoleId = "planner" | "executor" | "critic" | "memory" | "reflection";
+export type RoleId = "communicator" | "planner" | "executor" | "critic" | "memory" | "reflection";
 
 export interface AgentStatus {
   role: RoleId;
@@ -94,7 +94,36 @@ export interface Blackboard {
   createdAt: number;
 }
 
-export type RoleKind = "planner" | "executor" | "critic" | "memory" | "reflection";
+export type RoleKind = "communicator" | "planner" | "executor" | "critic" | "memory" | "reflection";
+
+// === M3c: MessageBus / Communicator 类型 ===
+
+export type BusDirection = "user→comm" | "comm→worker" | "worker→comm" | "comm→user";
+
+export type BusKind = "question" | "broadcast" | "reply";
+
+/** MessageBus 上流转的一条消息;由 server 端构造 + 持久化,推给前端展示。 */
+export interface BusMessage {
+  id: string;
+  ts: number;
+  direction: BusDirection;
+  fromRole: RoleId | "user";
+  toRole: RoleId | "user";
+  conversationId: string;
+  kind: BusKind;
+  /** 仅 reply 填:与原 question 共用 questionId。 */
+  questionId?: string;
+  payload: string;
+  context?: Record<string, unknown>;
+  /** worker 阻塞期局部上下文;恢复时由 caller 自取(resumeState 不落 jsonl)。 */
+  resumeState?: unknown;
+}
+
+/** Communicator / kernel 之间的 transform 决策。 */
+export type CommunicatorDecision =
+  | { kind: "chat"; reply: string }
+  | { kind: "task"; goal: string; toPlanner?: string }
+  | { kind: "feedback"; profileDelta: Record<string, string> };
 
 export interface AgentSessionMeta {
   id: string;

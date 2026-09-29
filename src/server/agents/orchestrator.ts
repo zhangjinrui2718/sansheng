@@ -35,12 +35,15 @@ import type {
 } from "@shared/types/agents";
 import { loadHarness, type HarnessConfig } from "../harness/loader.js";
 import { log } from "../../shared/log.js";
+import type { MessageBus } from "./messageBus.js";
 
 export interface OrchestratorOptions {
   storage: Storage;
   dataDir: string;
   agentDir: string;
   settings: RunnerSettings;
+  /** M3c: 可选 MessageBus。提供后 worker 可问 Communicator 拿额外信息 */
+  bus?: MessageBus;
   /** 测试可覆盖:返回 AgentRunner 的工厂 */
   runnerFactory?: (role: RoleKind, id: string | undefined) => AgentRunner;
 }
@@ -252,10 +255,12 @@ export class Orchestrator {
           this.opts.settings,
           `${this.opts.agentDir}/${role}/${id ?? "default"}`,
           process.cwd(),
-          this.harness.systemPrompts[role],
+          this.harness.systemPrompts[role] ?? "",
           this.harness.budget.perStepTimeoutMs,
         );
       }
+      // M3c: 注入 bus 让 worker 可问 Communicator
+      if (this.opts.bus) r.bus = this.opts.bus;
       this.runners.set(key, r);
     }
     return r;

@@ -30,7 +30,11 @@ export type ClientCommand =
   | { type: "load_conversation"; conversationId: string }
   // M3b: 多 agent / plan
   | { type: "plan"; goal: string; conversationId: string }
-  | { type: "abort_plan" };
+  | { type: "abort_plan" }
+  // M3c: Communicator ↔ MessageBus
+  | { type: "answer_question"; questionId: string; payload: string; conversationId: string }
+  | { type: "cancel_question"; questionId: string; conversationId: string }
+  | { type: "bus_replay"; conversationId: string; fromTs: number };
 
 import type { AgentKernel, ServerEvent } from "./kernel/agentKernel.js";
 import { SettingsStore } from "./settings/store.js";
@@ -90,6 +94,10 @@ export function attachWebSocket(
   wss.on("connection", (ws: WebSocket) => {
     log.muted(`ws connected (clients=${wss.clients.size})`);
     const sink = (e: ServerEvent) => send(ws, e);
+
+    // 连接后立刻广播 ready 事件(前端可借此判断协议握手完成)
+    const meta = kernel.activeInfo() ?? { modelId: "unknown", provider: "unknown" };
+    send(ws, { type: "ready", conversationId: kernel.getConversationId(), modelId: meta.modelId, provider: meta.provider });
 
     // 每次都实时查 kernel.isReady(),不缓存(settings 变更会 invalidate kernel)
     const ensureStarted = (): Promise<void> =>
@@ -277,13 +285,26 @@ export function attachWebSocket(
             }
             await kernel.prompt(enriched, sink);
           })
-          .catch((err) =>
+          .catch((err) => {
+            // M3c: 即使 ensureStarted 失败(如没 LLM provider),仍尝试 prompt,
+            // Communicator 可以走启发式/禁用 LLM 路径提供反馈。
+            if (err && (err as Error).message?.includes("尚未配置任何 provider")) {
+              log.warn("ws: ensureStarted failed (no provider); continuing to prompt for Communicator:", err);
+              void kernel.prompt(cmd.content, sink).catch((err2) =>
+                send(ws, {
+                  type: "error",
+                  conversationId: kernel.getConversationId(),
+                  error: { code: "prompt_failed", message: err2?.message ?? String(err2) },
+                }),
+              );
+              return;
+            }
             send(ws, {
               type: "error",
               conversationId: kernel.getConversationId(),
               error: { code: "prompt_failed", message: err?.message ?? String(err) },
-            }),
-          );
+            });
+          });
         return;
       }
 
@@ -299,6 +320,44 @@ export function attachWebSocket(
           activeOrchestrator.abort();
           activeOrchestrator = null;
         }
+        return;
+      }
+
+      // M3c: 用户回答 worker 提问 → communicator.answerPending
+      if (cmd.type === "answer_question") {
+        const ok = kernel.answerPendingQuestion(cmd.questionId, cmd.payload);
+        if (!ok) {
+          send(ws, {
+            type: "error",
+            conversationId: cmd.conversationId,
+            error: { code: "no_pending_question", message: `question ${cmd.questionId} 不在 pending` },
+          });
+        }
+        return;
+      }
+
+      // M3c: 取消一个 pending question
+      if (cmd.type === "cancel_question") {
+        kernel.cancelPendingQuestion(cmd.questionId);
+        return;
+      }
+
+      // M3c: timeline 回放
+      if (cmd.type === "bus_replay") {
+        kernel
+          .replayBus(cmd.conversationId, cmd.fromTs)
+          .then((messages) => {
+            for (const m of messages) {
+              send(ws, { type: "bus_event", message: m });
+            }
+          })
+          .catch((err) =>
+            send(ws, {
+              type: "error",
+              conversationId: cmd.conversationId,
+              error: { code: "replay_failed", message: (err as Error).message ?? String(err) },
+            }),
+          );
         return;
       }
     });
