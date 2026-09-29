@@ -4,6 +4,8 @@ import { HistoryRail } from "./components/shell/HistoryRail";
 import { AgentPanel } from "./components/shell/AgentPanel";
 import { ChatSurface } from "./components/chat/ChatSurface";
 import { SettingsPanel } from "./components/settings/SettingsPanel";
+import { AgentsPage } from "./routes/Agents";
+import { MemoryPage } from "./routes/Memory";
 import { useSettingsStore, activeProviderOf } from "./stores/settings";
 import { useChatStore } from "./stores/chat";
 
@@ -24,7 +26,7 @@ interface RuntimeConfig {
 }
 
 export function App() {
-  const [route, setRoute] = useState<"chat" | "settings">("chat");
+  const [route, setRoute] = useState<"chat" | "agents" | "memory" | "settings">("chat");
   const [cfg, setCfg] = useState<RuntimeConfig | null>(null);
   const [serverTime, setServerTime] = useState<string>("—");
   const loadSettings = useSettingsStore((s) => s.loadSettings);
@@ -34,6 +36,7 @@ export function App() {
   const totalUsage = useChatStore((s) => s.totalUsage);
   const currentUsage = useChatStore((s) => s.currentUsage);
   const status = useChatStore((s) => s.status);
+  const conversationId = useChatStore((s) => s.conversationId);
 
   useEffect(() => {
     fetch("/api/config")
@@ -91,6 +94,14 @@ export function App() {
             <ChatSurface />
           )}
           <AgentPanel />
+        </main>
+      ) : route === "agents" ? (
+        <main className="overflow-y-auto" style={{ background: "var(--ink-0)" }}>
+          <AgentsPage conversationId={conversationId} />
+        </main>
+      ) : route === "memory" ? (
+        <main className="overflow-y-auto" style={{ background: "var(--ink-0)" }}>
+          <MemoryPage />
         </main>
       ) : (
         <main

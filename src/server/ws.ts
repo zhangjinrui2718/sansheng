@@ -27,10 +27,16 @@ export type ClientCommand =
   | { type: "send"; content: string; conversationId?: string }
   | { type: "interrupt" }
   | { type: "ping" }
-  | { type: "load_conversation"; conversationId: string };
+  | { type: "load_conversation"; conversationId: string }
+  // M3b: 多 agent / plan
+  | { type: "plan"; goal: string; conversationId: string }
+  | { type: "abort_plan" };
 
 import type { AgentKernel, ServerEvent } from "./kernel/agentKernel.js";
+import { SettingsStore } from "./settings/store.js";
 import { Storage } from "./storage/index.js";
+import { Orchestrator } from "./agents/orchestrator.js";
+import type { Blackboard } from "@shared/types/agents";
 
 /**
  * 把 user message 包成含历史 context 的 prompt
@@ -54,7 +60,22 @@ function buildContextBlock(fragments: Array<{ kind: string; content: string }>, 
   return parts.join("\n");
 }
 
-export function attachWebSocket(server: Server, kernel: AgentKernel, storage?: Storage): WebSocketServer {
+export interface AttachOptions {
+  storage?: Storage;
+  settingsStore?: SettingsStore;
+  dataDir?: string;
+}
+
+export function attachWebSocket(
+  server: Server,
+  kernel: AgentKernel,
+  opts: AttachOptions = {},
+): WebSocketServer {
+  const storage = opts.storage;
+  const settingsStore = opts.settingsStore;
+  const dataDir = opts.dataDir;
+  /** M3b:当前 connection 上正在跑的 Orchestrator(同时只允许 1 个) */
+  let activeOrchestrator: Orchestrator | null = null;
   const wss = new WebSocketServer({ noServer: true });
 
   server.on("upgrade", (req: IncomingMessage, socket: Duplex, head: Buffer) => {
@@ -74,6 +95,9 @@ export function attachWebSocket(server: Server, kernel: AgentKernel, storage?: S
     const ensureStarted = (): Promise<void> =>
       kernel.isReady() ? Promise.resolve() : kernel.start(sink);
 
+    // M3b: Orchestrator runner 在 ws.on("error") 之后定义(依赖 send(ws, ...))
+    // 略(全量定义在下方)
+
     // 连接时主动启动一次
     ensureStarted().catch((err) => {
       send(ws, {
@@ -82,6 +106,75 @@ export function attachWebSocket(server: Server, kernel: AgentKernel, storage?: S
         error: { code: "start_failed", message: err?.message ?? String(err) },
       });
     });
+
+    /**
+     * M3b: 启动一个 Orchestrator,在 ws 上发 blackboard_update / plan_done。
+     * 闭包依赖 send(ws, ...)、storage、settingsStore、dataDir、activeOrchestrator、kernel.getAgentDir()。
+     */
+    async function runPlan(conversationId: string, goal: string): Promise<void> {
+      if (!storage || !settingsStore || !dataDir) {
+        send(ws, {
+          type: "error",
+          conversationId,
+          error: { code: "plan_unavailable", message: "Orchestrator 需要 storage + settingsStore + dataDir" },
+        });
+        return;
+      }
+      if (activeOrchestrator) {
+        send(ws, {
+          type: "error",
+          conversationId,
+          error: { code: "plan_busy", message: "已有 plan 在跑,请先 abort_plan" },
+        });
+        return;
+      }
+      const settings = settingsStore.load();
+      const active = settings.providers.find((p) => p.id === settings.activeProviderId);
+      if (!active?.apiKey) {
+        send(ws, {
+          type: "error",
+          conversationId,
+          error: { code: "no_api_key", message: "请先在设置中配置 API Key" },
+        });
+        return;
+      }
+      const orchestrator = new Orchestrator({
+        storage,
+        dataDir,
+        agentDir: kernel.getAgentDir(),
+        settings: {
+          provider: active.provider,
+          baseUrl: active.baseUrl,
+          apiKey: active.apiKey,
+          modelId: active.modelId,
+          thinkingLevel: active.thinkingLevel,
+        },
+      });
+      activeOrchestrator = orchestrator;
+      try {
+        const finalBb = await orchestrator.run(
+          conversationId,
+          goal,
+          (progress) => {
+            send(ws, {
+              type: "blackboard_update",
+              blackboard: progress.blackboard,
+              agents: progress.agents,
+            });
+          },
+        );
+        send(ws, { type: "plan_done", blackboard: finalBb });
+      } catch (err) {
+        log.warn("Orchestrator failed:", err);
+        send(ws, {
+          type: "error",
+          conversationId,
+          error: { code: "plan_failed", message: (err as Error).message ?? String(err) },
+        });
+      } finally {
+        activeOrchestrator = null;
+      }
+    }
 
     ws.on("message", async (raw) => {
       let cmd: ClientCommand;
@@ -152,6 +245,14 @@ export function attachWebSocket(server: Server, kernel: AgentKernel, storage?: S
 
       if (cmd.type === "send") {
         if (typeof cmd.content !== "string" || !cmd.content.trim()) return;
+        // M3b: `/plan 目标` 快捷转发到 plan 处理器
+        if (cmd.content.startsWith("/plan ")) {
+          const goal = cmd.content.slice(6).trim();
+          if (goal && cmd.conversationId) {
+            void runPlan(cmd.conversationId, goal);
+          }
+          return;
+        }
         // ensureStarted 后:若 conversationId 不匹配,先 resume 再 prompt
         ensureStarted()
           .then(async () => {
@@ -185,10 +286,26 @@ export function attachWebSocket(server: Server, kernel: AgentKernel, storage?: S
           );
         return;
       }
+
+      // M3b: 显式 plan 命令
+      if (cmd.type === "plan") {
+        if (!cmd.goal || !cmd.conversationId) return;
+        void runPlan(cmd.conversationId, cmd.goal);
+        return;
+      }
+
+      if (cmd.type === "abort_plan") {
+        if (activeOrchestrator) {
+          activeOrchestrator.abort();
+          activeOrchestrator = null;
+        }
+        return;
+      }
     });
 
     ws.on("close", () => log.muted(`ws closed (clients=${wss.clients.size})`));
     ws.on("error", (err) => log.warn("ws error:", err));
+
   });
 
   return wss;

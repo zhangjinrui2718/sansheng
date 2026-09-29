@@ -44,13 +44,24 @@ export function ChatSurface() {
     if (!hasKey) {
       return;
     }
+    const convId = useChatStore.getState().conversationId ?? undefined;
+    // M3b: `/plan 目标` 快捷触发多 agent 流程
+    if (text.startsWith("/plan ") && convId) {
+      const goal = text.slice(6).trim();
+      if (goal) {
+        useChatStore.getState().appendUserTurn(text);
+        socketRef.current?.send({ type: "plan", goal, conversationId: convId });
+        setInput("");
+        return;
+      }
+    }
     // kernelReady=false 允许发:server 端 ws.ts 的 ensureStarted 会自动 start。
     // 但 client 看到的"推演中"还是 idle,UI 上按钮文案会提示"未连接 · 点发送自动恢复"。
     useChatStore.getState().appendUserTurn(text);
     socketRef.current?.send({
       type: "send",
       content: text,
-      conversationId: useChatStore.getState().conversationId ?? undefined,
+      conversationId: convId,
     });
     setInput("");
   }

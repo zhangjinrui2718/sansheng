@@ -105,6 +105,14 @@
   .sansheng-text-jade { color: var(--jade); }
   .sansheng-text-ochre { color: var(--ochre); }
   .sansheng-text-cinnabar { color: var(--cinnabar); }
+
+  .sansheng-h2 {
+    font-family: theme('fontFamily.serif');
+    font-size: 16px;
+    color: var(--bone);
+    letter-spacing: 0.04em;
+    margin-bottom: 12px;
+  }
 }
 
 @layer utilities {

@@ -7,6 +7,9 @@ node_modules/
 **/node_modules/
 **/dist/
 **/*.tsbuildinfo
+# M3b: shared/types compiled JS artifacts (rootDir=.) should not be tracked
+shared/**/*.js
+shared/**/*.js.map
 npm-debug.log*
 yarn-error.log*
 pnpm-debug.log*

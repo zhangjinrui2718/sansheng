@@ -12,6 +12,7 @@ import { SettingsStore } from "./settings/store.js";
 import { AgentKernel } from "./kernel/agentKernel.js";
 import { attachWebSocket } from "./ws.js";
 import { Keyring, Storage } from "./storage/index.js";
+import { ensureHarness } from "./harness/loader.js";
 import { join } from "node:path";
 import type { Server } from "node:http";
 
@@ -28,6 +29,13 @@ export async function startServer(opts: ServerOptions): Promise<void> {
   // 导致 createAgentSession() 长时间挂起、ready 发不出来。
   // Sansheng 用本地 catalog(provider+model 都在 builtin),不需要远程刷新。
   process.env.PI_OFFLINE = process.env.PI_OFFLINE ?? "1";
+
+  // M3b: 生成 harness 默认文件(planner/executor/critic/memory/reflection 的 system_prompts)
+  try {
+    ensureHarness(opts.dataDir);
+  } catch (err) {
+    log.warn("ensureHarness failed:", err);
+  }
 
   // M2:Keyring(apiKey 加密)+ Storage(SQLite 持久化)
   const keyring = new Keyring(join(opts.dataDir, ".keyring"));
@@ -55,7 +63,11 @@ export async function startServer(opts: ServerOptions): Promise<void> {
   );
 
   // 拿到真正的 http.Server,再 attach WebSocket(WS 监听同一个 server 的 upgrade 事件)
-  attachWebSocket(httpServer as unknown as Server, kernel);
+  attachWebSocket(httpServer as unknown as Server, kernel, {
+    storage,
+    settingsStore,
+    dataDir: opts.dataDir,
+  });
 
   // daemon 模式响应 SIGTERM
   if (process.env.SANSHENG_DAEMON === "1") {

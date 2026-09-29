@@ -82,6 +82,17 @@ export function listFragmentsByKind(
   return rows.map(rowToFragment);
 }
 
+// M3b: 列出全部 fragment(按 created_at DESC);M3c 可加时间窗 / kind 过滤
+export function listFragmentsAll(
+  db: Database.Database,
+  limit: number = 100,
+): FragmentRow[] {
+  const rows = db
+    .prepare(`SELECT * FROM fragments ORDER BY created_at DESC LIMIT ?`)
+    .all(limit) as Array<Record<string, unknown>>;
+  return rows.map(rowToFragment);
+}
+
 export function searchFragments(db: Database.Database, opts: FragmentSearchOpts): FragmentRow[] {
   const limit = opts.limit ?? 10;
   // 向量检索路径

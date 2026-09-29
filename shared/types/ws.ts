@@ -36,4 +36,7 @@ export type ClientCommand =
   | { type: "send"; content: string; conversationId?: string }
   | { type: "interrupt" }
   | { type: "ping" }
-  | { type: "load_conversation"; conversationId: string };
+  | { type: "load_conversation"; conversationId: string }
+  // M3b: 多 agent / Blackboard
+  | { type: "plan"; goal: string; conversationId: string }
+  | { type: "abort_plan" };

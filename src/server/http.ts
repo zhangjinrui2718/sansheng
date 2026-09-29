@@ -23,6 +23,10 @@ import {
   listMessagesByConversation,
   listProfile,
   upsertProfile,
+  getActiveBlackboard,
+  listBlackboards,
+  listFragmentsByKind,
+  listFragmentsAll,
 } from "./storage/index.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -162,6 +166,33 @@ export function createApp(opts: AppOptions): Hono {
     return c.json({ ok: true, conversationId: opts.kernel.getConversationId() });
   });
 
+  // —— M3b: Blackboard / Agents / Memory 读路由 ——
+  app.get("/api/blackboard/:id", (c) => {
+    const conversationId = c.req.param("id");
+    const bb = getActiveBlackboard(opts.storage.db, conversationId);
+    return c.json({ blackboard: bb });
+  });
+
+  app.get("/api/blackboards/:id", (c) => {
+    const conversationId = c.req.param("id");
+    const list = listBlackboards(opts.storage.db, conversationId, 20);
+    return c.json({ blackboards: list });
+  });
+
+  app.get("/api/agents/:id", (c) => {
+    // M3b 占位:M3c 会接 ws 推送的 agents 快照/数据库中 agent_states 聚合
+    return c.json({ agents: [] });
+  });
+
+  app.get("/api/memory/fragments", (c) => {
+    const kind = c.req.query("kind");
+    const limit = Math.min(Number(c.req.query("limit") ?? "100"), 500);
+    const fragments = kind
+      ? listFragmentsByKind(opts.storage.db, kind as never, limit)
+      : listFragmentsAll(opts.storage.db, limit);
+    return c.json({ fragments });
+  });
+
   // ============== M2:持久化路由 ==============
 
   // 列出最近会话(供 HistoryRail 用)
@@ -285,7 +316,11 @@ export function createApp(opts: AppOptions): Hono {
   app.notFound((c) => c.json({ error: "not_found", path: c.req.path }, 404));
 
   // —— Attach WebSocket ——
-  attachWebSocket(opts.httpServer, opts.kernel);
+  attachWebSocket(opts.httpServer, opts.kernel, {
+    storage: opts.storage,
+    settingsStore: opts.settingsStore,
+    dataDir: opts.dataDir,
+  });
 
   return app;
 }

@@ -19,6 +19,7 @@ export {
   upsertFragmentEmbedding,
   getFragment,
   listFragmentsByKind,
+  listFragmentsAll,
   searchFragments,
   searchFragmentsByText,
   recordFragmentAccess,
@@ -29,4 +30,11 @@ export { getProfile, listProfile, upsertProfile, reinforceProfile } from "./repo
 export type { ProfileEntry } from "./repo/profile.js";
 export { upsertAgentState, getAgentState, deleteAgentState } from "./repo/agentStates.js";
 export type { AgentStateRow } from "./repo/agentStates.js";
+export {
+  upsertBlackboard,
+  getBlackboard,
+  getActiveBlackboard,
+  listBlackboards,
+  markBlackboardStatus,
+} from "./repo/blackboards.js";
 export { piMessagesToBlocks } from "./util/blocks.js";

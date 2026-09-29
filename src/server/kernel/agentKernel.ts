@@ -44,7 +44,10 @@ export type ServerEvent =
   | { type: "agent_end"; conversationId: string; ts: number; usage?: { input: number; output: number; costUsd: number } }
   | { type: "error"; conversationId: string; error: { code: string; message: string } }
   | { type: "interrupt"; conversationId: string }
-  | { type: "conversation_reset"; conversationId: string };
+  | { type: "conversation_reset"; conversationId: string }
+  // M3b: 多 agent Blackboard 流
+  | { type: "blackboard_update"; blackboard: import("@shared/types/agents").Blackboard; agents: Record<string, import("@shared/types/agents").AgentRunSummary> }
+  | { type: "plan_done"; blackboard: import("@shared/types/agents").Blackboard };
 
 export type EventSink = (e: ServerEvent) => void;
 
@@ -84,6 +87,11 @@ export class AgentKernel {
 
   isReady(): boolean {
     return this.session !== null;
+  }
+
+  /** M3b:ws.ts Orchestrator 需要知道 agentDir 路径 */
+  getAgentDir(): string {
+    return this.agentDir;
   }
 
   /**
