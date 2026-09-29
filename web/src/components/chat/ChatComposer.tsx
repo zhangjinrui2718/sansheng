@@ -5,10 +5,11 @@ interface Props {
   onChange: (v: string) => void;
   onSubmit: (text: string) => void;
   disabled?: boolean;
+  reason?: "streaming" | "noKernel" | "noKey";
   placeholder?: string;
 }
 
-export function ChatComposer({ value, onChange, onSubmit, disabled }: Props) {
+export function ChatComposer({ value, onChange, onSubmit, disabled, reason }: Props) {
   const [focused, setFocused] = useState(false);
 
   function send() {
@@ -67,14 +68,28 @@ export function ChatComposer({ value, onChange, onSubmit, disabled }: Props) {
           disabled={disabled || !value.trim()}
           style={{ padding: "6px 14px" }}
         >
-          {disabled ? "推演中…" : "发送 ⏎"}
+          {disabled
+            ? reason === "noKernel"
+              ? "未连接 · 点发送自动恢复"
+              : reason === "noKey"
+                ? "未配 API Key"
+                : "推演中…"
+            : "发送 ⏎"}
         </button>
       </div>
       <div
         className="mt-2 flex items-center gap-3 text-xs sansheng-text-mute"
         style={{ fontSize: 11 }}
       >
-        <span>{disabled ? "三生正在推演 · Esc 中断" : "Sansheng 闲置"}</span>
+        <span>
+          {disabled
+            ? reason === "noKernel"
+              ? "kernel 未就绪 · 发一条会自动 start"
+              : reason === "noKey"
+                ? "请先在 ⚙ 设置配置 API Key"
+                : "三生正在推演 · Esc 中断"
+            : "Sansheng 闲置"}
+        </span>
         <span>·</span>
         <span>思考 / 行动 / 反思 都会落到 timeline</span>
         <span className="ml-auto">⏎ 发送 · ⇧⏎ 换行 · Esc 中断</span>

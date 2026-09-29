@@ -38,13 +38,11 @@ export function ChatSurface() {
     const text = input.trim();
     if (!text) return;
     if (status === "streaming") return;
-    if (!kernelReady) {
-      // 不再 alert — 直接在 UI 上显示重试入口
-      return;
-    }
     if (!hasKey) {
       return;
     }
+    // kernelReady=false 允许发:server 端 ws.ts 的 ensureStarted 会自动 start。
+    // 但 client 看到的"推演中"还是 idle,UI 上按钮文案会提示"未连接 · 点发送自动恢复"。
     useChatStore.getState().appendUserTurn(text);
     socketRef.current?.sendText(text);
     setInput("");
@@ -133,9 +131,10 @@ export function ChatSurface() {
         value={input}
         onChange={setInput}
         onSubmit={send}
-        disabled={status === "streaming" || !kernelReady || !hasKey}
+        disabled={status === "streaming" || !hasKey}
+        reason={!kernelReady ? "noKernel" : !hasKey ? "noKey" : status === "streaming" ? "streaming" : undefined}
         placeholder={!kernelReady
-          ? "kernel 还没就绪,看上方状态 / 点 ↻ 重置"
+          ? "kernel 还没就绪,点发送会自动 start"
           : !hasKey
             ? "请先在「设置」配置 API Key"
             : "说点什么 · Enter 发送 · Shift+Enter 换行"}
