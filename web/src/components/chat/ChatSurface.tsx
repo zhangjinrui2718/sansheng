@@ -132,7 +132,13 @@ export function ChatSurface() {
         onChange={setInput}
         onSubmit={send}
         disabled={status === "streaming" || !hasKey}
-        reason={!kernelReady ? "noKernel" : !hasKey ? "noKey" : status === "streaming" ? "streaming" : undefined}
+        reason={status === "streaming"
+          ? "streaming"
+          : !kernelReady
+            ? "noKernel"
+            : !hasKey
+              ? "noKey"
+              : undefined}
         placeholder={!kernelReady
           ? "kernel 还没就绪,点发送会自动 start"
           : !hasKey

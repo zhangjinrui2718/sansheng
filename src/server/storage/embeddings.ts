@@ -23,6 +23,12 @@ export async function embedText(text: string, provider: EmbeddingProvider): Prom
   }
 
   const url = joinUrl(provider.baseUrl, "/v1/embeddings");
+  if (!url) {
+    // baseUrl 缺失或不合法——避免走 fetch 报 “Failed to parse URL”。
+    // fragment 不写入向量(下次 searchFragments 会降级到 LIKE)即可。
+    log.muted(`embedding: skipped, no baseUrl (provider="${provider.model}")`);
+    return null;
+  }
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 5000);
 
@@ -54,6 +60,11 @@ export async function embedText(text: string, provider: EmbeddingProvider): Prom
 }
 
 function joinUrl(base: string, path: string): string {
-  if (!base) return path;
+  // base 可能未配(在 M1.5 引入的可选项)。如果为空或不合法,
+  // 不能退回相对路径——fetch 会报 "Failed to parse URL"。
+  // 调用方会检查返回值是否合法(空字符串)决定 fallback 还是 warn+null。
+  if (!base || !base.match(/^https?:\/\//)) {
+    return "";
+  }
   return base.replace(/\/+$/, "") + path;
 }
