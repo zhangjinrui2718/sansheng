@@ -6,6 +6,7 @@ import { ChatSurface } from "./components/chat/ChatSurface";
 import { SettingsPanel } from "./components/settings/SettingsPanel";
 import { AgentsPage } from "./routes/Agents";
 import { MemoryPage } from "./routes/Memory";
+import { TimelinePage } from "./routes/Timeline";
 import { useSettingsStore, activeProviderOf } from "./stores/settings";
 import { useChatStore } from "./stores/chat";
 
@@ -26,7 +27,7 @@ interface RuntimeConfig {
 }
 
 export function App() {
-  const [route, setRoute] = useState<"chat" | "agents" | "memory" | "settings">("chat");
+  const [route, setRoute] = useState<"chat" | "agents" | "memory" | "timeline" | "settings">("chat");
   const [cfg, setCfg] = useState<RuntimeConfig | null>(null);
   const [serverTime, setServerTime] = useState<string>("—");
   const loadSettings = useSettingsStore((s) => s.loadSettings);
@@ -102,6 +103,13 @@ export function App() {
       ) : route === "memory" ? (
         <main className="overflow-y-auto" style={{ background: "var(--ink-0)" }}>
           <MemoryPage />
+        </main>
+      ) : route === "timeline" ? (
+        <main
+          className="overflow-y-auto"
+          style={{ background: "var(--ink-0)", minHeight: 0 }}
+        >
+          <TimelinePage conversationId={conversationId} />
         </main>
       ) : (
         <main

@@ -32,6 +32,14 @@ export interface ChatState {
   kernelReady: boolean;
   /** 递增计数,HistoryRail useEffect 依赖它来重新拉取。 */
   historyRefreshTrigger: number;
+  /** M3c: MessageBus 收到的全部 BusMessage 流(可被 Timeline 页订阅) */
+  busStream: import("@shared/types/agents").BusMessage[];
+  /** M3c: Communicator 当前状态 */
+  communicatorStatus: "idle" | "thinking" | "tool_use";
+  /** M3c: 当前阻塞中、Communicator 升级到用户的 pending question */
+  pendingQuestions: import("@shared/types/agents").PendingQuestion[];
+  /** M3c: 用户在 Timeline 输入的回答草稿,keyed by questionId */
+  answerDraft: Map<string, string>;
   socket: unknown;
   turns: Turn[];
   currentTurn: Turn | null;
@@ -46,6 +54,12 @@ export interface ChatState {
   attachSocket(socket: { send(cmd: unknown): void } | null): void;
   /** M3a: 点历史时发 WS load_conversation 让 server resume */
   sendLoadConversation(conversationId: string): void;
+  /** M3c: 用户回答 worker 的 pending question */
+  sendAnswerQuestion(questionId: string, payload: string): void;
+  /** M3c: 用户取消 worker 的 pending question */
+  sendCancelQuestion(questionId: string): void;
+  /** M3c: 设置 Timeline 输入框对某 question 的草稿 */
+  setAnswerDraft(questionId: string, text: string): void;
   /** 新建对话:调后端 + 清本地状态 */
   newConversation(): Promise<void>;
   /** M2:从后端加载一个历史对话的快照(覆盖本地状态) */
@@ -97,6 +111,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
   status: "connecting",
   kernelReady: false,
   historyRefreshTrigger: 0,
+  busStream: [],
+  communicatorStatus: "idle",
+  pendingQuestions: [],
+  answerDraft: new Map<string, string>(),
   turns: [],
   currentTurn: null,
   currentUsage: { input: 0, output: 0, costUsd: 0 },
@@ -112,6 +130,24 @@ export const useChatStore = create<ChatState>((set, get) => ({
     const socket = get().socket as { send(cmd: unknown): void } | null;
     socket?.send({ type: "load_conversation", conversationId });
   },
+  sendAnswerQuestion(questionId: string, payload: string) {
+    const socket = get().socket as { send(cmd: unknown): void } | null;
+    const conversationId = get().conversationId ?? "";
+    socket?.send({ type: "answer_question", questionId, payload, conversationId });
+  },
+  sendCancelQuestion(questionId: string) {
+    const socket = get().socket as { send(cmd: unknown): void } | null;
+    const conversationId = get().conversationId ?? "";
+    socket?.send({ type: "cancel_question", questionId, conversationId });
+  },
+  setAnswerDraft(questionId: string, text: string) {
+    set((s) => {
+      const next = new Map(s.answerDraft);
+      if (text) next.set(questionId, text);
+      else next.delete(questionId);
+      return { answerDraft: next };
+    });
+  },
 
   reset() {
     set((s) => ({
@@ -121,6 +157,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
       error: null,
       status: "idle",
       kernelReady: s.kernelReady,
+      // M3c: 重置不刷 bus stream(多会话复用,跨 turn 可见)
+      // 只有 talk 主动清空才动它
     }));
   },
 
@@ -329,6 +367,30 @@ export const useChatStore = create<ChatState>((set, get) => ({
         // 触发侧边列表重新拉取。
         set((s) => ({
           historyRefreshTrigger: s.historyRefreshTrigger + 1,
+        }));
+        return;
+      case "bus_event":
+        // 任何 BusMessage 都进 busStream;cap 2000,内存只留最近。
+        set((s) => {
+          const next = [...s.busStream, e.message];
+          if (next.length > 2000) next.splice(0, next.length - 2000);
+          return { busStream: next };
+        });
+        return;
+      case "communicator_thinking":
+        set({ communicatorStatus: e.status });
+        return;
+      case "pending_question":
+        set((s) => ({
+          pendingQuestions: [
+            ...s.pendingQuestions,
+            {
+              questionId: e.questionId,
+              payload: e.payload,
+              fromRole: e.fromRole,
+              ts: Date.now(),
+            },
+          ],
         }));
         return;
     }

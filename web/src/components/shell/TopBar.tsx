@@ -19,8 +19,8 @@ interface RuntimeConfig {
 interface Props {
   config: RuntimeConfig | null;
   serverTime: string;
-  route: "chat" | "agents" | "memory" | "settings";
-  onRoute: (r: "chat" | "agents" | "memory" | "settings") => void;
+  route: "chat" | "agents" | "memory" | "timeline" | "settings";
+  onRoute: (r: "chat" | "agents" | "memory" | "timeline" | "settings") => void;
   currentUsage: { input: number; output: number; costUsd: number };
   totalUsage: { input: number; output: number; costUsd: number };
   status: "idle" | "streaming" | "error" | "connecting";
@@ -73,6 +73,7 @@ export function TopBar({
       <nav className="flex items-center gap-1">
         <NavTab label="对话" active={route === "chat"} onClick={() => onRoute("chat")} />
         <NavTab label="Agent" active={route === "agents"} onClick={() => onRoute("agents")} />
+        <NavTab label="总线" active={route === "timeline"} onClick={() => onRoute("timeline")} />
         <NavTab label="记忆" active={route === "memory"} onClick={() => onRoute("memory")} />
         <NavTab label="工件" disabled hint="M5" />
         <NavTab label="目标" disabled hint="M7" />

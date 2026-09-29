@@ -125,6 +125,14 @@ export type CommunicatorDecision =
   | { kind: "task"; goal: string; toPlanner?: string }
   | { kind: "feedback"; profileDelta: Record<string, string> };
 
+/** M3c: 前端 Timeline 页看到的 pending question 提示。 */
+export interface PendingQuestion {
+  questionId: string;
+  payload: string;
+  fromRole: RoleId;
+  ts: number;
+}
+
 export interface AgentSessionMeta {
   id: string;
   role: RoleKind;
