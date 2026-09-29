@@ -316,6 +316,21 @@ export function createApp(opts: AppOptions): Hono {
 
   app.notFound((c) => c.json({ error: "not_found", path: c.req.path }, 404));
 
+  // —— 全局错误处理:任何 route handler 抛出的未捕获错误都返回 JSON,而不是 HTML —— 
+  // 避免前端 fetch().json() 拿到 <!doctype... 抛 SyntaxError。
+  // (例如 /api/memory/fragments 在 fragments 表缺失 / sqlite-vec 加载失败时会出错)
+  app.onError((err, c) => {
+    log.error(`unhandled route error on ${c.req.method} ${c.req.path}:`, err);
+    return c.json(
+      {
+        error: "internal_error",
+        message: err instanceof Error ? err.message : String(err),
+        path: c.req.path,
+      },
+      500,
+    );
+  });
+
   // —— Attach WebSocket ——
   attachWebSocket(opts.httpServer, opts.kernel, {
     storage: opts.storage,
