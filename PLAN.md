@@ -1,8 +1,8 @@
-# Sansheng · 三生机器人 · 实施计划 (v3 · npm + 浏览器访问 + Harness 自我优化)
+# Sansheng · 三生机器人 · 实施计划 (v4 · + Communicator + MessageBus + Live Trace)
 
 ## 摘要
 
-在空仓库 `/root/projects/sansheng` 中,从零搭建一个**单用户、本机常驻的 Node 服务**:通过 `@earendil-works/pi-coding-agent` SDK 驱动一个**多 agent + Blackboard** 体系(Planner / Executor / Critic / Memory / Reflection),共享一个**SQLite + 向量编码** 的持久化层,具备**文件 / HTTP / 浏览器** 三类行动能力,以**数字雇员**的定位对外服务 —— token 即工资,产出即工件。
+在空仓库 `/root/projects/sansheng` 中,从零搭建一个**单用户、本机常驻的 Node 服务**:通过 `@earendil-works/pi-coding-agent` SDK 驱动一个**Communicator Singleton + 5 Worker Pool** 体系——Communicator 永远在线作为对外门面,Planner / Executor / Critic / Memory / Reflection 5 个 worker 在背后通过 Blackboard 协作 + 通过双向 MessageBus 与 Communicator 异步通信;共享一个**SQLite + 向量编码** 的持久化层,具备**文件 / HTTP / 浏览器** 三类行动能力,以**数字雇员**的定位对外服务 —— token 即工资,产出即工件。
 
 Sansheng **通过持续优化自己的 harness**(system prompts / 工具集 / 路由策略 / 红线 / budget / plan templates / context 管理 / memory 阈值)来越来越好地完成用户任务。所有 harness 改动走**影子测试**验证,低风险自动应用,中高风险需用户审批。harness 文件本身是 harness 特殊的 **artifact**,享受全量快照 / 版本 / 回滚。
 
@@ -35,12 +35,15 @@ Sansheng **通过持续优化自己的 harness**(system prompts / 工具集 / �
 ### 认知与多 agent
 | 维度 | 决策 |
 |---|---|
-| 模型 | **多 agent · Blackboard** · Planner / Executor / Critic / Memory / Reflection · 独立 Pi session + 共享 Blackboard |
-| 触发 | **默认 Quick(单 agent 直答)**;`/plan` 触发多 agent;`/multi on/off` 切换本会话默认模式;Settings 默认模式可选 `auto` / `quick` / `plan` / `multi-on` |
-| Plan confirm | **复杂才确认**:涉及副作用(改 fs / 外发 / 超 token 阈值)的 plan 才预览;纯对话 plan 直接跑 |
-| Destructive confirm | **始终确认**,不受 plan confirm 策略影响 |
-| 启发式 | 默认 `quick` 模式不启用;用户选 `auto` 才启发式判断 |
-| 代理权 | **④ Plan + 关键点 confirm**:Planner 出方案 → 老板 sign-off → Executor 自己跑;仅破坏性 confirm |
+| 架构 | **Communicator Singleton + 5 Worker Pool + MessageBus** · Communicator 永远在线作为对外门面;Planner / Executor / Critic / Memory / Reflection 5 个 worker 在背后通过 Blackboard 协作 + 通过 MessageBus 与 Communicator 异步通信 |
+| 角色数 | **6**:`communicator`(沟通员,常驻,每会话 1 个,跨 turn 复用)+ `planner` / `executor` / `critic` / `memory` / `reflection`(5 worker) |
+| 触发 | **所有用户消息先过 Communicator**:Communicator 自主判 `chat`(闲聊直接答) / `task`(转译成结构化指令通过 MessageBus 分发给 Planner) / `feedback`(更新用户画像) |
+| Worker ↔ 用户 | **必须经 Communicator**:Worker 遇到不决时阻塞问 Communicator(`bus.ask`);Communicator 先尽力自查(读代码 / 调工具),无法解决才升级用户(`pending_question` 事件);用户 `answer_question` 回话后 worker 解阻塞继续 |
+| Plan confirm | **Communicator 内部决定**:复杂任务(改 fs / 外发 / 超 token 阈值)Communicator 主动向用户预览 plan;破坏性 confirm 始终必经 |
+| 代理权 | **⑤ Communicator 转译 + 关键点 confirm**:Communicator 转译 → Planner 出方案 → Communicator 审 + 必要时 confirm 用户 → Executor 自己跑;用户随时 kill switch |
+| 取消 | 用户新消息 ≤1 tick 广播到所有 worker;pending question 用 `/cancel-question <id>` 取消 |
+| Live Trace | **独立页面 `/timeline`**:实时显示 BusMessage 流(direction 图标 + 角色 + payload 摘要 + stick-to-bottom);用户发消息仍走 Chat composer,不直接评论某行 bus event |
+| 默认模式 | 无需 `auto`/`quick`/`plan` 模式开关 — Communicator 始终在线,自主路由;保留 `/plan`(强制走多 worker) 与 `/multi off`(Communicator 直答模式) 作为可选 override |
 
 ### Sansheng 的"灵魂"—— 数字雇员
 | 维度 | 决策 |
@@ -342,15 +345,99 @@ type Blackboard = {
 ### Orchestrator 循环
 ```
 loop while not_done and iterations < max:
-  plan = Planner session.update(blackboard)
-  result = Executor session.execute(plan, blackboard)
-  critique = Critic session.evaluate(result)
+  // Planner / Executor / Critic / Memory / Reflection 5 worker 在同一轮里通过 Blackboard 协作
+  plan = Planner session.update(blackboard)                       // planner 写 plan
+  results = await Promise.all(Executor sessions.execute(plan, bb)) // 并行,各自写 evidence[step_id]
+  critique = Critic session.evaluate(results, bb)                  // critic 写 critique
   if critique.approve: done = true
-  else: blackboard.critique.push(critique); refine plan
+  else: bb.critique.push(critique); refine plan
 end
-Reflection session.endOfRun(blackboard) → memory fragment candidates
+Reflection session.endOfRun(bb) → memory fragment candidates
 ```
+**Communicator 与 Orchestrator 的边界**:Communicator **不在 Blackboard 上读写**,只在 Orchestrator 入口转译任务 + Orchestrator 完成时收 broadcast 通知 + worker `ask` 时阻塞等。Worker 内部 `await bus.ask({...})` 是 Communicator 的 hook,带 timeout 5min,超时 fallback 走 Reflection。
+
 **CancelToken** 贯穿每个 session;用户在 Web 上发新消息即广播 cancel。
+
+### Communicator 与 MessageBus 协议
+
+新增第 6 角色 `communicator`(singleton,常驻,每会话 1 个,跨 turn 复用,新会话新建)。
+
+**职责**:
+- 接收用户消息,判断 `chat`(直接答) / `task`(转译发 Planner) / `feedback`(画像更新)
+- Worker 提问时回答;无法回答时升级(`user_question` 事件)
+- 收到 `task_done` / `broadcast` 后主动用对话告知用户
+
+**约束**:
+- 用户只能与 Communicator 对话;不假设用户能直接看到 worker 输出
+- 升级前先尽 Communicator 自己所能解决(查代码 / 调工具)
+- 默认 prompt `~/.sansheng/harness/system_prompts/communicator.md`(`ensureHarness` 自动生成)
+
+**MessageBus 接口**(双向阻塞):
+```ts
+type BusDirection = "user→comm" | "comm→worker" | "worker→comm" | "comm→user";
+
+interface BusMessage {
+  id: string;                    // nanoid
+  ts: number;
+  direction: BusDirection;
+  fromRole: RoleId | "user";
+  toRole: RoleId | "user";
+  conversationId: string;
+  /** question = 阻塞等回话; broadcast = 单向不需回应; reply = 对 question 的回话 */
+  kind: "question" | "broadcast" | "reply";
+  /** reply 才填,与原 question 同 id */
+  questionId?: string;
+  payload: string;
+  context?: Record<string, unknown>;
+  /** worker 阻塞期局部上下文(等回话后恢复) */
+  resumeState?: unknown;
+}
+
+interface PendingQuestion {
+  resolve: (reply: BusMessage) => void;
+  reject: (err: Error) => void;
+  timer: NodeJS.Timeout;
+  startedAt: number;
+}
+
+class MessageBus {
+  private stream: BusMessage[] = [];
+  private pending = new Map<string, PendingQuestion>();   // questionId → resolver
+  private listeners = new Set<(m: BusMessage) => void>(); // WS → timeline
+
+  /** Worker 端调用:阻塞等回话,timeout 默认 5 分钟 */
+  async ask(opts: {
+    fromRole: RoleId; conversationId: string;
+    payload: string; context?: Record<string, unknown>;
+    timeoutMs?: number;
+  }): Promise<string>;
+
+  /** Communicator 端调用:对 question 做出回应 */
+  reply(originalQuestionId: string, payload: string): void;
+
+  /** 广播(不需回应):Worker 状态更新、Reflection 结果、Critic 评审 */
+  broadcast(opts: Omit<BusMessage, "id" | "ts" | "kind">): void;
+
+  /** 浏览器订阅每条 BusMessage 推到 timeline 页 */
+  subscribe(h: (m: BusMessage) => void): () => void;
+
+  /** 反序列化未完成问题(resume 路径) */
+  snapshot(): BusMessage[];
+  restore(messages: BusMessage[]): void;
+}
+```
+
+**持久化**:每条 BusMessage → `~/.sansheng/sessions/<conversationId>/bus.jsonl` append;resume 路径用 `bus.restore(jsonl)` 重建 pending question。
+
+**WS 协议扩展**(Server → Client):
+- `bus_event {message: BusMessage}` — 每条总线消息推到 timeline
+- `communicator_thinking {status: "idle"|"thinking"|"tool_use"}` — Communicator 当前状态
+- `pending_question {questionId, payload, fromRole}` — Communicator 升级给用户的问题
+
+(Client → Server):
+- `answer_question {questionId, payload}` — 用户回答 worker 提问
+- `cancel_question {questionId}` — 用户取消 pending question
+- `bus_replay {fromTs}` — 回放历史 bus 流(timeline 滚动加载)
 
 ### Harness 系统
 ```
@@ -409,7 +496,7 @@ harness.rollback(path, version)         # 回滚到任意版本
 ### 验收标准
 1. `npm i -g sansheng` → `sansheng start` → `http://localhost:2718` 可访问
 2. 单轮聊天:云 API 流式文本正确渲染
-3. 多 agent:Plan→Execute→Critic 一轮 cycle 完成,Blackboard 实时可视化
+3. 多 agent:Communicator 转译 → Planner/Executor/Critic 1 轮 cycle → Blackboard 实时可视化;Worker 可阻塞问 Communicator,Communicator 可升级用户;Timeline 页显示完整 bus 流
 4. 工具:fs / http / browser 跑通真实任务,沙箱强制
 5. 记忆:跨会话语义检索有效
 6. 守护:cron 任务触发系统消息;用户输入立即中断
@@ -424,7 +511,10 @@ harness.rollback(path, version)         # 回滚到任意版本
 1. **M0 骨架**:package / tsconfig / Hono + vite + react / 设计 tokens / REST + WS 契约骨架 / `sansheng start` 起来 / 一个空 Chat 页能跑通 `http://localhost:2718`
 2. **M1 Kernel + 单 agent 对话**:Settings + Provider + Pi session 流式渲染 + 基础 shell 工具 + cost tracker
 3. **M2 持久化 + 记忆**:SQLite + sqlite-vec + schema 迁移系统 + conversations + fragments + 用户画像 + 衰减
-4. **M3 多 agent**:5 角色 + Blackboard + Orchestrator + Agents 可视化 + 中断机制 + Quick/Plan 触发
+4. **M3 多 agent**:
+   - **M3a** ✓ 会话恢复 + Fragment 检索注入 + `agent_states` 表 + `kernel.resume()`
+   - **M3b** ✓ Blackboard + Orchestrator + 5 角色 harness + Agents UI + 中断机制
+   - **M3c** (待实施) Communicator Singleton + MessageBus 双向阻塞 + Worker `ask` 回话 + Live Trace `/timeline` 页 + 默认模式从 Quick/Plan 改成「Communicator 转译」
 5. **M4 行动工具**:fs / http / browser / notify + 各沙箱
 6. **M5 Artifacts 系统**:artifact 自管 + 全量快照 + 6 种 kind + 注册工具 + Artifacts UI
 7. **M6 Harness 自我优化**:harness manager + proposer + riskClassifier + shadowRunner + evaluator + rollback + Harness UI
