@@ -6,7 +6,7 @@
   "private": false,
   "license": "MIT",
   "bin": {
-    "sansheng": "./dist/cli/index.js"
+    "sansheng": "./dist/src/cli/index.js"
   },
   "files": [
     "dist",
