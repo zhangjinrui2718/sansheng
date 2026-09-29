@@ -20,9 +20,13 @@ export {
   getFragment,
   listFragmentsByKind,
   searchFragments,
+  searchFragmentsByText,
   recordFragmentAccess,
   isVecAvailable,
 } from "./repo/fragments.js";
 export type { FragmentRow, FragmentSearchOpts } from "./repo/fragments.js";
 export { getProfile, listProfile, upsertProfile, reinforceProfile } from "./repo/profile.js";
 export type { ProfileEntry } from "./repo/profile.js";
+export { upsertAgentState, getAgentState, deleteAgentState } from "./repo/agentStates.js";
+export type { AgentStateRow } from "./repo/agentStates.js";
+export { piMessagesToBlocks } from "./util/blocks.js";

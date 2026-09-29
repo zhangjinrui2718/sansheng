@@ -10,7 +10,7 @@
 import { createAgentSession, type AgentSession } from "@earendil-works/pi-coding-agent";
 import type { Model } from "@earendil-works/pi-ai";
 import { nanoid } from "nanoid";
-import { SettingsStore, type Settings } from "../settings/store.js";
+import { SettingsStore, type Settings, type ProviderConfig } from "../settings/store.js";
 import { estimateCost } from "../providers/cost.js";
 import { log } from "../../shared/log.js";
 import { resolveModel } from "../providers/registry.js";
@@ -21,11 +21,17 @@ import {
   insertFragment,
   insertMessage,
   recordMessageUsage,
+  upsertAgentState,
+  getAgentState,
   upsertConversation,
+  listMessagesByConversation,
+  getConversation,
+  setConversationTitle,
   upsertFragmentEmbedding,
 } from "../storage/index.js";
 
 export type ServerEvent =
+  | { type: "title_changed"; conversationId: string; title: string }
   | { type: "ready"; conversationId: string; modelId: string; provider: string }
   | { type: "agent_start"; conversationId: string; ts: number }
   | { type: "turn_start"; conversationId: string; turnIndex: number; ts: number }
@@ -62,6 +68,8 @@ export class AgentKernel {
   } | null = null;
   /** M2:当前 turn_index(从 turn_start 事件拿) */
   private currentTurnIndex = 0;
+  /** M3a B9: kernel / 上一次 resume 的开始时间(给 reflection 用) */
+  private kernelStartedAt = Date.now();
   /** M2:当前正在发/等的 user 文本(prompt() 时 buffer 起来,message_start(user) 时消费) */
   private pendingUserText: string | null = null;
 
@@ -122,47 +130,17 @@ export class AgentKernel {
       sink({ type: "error", conversationId: this.conversationId, error: { code: "no_provider", message: msg } });
       throw new Error(msg);
     }
-    const m = resolveModel({
-      provider: active.provider,
-      modelId: active.modelId,
-      apiKey: active.apiKey,
-      baseUrl: active.baseUrl,
-    });
-    if (!m) {
-      const noKey = !active.apiKey;
-      const code = noKey ? "no_api_key" : "no_model";
-      const msg = noKey
-        ? `provider=${active.provider} 需要 API Key;请到「设置」填写`
-        : `model ${active.provider}/${active.modelId} 不可用;请检查 provider/model 拼写`;
-      sink({ type: "error", conversationId: this.conversationId, error: { code, message: msg } });
-      throw new Error(msg);
-    }
+    const m = await this.resolveActiveModel(active, sink);
     this.model = m;
     log.info(`kernel start: provider=${active.provider} model=${active.modelId} cwd=${this.cwd}`);
 
-    // createAgentSession 内部会调 ModelRuntime.refresh()(拉 model catalog),
-    // PI_OFFLINE=1 下会跳过,但保险起见加 8s 硬超时,避免任何阻塞。
-    const createPromise = createAgentSession({
-      model: m,
-      cwd: this.cwd,
-      agentDir: this.agentDir,
-      thinkingLevel: active.thinkingLevel,
-    });
-    const timeoutPromise = new Promise<never>((_, reject) =>
-      setTimeout(() => reject(new Error("createAgentSession timeout (8s) — ModelRuntime refresh hung?")), 8000),
-    );
-    const { session } = await Promise.race([createPromise, timeoutPromise]);
-
+    const session = await this.createPiSession(m, active);
     this.session = session;
 
     // 等 session 真正 idle 后再 emit ready;createAgentSession() 返回时
     // Pi SDK 还在做内部初始化(tool 注册 / system prompt 构建),此时 prompt() 会拋
     // "Agent is already processing"。等 isIdle=true 才安全。
-    for (let i = 0; i < 100; i++) {
-      // 最多 5s:每 50ms 检查一次
-      if (session.isIdle) break;
-      await new Promise((r) => setTimeout(r, 50));
-    }
+    await this.waitSessionIdle(session);
 
     sink({
       type: "ready",
@@ -185,6 +163,152 @@ export class AgentKernel {
 
     // subscribe 把 Pi 事件翻译成 ServerEvent
     this.session.subscribe(this.makeHandler(sink));
+  }
+
+  /**
+   * M3a: 恢复一个已存在的对话
+   *
+   * 策略(简化):
+   * - 切换 conversationId + 释放旧 session
+   * - 用当前 active provider 重建 Pi session(metadata 接续)
+   * - 把 agent_states 行写好(cwd/model/provider/lastActiveAt + state_json={historyCount})
+   * - emit ready 让前端把 kernelReady 恢复
+   *
+   * Sansheng 这边不在 Pi session 里重放 messages(那是 SDK 内部 session file 的事)。
+   * UI 侧 loadConversation() 已经负责把历史 messages 渲染;新 turn 用新会话上下文开始。
+   */
+  async resume(conversationId: string, sink: EventSink): Promise<void> {
+    log.muted(`kernel resume: ${conversationId}`);
+    if (this.conversationId !== conversationId) {
+      this.disposeSession();
+    }
+    this.conversationId = conversationId;
+    this.buf = null;
+    this.pendingUserText = null;
+    this.currentTurnIndex = 0;
+    this.inputTokens = 0;
+    this.outputTokens = 0;
+    this.kernelStartedAt = Date.now();
+
+    const conv = getConversation(this.storage.db, conversationId);
+    if (!conv) {
+      const msg = `conversation ${conversationId} 不存在`;
+      sink({ type: "error", conversationId: this.conversationId, error: { code: "not_found", message: msg } });
+      throw new Error(msg);
+    }
+
+    // 从 DB 拉历史 messages(用于 state_json metadata,不在此重放给 Pi)
+    const history = listMessagesByConversation(this.storage.db, conversationId);
+
+    this.settings = this.settingsStore.load();
+    const active = this.settingsStore.activeProvider();
+    if (!active) {
+      const msg = "尚未配置任何 provider;请到「设置」填写";
+      sink({ type: "error", conversationId: this.conversationId, error: { code: "no_provider", message: msg } });
+      throw new Error(msg);
+    }
+    const m = await this.resolveActiveModel(active, sink);
+    this.model = m;
+
+    const session = await this.createPiSession(m, active);
+    this.session = session;
+    await this.waitSessionIdle(session);
+
+    // M3a:写 agent_states metadata(用于 inspector / 调试 / 后续 reload)
+    try {
+      upsertAgentState(this.storage.db, {
+        conversationId,
+        cwd: conv.cwd ?? this.cwd,
+        modelId: conv.modelId ?? active.modelId,
+        provider: conv.provider ?? active.provider,
+        stateJson: JSON.stringify({ historyCount: history.length, resumedAt: Date.now() }),
+        lastActiveAt: Date.now(),
+      });
+      // 同步 conversations 行的 last_active_at / message_count
+      upsertConversation(this.storage.db, {
+        id: conversationId,
+        cwd: conv.cwd ?? this.cwd,
+        modelId: conv.modelId ?? active.modelId,
+        provider: conv.provider ?? active.provider,
+      });
+    } catch (err) {
+      log.warn("resume: persist agent_state failed:", err);
+    }
+
+    sink({
+      type: "ready",
+      conversationId: this.conversationId,
+      modelId: this.model?.id ?? active.modelId,
+      provider: this.model?.provider ?? active.provider,
+    });
+
+    this.session.subscribe(this.makeHandler(sink));
+    log.info(`kernel resumed: ${conversationId} (history=${history.length})`);
+  }
+
+  /** 释放当前 Pi session 但保留 agent_states。供 resume() / invalidate() 复用。 */
+  private disposeSession(): void {
+    if (this.session) {
+      try {
+        if ((this.session as any).isStreaming) {
+          try { this.session.abort(); } catch { /* noop */ }
+        }
+        this.session.dispose?.();
+      } catch (err) {
+        log.warn("disposeSession failed:", err);
+      }
+      this.session = null;
+      this.model = null;
+      this.currentMessageId = null;
+      this.toolStartAt.clear();
+      this.buf = null;
+      this.pendingUserText = null;
+      this.currentTurnIndex = 0;
+      this.kernelStartedAt = Date.now();
+    }
+  }
+
+  /** 用 active provider 解析 Pi Model;失败时 emit error + throw。 */
+  private async resolveActiveModel(active: ProviderConfig, sink: EventSink): Promise<Model<any>> {
+    const m = resolveModel({
+      provider: active.provider,
+      modelId: active.modelId,
+      apiKey: active.apiKey,
+      baseUrl: active.baseUrl,
+    });
+    if (!m) {
+      const noKey = !active.apiKey;
+      const code = noKey ? "no_api_key" : "no_model";
+      const msg = noKey
+        ? `provider=${active.provider} 需要 API Key;请到「设置」填写`
+        : `model ${active.provider}/${active.modelId} 不可用;请检查 provider/model 拼写`;
+      sink({ type: "error", conversationId: this.conversationId, error: { code, message: msg } });
+      throw new Error(msg);
+    }
+    return m;
+  }
+
+  /** 用 Pi SDK 创建 session,带 8s 硬超时防 ModelRuntime 卡死。 */
+  private async createPiSession(m: Model<any>, active: ProviderConfig): Promise<AgentSession> {
+    const createPromise = createAgentSession({
+      model: m,
+      cwd: this.cwd,
+      agentDir: this.agentDir,
+      thinkingLevel: active.thinkingLevel,
+    });
+    const timeoutPromise = new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error("createAgentSession timeout (8s) — ModelRuntime refresh hung?")), 8000),
+    );
+    const { session } = await Promise.race([createPromise, timeoutPromise]);
+    return session;
+  }
+
+  /** 等 Pi session 真正 idle(最多 5s) */
+  private async waitSessionIdle(session: AgentSession): Promise<void> {
+    for (let i = 0; i < 100; i++) {
+      if (session.isIdle) break;
+      await new Promise((r) => setTimeout(r, 50));
+    }
   }
 
   /**
@@ -326,6 +450,26 @@ export class AgentKernel {
                   createdAt: Date.now(),
                 });
                 recordMessageUsage(this.storage.db, this.conversationId, 0, 0, 0);
+
+                // 自动设置标题:首个 user message 出现时,从文本前 30 字截取
+                // (不调用 LLM——避免第一次发消息多走一次额外推理)。
+                try {
+                  const conv = getConversation(this.storage.db, this.conversationId);
+                  if (conv && !conv.title && text.trim()) {
+                    const t = deriveTitle(text);
+                    if (t) {
+                      setConversationTitle(this.storage.db, this.conversationId, t);
+                      log.muted(`title: set "${t}" for ${this.conversationId}`);
+                      sink({
+                        type: "title_changed",
+                        conversationId: this.conversationId,
+                        title: t,
+                      });
+                    }
+                  }
+                } catch (err) {
+                  log.warn("title: derive/set failed:", err);
+                }
               } catch (err) {
                 log.warn("storage: insertMessage(user) failed:", err);
               }
@@ -465,6 +609,27 @@ export class AgentKernel {
               ts: Date.now(),
               usage: { input: this.inputTokens, output: this.outputTokens, costUsd: cost },
             });
+            // M3a B9: 轻量 reflection — 只对“有意义的总账预算 / 时长”的 turn 留 trace
+            const turnDurationMs = Date.now() - this.kernelStartedAt;
+            if (cost > 0.005 || turnDurationMs > 30_000) {
+              try {
+                insertFragment(this.storage.db, {
+                  id: nanoid(),
+                  kind: "context",
+                  content: `[reflection] turn ${this.currentTurnIndex}: cost=$${cost.toFixed(4)} duration=${turnDurationMs}ms in/out=${this.inputTokens}/${this.outputTokens}`,
+                  sourceConversationId: this.conversationId,
+                  sourceMessageId: null,
+                  importance: Math.min(1, cost * 10 + turnDurationMs / 60_000),
+                  decayFactor: 0.9,
+                  accessCount: 0,
+                  lastAccessedAt: null,
+                  createdAt: Date.now(),
+                  metadata: null,
+                });
+              } catch (err) {
+                log.warn("reflection fragment insert failed:", err);
+              }
+            }
             break;
           }
           case "agent_settled":
@@ -537,4 +702,22 @@ export class AgentKernel {
       })();
     }
   }
+}
+
+/**
+ * 从用户首条消息提取会话标题:
+ * - 合并所有换行 / 多余空白为单个空格
+ * - 取前 30 个“视觉”字符(汉字计 1,标点不计超过原限)
+ * - 限制总长度 30 个 unicode 字符
+ * - 末尾如果截断,加省略号
+ */
+export function deriveTitle(text: string): string | null {
+  const t = text.trim();
+  if (!t) return null;
+  // 合并空白,去掉换行
+  const collapsed = t.replace(/\s+/g, " ").trim();
+  if (!collapsed) return null;
+  const max = 30;
+  if (collapsed.length <= max) return collapsed;
+  return collapsed.slice(0, max).trimEnd() + "…";
 }

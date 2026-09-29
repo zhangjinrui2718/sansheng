@@ -3,24 +3,58 @@
  *
  * 协议(JSON over text frame):
  * Client → Server:
- *   { type: "send"; content: string }
+ *   { type: "send"; content: string; conversationId?: string }
  *   { type: "interrupt" }
  *   { type: "ping" }
+ *   { type: "load_conversation"; conversationId: string }
  *
  * Server → Client: 复用 agentKernel 的 ServerEvent
+ *
+ * M3a:
+ *   - send 可选携带 conversationId;mismatch 时自动 resume
+ *   - load_conversation 显式触发 resume
+ *   - prompt handler 注入 fragment / profile context(B8 可选增强)
  */
 import type { Server, IncomingMessage } from "node:http";
 import type { Duplex } from "node:stream";
 import { WebSocketServer, WebSocket } from "ws";
 import { log } from "../shared/log.js";
-import type { AgentKernel, ServerEvent } from "./kernel/agentKernel.js";
-
+/**
+ * WS 命令类型 - 镜像 shared/types/ws.ts(避免 server build rootDir 问题)
+ * 同步点:ClientCommand 变更时两边同步改。
+ */
 export type ClientCommand =
-  | { type: "send"; content: string }
+  | { type: "send"; content: string; conversationId?: string }
   | { type: "interrupt" }
-  | { type: "ping" };
+  | { type: "ping" }
+  | { type: "load_conversation"; conversationId: string };
 
-export function attachWebSocket(server: Server, kernel: AgentKernel): WebSocketServer {
+import type { AgentKernel, ServerEvent } from "./kernel/agentKernel.js";
+import { Storage } from "./storage/index.js";
+
+/**
+ * 把 user message 包成含历史 context 的 prompt
+ * M3a: 简单 LIKE 匹配 fragments + profile 注入
+ */
+function buildContextBlock(fragments: Array<{ kind: string; content: string }>, profile: Array<{ key: string; value: string; confidence?: number }>): string {
+  if (fragments.length === 0 && profile.length === 0) return "";
+  const parts: string[] = [];
+  if (profile.length > 0) {
+    parts.push("# User Profile");
+    for (const p of profile) {
+      parts.push(`- ${p.key}: ${p.value}${p.confidence !== undefined ? ` (confidence: ${p.confidence.toFixed(2)})` : ""}`);
+    }
+  }
+  if (fragments.length > 0) {
+    parts.push("\n# Relevant Memories");
+    for (const f of fragments) {
+      parts.push(`- [${f.kind}] ${f.content}`);
+    }
+  }
+  return parts.join("\n");
+}
+
+export function attachWebSocket(server: Server, kernel: AgentKernel, storage?: Storage): WebSocketServer {
   const wss = new WebSocketServer({ noServer: true });
 
   server.on("upgrade", (req: IncomingMessage, socket: Duplex, head: Buffer) => {
@@ -89,11 +123,59 @@ export function attachWebSocket(server: Server, kernel: AgentKernel): WebSocketS
         return;
       }
 
+      if (cmd.type === "load_conversation") {
+        if (!cmd.conversationId) return;
+        try {
+          await ensureStarted();
+          // 只有 conversationId 不同时才 resume(避免无谓 dispose)
+          if (kernel.getConversationId() !== cmd.conversationId) {
+            await kernel.resume(cmd.conversationId, sink);
+          } else {
+            // 同 id 也再 emit 一次 ready,便于前端在切 tab 后快速恢复 kernelReady
+            const active = kernel.activeInfo();
+            send(ws, {
+              type: "ready",
+              conversationId: kernel.getConversationId(),
+              modelId: active?.modelId ?? "?",
+              provider: active?.provider ?? "?",
+            });
+          }
+        } catch (err) {
+          send(ws, {
+            type: "error",
+            conversationId: cmd.conversationId,
+            error: { code: "resume_failed", message: (err as Error)?.message ?? String(err) },
+          });
+        }
+        return;
+      }
+
       if (cmd.type === "send") {
         if (typeof cmd.content !== "string" || !cmd.content.trim()) return;
-        // ensureStarted 后 prompt;把 sink 传给 prompt 以便极端情况下自启动
+        // ensureStarted 后:若 conversationId 不匹配,先 resume 再 prompt
         ensureStarted()
-          .then(() => kernel.prompt(cmd.content, sink))
+          .then(async () => {
+            if (cmd.conversationId && kernel.getConversationId() !== cmd.conversationId) {
+              await kernel.resume(cmd.conversationId, sink);
+            }
+            // M3a B8: 注入 fragment / profile context (可选,失败不阻塞)
+            let enriched = cmd.content;
+            if (storage) {
+              try {
+                const { searchFragmentsByText, listProfile } = await import("./storage/index.js");
+                const fragments = searchFragmentsByText(storage.db, cmd.content, { limit: 3 });
+                const profile = listProfile(storage.db);
+                const ctx = buildContextBlock(
+                  fragments.map((f) => ({ kind: f.kind, content: f.content })),
+                  profile.map((p) => ({ key: p.key, value: p.value, confidence: p.confidence })),
+                );
+                if (ctx) enriched = `${ctx}\n\n---\n\nUser: ${cmd.content}`;
+              } catch (err) {
+                log.warn("ws: context injection failed:", err);
+              }
+            }
+            await kernel.prompt(enriched, sink);
+          })
           .catch((err) =>
             send(ws, {
               type: "error",

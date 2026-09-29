@@ -10,8 +10,9 @@ describe("storage/migrations", () => {
     const result = runMigrations(db);
     expect(result.applied).toContain(1);
     expect(result.applied).toContain(2);
+    expect(result.applied).toContain(3); // M3a: agent_states
     const version = (db.prepare(`SELECT MAX(version) as v FROM schema_version`).get() as { v: number }).v;
-    expect(version).toBe(2);
+    expect(version).toBe(3);
     db.close();
   });
 

@@ -34,7 +34,9 @@ export function HistoryRail() {
   const conversationId = useChatStore((s) => s.conversationId);
   const newConversation = useChatStore((s) => s.newConversation);
   const loadConversation = useChatStore((s) => s.loadConversation);
+  const sendLoadConversation = useChatStore((s) => s.sendLoadConversation);
   const kernelReady = useChatStore((s) => s.kernelReady);
+  const historyRefreshTrigger = useChatStore((s) => s.historyRefreshTrigger);
 
   const [list, setList] = useState<ConversationSummary[]>([]);
   const [loading, setLoading] = useState(false);
@@ -59,7 +61,7 @@ export function HistoryRail() {
     return () => {
       cancelled = true;
     };
-  }, [conversationId]);
+  }, [conversationId, historyRefreshTrigger]);
 
   async function openConversation(id: string) {
     if (id === conversationId && kernelReady) return; // 当前正在用的
@@ -68,6 +70,8 @@ export function HistoryRail() {
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       const snapshot = (await r.json()) as Parameters<typeof loadConversation>[0];
       loadConversation(snapshot);
+      // M3a: 发 WS load_conversation 让 server resume 这条会话
+      sendLoadConversation(id);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     }

@@ -24,8 +24,11 @@ export function ChatSurface() {
     socketRef.current = sock;
     sock.on((e: ServerEvent) => apply(e));
     sock.connect();
+    // M3a: 让 store 转发 load_conversation / send-with-conversationId
+    useChatStore.getState().attachSocket(sock);
     return () => {
       sock.close();
+      useChatStore.getState().attachSocket(null);
     };
   }, [apply]);
 
@@ -44,7 +47,11 @@ export function ChatSurface() {
     // kernelReady=false 允许发:server 端 ws.ts 的 ensureStarted 会自动 start。
     // 但 client 看到的"推演中"还是 idle,UI 上按钮文案会提示"未连接 · 点发送自动恢复"。
     useChatStore.getState().appendUserTurn(text);
-    socketRef.current?.sendText(text);
+    socketRef.current?.send({
+      type: "send",
+      content: text,
+      conversationId: useChatStore.getState().conversationId ?? undefined,
+    });
     setInput("");
   }
 

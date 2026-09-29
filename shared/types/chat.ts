@@ -12,7 +12,17 @@ export interface ToolCallInfo {
   isError?: boolean;
   startedAt?: number;
   endedAt?: number;
+  durationMs?: number;
 }
+
+/**
+ * Sansheng UI · 一个 turn 内的逻辑块
+ * M3a: shared 化,让 pi → blocks 工具可以写在 server 端。
+ */
+export type Block =
+  | { kind: "thinking"; text: string }
+  | { kind: "text"; text: string }
+  | { kind: "tool"; tool: ToolCallInfo };
 
 export interface MessageChunk {
   type: "delta" | "tool_call" | "tool_result" | "thinking" | "done" | "error" | "node" | "heartbeat";

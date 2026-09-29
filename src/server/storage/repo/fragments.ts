@@ -113,6 +113,60 @@ export function recordFragmentAccess(db: Database.Database, id: string): void {
   ).run(Date.now(), id);
 }
 
+/**
+ * M3a · 基于文本 LIKE 的轻量检索(用于 ws.ts prompt 上下文注入)
+ * - 对每个 ≥2 字符的 word 跑 OR LIKE
+ * - 评分:命中 token 数 * importance * (1 + access_count)
+ * - kinds?:限定种类
+ * - limit:返回数量上限
+ */
+export function searchFragmentsByText(
+  db: Database.Database,
+  query: string,
+  opts: { limit?: number; kinds?: FragmentRow["kind"][] } = {},
+): FragmentRow[] {
+  const limit = opts.limit ?? 5;
+  // 简单 tokenize:中文 char-by-char + 英文 word
+  const words: string[] = [];
+  for (const tok of query.split(/\s+/)) {
+    if (!tok) continue;
+    // 英文 word
+    const en = tok.match(/[a-zA-Z]{2,}/g);
+    if (en) words.push(...en.map((w) => w.toLowerCase()));
+    // 中文按字拆(2+ chars)
+    const zh = tok.match(/[\u4e00-\u9fa5]{2,}/g);
+    if (zh) words.push(...zh);
+  }
+  // 去重
+  const tokens = Array.from(new Set(words));
+  if (tokens.length === 0) return [];
+
+  // 构造可选 kind 过滤
+  let kindClause = "";
+  const params: unknown[] = [];
+  if (opts.kinds && opts.kinds.length > 0) {
+    kindClause = `AND f.kind IN (${opts.kinds.map(() => "?").join(",")})`;
+    params.push(...opts.kinds);
+  }
+  // OR 拼接 like 片段
+  const likeClauses = tokens.map(() => "LOWER(f.content) LIKE ?").join(" OR ");
+  params.push(...tokens.map((t) => `%${t}%`));
+  params.push(limit);
+
+  const rows = db
+    .prepare(
+      `SELECT f.*,
+              (LENGTH(f.content) - LENGTH(REPLACE(LOWER(f.content), LOWER(?), ''))) / MAX(LENGTH(?), 1)
+                * f.importance * (1 + f.access_count) AS score
+       FROM fragments f
+       WHERE (${likeClauses}) ${kindClause}
+       ORDER BY score DESC, f.importance DESC, f.created_at DESC
+       LIMIT ?`,
+    )
+    .all(tokens[0], tokens[0], ...params) as Array<Record<string, unknown>>;
+  return rows.map(rowToFragment);
+}
+
 function rowToFragment(r: Record<string, unknown>): FragmentRow {
   return {
     id: r.id as string,

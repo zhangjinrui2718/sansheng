@@ -5,13 +5,11 @@
  */
 import { create } from "zustand";
 import type { ServerEvent } from "@shared/types/ws";
+import type { Block } from "@shared/types/chat";
 
 export type Role = "user" | "assistant" | "system";
 
-export type Block =
-  | { kind: "thinking"; text: string }
-  | { kind: "text"; text: string }
-  | { kind: "tool"; tool: { id: string; name: string; args?: unknown; result?: unknown; isError?: boolean; durationMs?: number } };
+export type { Block };
 
 export interface Turn {
   id: string;
@@ -32,6 +30,9 @@ export interface ChatState {
   provider: string | null;
   status: ChatStatus;
   kernelReady: boolean;
+  /** 递增计数,HistoryRail useEffect 依赖它来重新拉取。 */
+  historyRefreshTrigger: number;
+  socket: unknown;
   turns: Turn[];
   currentTurn: Turn | null;
   currentUsage: { input: number; output: number; costUsd: number };
@@ -41,6 +42,10 @@ export interface ChatState {
   reset(): void;
   applyEvent(e: ServerEvent): void;
   appendUserTurn(text: string): void;
+  /** 在 ChatSurface 创建 socket 后调,让 store 能转发 WS 命令 */
+  attachSocket(socket: { send(cmd: unknown): void } | null): void;
+  /** M3a: 点历史时发 WS load_conversation 让 server resume */
+  sendLoadConversation(conversationId: string): void;
   /** 新建对话:调后端 + 清本地状态 */
   newConversation(): Promise<void>;
   /** M2:从后端加载一个历史对话的快照(覆盖本地状态) */
@@ -91,11 +96,22 @@ export const useChatStore = create<ChatState>((set, get) => ({
   provider: null,
   status: "connecting",
   kernelReady: false,
+  historyRefreshTrigger: 0,
   turns: [],
   currentTurn: null,
   currentUsage: { input: 0, output: 0, costUsd: 0 },
   totalUsage: { input: 0, output: 0, costUsd: 0 },
   error: null,
+  socket: null,
+
+  attachSocket(socket: { send(cmd: unknown): void } | null) {
+    set({ socket });
+  },
+
+  sendLoadConversation(conversationId: string) {
+    const socket = get().socket as { send(cmd: unknown): void } | null;
+    socket?.send({ type: "load_conversation", conversationId });
+  },
 
   reset() {
     set((s) => ({
@@ -307,6 +323,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
           error: null,
           status: "idle",
         });
+        return;
+      case "title_changed":
+        // 递增 historyRefreshTrigger,HistoryRail useEffect 依赖它,
+        // 触发侧边列表重新拉取。
+        set((s) => ({
+          historyRefreshTrigger: s.historyRefreshTrigger + 1,
+        }));
         return;
     }
   },

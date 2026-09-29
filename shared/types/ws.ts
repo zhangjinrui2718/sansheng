@@ -29,9 +29,11 @@ export type ServerEvent =
     }
   | { type: "error"; conversationId: string; error: { code: string; message: string } }
   | { type: "interrupt"; conversationId: string }
-  | { type: "conversation_reset"; conversationId: string };
+  | { type: "conversation_reset"; conversationId: string }
+  | { type: "title_changed"; conversationId: string; title: string };
 
 export type ClientCommand =
-  | { type: "send"; content: string }
+  | { type: "send"; content: string; conversationId?: string }
   | { type: "interrupt" }
-  | { type: "ping" };
+  | { type: "ping" }
+  | { type: "load_conversation"; conversationId: string };
