@@ -28,6 +28,10 @@ import {
   listFragmentsByKind,
   listFragmentsAll,
 } from "./storage/index.js";
+import {
+  createToolRegistry,
+  type CreateToolRegistryOptions,
+} from "./tools/integration.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = import.meta.dirname ?? join(__filename, "..");
@@ -38,6 +42,11 @@ export interface AppOptions {
   httpServer: Server;
   settingsStore: SettingsStore;
   storage: Storage;
+  /**
+   * 可选:把外部已建好的 ToolRegistry opts 传入(如显式 sandbox / netPolicy)。
+   * 不传 → createApp 在初始化时自动调用 createToolRegistry()(异步,加载默认 sandbox + net policy)。
+   */
+  toolRegistryOptions?: CreateToolRegistryOptions;
 }
 
 /** 从任意 throw 值取可读错误信息。 */
@@ -65,9 +74,12 @@ function toPublic(s: ReturnType<SettingsStore["load"]>) {
   };
 }
 
-export function createApp(opts: AppOptions): Hono {
+export async function createApp(opts: AppOptions): Promise<Hono> {
   const app = new Hono();
   const settingsStore = opts.settingsStore;
+  // M4: ToolRegistry(fs+http 6 件套)全局单例,每次 HTTP request 复用。
+  // 创建可能涉及 ~/.sansheng/{sandbox,net}.json 读盘,所以是 async;直接 await。
+  const tools = await createToolRegistry(opts.toolRegistryOptions);
 
   // —— Logger middleware ——
   app.use("*", async (c, next) => {
@@ -275,6 +287,58 @@ export function createApp(opts: AppOptions): Hono {
       log.warn("upsert profile failed:", err);
       return c.json({ error: "storage_error" }, 500);
     }
+  });
+
+  // —— M4:ToolRegistry endpoints ——
+  // 列出已注册工具的 { name, description }(不暴露 fn)。
+  app.get("/api/tools/list", (c) => {
+    return c.json({
+      tools: tools.entries().map((e) => ({
+        name: e.name,
+        description: e.description ?? "",
+      })),
+    });
+  });
+
+  // 调用工具。
+  //   body: { name, args? }
+  //   resp 200: { ok: true, value }
+  //   resp 400: { ok: false, error: { name: "TypeError", message, code?: "invalid_body" } }
+  //   resp 404: { ok: false, error: { name: "ToolNotFoundError", message, code?: "tool_not_found" } }
+  //   resp 500(由全局 onError 兜):工具 throw 原始 SandboxError/NetSandboxError,栈完整保留。
+  app.post("/api/tools/invoke", async (c) => {
+    const body = (await c.req.json().catch(() => null)) as { name?: unknown; args?: unknown } | null;
+    if (!body || typeof body.name !== "string" || body.name.length === 0) {
+      return c.json(
+        {
+          ok: false,
+          error: {
+            name: "TypeError",
+            code: "invalid_body",
+            message: "request body must be { name: string, args?: unknown }",
+          },
+        },
+        400,
+      );
+    }
+    const reg = tools.get(body.name);
+    if (!reg) {
+      return c.json(
+        {
+          ok: false,
+          error: {
+            name: "ToolNotFoundError",
+            code: "tool_not_found",
+            message: `tool not registered: ${body.name}`,
+          },
+        },
+        404,
+      );
+    }
+    // 不 wrap try/catch:让原始 SandboxError/NetSandboxError 抛出,走全局 onError 兜底成 500 JSON。
+    // 这保留了 instance + stack trace,instanceof 检查在客户端仍有效。
+    const value = await reg.fn(body.args);
+    return c.json({ ok: true, value });
   });
 
   // 重置 Sansheng:删 db / keyring / settings / pi 目录(留 logs)

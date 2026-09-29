@@ -47,7 +47,7 @@ export async function startServer(opts: ServerOptions): Promise<void> {
   const kernel = new AgentKernel(settingsStore, agentDir, settings.cwd, storage);
 
   // 先建一个 placeholder app 占 fetch,只是为了 listen
-  const placeholder = createApp({ dataDir: opts.dataDir, kernel, httpServer: createServer(), settingsStore, storage });
+  const placeholder = await createApp({ dataDir: opts.dataDir, kernel, httpServer: createServer(), settingsStore, storage });
   const httpServer = serve(
     { fetch: placeholder.fetch, port: opts.port, hostname: opts.host },
     (info) => {
