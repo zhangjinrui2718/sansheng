@@ -281,6 +281,28 @@ cd /root/projects/sansheng && \
 
 ---
 
+## UI bug 修复派遣中 (2026-09-29 17:16 UTC)
+
+runId: `del_mumgpks7_7bo3`(worker,model=balanced,timeout=45min)
+
+**User 报 2 bug**(m00331 / m00333):
+
+1. **会话历史跳变**:点击 session 后列表跳变
+   - 根因:`HistoryRail.tsx:45-64` useEffect deps 含 `conversationId` → 点击 → useEffect 重 fetch → server 按 lastActiveAt 倒序把刚点中的拍到顶 → 列表跳
+   - Fix:从 deps 移除 `conversationId`,只留 `[historyRefreshTrigger]`
+
+2. **AGENT 活动 tab 全空**:`AgentPanel.tsx`(侧栏)是静态 placeholder,从没接 API
+   - Fix:加 `useEffect` 拉 `/api/blackboard/:id`(2s 轮询),动态渲染角色状态徽章 + Blackboard 卡片
+
+**Scope 锁紧**:
+- ✅ `HistoryRail.tsx` + `AgentPanel.tsx` + (若需要)`chat.ts` store
+- ❌ 不改 `pages/index.ts` / `web/src/routes/Agents.tsx` / `src/server/` 任何文件
+- ❌ 不接 WS / 不加新依赖 / 不用 as any
+
+预计 ~17:55 UTC 完成。
+
+---
+
 ## M4 integration 派遣中 (2026-09-29 17:11 UTC)
 
 runId: `del_mumgkbck_5d7p`(worker,model=balanced,timeout=45min)
