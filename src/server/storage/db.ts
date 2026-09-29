@@ -51,6 +51,13 @@ export class Storage {
  *   - Recovery scenarios where a row needs the column added
  */
 export function ensureBlackboardArtifactsColumn(db: Database.Database): void {
+  // PRAGMA table_info on a missing table throws. Guard so callers (e.g. fresh
+  // DB before migrations ran) don't crash — it's purely a defense-in-depth
+  // check; the column is normally added by migration 005.
+  const tables = db
+    .prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='blackboards'`)
+    .all() as Array<{ name: string }>;
+  if (tables.length === 0) return;
   const cols = db
     .prepare(`PRAGMA table_info(blackboards)`)
     .all() as Array<{ name: string }>;

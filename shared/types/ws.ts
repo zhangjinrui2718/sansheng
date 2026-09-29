@@ -47,6 +47,33 @@ export type ServerEvent =
       questionId: string;
       payload: string;
       fromRole: import("./agents.js").RoleId;
+    }
+  // M3+ BlackboardArtifact lifecycle (forwarded from artifactBus)
+  | {
+      type: "artifact_created";
+      artifact: import("./blackboard.js").BlackboardArtifact;
+    }
+  | {
+      type: "artifact_status_changed";
+      artifactId: string;
+      oldStatus: import("./blackboard.js").ArtifactStatus;
+      newStatus: import("./blackboard.js").ArtifactStatus;
+      actor?: import("./blackboard.js").ArtifactAuthor;
+    }
+  | {
+      type: "executor_callback";
+      executorSessionId: string;
+      hypothesisId: string;
+      reason: import("./blackboard.js").CallbackReason;
+    }
+  | {
+      type: "executor_resume";
+      executorSessionId: string;
+      decisionArtifactId: string;
+    }
+  | {
+      type: "harness_proposal_created";
+      artifact: import("./blackboard.js").BlackboardArtifact;
     };
 
 export type ClientCommand =

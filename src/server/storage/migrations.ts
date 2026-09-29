@@ -3,7 +3,18 @@ import { readdirSync, readFileSync, existsSync } from "node:fs";
 import { join, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const MIGRATIONS_DIR = resolve(dirname(fileURLToPath(import.meta.url)), "../../../migrations");
+// Resolve migrations dir — works for both:
+//   - dev: src/server/storage/migrations.ts → /  3 levels to /<repo>/migrations
+//   - prod: dist/src/server/storage/migrations.js → /  4 levels to /<repo>/migrations
+// Try 3-level first, fall back to 4-level if missing.
+const HERE = dirname(fileURLToPath(import.meta.url));
+const MIGRATIONS_DIR_CANDIDATES = [
+  resolve(HERE, "../../../migrations"),
+  resolve(HERE, "../../../../migrations"),
+];
+const MIGRATIONS_DIR: string =
+  MIGRATIONS_DIR_CANDIDATES.find((p): p is string => existsSync(p)) ??
+  MIGRATIONS_DIR_CANDIDATES[1]!;
 
 export interface MigrationResult {
   applied: number[];

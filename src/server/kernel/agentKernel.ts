@@ -66,6 +66,33 @@ export type ServerEvent =
       questionId: string;
       payload: string;
       fromRole: import("@shared/types/agents").RoleId;
+    }
+  // M3+ BlackboardArtifact lifecycle (forwarded from artifactBus)
+  | {
+      type: "artifact_created";
+      artifact: import("@shared/types/blackboard.js").BlackboardArtifact;
+    }
+  | {
+      type: "artifact_status_changed";
+      artifactId: string;
+      oldStatus: import("@shared/types/blackboard.js").ArtifactStatus;
+      newStatus: import("@shared/types/blackboard.js").ArtifactStatus;
+      actor?: import("@shared/types/blackboard.js").ArtifactAuthor;
+    }
+  | {
+      type: "executor_callback";
+      executorSessionId: string;
+      hypothesisId: string;
+      reason: import("@shared/types/blackboard.js").CallbackReason;
+    }
+  | {
+      type: "executor_resume";
+      executorSessionId: string;
+      decisionArtifactId: string;
+    }
+  | {
+      type: "harness_proposal_created";
+      artifact: import("@shared/types/blackboard.js").BlackboardArtifact;
     };
 
 export type EventSink = (e: ServerEvent) => void;
@@ -514,8 +541,10 @@ export class AgentKernel {
             case "bus_event":
             case "error":
             case "pending_question":
+            case "user_reply":
               // done/delta:不直接喂给 session.prompt(),只 log 或 bus_event
               // pending_question:升级用户
+              // user_reply: Communicator 的内部标记(delta/done 已经发了)
               if (e.type === "bus_event") {
                 effectiveSink({ type: "bus_event", message: e.message });
               } else if (e.type === "pending_question") {
@@ -530,6 +559,9 @@ export class AgentKernel {
               } else if (e.type === "error") {
                 log.warn(`communicator ${e.code}: ${e.message}`);
               }
+              break;
+            case "artifact_created":
+              effectiveSink({ type: "artifact_created", artifact: e.artifact });
               break;
             default: {
               const _exhaustive: never = e;

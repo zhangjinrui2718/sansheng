@@ -41,6 +41,7 @@ import { SettingsStore } from "./settings/store.js";
 import { Storage } from "./storage/index.js";
 import { Orchestrator } from "./agents/orchestrator.js";
 import type { Blackboard } from "@shared/types/agents";
+import { artifactBus } from "./bus/index.js";
 
 /**
  * 把 user message 包成含历史 context 的 prompt
@@ -113,6 +114,55 @@ export function attachWebSocket(
         conversationId: kernel.getConversationId(),
         error: { code: "start_failed", message: err?.message ?? String(err) },
       });
+    });
+
+    // M3+: 订阅 BlackboardArtifact lifecycle bus → 转发到 Client(同 connection)
+    // 这里用 artifactBus(process singleton) + per-connection unsubscribe list。
+    const busUnsubs: Array<() => void> = [];
+    busUnsubs.push(
+      artifactBus.subscribe("artifact_created", (e) => {
+        send(ws, { type: "artifact_created", artifact: e.artifact });
+      }),
+    );
+    busUnsubs.push(
+      artifactBus.subscribe("artifact_status_changed", (e) => {
+        send(ws, {
+          type: "artifact_status_changed",
+          artifactId: e.artifactId,
+          oldStatus: e.oldStatus,
+          newStatus: e.newStatus,
+          actor: e.actor,
+        });
+      }),
+    );
+    busUnsubs.push(
+      artifactBus.subscribe("executor_callback", (e) => {
+        send(ws, {
+          type: "executor_callback",
+          executorSessionId: e.executorSessionId,
+          hypothesisId: e.hypothesisId,
+          reason: e.reason,
+        });
+      }),
+    );
+    busUnsubs.push(
+      artifactBus.subscribe("executor_resume", (e) => {
+        send(ws, {
+          type: "executor_resume",
+          executorSessionId: e.executorSessionId,
+          decisionArtifactId: e.decisionArtifactId,
+        });
+      }),
+    );
+    busUnsubs.push(
+      artifactBus.subscribe("harness_proposal_created", (e) => {
+        send(ws, { type: "harness_proposal_created", artifact: e.artifact });
+      }),
+    );
+    ws.on("close", () => {
+      for (const u of busUnsubs) {
+        try { u(); } catch { /* ignore */ }
+      }
     });
 
     /**

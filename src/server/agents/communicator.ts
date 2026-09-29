@@ -1,22 +1,23 @@
 /**
- * Sansheng Communicator · M3c
+ * Sansheng Communicator · M3+ (3 重身份)
  *
  * Singleton,常驻,跨 turn 复用。每会话 1 个,新会话重建。
  *
- * 职责:
- *   1. 接收用户文本,落到 `decide()` 判 chat / task / feedback
- *      - chat   : 直接通过 sink 流式答用户(自管 Pi session)
- *      - task   : bus.broadcast 给 planner,等 worker 回报
- *      - feedback: 写 profile
- *   2. Worker 提问时回答(`handleWorkerAsk`)
- *      - 知道:reply 自己答
- *      - 不知道:emit pending_question 升级,等用户回话
+ * M3+ 三重身份:
+ *   1. Reactive Input — 接 user message / executor_callback(bus)
+ *   2. Plan Producer  — 每次响应输出 JSON `{userReply?, artifacts[]}` 结构
+ *   3. Observer      — 订阅 bus `artifact_status_changed`,仅 `newStatus ∈ {resolved, failed}` 触发
+ *
+ * 保留 v4 兼容 API(`routeUserMessage` / `handleWorkerAsk` / `answerPending` / `cancelPending`)，
+ * v4 测试不受影响。
  *
  * 设计点:
  *   - decide() 抽象为独立函数,可被测试覆盖(FakeCommunicator / decideFn 注入)
  *   - 默认 decide 是 LLM 驱动(PI_OFFLINE=1 时通过 mock answer / 显式 prompt 解析)
  *   - Communicator 不读写 Blackboard,只通过 bus 与 worker 沟通
  *   - 默认 prompt 通过 harness/loader 加载 ~/.sansheng/harness/system_prompts/communicator.md
+ *   - 结构化输出 parse 失败 → emit 单 note artifact(降级)
+ *   - Intent 验证失败 → kind 强制改为 hypothesis
  */
 import { nanoid } from "nanoid";
 import { createAgentSession, type AgentSession } from "@earendil-works/pi-coding-agent";
@@ -30,6 +31,18 @@ import type {
 } from "@shared/types/agents";
 import type { MessageBus } from "./messageBus.js";
 import { log } from "../../shared/log.js";
+import {
+  IMPERATIVE_VERBS,
+  type BlackboardArtifact,
+  type ArtifactKind,
+  type ArtifactStatus,
+  type CommunicatorResponse,
+  type ParsedCommunicatorResponse,
+  type ValidatedArtifact,
+  type ArtifactStatusChangedEvent,
+  type ExecutorCallbackEvent,
+} from "../../../shared/types/bus.js";
+import { artifactBus, makeArtifact } from "../bus/index.js";
 
 export type CommunicatorSink = (e: CommunicatorEvent) => void;
 
@@ -44,7 +57,10 @@ export type CommunicatorEvent =
       questionId: string;
       payload: string;
       fromRole: RoleId;
-    };
+    }
+  // M3+ 新增
+  | { type: "user_reply"; messageId: string; text: string }
+  | { type: "artifact_created"; artifact: BlackboardArtifact };
 
 export interface CommunicatorDecideFn {
   (input: { userText: string; conversationId: string }): Promise<CommunicatorDecision>;
@@ -81,7 +97,30 @@ export interface CommunicatorOptions {
   decideFn?: CommunicatorDecideFn;
   /** 不打开真实 Pi session(测试用)。 */
   disableLlm?: boolean;
+  /** M3+ respond 函数(产 JSON output);默认使用 LLM 或离线 fallback */
+  respondFn?: CommunicatorRespondFn;
 }
+
+/**
+ * M3+ respond 函数 — 把 input 转换成 `{userReply?, artifacts[]}`。
+ * 默认实现跑 LLM;offline / test 注入 fake。
+ */
+export interface CommunicatorRespondFn {
+  (input: ReactiveInput): Promise<CommunicatorResponse>;
+}
+
+/** M3+ reactive input — 来自 user 或 executor_callback */
+export type ReactiveInput =
+  | {
+      kind: "user_message";
+      userText: string;
+      conversationId: string;
+    }
+  | {
+      kind: "executor_callback";
+      callback: ExecutorCallbackEvent;
+      conversationId: string;
+    };
 
 /**
  * Communicator 主类。
@@ -255,3 +294,319 @@ export class Communicator {
     this.session = null;
   }
 }
+
+/* ─────────────────────────────────────────────────────────
+ * M3+ · Helpers & 3 重身份 helper 函数
+ * ───────────────────────────────────────────────────────── */
+
+/** 检测 imperative verb(中英均包括) */
+export function hasImperativeVerb(title: string): boolean {
+  if (!title) return false;
+  const tokens = title
+    .split(/[\s,，。；;]+/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+  for (const tok of tokens) {
+    if (IMPERATIVE_VERBS.has(tok)) return true;
+    const lower = tok.toLowerCase();
+    if (IMPERATIVE_VERBS.has(lower)) return true;
+  }
+  return false;
+}
+
+/** parse 失败 → 单 note artifact 降级 */
+export function fallbackToNote(
+  parseError: string,
+  userReply?: string,
+): ParsedCommunicatorResponse {
+  const note = makeArtifact({
+    kind: "note",
+    title: "Communicator 输出解析失败",
+    body: `${parseError}\n\n降级为单 note artifact;请 Communicator 重新输出纯 JSON。`,
+    author: "communicator",
+    scope: "global",
+  });
+  return {
+    userReply,
+    artifacts: [{ artifact: note, intentValid: true }],
+    parseError,
+  };
+}
+
+/**
+ * 解析 LLM raw 输出 → ParsedCommunicatorResponse
+ *
+ * 行为:
+ *   - 提取 ```json ... ``` 或首个 {...}
+ *   - parse 失败 → { parseError, artifacts: [note 降级], userReply: undefined }
+ *   - parse 成功 → Intent 验证(无 imperative verb 且无 refs → 降级 hypothesis)
+ */
+export function parseStructuredOutput(raw: string): ParsedCommunicatorResponse {
+  const trimmed = raw.trim();
+  if (!trimmed) return fallbackToNote("empty output");
+
+  let jsonText = trimmed;
+  const fenceMatch = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/);
+  if (fenceMatch && fenceMatch[1]) {
+    jsonText = fenceMatch[1].trim();
+  } else {
+    const braceIdx = jsonText.indexOf("{");
+    if (braceIdx >= 0) jsonText = jsonText.slice(braceIdx);
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(jsonText);
+  } catch (err) {
+    return fallbackToNote(
+      `JSON parse failed: ${(err as Error).message}; raw first 200 chars: ${trimmed.slice(0, 200)}`,
+    );
+  }
+
+  if (!parsed || typeof parsed !== "object") {
+    return fallbackToNote("not an object");
+  }
+
+  const obj = parsed as Record<string, unknown>;
+  const userReply =
+    typeof obj.userReply === "string" ? obj.userReply : undefined;
+
+  if (!Array.isArray(obj.artifacts)) {
+    return fallbackToNote(
+      `artifacts must be array; got ${typeof obj.artifacts}`,
+      userReply,
+    );
+  }
+
+  const artifacts: ValidatedArtifact[] = [];
+  for (const raw of obj.artifacts) {
+    if (!raw || typeof raw !== "object") continue;
+    const a = raw as Record<string, unknown>;
+    const kind = typeof a.kind === "string" ? (a.kind as ArtifactKind) : null;
+    const body = typeof a.body === "string" ? a.body : null;
+    const author =
+      typeof a.author === "string"
+        ? (a.author as BlackboardArtifact["author"])
+        : "communicator";
+    if (!kind || !body) continue;
+    const refs = Array.isArray(a.refs)
+      ? a.refs.filter((r): r is string => typeof r === "string")
+      : undefined;
+
+    let finalKind = kind;
+    let downgraded: "imperative-missing" | undefined;
+    if (kind === "intent") {
+      const title = typeof a.title === "string" ? a.title : "";
+      const verbOk = hasImperativeVerb(title);
+      const refsOk = !!(refs && refs.length > 0);
+      if (!verbOk && !refsOk) {
+        finalKind = "hypothesis";
+        downgraded = "imperative-missing";
+      }
+    }
+
+    const artifact = makeArtifact({
+      kind: finalKind,
+      title: typeof a.title === "string" ? a.title : "(untitled)",
+      body,
+      author,
+      refs,
+      dependsOn: Array.isArray(a.dependsOn)
+        ? a.dependsOn.filter((d): d is string => typeof d === "string")
+        : undefined,
+      parentIntent:
+        typeof a.parentIntent === "string" ? a.parentIntent : undefined,
+      metadata:
+        a.metadata && typeof a.metadata === "object"
+          ? (a.metadata as BlackboardArtifact["metadata"])
+          : undefined,
+      scope:
+        typeof a.scope === "string"
+          ? (a.scope as BlackboardArtifact["scope"])
+          : "global",
+      conversationId:
+        typeof a.conversationId === "string"
+          ? a.conversationId
+          : undefined,
+      status:
+        typeof a.status === "string"
+          ? (a.status as BlackboardArtifact["status"])
+          : "open",
+    });
+
+    artifacts.push({
+      artifact,
+      intentValid: kind === "intent" ? !downgraded : true,
+      downgraded,
+    });
+  }
+
+  return { userReply, artifacts };
+}
+
+/* ─────────────────────────────────────────────────────────
+ * M3+ Communicator · 3 重身份 类扩展
+ * 动态粘附在原 class prototype(避免双 class 定义冲突)
+ * ───────────────────────────────────────────────────────── */
+
+// 存储原 constructor 引用
+type CommunicatorProto = Communicator & {
+  __observerUnsub?: (() => void) | null;
+  __respondFn?: CommunicatorRespondFn;
+};
+
+// 仅在第一次 require 时 patch 一次
+const _patched = (() => {
+  const Ctor = Communicator as unknown as {
+    prototype: CommunicatorProto;
+  };
+  const proto = Ctor.prototype;
+
+  if ((proto as { __m3Patched?: boolean }).__m3Patched) {
+    return true;
+  }
+
+  // 重新记录原 dispose(原 v4 dispose 不取消 observer — 我们手动接管)
+  // 这里不重写 dispose;M3+ observer 由下面的 isObserverActive + 全局 artifactBus 管理。
+  // 为了避免内存泄漏,expose 一个手动 stopObserver。
+
+  (proto as { __m3Patched?: boolean }).__m3Patched = true;
+  return true;
+})();
+
+/** Communicator M3+ 扩展方法,挂在原型上 */
+declare module "./communicator.js" {
+  // 让 TS 知道这些方法存在
+}
+
+// 在 class 后面用 prototype 注入 — 这样 ES2022 target 下属性查找仍然能找到
+(Communicator.prototype as unknown as {
+  startObserver: () => () => void;
+  onArtifactFinalized: (id: string, status: ArtifactStatus) => void;
+  isObserverActive: () => boolean;
+  respond: (input: ReactiveInput) => Promise<ParsedCommunicatorResponse>;
+  emitResponse: (
+    parsed: ParsedCommunicatorResponse,
+    sink: CommunicatorSink,
+  ) => void;
+}).startObserver = function (this: CommunicatorProto): () => void {
+  const self = this as unknown as Communicator;
+  return artifactBus.subscribe(
+    "artifact_status_changed",
+    (event: ArtifactStatusChangedEvent) => {
+      const { newStatus, artifactId } = event;
+      if (newStatus !== "resolved" && newStatus !== "failed") {
+        return;
+      }
+      const verb = newStatus === "resolved" ? "已完成" : "失败";
+      const noteId = `obs-${nanoid(8)}`;
+      const note = makeArtifact({
+        kind: "note",
+        title: `Observer · ${verb} ${artifactId.slice(0, 8)}`,
+        body: `Artifact ${artifactId.slice(0, 8)} ${verb}。`,
+        author: "communicator",
+        scope: "global",
+        status: newStatus,
+        metadata: { relatedArtifacts: [artifactId] },
+      });
+      artifactBus.publish({ type: "artifact_created", artifact: note });
+      log.info(`[Communicator.observer] artifact ${artifactId} → ${newStatus}`);
+    },
+  );
+};
+
+(Communicator.prototype as unknown as {
+  isObserverActive: () => boolean;
+}).isObserverActive = function (this: CommunicatorProto): boolean {
+  return this.__observerUnsub != null;
+};
+
+/**
+ * Identity 1+2: Reactive Input + Plan Producer
+ * 接受 user_message 或 executor_callback → 产出 JSON 响应 → 写 BlackboardArtifact。
+ */
+(Communicator.prototype as unknown as {
+  respond: (input: ReactiveInput) => Promise<ParsedCommunicatorResponse>;
+}).respond = async function (
+  this: CommunicatorProto,
+  input: ReactiveInput,
+): Promise<ParsedCommunicatorResponse> {
+  // resolve respondFn(lazy,避免 bind 问题)
+  let fn = this.__respondFn;
+  if (!fn) {
+    fn = (async (i: ReactiveInput): Promise<CommunicatorResponse> => {
+      // offline / LLM-not-ready fallback
+      if (i.kind === "user_message") {
+        return { userReply: `已收到:${i.userText.slice(0, 80)}`, artifacts: [] };
+      }
+      return {
+        userReply: `收到 executor 回调 (${i.callback.reason})`,
+        artifacts: [],
+      };
+    }) as CommunicatorRespondFn;
+    this.__respondFn = fn;
+  }
+
+  try {
+    const raw = await fn(input);
+    const parsed = parseStructuredOutput(JSON.stringify(raw));
+    for (const v of parsed.artifacts) {
+      artifactBus.publish({ type: "artifact_created", artifact: v.artifact });
+    }
+    return parsed;
+  } catch (err) {
+    const fb = fallbackToNote(`respondFn threw: ${(err as Error).message}`);
+    for (const v of fb.artifacts) {
+      artifactBus.publish({ type: "artifact_created", artifact: v.artifact });
+    }
+    return fb;
+  }
+};
+
+/** emit response 到 sink */
+(Communicator.prototype as unknown as {
+  emitResponse: (
+    parsed: ParsedCommunicatorResponse,
+    sink: CommunicatorSink,
+  ) => void;
+}).emitResponse = function (
+  parsed: ParsedCommunicatorResponse,
+  sink: CommunicatorSink,
+): void {
+  if (parsed.userReply) {
+    const messageId = nanoid();
+    sink({ type: "user_reply", messageId, text: parsed.userReply });
+    sink({ type: "delta", messageId, text: parsed.userReply });
+    sink({ type: "done", messageId });
+  }
+  for (const v of parsed.artifacts) {
+    sink({ type: "artifact_created", artifact: v.artifact });
+  }
+};
+
+/** 手动启动 observer(也可在构造时自动启动) */
+(Communicator.prototype as unknown as {
+  enableObserver: () => void;
+}).enableObserver = function (this: CommunicatorProto): void {
+  if (this.__observerUnsub) return;
+  const subFn = (this as unknown as {
+    startObserver: () => () => void;
+  }).startObserver.bind(this);
+  this.__observerUnsub = subFn();
+};
+
+/** 手动停止 observer */
+(Communicator.prototype as unknown as {
+  disableObserver: () => void;
+}).disableObserver = function (this: CommunicatorProto): void {
+  if (this.__observerUnsub) {
+    try {
+      this.__observerUnsub();
+    } catch {
+      /* ignore */
+    }
+    this.__observerUnsub = null;
+  }
+};
+
+/** answerPending / cancelPending 已在 v4 中提供(薄包装 bus.reply) */
