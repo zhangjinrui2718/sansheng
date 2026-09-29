@@ -26,5 +26,8 @@ coverage/
 *.lcov
 
 # GitHub PAT (per-user; never commit)
+.ghp_token
 ghp_*
+.github_pat_*
+*.ghp_token
 
