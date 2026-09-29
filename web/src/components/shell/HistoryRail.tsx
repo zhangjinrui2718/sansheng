@@ -15,6 +15,27 @@ interface ConversationSummary {
   messageCount: number;
 }
 
+/** Shallow 字段比对,避免相同列表触发 setState re-render。 */
+function sameList(a: ConversationSummary[], b: ConversationSummary[]): boolean {
+  if (a === b) return true;
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    const x = a[i];
+    const y = b[i];
+    if (x === undefined || y === undefined) return false;
+    if (
+      x.id !== y.id ||
+      x.title !== y.title ||
+      x.lastActiveAt !== y.lastActiveAt ||
+      x.preview !== y.preview ||
+      x.messageCount !== y.messageCount
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
 function relativeTime(ts: number): string {
   const diff = Date.now() - ts;
   if (diff < 0) return "刚刚";
@@ -42,7 +63,9 @@ export function HistoryRail() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // 拉历史(挂载时 + 当前 conversationId 变化时刷新)
+  // 拉历史 · 仅在「挂载 / 创建新对话 / WS 推送 conversation_* 事件」时刷新。
+  // 注意:点击某条历史只是切换 current conversationId,不应触发整列重 fetch;
+  //      否则 server 按 lastActiveAt 倒序返回会把刚点中的条目顶到最前,列表"跳变"。
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
@@ -50,7 +73,10 @@ export function HistoryRail() {
     fetch("/api/conversations?limit=50")
       .then((r) => r.json() as Promise<{ conversations?: ConversationSummary[] }>)
       .then((d) => {
-        if (!cancelled) setList(d.conversations ?? []);
+        if (cancelled) return;
+        const next = d.conversations ?? [];
+        // shallow 字段比对:列表内容未变就跳过 setState,避免无谓 re-render。
+        setList((prev) => (sameList(prev, next) ? prev : next));
       })
       .catch((err) => {
         if (!cancelled) setError(err instanceof Error ? err.message : String(err));
@@ -61,7 +87,7 @@ export function HistoryRail() {
     return () => {
       cancelled = true;
     };
-  }, [conversationId, historyRefreshTrigger]);
+  }, [historyRefreshTrigger]);
 
   async function openConversation(id: string) {
     if (id === conversationId && kernelReady) return; // 当前正在用的
