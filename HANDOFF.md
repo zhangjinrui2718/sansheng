@@ -281,6 +281,36 @@ cd /root/projects/sansheng && \
 
 ---
 
+## Memory Fragments bug fix (2026-09-29 17:08 UTC) · 重要
+
+Commit: `40e0589 fix(http): add global onError handler returning JSON 500 (not HTML)`
+
+**User 报告** (m00207):Memory 页 "Memory Fragments 加载失败: SyntaxError: Unexpected token '<', '<!doctype '... is not valid JSON"
+
+**根因**:任何 route handler 抛出未捕获错误时,Hono 默认 fallback 让 `app.get("*", (c) => c.html(...))` 的 SPA fallback 返回 `index.html`(HTML)。前端 `fetch(r).json()` 尝试解析 HTML 拋 SyntaxError。
+
+**Fix**:`src/server/http.ts:321` 加 `app.onError` 全局错误处理,任何未捕获错误都返回 JSON `{ error: 'internal_error', message, path }` 500。
+
+**验证**:`curl http://localhost:2718/api/memory/fragments` 返回 JSON `{fragments:[], sources:["reflection"]}`(空 fragments 数组,因为 PI_OFFLINE 没数据)。
+
+**User Profile "暂无 profile" 是预期 empty state**(本地 curl 验证 `/api/profile` 返回 JSON 空数组),不是 bug。M3 reflection 没跑(PI_OFFLINE),不会有 profile 数据。
+
+### 教训(写入 MEMORY)
+- SPA fallback `app.get("*", c.html(...))` 会捕获未匹配路径 —— 但也可能吃掉错走的 API 请求
+- 所有 Hono 路由应该假设上游有 `app.onError` 兜底,return JSON not HTML
+- 前端 `fetch(r).json()` 不检查 content-type,默认假设 JSON;服务端必须保证失败响应也是 JSON
+
+---
+
+## M4 http 工具完成 (2026-09-29 17:00 UTC) · 简述
+
+Commit: `1d492fb M4: http tools (fetchUrl/postJson) + net sandbox + 17 tests`
+
+- 新增 `src/server/tools/netSandbox.ts`(272 行)+ `src/server/tools/http.ts`(200 行)+ `tests/tools/http.test.ts`(200 行,17 case)
+- 默认上限:body 5 MiB / 允许端口 {80, 443, 8080, 8443} / 拒绝 private IP(127/10/172.16-31/192.168/::1/fc00::/7/fe80::/10)
+
+---
+
 ## CLI bin path 修复 (2026-09-29 17:05 UTC) · 重要
 
 Commit: `6c4b176 fix(cli): correct bin path to dist/src/cli/index.js`
