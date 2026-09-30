@@ -28,6 +28,7 @@ import type {
   BlackboardShape,
   CallbackReason,
 } from "../../../shared/types/blackboard.js";
+import type { ArtifactStatus } from "../../../shared/types/blackboard.js";
 import type {
   ArtifactCreatedEvent,
   ArtifactStatusChangedEvent,
@@ -66,14 +67,12 @@ export type ProgressSink = (event: ProgressEvent) => void;
  * Callback 路由函数。默认行为:仅通过 bus `executor_callback` 让其他订阅者(Communicator)处理。
  * 测试可注入自定义路由(同步记录,无需真 Communicator)。
  */
-export type CallbackRouter = (
-  cb: ExecutorCallbackEvent,
-  context: {
-    executorSessionId: string;
-    todo: BlackboardArtifact;
-    hypothesis: BlackboardArtifact;
-  },
-) => void | Promise<void>;
+export type CallbackRouter = (arg: {
+  todoId: string;
+  reason: CallbackReason;
+  hypothesisId: string;
+  executorSessionId: string;
+}) => void | Promise<void>;
 
 export interface OrchestratorOptions {
   storage: Storage;
@@ -303,15 +302,48 @@ export class Orchestrator {
       if (a && a.kind === "todo") {
         if (e.newStatus === "resolved") {
           this.sink?.({ type: "todo_resolved", todo: a });
+          // 上报后检查:本 todo 是否属于当前 run 的 intent,且所有 sibling todos 已终结
+          this.maybeResolveIntent(a);
         } else if (e.newStatus === "failed") {
           this.sink?.({
             type: "todo_failed",
             todo: a,
-            reason: a.metadata?.errorReason ?? "executor reported failure",
+            reason: typeof a.metadata?.errorReason === "string" ? a.metadata.errorReason : "executor reported failure",
           });
+          this.maybeResolveIntent(a);
         }
       }
     }
+  }
+
+  /**
+   * todo 终结后检查其 parent intent:若 intent 仍 open 且所有关联 todos 已 resolved/failed,
+   * 则把 intent 标记 resolved(fail-fast:有任一 failed → failed,否则 resolved)。
+   * 后续 onArtifactStatusChanged 会 → completeRun() → run() resolve。
+   */
+  private maybeResolveIntent(todo: BlackboardArtifact): void {
+    const intentId = todo.parentIntent;
+    if (!intentId) return;
+    const intent = getArtifact(this.storage.db, intentId);
+    if (!intent || intent.kind !== "intent") return;
+    if (intent.status !== "open") return; // 已有 resolution
+    const todos = listArtifacts(this.storage.db, {
+      scope: "conversation",
+      conversationId: intent.conversationId ?? "*",
+    }).filter((a) => a.kind === "todo" && a.parentIntent === intentId);
+    if (todos.length === 0) return;
+    const pending = todos.filter((t) => t.status === "open" || t.status === "in_progress" || t.status === "waiting_for_decision");
+    if (pending.length > 0) return;
+    const anyFailed = todos.some((t) => t.status === "failed");
+    const newStatus: ArtifactStatus = anyFailed ? "failed" : "resolved";
+    updateArtifactStatus(this.storage.db, intentId, newStatus);
+    this.bus.publish({
+      type: "artifact_status_changed",
+      artifactId: intentId,
+      oldStatus: "open",
+      newStatus,
+      actor: "planner", // actor must be ArtifactAuthor; orchestrator isn't a registered author
+    });
   }
 
   private async onExecutorCallback(e: ExecutorCallbackEvent): Promise<void> {
@@ -350,11 +382,13 @@ export class Orchestrator {
     // 3. 路由给 Communicator(通过注入的 router;默认仅 publish bus event)
     this.sink?.({ type: "callback_routed", callback: e });
     try {
-      await this.routeCallback(e, {
+      await this.routeCallback({
+        todoId,
+        reason: hypothesis.metadata?.callbackReason ?? "judgment",
+        hypothesisId: e.hypothesisId,
         executorSessionId: e.executorSessionId,
-        todo,
-        hypothesis,
       });
+      this.maybeResolveRunOnBlocked(todo);
     } catch (err) {
       // 路由失败不影响 Orchestrator 状态 — watchdog 会兜底
       // 但取消 timers,避免悬挂
@@ -385,6 +419,12 @@ export class Orchestrator {
     const planner = this.plannerFactory({ storage: this.storage });
     try {
       const result = await planner.plan(intent);
+      // intent 在 plan() 期间可能已被标为 failed(parse-fail / 0 valid todos)。
+      // 此时不应再发 todos_planned(也不应启动 executor)。
+      const currentIntent = getArtifact(this.storage.db, intent.id);
+      if (currentIntent?.status !== "open") {
+        return;
+      }
       this.sink?.({ type: "todos_planned", todos: result.todos });
       // 启动所有 ready todos(无依赖 / 依赖已 resolved)
       for (const todo of result.todos) {
@@ -590,6 +630,18 @@ export class Orchestrator {
     this.waiting.delete(executorSessionId);
   }
 
+  private maybeResolveRunOnBlocked(blockedTodo: BlackboardArtifact): void {
+    if (!this.runResolve) return;
+    const intentId = blockedTodo.parentIntent;
+    if (!intentId) return;
+    const intent = getArtifact(this.storage.db, intentId);
+    if (!intent || intent.kind !== "intent") return;
+    // 只有当该 todo 属于当前 run 的 intent,才 resolve run()
+    if (intent.status !== "open") return;
+    // 意图:run() 返回 = orchestrator 的 orchestration 阶段结束(分发给 Communicator / HarnessManager)
+    this.completeRun(intent);
+  }
+
   private completeRun(intent: BlackboardArtifact): void {
     if (!this.runResolve) return;
     if (this.runTimer) {
@@ -618,12 +670,10 @@ export class Orchestrator {
  * Default callback router
  * ────────────────────────────────────────────────────────── */
 
-const defaultRouteCallback: CallbackRouter = (cb, ctx) => {
+const defaultRouteCallback: CallbackRouter = (_arg) => {
   // 默认行为:仅通过 artifactBus 的 executor_callback event 通知外部订阅者
   // (Communicator 已在 B2 阶段被设计成 bus 订阅者)
   // 这里啥都不做 — event 已经被 Orchestrator 处理过(触发 watchdog + depth tracking)
-  void ctx;
-  void cb;
 };
 
 /* ────────────────────────────────────────────────────────── *

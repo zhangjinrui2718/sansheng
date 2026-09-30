@@ -210,11 +210,9 @@ export class Planner {
       if (typeof t.title !== "string" || !t.title.trim()) continue;
       if (typeof t.body !== "string") t.body = "";
 
-      // ID:use provided or generate;ensure unique
-      let id = typeof t.id === "string" && t.id.trim() ? t.id : `todo-${nanoid(8)}`;
-      while (seen.has(id)) {
-        id = `${id}-${nanoid(4)}`;
-      }
+      // ID:use provided or generate;ensure unique (first wins on duplicate)
+      const id = typeof t.id === "string" && t.id.trim() ? t.id : `todo-${nanoid(8)}`;
+      if (seen.has(id)) continue; // dedup: first occurrence wins, later dropped
       seen.add(id);
 
       const dependsOn = Array.isArray(t.dependsOn)
@@ -229,16 +227,18 @@ export class Planner {
         metadata: t.metadata && typeof t.metadata === "object" ? t.metadata : undefined,
       });
     }
-    // 校验:dependsOn 引用的 id 必须在 todos 数组内
+    // 校验:dependsOn 引用的 id 必须在 todos 数组内;含任何未知 id → 整个 todo drop
     const allIds = new Set(todos.map((t) => t.id));
+    const filtered: PlannedTodo[] = [];
     for (const t of todos) {
       const badDeps = t.dependsOn.filter((d) => !allIds.has(d));
       if (badDeps.length > 0) {
-        warnings.push(`todo ${t.id} dependsOn unknown ids: ${badDeps.join(",")}`);
-        t.dependsOn = t.dependsOn.filter((d) => allIds.has(d));
+        warnings.push(`dropped todo ${t.id} due to unknown dependsOn: ${badDeps.join(",")}`);
+        continue;
       }
+      filtered.push(t);
     }
-    return { todos, warnings };
+    return { todos: filtered, warnings };
   }
 
   private async handleParseFailure(

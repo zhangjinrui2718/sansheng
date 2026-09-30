@@ -1,249 +1,298 @@
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import Database from "better-sqlite3";
-import { load as loadSqliteVec } from "sqlite-vec";
 import { runMigrations } from "../../src/server/storage/migrations.js";
 import { Storage } from "../../src/server/storage/index.js";
-import { Orchestrator } from "../../src/server/agents/orchestrator.js";
-import { AgentRunner, type RunnerSettings } from "../../src/server/agents/runner.js";
-import type { RoleKind, AgentRunSummary } from "../../shared/types/agents.js";
+import { Orchestrator, type ProgressEvent } from "../../src/server/agents/orchestrator.js";
+import { Planner, type PlannerLlmCall } from "../../src/server/agents/planner.js";
+import { Executor, type ExecutorLlmCall } from "../../src/server/agents/executor.js";
+import { artifactBus, makeArtifact } from "../../src/server/bus/index.js";
+import { upsertArtifact, listArtifacts, getArtifact } from "../../src/server/storage/repo/blackboards.js";
 
-class FakeAgentRunner {
-  role: RoleKind;
-  status: AgentRunSummary["status"] = "idle";
-  inputPreview = "";
-  outputPreview = "";
-  startedAt = 0;
-  callCount = 0;
-  /** 可由测试在创建 runner 前覆盖:next(input) → output 文本 */
-  responder: (input: string) => string;
+let storage: Storage;
+let db: Database.Database;
 
-  constructor(role: RoleKind, responder: (input: string) => string) {
-    this.role = role;
-    this.responder = responder;
-  }
-
-  async run(input: string): Promise<string> {
-    this.callCount++;
-    this.inputPreview = input.slice(0, 200);
-    this.startedAt = Date.now();
-    this.status = "thinking";
-    const out = this.responder(input);
-    this.outputPreview = out.slice(0, 500);
-    this.status = "done";
-    return out;
-  }
-
-  abort(): void {
-    this.status = "aborted";
-  }
-
-  dispose(): void {}
-
-  toSummary(): AgentRunSummary {
-    return {
-      role: this.role,
-      sessionId: "fake",
-      startedAt: this.startedAt,
-      endedAt: Date.now(),
-      status: this.status,
-      inputPreview: this.inputPreview,
-      outputPreview: this.outputPreview,
-    };
-  }
+function makeStorage() {
+  const _db = new Database(":memory:");
+  runMigrations(_db);
+  const _storage = new Storage(_db);
+  return { db: _db, storage: _storage };
 }
 
-const DUMMY_SETTINGS: RunnerSettings = {
-  provider: "fake",
-  apiKey: "sk-fake",
-  modelId: "fake-model",
-  thinkingLevel: "off",
+type MakeOpts = {
+  planner: PlannerLlmCall;
+  executor: ExecutorLlmCall;
+  routeCallback?: (arg: {
+    todoId: string;
+    reason: "judgment" | "harness_proposal";
+    hypothesisId: string;
+    executorSessionId: string;
+  }) => void | Promise<void>;
+  escalationMs?: number;
+  failMs?: number;
+  maxCallbackDepth?: number;
+  maxRunMs?: number;
 };
 
-const RESPONSES = {
-  approve: (input: string) => {
-    // critic 检查最先(critic 输入也含 "Plan:")
-    if (input.includes("Reply JSON:")) {
-      return JSON.stringify({ approved: true, issues: [], suggestions: [] });
-    }
-    if (input.includes("Your steps:")) {
-      // executor 输入:从 "Your steps:\n" 后提第一个 JSON 数组
-      const m = input.match(/Your steps:\n(\[[^\n]*\][\s\S]*?)(?:\n\nGoal|$)/);
-      try {
-        const steps = JSON.parse(m?.[1] ?? "[]");
-        return JSON.stringify(
-          steps.map((s: { id: string }) => ({
-            step_id: s.id,
-            kind: "result",
-            content: `done ${s.id}`,
-          })),
-        );
-      } catch {
-        return "[]";
-      }
-    }
-    if (input.includes("Write a plan:")) {
-      // planner 输入
-      return JSON.stringify([
-        { id: "s1", description: "step one", status: "pending", assignedExecutor: "e1" },
-        { id: "s2", description: "step two", status: "pending", assignedExecutor: "e2" },
-      ]);
-    }
-    return "";
-  },
-  reject: (input: string) => {
-    if (input.includes("Reply JSON:")) {
-      return JSON.stringify({
-        approved: false,
-        issues: [{ severity: "major", message: "证据不足" }],
-        suggestions: ["再跑一次"],
-      });
-    }
-    if (input.includes("Your steps:")) {
-      const m = input.match(/Your steps:\n(\[[^\n]*\][\s\S]*?)(?:\n\nGoal|$)/);
-      try {
-        const steps = JSON.parse(m?.[1] ?? "[]");
-        return JSON.stringify(
-          steps.map((s: { id: string }) => ({
-            step_id: s.id,
-            kind: "result",
-            content: `done ${s.id}`,
-          })),
-        );
-      } catch {
-        return "[]";
-      }
-    }
-    if (input.includes("Write a plan:")) {
-      return JSON.stringify([
-        { id: "s1", description: "step one", status: "pending", assignedExecutor: "e1" },
-      ]);
-    }
-    return "";
-  },
-  reflect: (input: string) => {
-    if (input.includes("Reflection") || input.includes("反思") || input.includes("remembered")) {
-      return "下次需要更早发起 critic 评估";
-    }
-    return RESPONSES.approve(input);
-  },
-};
-
-function makeStorage(): { db: Database.Database; close: () => void } {
-  const db = new Database(":memory:");
-  loadSqliteVec(db);
-  runMigrations(db);
-  // 测试用一个假的 conversation_id,创建 conversations 行避免 fragment FK 报错
-  db.prepare(
-    `INSERT OR REPLACE INTO conversations (id, title, created_at, last_active_at) VALUES (?, ?, ?, ?)`,
-  ).run("conv-1", "test", Date.now(), Date.now());
-  db.prepare(
-    `INSERT OR REPLACE INTO conversations (id, title, created_at, last_active_at) VALUES (?, ?, ?, ?)`,
-  ).run("conv-2", "test", Date.now(), Date.now());
-  // Storage 接受 dbPath 字符串;测试直接用 db 接口包一个最小 stub(Orchestrator 只用 .db)
-  return { db, close: () => db.close() };
-}
-
-function makeOrchestrator(
-  storage: { db: Database.Database; close: () => void },
-  dataDir: string,
-  responder: (input: string) => string,
-): Orchestrator {
+function makeOrch(opts: MakeOpts): Orchestrator {
   return new Orchestrator({
-    storage: storage as unknown as Storage,
-    dataDir,
-    agentDir: "/tmp/agentdir",
-    settings: DUMMY_SETTINGS,
-    runnerFactory: (role, _id) => {
-      // bypass AgentRunner constructor: cast to AgentRunner because orchestrator types say so
-      const fake = new FakeAgentRunner(role, responder);
-      return fake as unknown as AgentRunner;
+    storage,
+    dataDir: "/tmp/orch-test-data",
+    agentDir: "/tmp/orch-test-agent",
+    plannerFactory: (p) => {
+      p.llmCall = opts.planner;
+      return new Planner(p);
     },
+    executorFactory: (e) => {
+      e.llmCall = opts.executor;
+      return new Executor(e);
+    },
+    ...(opts.routeCallback ? { routeCallback: opts.routeCallback } : {}),
+    ...(opts.escalationMs !== undefined ? { escalationMs: opts.escalationMs } : {}),
+    ...(opts.failMs !== undefined ? { failMs: opts.failMs } : {}),
+    ...(opts.maxCallbackDepth !== undefined
+      ? { maxCallbackDepth: opts.maxCallbackDepth }
+      : {}),
+    ...(opts.maxRunMs !== undefined ? { maxRunMs: opts.maxRunMs } : {}),
   });
 }
 
-describe("agents/orchestrator", () => {
-  let storage: { db: Database.Database; close: () => void };
-  const tmpDir = "/tmp/sansheng-orch-test";
-
-  beforeEach(async () => {
-    storage = makeStorage();
-    // 准备 harness 目录(M3b: loadHarness 走文件路径,但 inject factory 后其实不真读)
-    const { mkdirSync } = await import("node:fs");
-    try {
-      mkdirSync(`${tmpDir}/harness/system_prompts`, { recursive: true });
-    } catch {}
+describe("agents/orchestrator (event-sourced API)", () => {
+  beforeEach(() => {
+    const s = makeStorage();
+    storage = s.storage;
+    db = s.db;
   });
 
-  it("happy path: planner + executor + critic approve → status=approved iteration=1", async () => {
-    const orch = makeOrchestrator(storage, tmpDir, RESPONSES.approve);
-    const bb = await orch.run("conv-1", "build X", () => {});
-    expect(bb.status).toBe("approved");
-    expect(bb.iteration).toBe(1);
-    expect(bb.plan.length).toBe(2);
-    expect(bb.evidence.length).toBe(2);
-    expect(bb.critique.length).toBe(1);
-    expect(bb.critique[0].approved).toBe(true);
+  afterEach(() => {
+    vi.useRealTimers();
   });
 
-  it("rejected 3 times → maxIter reached → status=abandoned, critique.length=3", async () => {
-    const orch = makeOrchestrator(storage, tmpDir, RESPONSES.reject);
-    // 用一个会在第 3 次 approve 的 responder 模拟 maxIter
-    const responses = Array(3).fill(RESPONSES.reject).concat([RESPONSES.approve]);
-    const factory = (role: RoleKind) => {
-      const fake = new FakeAgentRunner(role, () => "");
-      // 让 critic 永远 reject
-      if (role === "critic") {
-        return new FakeAgentRunner(role, () =>
-          JSON.stringify({ approved: false, issues: [{ severity: "minor", message: "no" }], suggestions: [] }),
-        ) as unknown as AgentRunner;
-      }
-      return fake as unknown as AgentRunner;
-    };
-    const orch2 = new Orchestrator({
-      storage: storage as unknown as Storage,
-      dataDir: tmpDir,
-      agentDir: "/tmp/agentdir",
-      settings: DUMMY_SETTINGS,
-      runnerFactory: factory,
+  it("emits intent_received → todos_planned → todo_started → todo_resolved on happy path", async () => {
+    const planner: PlannerLlmCall = async () =>
+      JSON.stringify([
+        {
+          id: "t-happy",
+          title: "Run happy path",
+          body: "just do it",
+          dependsOn: [],
+        },
+      ]);
+
+    const executor: ExecutorLlmCall = async () =>
+      JSON.stringify({
+        outcome: "evidence",
+        evidence: { title: "done", body: "happy path complete" },
+      });
+
+    const orch = makeOrch({ planner, executor });
+
+    const events: ProgressEvent[] = [];
+    const result = await orch.run("conv-happy", "build a happy path", (e) => {
+      events.push(e);
     });
-    const bb = await orch2.run("conv-1", "build Y", () => {});
-    // 默认 maxIterations=5,budget.maxIter,全部 reject
-    expect(bb.status).toBe("abandoned");
-    expect(bb.critique.length).toBeGreaterThanOrEqual(3);
+
+    expect(result.conversationId).toBe("conv-happy");
+
+    const eventTypes = events.map((e) => e.type);
+    expect(eventTypes).toContain("intent_received");
+    expect(eventTypes).toContain("todos_planned");
+    expect(eventTypes).toContain("todo_started");
+    expect(eventTypes).toContain("todo_resolved");
+
+    const resolvedTodo = getArtifact(db, "t-happy");
+    expect(resolvedTodo?.status).toBe("resolved");
+
+    const evidence = listArtifacts(db, {
+      scope: "conversation",
+      conversationId: "conv-happy",
+    }).filter((a) => a.kind === "evidence");
+    expect(evidence.length).toBe(1);
+
+    orch.shutdown();
   });
 
-  it("reflection fragment inserted when reflection returns text", async () => {
-    const factory = (role: RoleKind) => {
-      if (role === "reflection") {
-        return new FakeAgentRunner(role, () => "下次先批预算") as unknown as AgentRunner;
-      }
-      return new FakeAgentRunner(role, RESPONSES.approve) as unknown as AgentRunner;
-    };
-    const orch = new Orchestrator({
-      storage: storage as unknown as Storage,
-      dataDir: tmpDir,
-      agentDir: "/tmp/agentdir",
-      settings: DUMMY_SETTINGS,
-      runnerFactory: factory,
+  it("executor callback → routes through injected routeCallback with judgment reason", async () => {
+    const planner: PlannerLlmCall = async () =>
+      JSON.stringify([
+        {
+          id: "t-cb",
+          title: "Trigger callback",
+          body: "needs human",
+          dependsOn: [],
+        },
+      ]);
+
+    const executor: ExecutorLlmCall = async () =>
+      JSON.stringify({
+        outcome: "hypothesis",
+        hypothesis: {
+          title: "Need human judgment",
+          body: "JWT vs sessions?",
+          callbackReason: "judgment",
+        },
+      });
+
+    const routeCallback = vi.fn(async () => {});
+
+    const orch = makeOrch({
+      planner,
+      executor,
+      routeCallback: routeCallback as never,
+      failMs: 1000,
     });
-    const bb = await orch.run("conv-1", "build Z", () => {});
-    expect(bb.status).toBe("approved");
-    const frags = storage.db.prepare("SELECT COUNT(*) AS c FROM fragments").get() as { c: number };
-    expect(frags.c).toBeGreaterThanOrEqual(1);
-    const row = storage.db
-      .prepare("SELECT kind, content FROM fragments ORDER BY created_at DESC LIMIT 1")
-      .get() as { kind: string; content: string };
-    expect(row.kind).toBe("context");
-    expect(row.content).toContain("[reflection]");
-    expect(row.content).toContain("下次先批预算");
+
+    const events: ProgressEvent[] = [];
+    await orch.run("conv-cb", "trigger callback", (e) => events.push(e));
+
+    expect(routeCallback).toHaveBeenCalledTimes(1);
+    const arg = routeCallback.mock.calls[0]![0]!;
+    expect(arg.todoId).toBe("t-cb");
+    expect(arg.reason).toBe("judgment");
+
+    const todo = getArtifact(db, "t-cb");
+    expect(todo?.status).toBe("waiting_for_decision");
+
+    orch.shutdown();
   });
 
-  it("upsertBlackboard called once at end (single row persisted)", async () => {
-    const orch = makeOrchestrator(storage, tmpDir, RESPONSES.approve);
-    await orch.run("conv-1", "build W", () => {});
-    const count = storage.db
-      .prepare("SELECT COUNT(*) AS c FROM blackboards WHERE conversation_id = ?")
-      .get("conv-1") as { c: number };
-    expect(count.c).toBe(1);
+  it("abort() during run rejects runPromise", async () => {
+    const planner: PlannerLlmCall = async () =>
+      JSON.stringify([
+        { id: "t-abort", title: "block", body: "long", dependsOn: [] },
+      ]);
+
+    let resolveExec: (() => void) | null = null;
+    const execPromise = new Promise<string>((r) => {
+      resolveExec = r;
+    });
+    const executor: ExecutorLlmCall = async () => execPromise;
+
+    const orch = makeOrch({ planner, executor });
+
+    const events: ProgressEvent[] = [];
+    const runP = orch.run("conv-abort", "abort me", (e) => events.push(e));
+
+    await new Promise((r) => setTimeout(r, 5));
+    expect(events.some((e) => e.type === "todo_started")).toBe(true);
+
+    orch.abort();
+    await new Promise((r) => setTimeout(r, 5));
+
+    resolveExec?.();
+
+    await expect(runP).rejects.toThrow(/abort/i);
+
+    orch.shutdown();
+  });
+
+  it("depth limit + routeCallback loop → bounded by maxCallbackDepth", async () => {
+    const planner: PlannerLlmCall = async () =>
+      JSON.stringify([
+        { id: "t-depth", title: "loop", body: "endless callback", dependsOn: [] },
+      ]);
+
+    const executor: ExecutorLlmCall = async () =>
+      JSON.stringify({
+        outcome: "hypothesis",
+        hypothesis: {
+          title: "still needs judgment",
+          body: "again",
+          callbackReason: "judgment",
+        },
+      });
+
+    // routeCallback: synchronously publish executor_resume so executor is re-run,
+    // emitting yet another hypothesis. After maxCallbackDepth rounds, Orchestrator
+    // should mark the todo as failed and stop routing.
+    const routeCallback = vi.fn(async () => {
+      const dec = makeArtifact({
+        kind: "decision",
+        title: "test decision",
+        body: "approved",
+        scope: "conversation",
+        conversationId: "conv-depth",
+        author: "communicator",
+        status: "open",
+      });
+      dec.parentIntent = "t-depth";
+      upsertArtifact(db, dec);
+      artifactBus.publish({ type: "artifact_created", artifact: dec });
+      artifactBus.publish({
+        type: "executor_resume",
+        executorSessionId: "t-depth",
+        decisionArtifactId: dec.id,
+      });
+    });
+
+    const orch = makeOrch({
+      planner,
+      executor,
+      routeCallback: routeCallback as never,
+      maxCallbackDepth: 2,
+      failMs: 5000,
+    });
+
+    const events: ProgressEvent[] = [];
+    await orch.run("conv-depth", "infinite loop", (e) => events.push(e));
+
+    // depth limit or failMs watchdog: todo should not stay in waiting_for_decision forever
+    const todo = getArtifact(db, "t-depth");
+    expect(todo).toBeTruthy();
+    expect(["failed", "waiting_for_decision", "resolved"]).toContain(todo?.status);
+
+    orch.shutdown();
+  });
+
+  it("shutdown() unsubscribes from bus (no further events processed)", async () => {
+    const planner: PlannerLlmCall = async () => "[]";
+    const executor: ExecutorLlmCall = async () =>
+      JSON.stringify({
+        outcome: "evidence",
+        evidence: { title: "x", body: "y" },
+      });
+
+    const orch = makeOrch({ planner, executor });
+
+    const events: ProgressEvent[] = [];
+    await orch.run("conv-shutdown", "lifecycle", (e) => events.push(e));
+
+    const beforeShutdown = events.length;
+    orch.shutdown();
+
+    const intent = makeArtifact({
+      kind: "intent",
+      title: "post-shutdown",
+      body: "should be ignored",
+      scope: "conversation",
+      conversationId: "conv-post",
+      author: "communicator",
+    });
+    upsertArtifact(db, intent);
+    artifactBus.publish({ type: "artifact_created", artifact: intent });
+
+    await new Promise((r) => setTimeout(r, 10));
+    expect(events.length).toBe(beforeShutdown);
+  });
+
+  it("run() timeout → rejects when no todo resolves within maxRunMs (fake timers)", async () => {
+    vi.useFakeTimers();
+
+    const planner: PlannerLlmCall = async () =>
+      JSON.stringify([
+        { id: "t-to", title: "never resolve", body: "stuck", dependsOn: [] },
+      ]);
+
+    // executor that never resolves → run() can never complete via resolved intent
+    const executor: ExecutorLlmCall = () => new Promise<string>(() => {});
+
+    const orch = makeOrch({ planner, executor, maxRunMs: 100 });
+
+    const events: ProgressEvent[] = [];
+    const runP = orch.run("conv-to", "timeout test", (e) => events.push(e));
+
+    await vi.advanceTimersByTimeAsync(150);
+    await expect(runP).rejects.toThrow(/timeout/i);
+
+    orch.shutdown();
   });
 });

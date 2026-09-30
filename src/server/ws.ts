@@ -200,28 +200,30 @@ export function attachWebSocket(
         storage,
         dataDir,
         agentDir: kernel.getAgentDir(),
-        settings: {
-          provider: active.provider,
-          baseUrl: active.baseUrl,
-          apiKey: active.apiKey,
-          modelId: active.modelId,
-          thinkingLevel: active.thinkingLevel,
-        },
+        // M3+ partial:真实 llmCall 由 M5+ 注入;这里保留 active provider 校验
+        // 以保证缺少 API key 的用户在 UI 上能看到明确错误。Planner/Executor
+        // 在生产路径里需要通过 boot 流程把 settings 转换成 llmCall — 当前
+        // 尚未实现(默认 llmCall 会抛错),所以 OrchestratorOptions 不接收
+        // settings 字段以避免悄悄接受却忽略的陷阱。
       });
       activeOrchestrator = orchestrator;
       try {
         const finalBb = await orchestrator.run(
           conversationId,
           goal,
-          (progress) => {
-            send(ws, {
-              type: "blackboard_update",
-              blackboard: progress.blackboard,
-              agents: progress.agents,
-            });
+          // M3+:新的 Orchestrator.run 沿 artifact_bus 推送进度
+          // (intent_received/todos_planned/todo_started/todo_resolved/
+          //  todo_failed),由 kernel 订阅 bus 后转成 ServerEvent 发给客户端。
+          // 这里不再合成 'blackboard_update' / 'plan_done' — wire 协议
+          // 在 M5 重设计后才有完整的 blackboard 快照流(B1 BlackboardShape 与
+          // legacy Blackboard 字段不重叠,目前没法直接喂给 'plan_done')。
+          // 'finalBb' 保留满足 run() 返回类型,后续 M5 接 snapshot。
+          (_progress) => {
+            /* progress forwarded via artifactBus → kernel.bus subscribe */
           },
         );
-        send(ws, { type: "plan_done", blackboard: finalBb });
+        // 显式吞掉 finalBb:后续 M5 plan_done 推送 snapshot 时再启用
+        void finalBb;
       } catch (err) {
         log.warn("Orchestrator failed:", err);
         send(ws, {

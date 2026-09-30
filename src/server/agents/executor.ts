@@ -122,15 +122,10 @@ export class Executor {
         return !dep || dep.status !== "resolved";
       });
       if (unresolved.length > 0) {
-        // 阻塞:等待 Orchestrator 在 artifact_status_changed 事件中唤醒
-        updateArtifactStatus(this.storage.db, todo.id, "waiting_for_dependency");
-        this.bus.publish({
-          type: "artifact_status_changed",
-          artifactId: todo.id,
-          oldStatus: "open",
-          newStatus: "waiting_for_dependency",
-          actor: "executor",
-        });
+        // 阻塞:保持 todo.status='open',等 Orchestrator 在上游 artifact 状态变更时
+        // 通过 tryUnblockDependents() 重新触发 spawnExecutorIfReady。不引入额外的
+        // "waiting_for_dependency" 状态(超出 ArtifactStatus 语义),也避免让
+        // onArtifactStatusChanged 把这个 todo 当作 failed 处理。
         return {
           todoId: todo.id,
           executorSessionId: this.sessionId,
@@ -322,6 +317,14 @@ export class Executor {
       upsertArtifact(this.storage.db, evidence);
       this.bus.publish({ type: "artifact_created", artifact: evidence });
       artifactIds.push(evidenceId);
+      updateArtifactStatus(this.storage.db, todo.id, "resolved");
+      this.bus.publish({
+        type: "artifact_status_changed",
+        artifactId: todo.id,
+        oldStatus: "in_progress",
+        newStatus: "resolved",
+        actor: "executor",
+      });
     } else if (parsed.outcome === "hypothesis") {
       const hypothesisId = `hyp-${nanoid(10)}`;
       const hypothesis = makeArtifact({

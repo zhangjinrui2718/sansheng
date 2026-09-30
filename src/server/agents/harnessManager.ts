@@ -36,19 +36,16 @@
  */
 
 import { log } from "../../shared/log.js";
-import type { BlackboardArtifact } from "../../shared/types/blackboard.js";
-import type { BusEventPayload } from "../../shared/types/bus.js";
+import type { BlackboardArtifact, FileChange } from "../../../shared/types/blackboard.js";
+import type { BusEventPayload } from "../../../shared/types/bus.js";
 import {
   parseHarnessPreview,
   type RawHarnessPreview,
   type ImplementationPreviewPayload,
-} from "../../shared/types/harness.js";
+} from "../../../shared/types/harness.js";
 import { artifactBus, makeArtifact } from "../bus/index.js";
-import {
-  upsertArtifact,
-  listArtifacts,
-  type Storage,
-} from "../storage/repo/blackboards.js";
+import { upsertArtifact, listArtifacts } from "../storage/repo/blackboards.js";
+import type { Storage } from "../storage/db.js";
 
 // ───────────────────────────── Decide / Notify 注入 ─────────────────────────────
 
@@ -260,8 +257,8 @@ export class HarnessManager {
       this.warn(`upsertArtifact(preview) failed for ${proposal.id}:`, err);
       return;
     }
-    artifactBus.publish("artifact_created", { artifact: preview });
-    this.opts.info?.(
+    artifactBus.publish({ type: "artifact_created", artifact: preview });
+    this.warn(
       `[harness] preview ${preview.id} emitted for ${proposal.id} (risk=${parsed.value.riskLevel}, mode=${parsed.value.mode}, files=${parsed.value.targetFiles.length})`,
     );
 
@@ -317,7 +314,7 @@ export class HarnessManager {
         ? [
             "## filesToChange (from proposal metadata)",
             ...proposal.metadata.filesToChange.map(
-              (f) => `- ${f.changeType}: ${f.path}${f.diffPreview ? `\n  preview: ${f.diffPreview.slice(0, 200)}` : ""}`,
+              (f: FileChange) => `- ${f.changeType}: ${f.path}${f.diffPreview ? `\n  preview: ${f.diffPreview.slice(0, 200)}` : ""}`,
             ),
           ].join("\n")
         : "";
@@ -406,7 +403,7 @@ export class HarnessManager {
     });
     try {
       upsertArtifact(this.opts.storage.db, note);
-      artifactBus.publish("artifact_created", { artifact: note });
+      artifactBus.publish({ type: "artifact_created", artifact: note });
       this.opts.info?.(
         `[harness] failure-note ${note.id} emitted for ${proposal.id}`,
       );
