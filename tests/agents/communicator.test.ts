@@ -8,7 +8,42 @@
  * 4. Worker raise + knowIt=false → emit pending_question 升级
  * 5. answer_question 回来 → reply 给 worker,worker 解阻塞继续
  */
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, vi } from "vitest";
+
+// 顶层 mock 捕获 DefaultResourceLoader 构造 + createAgentSession 调用
+// (为 ensureSession 测试验证 user-customized systemPrompt 流入 loader)
+const __loaderCapture = vi.hoisted(() => ({
+  loaderCalls: [] as Array<Record<string, unknown>>,
+  sessionCalls: [] as Array<Record<string, unknown>>,
+}));
+vi.mock("@earendil-works/pi-coding-agent", async () => {
+  const actual = await vi.importActual<typeof import("@earendil-works/pi-coding-agent")>(
+    "@earendil-works/pi-coding-agent",
+  );
+  return {
+    ...actual,
+    DefaultResourceLoader: class {
+      constructor(opts: any) {
+        __loaderCapture.loaderCalls.push({ ...opts });
+      }
+    },
+    createAgentSession: (opts: any) => {
+      __loaderCapture.sessionCalls.push({ ...opts });
+      return Promise.resolve({ session: { id: "stub-session", abort: () => {} } });
+    },
+  };
+});
+
+// mock providers/registry 让 resolveModel 返回 fake model,不走真实 LLM 加载
+vi.mock("../../src/server/providers/registry.js", async () => {
+  const actual = await vi.importActual<typeof import("../../src/server/providers/registry.js")>(
+    "../../src/server/providers/registry.js",
+  );
+  return {
+    ...actual,
+    resolveModel: () => ({ provider: "mock", id: "mock", baseUrl: "", headers: {} } as any),
+  };
+});
 import { MessageBus } from "../../src/server/agents/messageBus.js";
 import {
   Communicator,
@@ -197,5 +232,31 @@ describe("agents/communicator", () => {
 
     // 5. sink 至少收到 pending_question
     expect(events.some((e) => e.type === "pending_question")).toBe(true);
+  });
+
+  // M3c regression:保证 user-customized systemPrompt 流入 DefaultResourceLoader
+  it("ensureSession: custom systemPrompt flows to DefaultResourceLoader", async () => {
+    __loaderCapture.loaderCalls.length = 0;
+    __loaderCapture.sessionCalls.length = 0;
+    const bus = new MessageBus();
+    const CUSTOM = "CUSTOM_SYSTEM_PROMPT_FROM_USER";
+    const comm = new Communicator({
+      bus,
+      settings: { provider: "mock", apiKey: "sk-mock", modelId: "mock", thinkingLevel: "off" },
+      agentDir: "/tmp/agentdir/communicator",
+      cwd: "/tmp",
+      systemPrompt: CUSTOM,
+      decideFn: async () => ({ kind: "reply", text: "x" }),
+    });
+    const session = await (comm as any).ensureSession();
+    expect(session).toBeTruthy();
+    // 验证 DefaultResourceLoader 用 user-customized systemPrompt 构造
+    expect(__loaderCapture.loaderCalls.length).toBe(1);
+    expect(__loaderCapture.loaderCalls[0].systemPrompt).toBe(CUSTOM);
+    expect(__loaderCapture.loaderCalls[0].cwd).toBe("/tmp");
+    expect(__loaderCapture.loaderCalls[0].agentDir).toBe("/tmp/agentdir/communicator");
+    // 验证 createAgentSession 收到了 resourceLoader
+    expect(__loaderCapture.sessionCalls.length).toBe(1);
+    expect(__loaderCapture.sessionCalls[0].resourceLoader).toBeDefined();
   });
 });

@@ -200,7 +200,7 @@ export class AgentKernel {
       settings,
       agentDir: `${this.agentDir}/communicator`,
       cwd: this.cwd,
-      systemPrompt: harness.systemPrompts.communicator ?? "",
+      systemPrompt: harness.systemPrompts.communicator, // undefined 让 DefaultResourceLoader 走 AGENTS.md 默认
       // kernel 层拿不到模型时(无 API key)降级为 disableLlm
       disableLlm: !active?.apiKey,
     });

@@ -20,7 +20,11 @@
  *   - Intent 验证失败 → kind 强制改为 hypothesis
  */
 import { nanoid } from "nanoid";
-import { createAgentSession, type AgentSession } from "@earendil-works/pi-coding-agent";
+import {
+  createAgentSession,
+  DefaultResourceLoader,
+  type AgentSession,
+} from "@earendil-works/pi-coding-agent";
 import type { Model } from "@earendil-works/pi-ai";
 import { resolveModel } from "../providers/registry.js";
 import type { RunnerSettings } from "./runner.js";
@@ -276,10 +280,18 @@ export class Communicator {
       return null;
     }
     this.model = model as Model<string>;
+    // 注入 user-customized systemPrompt:用户 ~/.sansheng/system_prompts/communicator.md
+    // 覆盖或 DEFAULT_PROMPTS.communicator fallback(undefined → loader 用默认 AGENTS.md)
+    const resourceLoader = new DefaultResourceLoader({
+      cwd: this.opts.cwd,
+      agentDir: this.opts.agentDir,
+      systemPrompt: this.opts.systemPrompt || undefined,
+    });
     const result = await createAgentSession({
       model: this.model,
       agentDir: this.opts.agentDir,
       cwd: this.opts.cwd,
+      resourceLoader,
     });
     this.session = result.session;
     return this.session;
