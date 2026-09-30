@@ -1,18 +1,33 @@
 # Sansheng 项目交接包
 
-**生成时间**:2026-09-30 16:20 CST · **v6.0**(M3+ B5+B7-partial + Communicator fix landed)
+**生成时间**:2026-09-30 16:58 CST · **v6.1**(M3+ 全闭环:B3-B7 + 2 dep bumps 全部 push)
 **适用**:下一会话(主对话 / worker)开盒即读
 **配套阅读**:`/root/projects/sansheng/PLAN.md`(v5 集成版),`/root/.pi/agent/memory/MEMORY.md`(长期偏好 + 教训)
+
+> **M3+ 状态变化 (v6.0 → v6.1)**:
+> - B6 (HarnessManager v0 reinforcement) 已 commit `df5d388`
+> - B7 partial (Timeline BusRow memo) 已 commit `e735689`
+> - better-sqlite3 v13 + Node 22 upgrade 已 commit `b7a8784`
+> - @types/better-sqlite3 v9.6.0 bump 已 commit `bef7cd8`
+> - 全部 11 commits 已 push origin/master
+> - 附录 B 中 3 项已 close(B6 / push / C2 typo),仅剩 2 项 open(User Profile + manual tests)
+> - 见末尾 **附录 C: M3+ 闭环总结 (v6.1 新增)**
 
 ---
 
 ## TL;DR
 
-Sansheng = 单用户本地 Node 服务。M0-M4 + M3+ B1+B2 已 commit + push(10 commits remote)。
-**当前 M3+ 进展**:
-- ✅ **B3 + B4** 已 commit(7228268 + 640204f) — Orchestrator + Planner + Executor + HarnessManager event-sourced rewrite
-- ✅ **Communicator fix** 已 commit(06abfcc) — wire user-customized systemPrompt 到 DefaultResourceLoader
-- ✅ **B5** 已 commit(33d60dc) — Planner + Executor reinforcement(LLM graceful failure + DAG cycle detection)
+Sansheng = 单用户本地 Node 服务。M0-M4 + M3+ B1-B7 + 2 dep bumps 已 commit + push(11 commits remote,origin/master = `bef7cd8`)。
+**当前 M3+ 进展**(全部 ✅):
+- ✅ **B1** 已 commit(`36694c6`) — BlackboardArtifact v3 + storage + HTTP
+- ✅ **B2** 已 commit(`aeec7f6`) — Communicator 3 identities + bus events + Live Trace
+- ✅ **B3 + B4** 已 commit(`7228268` + `640204f`) — Orchestrator + Planner + Executor + HarnessManager event-sourced rewrite
+- ✅ **Communicator fix** 已 commit(`06abfcc`) — wire user-customized systemPrompt 到 DefaultResourceLoader
+- ✅ **B5** 已 commit(`33d60dc`) — Planner + Executor reinforcement(LLM graceful failure + DAG cycle detection)
+- ✅ **B6** 已 commit(`df5d388`) — HarnessManager v0 reinforcement(decideFn timeout + HarnessManagerStats + observability)
+- ✅ **B7 partial** 已 commit(`e735689`) — Timeline BusRow memo
+- ✅ **better-sqlite3 ^13 + Node 22** 已 commit(`b7a8784`)
+- ✅ **@types/better-sqlite3 ^9.6.0** 已 commit(`bef7cd8`)
 - ✅ **B7 partial** 已 commit(e735689) — Timeline BusRow memoization
 - ✅ **C2 server smoke** 全绿(8min,无 commit)
 - ❌ **B6 lost** — Harness Manager reinforcement worker 死亡,/tmp 被 systemd 清理,无 commit
@@ -318,10 +333,51 @@ git log / status / typecheck / test / build / 改进点 / files / open questions
 
 ## 附录 B: Open issues / Follow-ups
 
-1. **[BUG · remote verification]** User Profile "暂无 profile" — 已知是 empty state 正常(无 data)。需用户在 UI 触发 M3 reflection 才会生成内容。
-2. **HANDOFF §C2 路径描述错误**:`?scope=global` → 实际 `/api/blackboard/global`(不影响代码,只本文件)
-3. **B6 重派时**:用 `TMPDIR=~/.cache/tmp` 新会话(避免 /tmp 被清)
-4. **push 7 commits**:本地 `master` 领先 `origin/master` 7 个,建议 `git push origin master`
-5. **8 manual verification tests**:USER-only,需在浏览器触发
+1. **[BUG · remote verification]** User Profile "暂无 profile" — 已知是 empty state 正常(无 data)。需用户在 UI 触发 M3 reflection 才会生成内容。**STILL OPEN** — 需 UI 触发。
+2. ~~**HANDOFF §C2 路径描述错误**: `?scope=global` → 实际 `/api/blackboard/global`~~ ✅ **CLOSED (v6.1)** — C2 server smoke verify pass,本附录已修正
+3. ~~**B6 重派时**: 用 `TMPDIR=~/.cache/tmp` 新会话(避免 /tmp 被清)~~ ✅ **CLOSED (v6.1)** — B6 已 commit `df5d388`
+4. ~~**push 7 commits**: 本地 `master` 领先 `origin/master` 7 个,建议 `git push origin master`~~ ✅ **CLOSED (v6.1)** — 已 push 11 commits (origin/master = `bef7cd8`)
+5. **8 manual verification tests**:USER-only,需在浏览器触发。**STILL OPEN** — 见 PLAN.md §manual-verification / HANDOFF §C2,需 user 手动跑。
 
-#sansheng #m3-plus #v6 #b5-done #b7-partial #b6-lost #163-tests #7-unpushed
+---
+
+## 附录 C: M3+ 闭环总结 (v6.1 新增)
+
+### 架构落地完整链
+
+```
+M3+ B1 BlackboardArtifact v3 + 5 bus events       ✅ 36694c6
+M3+ B2 Communicator 三重身份 + Live Trace          ✅ aeec7f6
+M3+ B3 + B4 Orchestrator + Planner + Executor       ✅ 7228268 + 640204f
+    + HarnessManager event-sourced
+M3+ Communicator fix (systemPrompt wire)            ✅ 06abfcc
+M3+ B5 Planner + Executor reinforcement             ✅ 33d60dc
+M3+ B7 partial (Timeline BusRow memo)               ✅ e735689
+M3+ B6 HarnessManager v0 reinforcement             ✅ df5d388
+better-sqlite3 ^13 + Node 22 + @types v9            ✅ b7a8784 + bef7cd8
+```
+
+### Sprint metrics
+
+| Metric | Value |
+| --- | --- |
+| Commits this sprint | 11 (10 M3+ + 2 dep bump - 1 overlap) |
+| Test count | 132 → **166** (+34, all passing) |
+| Type errors | 0 |
+| Build status | ✅ OK |
+| Origin/master | `bef7cd8` (in sync) |
+| Native bindings | better-sqlite3 v13.0.3 on Node 22.23.3 |
+
+### Worker prompts (本 session 实际用的,可复用)
+
+- **B6 (HarnessManager reinforcement)** — 5min worker `del_munuje5l_3irf` → `df5d388`
+- **better-sqlite3 upgrade** — 3min worker `del_munv9lml_1qpg` → `b7a8784`
+- **@types/better-sqlite3 bump** — 3min worker `del_munvf5rd_pien` → `bef7cd8`
+
+### 下一会话起手 3 件事
+
+1. **8 manual browser verification tests**(USER-only) — 起 `npm run dev`,浏览器按 HANDOFF §C2 跑 8 个 test case
+2. **(可选)Orchestrator 2 unhandled rejection** — `tests/agents/orchestrator.test.ts` 中 pre-existing 2 errors,baseline 不影响 pass,但可清理
+3. **(可选)HANDOFF §C2 实测** — `/api/profile` 空 state 是已知 empty,需 UI 触发 M3 reflection 才会有内容
+
+#sansheng #m3-plus #v6-1 #b3-b7-done #166-tests #11-commits-pushed #node-22 #better-sqlite3-v13
