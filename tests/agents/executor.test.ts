@@ -346,4 +346,62 @@ describe("agents/executor", () => {
     // same instance sessionId
     expect(exec.sessionId).toBe(sid);
   });
+
+  it("abort() before execute() → returns failed without calling LLM", async () => {
+    const todo = makeTodo("conv-abort-before");
+    upsertArtifact(db, todo);
+
+    let llmCalled = false;
+    const llm: ExecutorLlmCall = async () => {
+      llmCalled = true;
+      return JSON.stringify({
+        outcome: "evidence",
+        evidence: { title: "x", body: "y" },
+      });
+    };
+
+    const exec = new Executor({ storage, bus: artifactBus, llmCall: llm });
+    exec.abort();
+
+    const result = await exec.execute(todo);
+    expect(result.outcome).toBe("failed");
+    expect(result.artifactIds).toEqual([]);
+    expect(llmCalled).toBe(false);
+
+    // todo.status 保持原样（未变更，aborted skip 一切 side effect）
+    const refreshed = getArtifact(db, todo.id);
+    expect(refreshed?.status).toBe("open");
+  });
+
+  it("abort() after first execute() → second execute() returns failed without LLM", async () => {
+    const todo = makeTodo("conv-abort-after");
+    upsertArtifact(db, todo);
+
+    let llmCallCount = 0;
+    const llm: ExecutorLlmCall = async () => {
+      llmCallCount += 1;
+      return JSON.stringify({
+        outcome: "evidence",
+        evidence: { title: "x", body: "y" },
+      });
+    };
+
+    const exec = new Executor({ storage, bus: artifactBus, llmCall: llm });
+
+    // 第一次 execute: 正常路径
+    const r1 = await exec.execute(todo);
+    expect(r1.outcome).toBe("evidence");
+    expect(llmCallCount).toBe(1);
+
+    // abort 之后：实例被冻住
+    exec.abort();
+    const todo2 = makeTodo("conv-abort-after", { id: "t-aborted-2" });
+    upsertArtifact(db, todo2);
+
+    const r2 = await exec.execute(todo2);
+    expect(r2.outcome).toBe("failed");
+    expect(r2.artifactIds).toEqual([]);
+    // 重要：LLM 不被调用 — aborted skip 在 dependsOn 检查之前
+    expect(llmCallCount).toBe(1);
+  });
 });

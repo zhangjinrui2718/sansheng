@@ -27,6 +27,65 @@ import {
 import type { Storage } from "../storage/index.js";
 
 /* ────────────────────────────────────────────────────────── *
+ * DAG cycle detection helper
+ * 给定已 validate 且 dependsOn 全为已知 id 的 todos，找出依赖图中的环节点并 drop。
+ * 警告推入 warnings[]（“dropped todo X due to cycle: ...”）。
+ * 实现：DFS 三色标记（white/gray/black）。输出不含环上节点，但保留环外合法节点。
+ * ────────────────────────────────────────────────────────── */
+
+function dropCycles(
+  todos: PlannedTodo[],
+  warnings: string[],
+): PlannedTodo[] {
+  const idToTodo = new Map<string, PlannedTodo>();
+  for (const t of todos) idToTodo.set(t.id, t);
+
+  const color = new Map<string, "white" | "gray" | "black">(); // 0=未访,1=栈中,2=完成
+  const cycleMembers = new Set<string>();
+  const stackPath: string[] = [];
+
+  function visit(id: string): void {
+    const c = color.get(id);
+    if (c === "black") return;
+    if (c === "gray") {
+      // 环：从栈中 id 到当前 id 的所有节点都是环成员。
+      const idx = stackPath.indexOf(id);
+      if (idx >= 0) {
+        for (let i = idx; i < stackPath.length; i++) {
+          cycleMembers.add(stackPath[i]!);
+        }
+        cycleMembers.add(id);
+      }
+      return;
+    }
+    color.set(id, "gray");
+    stackPath.push(id);
+    const todo = idToTodo.get(id);
+    if (todo) {
+      for (const dep of todo.dependsOn) {
+        if (idToTodo.has(dep)) visit(dep);
+      }
+    }
+    stackPath.pop();
+    color.set(id, "black");
+  }
+
+  for (const t of todos) visit(t.id);
+
+  if (cycleMembers.size === 0) return todos;
+
+  for (const id of cycleMembers) {
+    const t = idToTodo.get(id);
+    warnings.push(
+      `dropped todo ${id} due to cycle: ${
+        t ? t.dependsOn.join(",") : "(missing)"
+      }`,
+    );
+  }
+  return todos.filter((t) => !cycleMembers.has(t.id));
+}
+
+/* ────────────────────────────────────────────────────────── *
  * 注入接口(测试可替换)
  * ────────────────────────────────────────────────────────── */
 
@@ -92,12 +151,18 @@ export class Planner {
     // 1. 收集 current blackboard context(siblings intent 看不到,但同 conv 已存在的 todos 可以看)
     const siblings = await this.gatherContext(intent);
 
-    // 2. 调 LLM
+    // 2. 调 LLM(失败 → 写 failure note + mark intent failed,与 Executor 对称)
     const userPrompt = this.buildUserPrompt(intent, siblings);
-    const raw = await this.llmCall({
-      systemPrompt: this.systemPrompt,
-      userPrompt,
-    });
+    let raw: string;
+    try {
+      raw = await this.llmCall({
+        systemPrompt: this.systemPrompt,
+        userPrompt,
+      });
+    } catch (err) {
+      await this.handleLlmFailure(intent, err);
+      return { intent, todos: [] };
+    }
 
     // 3. Parse JSON 数组
     const planned = this.parseTodoArray(raw);
@@ -239,7 +304,10 @@ export class Planner {
       }
       filtered.push(t);
     }
-    return { todos: filtered, warnings };
+    // 校验:DAG 环检测(LLM 可能输出 A→B,B→A 这种自反 / 互反依赖)。
+    // 环上节点全部 drop(Orchestrator 永远 resolve 不了,会无限等待)。
+    const cycleDropped = dropCycles(filtered, warnings);
+    return { todos: cycleDropped, warnings };
   }
 
   private async handleParseFailure(
@@ -267,6 +335,41 @@ export class Planner {
     this.bus.publish({ type: "artifact_created", artifact: note });
 
     // mark intent failed
+    updateArtifactStatus(this.storage.db, intent.id, "failed");
+    this.bus.publish({
+      type: "artifact_status_changed",
+      artifactId: intent.id,
+      oldStatus: "open",
+      newStatus: "failed",
+      actor: "planner",
+    });
+  }
+
+  private async handleLlmFailure(
+    intent: BlackboardArtifact,
+    err: unknown,
+  ): Promise<void> {
+    const ts = this.now();
+    const msg = err instanceof Error ? err.message : String(err);
+    const noteId = `planner-err-${nanoid(8)}`;
+    const note = makeArtifact({
+      id: noteId,
+      scope: intent.scope ?? "global",
+      conversationId: intent.conversationId,
+      kind: "note",
+      title: `Planner · LLM failed for ${intent.id.slice(0, 8)}`,
+      body: `LLM call threw: ${msg}`,
+      author: "planner",
+      status: "resolved",
+      parentIntent: intent.id,
+      metadata: { relatedArtifacts: [intent.id] },
+      createdAt: ts,
+      updatedAt: ts,
+    });
+    upsertArtifact(this.storage.db, note);
+    this.bus.publish({ type: "artifact_created", artifact: note });
+
+    // mark intent failed(对称 Executor.handleLlmFailure)
     updateArtifactStatus(this.storage.db, intent.id, "failed");
     this.bus.publish({
       type: "artifact_status_changed",

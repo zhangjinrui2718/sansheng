@@ -160,21 +160,52 @@ describe("agents/planner", () => {
     expect(notes.length).toBeGreaterThanOrEqual(1);
   });
 
-  it("LLM throws → planner throws (orchestrator handles upstream)", async () => {
+  it("LLM throws → handleLlmFailure writes note + marks intent failed (no throw)", async () => {
     const intent = makeIntent("conv-llm-throw");
     upsertArtifact(db, intent);
 
-    const llm: PlannerLlmCall = async () => {
-      throw new Error("upstream LLM 500");
-    };
-
-    const planner = new Planner({
-      storage,
-      bus: artifactBus,
-      llmCall: llm,
+    const busEvents: BlackboardArtifact[] = [];
+    const statusEvents: Array<{ id: string; newStatus: string }> = [];
+    const unsubArtifact = artifactBus.subscribe("artifact_created", (e) => {
+      busEvents.push(e.artifact);
     });
+    const unsubStatus = artifactBus.subscribe(
+      "artifact_status_changed",
+      (e) => {
+        if (e.artifactId === intent.id) statusEvents.push({ id: e.artifactId, newStatus: e.newStatus });
+      },
+    );
 
-    await expect(planner.plan(intent)).rejects.toThrow("upstream LLM 500");
+    try {
+      const llm: PlannerLlmCall = async () => {
+        throw new Error("upstream LLM 500");
+      };
+
+      const planner = new Planner({
+        storage,
+        bus: artifactBus,
+        llmCall: llm,
+      });
+
+      // 不再 throw —— 对称 Executor.handleLlmFailure：返回 {todos:[]} + 标记 intent failed
+      const result = await planner.plan(intent);
+      expect(result.todos).toEqual([]);
+
+      // failure note 落地
+      const failureNotes = busEvents.filter(
+        (a) => a.kind === "note" && a.title.includes("LLM failed"),
+      );
+      expect(failureNotes.length).toBe(1);
+      expect(failureNotes[0]?.body).toContain("upstream LLM 500");
+
+      // intent 被标 failed
+      const refreshed = getArtifact(db, intent.id);
+      expect(refreshed?.status).toBe("failed");
+      expect(statusEvents).toContainEqual({ id: intent.id, newStatus: "failed" });
+    } finally {
+      unsubArtifact();
+      unsubStatus();
+    }
   });
 
   it("duplicate IDs → earlier wins (dedup by id)", async () => {
@@ -197,5 +228,128 @@ describe("agents/planner", () => {
     const result = await planner.plan(intent);
     expect(result.todos.length).toBe(1);
     expect(result.todos[0]?.title).toBe("first");
+  });
+
+  it("0 valid todos after validation → handleParseFailure with extra param + intent failed", async () => {
+    const intent = makeIntent("conv-zero-valid");
+    upsertArtifact(db, intent);
+
+    const busEvents: BlackboardArtifact[] = [];
+    const statusEvents: Array<{ artifactId: string; newStatus: string }> = [];
+    const unsubArtifact = artifactBus.subscribe("artifact_created", (e) => {
+      busEvents.push(e.artifact);
+    });
+    const unsubStatus = artifactBus.subscribe(
+      "artifact_status_changed",
+      (e) => {
+        statusEvents.push({ artifactId: e.artifactId, newStatus: e.newStatus });
+      },
+    );
+
+    try {
+      // 所有 todo 都缺少 title(被归一化函数 drop)→ 验证后 todo.length === 0
+      const llm: PlannerLlmCall = fakeLlmCall(
+        JSON.stringify([
+          { id: "no-title-1", body: "no title here" },
+          { id: "no-title-2", body: "no title here either" },
+        ]),
+      );
+
+      const planner = new Planner({
+        storage,
+        bus: artifactBus,
+        llmCall: llm,
+      });
+
+      const result = await planner.plan(intent);
+      expect(result.todos).toEqual([]);
+
+      // failure note 落地（明确 extra 参数）
+      const failureNotes = busEvents.filter(
+        (a) => a.kind === "note" && a.title.includes("parse failed"),
+      );
+      expect(failureNotes.length).toBe(1);
+      expect(failureNotes[0]?.body).toContain("0 valid todos after validation");
+
+      // intent failed
+      expect(statusEvents.some((e) => e.artifactId === intent.id && e.newStatus === "failed")).toBe(true);
+    } finally {
+      unsubArtifact();
+      unsubStatus();
+    }
+  });
+
+  it("dependsOn references unknown todo id → warning + valid peers persisted", async () => {
+    const intent = makeIntent("conv-bad-dep");
+    upsertArtifact(db, intent);
+
+    const llm: PlannerLlmCall = fakeLlmCall(
+      JSON.stringify([
+        { id: "bad", title: "BadDep", body: "x", dependsOn: ["does-not-exist"] },
+        { id: "good1", title: "G1", body: "g1b", dependsOn: [] },
+        { id: "good2", title: "G2", body: "g2b", dependsOn: ["good1"] },
+      ]),
+    );
+
+    const planner = new Planner({
+      storage,
+      bus: artifactBus,
+      llmCall: llm,
+    });
+
+    const result = await planner.plan(intent);
+    // bad 被过滤，good1/good2 保留
+    expect(result.todos.length).toBe(2);
+    const ids = result.todos.map((t) => t.id).sort();
+    expect(ids).toEqual(["good1", "good2"]);
+  });
+
+  it("DAG cycle (A↔B) → both nodes dropped, cycle-free peers kept", async () => {
+    const intent = makeIntent("conv-cycle");
+    upsertArtifact(db, intent);
+
+    const llm: PlannerLlmCall = fakeLlmCall(
+      JSON.stringify([
+        { id: "A", title: "A", body: "a", dependsOn: ["B"] },
+        { id: "B", title: "B", body: "b", dependsOn: ["A"] }, // A↔B 环
+        { id: "C", title: "C", body: "c", dependsOn: [] }, // 不在环上，保留
+        { id: "D", title: "D", body: "d", dependsOn: ["C"] }, // 依赖 C，保留
+      ]),
+    );
+
+    const planner = new Planner({
+      storage,
+      bus: artifactBus,
+      llmCall: llm,
+    });
+
+    const result = await planner.plan(intent);
+    const ids = result.todos.map((t) => t.id).sort();
+    // A 和 B 都在环上被 drop；C/D 不在环上，保留。
+    expect(ids).toEqual(["C", "D"]);
+    expect(ids).not.toContain("A");
+    expect(ids).not.toContain("B");
+  });
+
+  it("self-cycle (A→A) → A dropped, cycle-free peers kept", async () => {
+    const intent = makeIntent("conv-self-cycle");
+    upsertArtifact(db, intent);
+
+    const llm: PlannerLlmCall = fakeLlmCall(
+      JSON.stringify([
+        { id: "A", title: "A", body: "a", dependsOn: ["A"] }, // 自反
+        { id: "B", title: "B", body: "b", dependsOn: [] },
+      ]),
+    );
+
+    const planner = new Planner({
+      storage,
+      bus: artifactBus,
+      llmCall: llm,
+    });
+
+    const result = await planner.plan(intent);
+    const ids = result.todos.map((t) => t.id).sort();
+    expect(ids).toEqual(["B"]);
   });
 });
