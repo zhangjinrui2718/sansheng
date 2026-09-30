@@ -101,7 +101,7 @@ export interface HarnessManagerOptions {
 
 /**
  * 默认 harness 系统 prompt(若 harness loader 没读到对应文件)。
- * 同步嵌入的简短版 — 完整版在 `shared/prompts/harness.md`。
+ * 同步嵌入的简短版 — 完整版在 `shared/prompts/harness_manager.md`。
  */
 const FALLBACK_HARNESS_PROMPT = `# Harness Manager v0
 

@@ -129,6 +129,7 @@ export class Planner {
         status: "open" as ArtifactStatus,
         dependsOn: t.dependsOn,
         parentIntent: intent.id,
+        executors: ["executor"], // D8 execution tracking:声明可执行该 todo 的 executor(s)
         metadata: t.metadata,
         createdAt: ts,
         updatedAt: ts,
