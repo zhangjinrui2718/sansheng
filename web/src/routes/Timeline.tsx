@@ -4,7 +4,7 @@
  * 实时显示 MessageBus 上的所有 BusMessage,stick-to-bottom,不允许用户评论某一行
  * (想发消息请回 Chat 输入框)。
  */
-import { useEffect, useMemo, useRef, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
 import { useChatStore } from "@/stores/chat";
 import type { BusDirection, BusMessage, BusKind } from "@shared/types/agents";
 
@@ -250,7 +250,7 @@ export function TimelinePage({ conversationId }: Props) {
   );
 }
 
-function BusRow({ msg, now }: { msg: BusMessage; now: number }) {
+function BusRowImpl({ msg, now }: { msg: BusMessage; now: number }) {
   const dir = msg.direction;
   const icon = DIR_ICON[dir] ?? "?";
   const dirLabel = DIR_LABEL[dir] ?? dir;
@@ -299,3 +299,10 @@ function BusRow({ msg, now }: { msg: BusMessage; now: number }) {
     </div>
   );
 }
+
+/**
+ * B7: 用 React.memo 包裹,避免 now(每 5s 更新)触发所有 bus row 重渲染。
+ * 自定义比较:msg 对象稳定引用 + now 数字。msg 内容变更会重渲,时间戳更新只重渲时间标签
+ * (实际 now 的影响只 fmtRel,而 fmtRel 不影响 DOM 结构,React.memo 也会放行变更)。
+ */
+export const BusRow = memo(BusRowImpl, (prev, next) => prev.msg === next.msg);
