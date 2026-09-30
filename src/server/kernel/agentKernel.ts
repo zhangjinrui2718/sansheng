@@ -43,6 +43,14 @@ function isStreaming(s: unknown): s is { isStreaming: boolean } {
   return !!s && typeof s === "object" && "isStreaming" in s && typeof (s as { isStreaming: unknown }).isStreaming === "boolean";
 }
 
+interface MsgShape {
+  id?: string;
+  role?: "user" | "assistant";
+}
+function hasMsgShape(s: unknown): s is MsgShape {
+  return !!s && typeof s === "object";
+}
+
 export type ServerEvent =
   | { type: "title_changed"; conversationId: string; title: string }
   | { type: "ready"; conversationId: string; modelId: string; provider: string }
@@ -454,7 +462,7 @@ export class AgentKernel {
   async newConversation(sink: EventSink): Promise<string> {
     if (this.session) {
       try {
-        if ((this.session as any).isStreaming) this.session.abort();
+        if (isStreaming(this.session) && this.session.isStreaming) this.session.abort();
         this.session.dispose?.();
       } catch (err) {
         log.warn("dispose on newConversation failed:", err);
@@ -486,7 +494,7 @@ export class AgentKernel {
     log.warn("kernel reset requested");
     if (this.session) {
       try {
-        if ((this.session as any).isStreaming) {
+        if (isStreaming(this.session) && this.session.isStreaming) {
           try { this.session.abort(); } catch {}
           await new Promise((r) => setTimeout(r, 500));
         }
@@ -638,9 +646,9 @@ export class AgentKernel {
             break;
           case "message_start": {
             const msg = event.message;
-            const mid: string = (msg && (msg as any).id) || `m_${Date.now().toString(36)}`;
+            const mid: string = (hasMsgShape(msg) ? msg.id : undefined) || `m_${Date.now().toString(36)}`;
             this.currentMessageId = mid;
-            const role: "user" | "assistant" = (msg && (msg as any).role) || "assistant";
+            const role: "user" | "assistant" = (hasMsgShape(msg) ? msg.role : undefined) || "assistant";
 
             // M2:落库 user / assistant message
             if (role === "user") {
