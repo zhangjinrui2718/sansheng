@@ -9,6 +9,10 @@ import { getBuiltinModel, builtinProviders, getBuiltinModels, type BuiltinProvid
 import type { Model } from "@earendil-works/pi-ai";
 import { log } from "../../shared/log.js";
 
+function hasBaseUrl(m: Model<any>): m is Model<any> & { baseUrl?: string } {
+  return !!m && typeof m === "object" && "baseUrl" in m;
+}
+
 export interface ProviderInfo {
   id: string;
   name: string;
@@ -103,9 +107,13 @@ export function resolveModel(opts: {
   }
 
   try {
-    const m = getBuiltinModel(provider as any, modelId as any) as Model<any>;
-    if (baseUrl) {
-      (m as any).baseUrl = baseUrl;
+    // `modelId as never` satisfies the constrained generic `TModelId extends keyof (typeof MODELS)[TProvider]`
+    // (with `provider` widened to the BuiltinProvider union, the keyof collapses to `never` because
+    // different providers have disjoint model-id sets). Runtime lookup `MODELS[provider]?.[modelId]`
+    // accepts any string, so the cast is safe.
+    const m = getBuiltinModel(provider as BuiltinProvider, modelId as never) as Model<any>;
+    if (hasBaseUrl(m) && baseUrl) {
+      m.baseUrl = baseUrl;
     }
     return m;
   } catch (err) {

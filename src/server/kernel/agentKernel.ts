@@ -39,6 +39,10 @@ import {
   upsertFragmentEmbedding,
 } from "../storage/index.js";
 
+function isStreaming(s: unknown): s is { isStreaming: boolean } {
+  return !!s && typeof s === "object" && "isStreaming" in s && typeof (s as { isStreaming: unknown }).isStreaming === "boolean";
+}
+
 export type ServerEvent =
   | { type: "title_changed"; conversationId: string; title: string }
   | { type: "ready"; conversationId: string; modelId: string; provider: string }
@@ -153,7 +157,7 @@ export class AgentKernel {
   invalidate(): void {
     if (this.session) {
       try {
-        if ((this.session as any).isStreaming) this.session.abort();
+        if (isStreaming(this.session) && this.session.isStreaming) this.session.abort();
         this.session.dispose?.();
       } catch (err) {
         log.warn("invalidate dispose failed:", err);
@@ -382,7 +386,7 @@ export class AgentKernel {
   private disposeSession(): void {
     if (this.session) {
       try {
-        if ((this.session as any).isStreaming) {
+        if (isStreaming(this.session) && this.session.isStreaming) {
           try { this.session.abort(); } catch { /* noop */ }
         }
         this.session.dispose?.();

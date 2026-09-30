@@ -3,6 +3,10 @@
  */
 import type { Model } from "@earendil-works/pi-ai";
 
+function hasCost(model: Model<any>): model is Model<any> & { cost: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number } } {
+  return !!model && typeof model === "object" && "cost" in model && (model as { cost?: unknown }).cost !== undefined;
+}
+
 export interface TokenUsage {
   input: number;
   output: number;
@@ -12,7 +16,8 @@ export interface TokenUsage {
 
 export function estimateCost(model: Model<any> | undefined, usage: TokenUsage): number {
   if (!model) return 0;
-  const c = (model as any).cost;
+  if (!hasCost(model)) return 0;
+  const c = model.cost;
   if (!c) return 0;
   const input = (usage.input / 1_000_000) * (c.input ?? 0);
   const output = (usage.output / 1_000_000) * (c.output ?? 0);
