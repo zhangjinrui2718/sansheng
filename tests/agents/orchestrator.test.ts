@@ -171,6 +171,9 @@ describe("agents/orchestrator (event-sourced API)", () => {
 
     const events: ProgressEvent[] = [];
     const runP = orch.run("conv-abort", "abort me", (e) => events.push(e));
+    // Attach rejection handler synchronously to avoid an unhandled-rejection
+    // window between orch.abort() (which rejects runP) and the later assertion.
+    const runPAssertion = expect(runP).rejects.toThrow(/abort/i);
 
     await new Promise((r) => setTimeout(r, 5));
     expect(events.some((e) => e.type === "todo_started")).toBe(true);
@@ -180,7 +183,7 @@ describe("agents/orchestrator (event-sourced API)", () => {
 
     resolveExec?.();
 
-    await expect(runP).rejects.toThrow(/abort/i);
+    await runPAssertion;
 
     orch.shutdown();
   });
@@ -289,9 +292,13 @@ describe("agents/orchestrator (event-sourced API)", () => {
 
     const events: ProgressEvent[] = [];
     const runP = orch.run("conv-to", "timeout test", (e) => events.push(e));
+    // Attach rejection handler synchronously to avoid an unhandled-rejection
+    // window between the run() timeout firing inside advanceTimersByTimeAsync
+    // and the later assertion.
+    const runPAssertion = expect(runP).rejects.toThrow(/timeout/i);
 
     await vi.advanceTimersByTimeAsync(150);
-    await expect(runP).rejects.toThrow(/timeout/i);
+    await runPAssertion;
 
     orch.shutdown();
   });
