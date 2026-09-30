@@ -48,7 +48,7 @@
     "zustand": "^4.5.7"
   },
   "devDependencies": {
-    "@types/better-sqlite3": "^7.6.12",
+    "@types/better-sqlite3": "^9.6.0",
     "@types/node": "^22.10.2",
     "@types/node-notifier": "^8.0.5",
     "@types/react": "^18.3.31",
