@@ -82,6 +82,23 @@ export type HarnessNotifyUserFn = (input: {
   conversationId?: string;
 }) => void;
 
+// ───────────────────────────── Stats ─────────────────────────────
+
+/**
+ * Harness Manager 运行期计数器 — 用于 observability 与测试断言。
+ * `seenSize` / `inFlightSize` 在每次 Set 变更后同步刷新。
+ */
+export interface HarnessManagerStats {
+  received: number; // artifact_created events matched harness_proposal
+  processed: number; // decideFn succeeded AND preview emitted
+  failed: number; // decideFn threw/timeout OR parse failed OR upsert failed
+  skippedSeen: number; // dedupe hit: proposal.id already in seen set
+  skippedStorageDedup: number; // dedupe hit: storage has existing preview
+  skippedInFlight: number; // dedupe hit: same proposal in-flight
+  seenSize: number; // current size of seen set
+  inFlightSize: number; // current size of in-flight set
+}
+
 // ───────────────────────────── Options ─────────────────────────────
 
 export interface HarnessManagerOptions {
@@ -92,6 +109,8 @@ export interface HarnessManagerOptions {
   decideFn: HarnessDecideFn;
   /** user 通知回调(可选;不传则 high-risk 只 log)。 */
   notifyUser?: HarnessNotifyUserFn;
+  /** decideFn timeout in ms. Default 60_000 (1 minute). */
+  decideTimeoutMs?: number;
   /** 测试用:覆盖日志(默认 log.warn)。 */
   warn?: (msg: string, ...rest: unknown[]) => void;
   info?: (msg: string, ...rest: unknown[]) => void;
@@ -126,10 +145,25 @@ export class HarnessManager {
   private readonly seen = new Set<string>();
   /** 正在跑的 proposalId — 防御同 proposal 的并发订阅。 */
   private readonly inFlight = new Set<string>();
+  /** decideFn 超时阈值(ms)。默认 60_000。 */
+  private readonly decideTimeoutMs: number;
+  /** 运行期计数器 — 每次 Set 变更后刷新 seenSize / inFlightSize。 */
+  private stats: HarnessManagerStats = {
+    received: 0,
+    processed: 0,
+    failed: 0,
+    skippedSeen: 0,
+    skippedStorageDedup: 0,
+    skippedInFlight: 0,
+    seenSize: 0,
+    inFlightSize: 0,
+  };
   private unsubscribe: (() => void) | null = null;
   private started = false;
 
-  constructor(private readonly opts: HarnessManagerOptions) {}
+  constructor(private readonly opts: HarnessManagerOptions) {
+    this.decideTimeoutMs = opts.decideTimeoutMs ?? 60_000;
+  }
 
   /**
    * 启动 bus 订阅。重复调用是 no-op。
@@ -169,6 +203,19 @@ export class HarnessManager {
     return this.seen.has(proposalId);
   }
 
+  /** 返回当前运行期计数器的快照(对外只读)。 */
+  public getStats(): Readonly<HarnessManagerStats> {
+    // 返回前刷新 size 计数器,避免外部看到 stale 值。
+    this.updateSizeCounters();
+    return { ...this.stats };
+  }
+
+  /** Set 变更后同步刷新 seenSize / inFlightSize。 */
+  private updateSizeCounters(): void {
+    this.stats.seenSize = this.seen.size;
+    this.stats.inFlightSize = this.inFlight.size;
+  }
+
   // ── 事件入口 ─────────────────────────────────────────────────
 
   private async handleEvent(event: BusEventPayload<"artifact_created">): Promise<void> {
@@ -177,23 +224,38 @@ export class HarnessManager {
     if (artifact.kind !== "harness_proposal") return;
     if (artifact.status !== "open") return;
 
+    // 过完 kind/status 过滤器 → 计入 received。
+    this.stats.received++;
     const proposalId = artifact.id;
-    if (this.inFlight.has(proposalId)) return;
-    if (this.seen.has(proposalId)) return;
+    if (this.inFlight.has(proposalId)) {
+      this.stats.skippedInFlight++;
+      this.warn(`[harness] dedupe in-flight ${proposalId} (${this.inFlight.size} in-flight)`);
+      return;
+    }
+    if (this.seen.has(proposalId)) {
+      this.stats.skippedSeen++;
+      this.warn(`[harness] dedupe seen ${proposalId} (seen=${this.seen.size})`);
+      return;
+    }
 
     // 防御重跑:storage 里已有 preview 关联到此 proposal → 跳过
     if (this.existingPreviewFor(proposalId)) {
+      this.stats.skippedStorageDedup++;
+      this.warn(`[harness] dedupe storage-dedup ${proposalId} — preview already exists`);
       this.seen.add(proposalId);
+      this.updateSizeCounters();
       this.opts.info?.(`[harness] skip ${proposalId} — preview already exists`);
       return;
     }
 
     this.inFlight.add(proposalId);
+    this.updateSizeCounters();
     try {
       await this.processProposal(artifact);
     } finally {
       this.inFlight.delete(proposalId);
       this.seen.add(proposalId);
+      this.updateSizeCounters();
     }
   }
 
@@ -229,21 +291,40 @@ export class HarnessManager {
 
     let rawOutput: string;
     try {
-      rawOutput = await this.opts.decideFn({
-        proposal,
-        relatedArtifacts,
-        previewedBefore: false,
+      // decideFn 超时防护:Promise.race 强制限时,超时 reject 进入下方 catch。
+      const timeoutMs = this.decideTimeoutMs;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const timeoutPromise = new Promise<never>((_, reject) => {
+        timer = setTimeout(
+          () => reject(new Error(`decideFn timeout after ${timeoutMs}ms`)),
+          timeoutMs,
+        );
       });
+      try {
+        rawOutput = await Promise.race([
+          this.opts.decideFn({
+            proposal,
+            relatedArtifacts,
+            previewedBefore: false,
+          }),
+          timeoutPromise,
+        ]);
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
     } catch (err) {
-      // LLM call 失败 → 写 fallback note artifact,让用户/UI 看到失败
+      // LLM call 失败或超时 → 写 fallback note artifact,让用户/UI 看到失败
+      const msg = (err as Error).message ?? String(err);
+      this.stats.failed++;
       this.warn(`decideFn threw for ${proposal.id}:`, err);
-      this.writeFailureNote(proposal, (err as Error).message ?? String(err));
+      this.writeFailureNote(proposal, msg);
       return;
     }
 
     // 3. parse
     const parsed = parseHarnessPreview(rawOutput);
     if (!parsed.ok) {
+      this.stats.failed++;
       this.warn(`parse failed for ${proposal.id}: ${parsed.error}`);
       this.writeFailureNote(proposal, parsed.error, parsed.raw);
       return;
@@ -253,7 +334,9 @@ export class HarnessManager {
     const preview = this.buildPreviewArtifact(proposal, parsed.value);
     try {
       upsertArtifact(this.opts.storage.db, preview);
+      this.stats.processed++;
     } catch (err) {
+      this.stats.failed++;
       this.warn(`upsertArtifact(preview) failed for ${proposal.id}:`, err);
       return;
     }

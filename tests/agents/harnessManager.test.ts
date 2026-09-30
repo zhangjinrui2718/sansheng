@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, vi } from "vitest";
 import Database from "better-sqlite3";
 import { runMigrations } from "../../src/server/storage/migrations.js";
 import { Storage } from "../../src/server/storage/index.js";
@@ -252,5 +252,110 @@ describe("agents/harnessManager", () => {
     stop();
 
     expect(decideCalls.length).toBe(0);
+  });
+
+  // ── M3+ B6 reinforcement: 3 new tests ─────────────────────────────
+
+  // Helper: minimal constructor wrapper (decideFn + notifyUser + timeout).
+  function newHarnessManager(opts: {
+    decideFn: HarnessDecideFn;
+    notifyUser?: HarnessNotifyUserFn;
+    decideTimeoutMs?: number;
+  }): { manager: HarnessManager; storage: Storage } {
+    return {
+      manager: new HarnessManager({
+        storage,
+        bus: artifactBus,
+        decideFn: opts.decideFn,
+        notifyUser: opts.notifyUser,
+        decideTimeoutMs: opts.decideTimeoutMs,
+      }),
+      storage,
+    };
+  }
+
+  // Helper: persist a proposal to storage + return the artifact for bus.emit.
+  function harnessProposalEvent() {
+    const p = makeProposal();
+    upsertArtifact(db, p);
+    return p;
+  }
+
+  // Helper: filter artifacts by kind (matches existing inline pattern).
+  function listArtifactsByKind(targetStorage: Storage, kind: string) {
+    return listArtifacts(targetStorage.db, { scope: "global", limit: 100 }).filter(
+      (a) => a.kind === kind,
+    );
+  }
+
+  it("B6: decideFn timeout → writeFailureNote with timeout reason", async () => {
+    const neverResolve: HarnessDecideFn = () => new Promise(() => {});
+    const { manager } = newHarnessManager({
+      decideFn: neverResolve,
+      decideTimeoutMs: 50,
+      notifyUser: () => {},
+    });
+    await manager.start();
+    const p = harnessProposalEvent();
+    artifactBus.publish({ type: "artifact_created", artifact: p });
+    // wait past timeout (50ms) + bookkeeping slack
+    await new Promise((r) => setTimeout(r, 150));
+    const notes = listArtifactsByKind(storage, "note");
+    expect(notes.length).toBe(1);
+    expect(notes[0]?.metadata?.errorMsg).toMatch(/timeout/);
+    const s = manager.getStats();
+    expect(s.received).toBe(1);
+    expect(s.failed).toBe(1);
+    expect(s.processed).toBe(0);
+    manager.stop();
+  });
+
+  it("B6: stats — received/processed/failed all increment on success path", async () => {
+    const fakeDecideOk: HarnessDecideFn = async () => VALID_PREVIEW_JSON;
+    const { manager } = newHarnessManager({
+      decideFn: fakeDecideOk,
+      notifyUser: () => {},
+    });
+    await manager.start();
+    artifactBus.publish({ type: "artifact_created", artifact: harnessProposalEvent() });
+    await new Promise((r) => setTimeout(r, 30));
+    const s = manager.getStats();
+    expect(s.received).toBe(1);
+    expect(s.processed).toBe(1);
+    expect(s.failed).toBe(0);
+    expect(s.skippedSeen).toBe(0);
+    expect(s.skippedInFlight).toBe(0);
+    expect(s.skippedStorageDedup).toBe(0);
+    expect(s.seenSize).toBe(1);
+    expect(s.inFlightSize).toBe(0);
+    manager.stop();
+  });
+
+  it("B6: stats — skippedInFlight when same proposal emitted twice in window", async () => {
+    const slowDecide = vi.fn(
+      () =>
+        new Promise<string>((r) =>
+          setTimeout(() => r('{"previewMarkdown":"x","riskLevel":"low","targetFiles":[],"estimatedLines":1,"mode":"create"}'), 100),
+        ),
+    );
+    const { manager } = newHarnessManager({
+      decideFn: slowDecide,
+      notifyUser: () => {},
+    });
+    await manager.start();
+    const p = harnessProposalEvent();
+    // first emit → in-flight (decideFn still pending at 10ms)
+    artifactBus.publish({ type: "artifact_created", artifact: p });
+    await new Promise((r) => setTimeout(r, 10));
+    // second emit same id → skippedInFlight
+    artifactBus.publish({ type: "artifact_created", artifact: p });
+    // wait past slow decide (100ms) + bookkeeping
+    await new Promise((r) => setTimeout(r, 200));
+    const s = manager.getStats();
+    expect(s.received).toBe(2);
+    expect(s.processed).toBe(1);
+    expect(s.failed).toBe(0);
+    expect(s.skippedInFlight).toBe(1);
+    manager.stop();
   });
 });
