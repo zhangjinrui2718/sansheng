@@ -1,9 +1,15 @@
 # Sansheng 项目交接包
 
-**生成时间**:2026-09-30 16:58 CST · **v6.1**(M3+ 全闭环:B3-B7 + 2 dep bumps 全部 push)
+**生成时间**:2026-09-30 20:50 CST · **v6.2**(as-any sweep fully closed + type-guard hardening)
 **适用**:下一会话(主对话 / worker)开盒即读
 **配套阅读**:`/root/projects/sansheng/PLAN.md`(v5 集成版),`/root/.pi/agent/memory/MEMORY.md`(长期偏好 + 教训)
 
+> **v6.2 · as-any sweep (commit `9a312df` + `2de5aeb`)**:
+> - 清掉 9 处 `as any` 全部 — `registry.ts:106/108`、`cost.ts:15`、`agentKernel.ts:156/385/457/489/641/643`
+> - 新增 4 个 module-level type guards: `hasBaseUrl` / `hasCost` / `isStreaming` / `hasMsgShape`
+> - 1 处 `as never` 残留 `registry.ts:114`(`getBuiltinModel` generics collapse `TModelId` to `never`,runtime safe)
+> - 推动 AGENTS.md literal compliance(不再使用 `as any` 抑制类型)
+>
 > **M3+ 状态变化 (v6.0 → v6.1)**:
 > - B6 (HarnessManager v0 reinforcement) 已 commit `df5d388`
 > - B7 partial (Timeline BusRow memo) 已 commit `e735689`
@@ -285,7 +291,7 @@ git log / status / typecheck / test / build / 改进点 / files / open questions
 ## 7. 文件指针
 
 - **主 plan**:`/root/projects/sansheng/PLAN.md`(823 行,v5 集成版)
-- **handoff**:`/root/projects/sansheng/HANDOFF.md`(本文件,v6.0)
+- **handoff**:`/root/projects/sansheng/HANDOFF.md`(本文件,v6.2)
 - **memory**:`/root/.pi/agent/memory/MEMORY.md`(长期偏好 + 教训)
 - **daily log**:`/root/.pi/agent/memory/daily/2026-09-30.md`(本日工作流)
 - **scratchpad**:`scratchpad tool`(working context)
