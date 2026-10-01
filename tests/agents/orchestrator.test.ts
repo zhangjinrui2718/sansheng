@@ -280,6 +280,67 @@ describe("agents/orchestrator (event-sourced API)", () => {
     orch.shutdown();
   }, 20_000);
 
+  // A3-followup(open question #2 → 追加任务):dep-failed 级联。
+  // 旧行为:上游 todo failed 后,下游永远 open(areDepsResolved 要求全部 resolved)
+  // → intent 不终态 → run 等满 maxRunMs 才超时 reject。
+  // 新行为:failed 触发级联(只对 open 下游,递归 + visited 防环)→ intent 立即
+  // 终态 → run 同步 settle(远早于 maxRunMs)。
+  it("dep-failed cascade: upstream fail → open 下游递归 failed → run 立即 settle", async () => {
+    const planner: PlannerLlmCall = async () =>
+      JSON.stringify([
+        { id: "t-c-root", title: "root", body: "will fail", dependsOn: [] },
+        { id: "t-c-mid", title: "mid", body: "dep root", dependsOn: ["t-c-root"] },
+        { id: "t-c-leaf", title: "leaf", body: "dep mid", dependsOn: ["t-c-mid"] },
+      ]);
+    // 只有 root 会被执行(且失败);mid/leaf 不应被执行 — 级联直接标 failed
+    const executor: ExecutorLlmCall = vi.fn(async () =>
+      JSON.stringify({
+        outcome: "failed",
+        note: { title: "boom", body: "root failed on purpose" },
+      }),
+    );
+
+    const orch = makeOrch({
+      planner,
+      executor,
+      maxRunMs: 15_000, // 刻意大于断言阈值:settle 必须来自级联,而非超时兜底
+    });
+
+    const events: ProgressEvent[] = [];
+    const t0 = Date.now();
+    const finalBb = await orch.run("conv-cascade", "cascade test", (e) => events.push(e));
+    const elapsed = Date.now() - t0;
+
+    // run 及时 settle(级联是同步路径,实际 <1s;阈值 5s ≪ maxRunMs 15s)
+    expect(elapsed).toBeLessThan(5_000);
+
+    // 三级 todos 全部 failed(root 由 executor, mid/leaf 由级联)
+    expect(getArtifact(db, "t-c-root")?.status).toBe("failed");
+    expect(getArtifact(db, "t-c-mid")?.status).toBe("failed");
+    expect(getArtifact(db, "t-c-leaf")?.status).toBe("failed");
+    // executor 只跑了 root;mid/leaf 从未 spawn
+    expect(executor).toHaveBeenCalledTimes(1);
+
+    // 级联 reason 持久化且注明上游(metadata.errorReason,case3 sink 同源读取)
+    expect(String(getArtifact(db, "t-c-mid")?.metadata?.errorReason)).toContain(
+      "cascade from t-c-root",
+    );
+    expect(String(getArtifact(db, "t-c-leaf")?.metadata?.errorReason)).toContain(
+      "cascade from t-c-mid",
+    );
+
+    // intent 终态 failed(finalBb 是 settle 时刻的快照)
+    const intent = (finalBb.artifacts ?? []).find((a) => a.kind === "intent");
+    expect(intent?.status).toBe("failed");
+
+    // sink 收到级联 todo_failed(reason 含 cascade 字样)
+    expect(
+      events.some((e) => e.type === "todo_failed" && e.reason.includes("cascade from t-c-root")),
+    ).toBe(true);
+
+    orch.shutdown();
+  }, 20_000);
+
   it("shutdown() unsubscribes from bus (no further events processed)", async () => {
     const planner: PlannerLlmCall = async () => "[]";
     const executor: ExecutorLlmCall = async () =>

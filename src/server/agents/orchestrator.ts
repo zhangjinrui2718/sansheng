@@ -349,6 +349,10 @@ export class Orchestrator {
         todo: a,
         reason: typeof a.metadata?.errorReason === "string" ? a.metadata.errorReason : "executor reported failure",
       });
+      // A3-followup:上游 failed → 级联 fail 永远无法满足的 open 下游(否则 intent
+      // 不终态,run 只能等满 maxRunMs 超时)。放在 maybeResolveIntent 之前:级联后
+      // 全部 todo 已终态,本次调用即可立即收敛 intent → run 同步 settle。
+      this.cascadeFailDependents(a.id, new Set<string>());
       this.maybeResolveIntent(a);
     }
   }
@@ -549,6 +553,47 @@ export class Orchestrator {
       );
     }
     return out;
+  }
+
+  /**
+   * A3-followup(审查报告 §A3 open question #2 → 批次 1 追加任务):dep-failed 级联。
+   *
+   * areDepsResolved 要求全部 deps resolved —— 上游 todo failed 后,下游永远 open、
+   * intent 不终态,run 只能等满 maxRunMs(默认 30min)超时收尾。现在:上游进入
+   * failed 终态即递归级联 fail 仍 open(阻塞在依赖上)的下游 todo,随后走既有
+   * maybeResolveIntent 终态路径 → run 立即 settle,不等超时。
+   *
+   * 语义边界:
+   * - 只对 status === "open" 级联(仍阻塞在依赖上、从未成功 spawn)。
+   *   in_progress / waiting_for_decision 有自己的生命周期与 watchdog,不动;
+   *   resolved / superseded / failed 已终态,自然跳过。
+   * - 防环/幂等:visited 集合去重(planner 侧有 dropCycles,但 storage 可能存在
+   *   历史脏 dependsOn,不能无限递归);failTodo 的 publish 会重入 case3 →
+   *   本方法(新 visited),但已级联 failed 的 todo 被 status 过滤跳过,两条路径
+   *   互为幂等。
+   * - 级联 reason 写入 metadata.errorReason(持久化 + case3 sink 同源读取),
+   *   文案注明上游 id:`cascade from <upstreamId>`。
+   * - ownership(A2):只级联本 run intent 派生的 todo。
+   */
+  private cascadeFailDependents(upstreamTodoId: string, visited: Set<string>): void {
+    if (visited.has(upstreamTodoId)) return;
+    visited.add(upstreamTodoId);
+    for (const depId of this.findTodosDependingOn(upstreamTodoId)) {
+      if (visited.has(depId)) continue;
+      visited.add(depId);
+      const dep = getArtifact(this.storage.db, depId);
+      if (!dep) continue;
+      if (dep.parentIntent !== this.myIntentId) continue;
+      if (dep.status !== "open") continue;
+      const reason = `cascade from ${upstreamTodoId}: upstream dependency failed`;
+      dep.metadata = { ...(dep.metadata ?? {}), errorReason: reason };
+      upsertArtifact(this.storage.db, dep);
+      // failTodo → publish status_changed → 重入 case3(sink todo_failed 携带
+      // cascade reason + 对更深层级联)+ maybeResolveIntent;随后的显式递归
+      // 兜底覆盖剩余分支(status 过滤保证幂等)
+      this.failTodo(dep, new Error(reason));
+      this.cascadeFailDependents(depId, visited);
+    }
   }
 
   private async spawnExecutor(

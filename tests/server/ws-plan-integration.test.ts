@@ -400,4 +400,54 @@ describe("ws /plan integration (real attachWebSocket + runPlan + Orchestrator + 
       await c.close();
     }
   }, 60_000);
+
+  it("⑤ 上游 todo failed → 下游级联 failed → 客户端及时收到失败闭环(A3-followup)", async () => {
+    // 旧行为:it5-root failed 后 it5-down 永远 open(areDepsResolved 要求全部
+    // resolved)→ intent 不终态 → run 等满 maxRunMs(生产默认 30min)→ 客户端
+    // 10s 内收不到任何闭环事件。新行为:failed 触发递归级联(只对 open 下游)
+    // → intent 终态 → run 同步 settle → plan_done 及时到达,summary 含失败清单。
+    // (plan_failed 保留给 orchestrator 级错误:超时/abort/shutdown — 此处失败
+    //  闭环走既有 plan_done+summary 路径,与 B2 混合计划语义一致。)
+    plannerPrompts.length = 0;
+    executorPrompts.length = 0;
+    fakeLlm = async (input) => {
+      if (isPlannerInput(input)) {
+        return JSON.stringify([
+          { id: "it5-root", title: "根任务", body: "会失败", dependsOn: [] },
+          { id: "it5-down", title: "下游任务", body: "依赖根", dependsOn: ["it5-root"] },
+        ]);
+      }
+      // executor:恒失败(只有 root 会真正被执行)
+      return JSON.stringify({
+        outcome: "failed",
+        note: { title: "boom", body: "root failed on purpose" },
+      });
+    };
+    const c = await connectClient();
+    try {
+      c.send({ type: "plan", goal: "集成⑤:dep-failed 级联", conversationId: "conv-it-5" });
+
+      // 及时收到含失败闭环的 plan_done(阈值 10s ≪ 旧行为的 30min 超时)
+      const done = await waitForEvent(c, "plan_done", {
+        timeoutMs: 10_000,
+        where: (e) => e.conversationId === "conv-it-5",
+      });
+      expect(done.summary).toContain("完成 0/2");
+      expect(done.summary).toContain("失败 2");
+
+      // 下游 todo 从未被执行(级联直接标 failed)。注意不能用裸 "it5-down"
+      // 过滤 — root 的 siblings 上下文里也含下游 id;要匹配 Todo 头形态。
+      expect(executorPrompts.filter((p) => p.includes("id: it5-down")).length).toBe(0);
+      expect(executorPrompts.filter((p) => p.includes("id: it5-root")).length).toBe(1);
+
+      // finalBb:两个 todo 均终态 failed
+      const root = (done.artifacts ?? []).find((a) => a.id === "it5-root");
+      const down = (done.artifacts ?? []).find((a) => a.id === "it5-down");
+      expect(root?.status).toBe("failed");
+      expect(down?.status).toBe("failed");
+    } finally {
+      await abortActivePlan(c);
+      await c.close();
+    }
+  }, 30_000);
 });
