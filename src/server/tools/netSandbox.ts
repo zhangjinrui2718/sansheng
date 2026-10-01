@@ -29,7 +29,9 @@ export type NetSandboxCode =
   | "blocked_port"
   | "too_large"
   | "timeout"
-  | "resolve_failed";
+  | "resolve_failed"
+  /** A6:redirect 链超过手工跟随上限(每跳复检的循环防环)。 */
+  | "too_many_redirects";
 
 export class NetSandboxError extends Error {
   public readonly code: NetSandboxCode;
