@@ -6,7 +6,9 @@
  *   1. 把 path 规范化(处理 `..` / `.` / 相对路径)
  *   2. fs.realpath 解开 symlink
  *   3. 校验 normalized 路径在 policy.allowlist 内 → 否则 'outside_allowlist'
- *   4. 校验 real 路径也在 allowlist 内 → 否则 'symlink_escape'
+ *   4. 校验 real 路径在 allowlist(entry 同样解链后)内 → 否则 'symlink_escape'
+ *      · real-vs-real 比较:macOS 的 /tmp、/var 本身是 symlink(→ /private/*),
+ *        若拿 raw entry 比较会把合法路径误判为逃逸;Linux 行为不变。
  *
  * Policy 来源优先级:
  *   显式 SandboxOptions.policy > Sandbox.create() 读 ~/.sansheng/sandbox.json > 默认 policy
@@ -20,7 +22,7 @@
 import { realpath, stat as fsStat, mkdir, readFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { homedir as osHomedir, tmpdir as osTmpdir } from "node:os";
-import { isAbsolute, join, resolve, sep } from "node:path";
+import { basename, isAbsolute, join, resolve, sep } from "node:path";
 import { log } from "../../shared/log.js";
 
 /** SandboxError 语义 code 枚举。 */
@@ -190,10 +192,13 @@ export class Sandbox {
       );
     }
 
-    // 校验 2:realpath 解链
+    // 校验 2:realpath 解链。
+    // 注意:比较双方都必须用 real 形式 — macOS 上 /tmp、/var 本身是 symlink
+    // (→ /private/tmp、/private/var),raw allowlist entry 与 realpath 结果前缀
+    // 不同,直接 matchAllow(real) 会把合法路径误判为 symlink_escape。
     try {
       const real = await realpath(normalized);
-      if (!this.matchAllow(real)) {
+      if (!(await this.matchAllowReal(real))) {
         throw new SandboxError(
           `realpath ${real} (from ${abs}) is outside sandbox allowlist`,
           "symlink_escape",
@@ -226,6 +231,55 @@ export class Sandbox {
       }
     }
     return undefined;
+  }
+
+  /** entry.path → real 形式缓存(mutable allowlist 追加条目时按需计算)。 */
+  private realEntryCache = new Map<string, string>();
+
+  /**
+   * 计算 allowlist entry 的 real(symlink-resolved)形式。
+   * entry 可能尚未创建(如 canvas 目录懒创建)→ 向上找最长已存在祖先,
+   * realpath 该祖先后拼回剩余段。Linux 上无 symlink 前缀时结果 = 原路径。
+   */
+  private async realFormOf(entryPath: string): Promise<string> {
+    const cached = this.realEntryCache.get(entryPath);
+    if (cached !== undefined) return cached;
+    let existing = entryPath;
+    const rest: string[] = [];
+    for (;;) {
+      if (existsSync(existing)) break;
+      const parent = resolve(existing, "..");
+      if (parent === existing) break; // 已到根
+      rest.unshift(basename(existing));
+      existing = parent;
+    }
+    let realBase: string;
+    try {
+      realBase = await realpath(existing);
+    } catch {
+      realBase = existing; // 理论上不可达(根目录必存在);保守回退
+    }
+    const real = rest.length > 0 ? join(realBase, ...rest) : realBase;
+    this.realEntryCache.set(entryPath, real);
+    return real;
+  }
+
+  /**
+   * real-vs-real 的 allowlist 匹配:先把每条 entry 也解链再比较。
+   * 用于 resolve() 的校验 2 — 消除 macOS /tmp、/var symlink 前缀误报,
+   * 同时保留原语义(workspace 内 symlink 指向外部仍会因 real 越界被拒)。
+   */
+  private async matchAllowReal(absPath: string): Promise<boolean> {
+    for (const entry of this.policy.allowlist) {
+      const realEntry = await this.realFormOf(entry.path);
+      if (entry.kind === "dir") {
+        if (absPath === realEntry) return true;
+        if (absPath.startsWith(realEntry + sep)) return true;
+      } else {
+        if (absPath === realEntry) return true;
+      }
+    }
+    return false;
   }
 
   /**

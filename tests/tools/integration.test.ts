@@ -18,7 +18,7 @@ import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { createServer, type Server, type IncomingMessage, type ServerResponse } from "node:http";
 import { mkdtemp, mkdir, rm, writeFile as nodeWriteFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 import { Sandbox, SandboxError } from "../../src/server/tools/sandbox.js";
 import {
@@ -92,7 +92,8 @@ afterAll(async () => {
   await new Promise<void>((resolve) => {
     server.close(() => resolve());
   });
-  await rm(workspace + "/..", { recursive: true, force: true });
+  // macOS 的 rmdir 拒绝尾段为 ".." 的路径(EINVAL)→ 先取 dirname 归一化
+  await rm(dirname(workspace), { recursive: true, force: true });
 });
 
 describe("createToolRegistry · shape", () => {

@@ -23,7 +23,7 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { mkdtemp, rm, writeFile as nodeWriteFile, symlink, mkdir, readFile as nodeReadFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 import {
   Sandbox,
@@ -65,7 +65,8 @@ beforeAll(async () => {
 
 afterAll(async () => {
   // workspace 的父目录是 mkdtemp 创建的 base,递归清掉
-  await rm(workspace + "/..", { recursive: true, force: true });
+  // macOS 的 rmdir 拒绝尾段为 ".." 的路径(EINVAL)→ 先取 dirname 归一化
+  await rm(dirname(workspace), { recursive: true, force: true });
 });
 
 describe("fs tools / sandbox (M4)", () => {
