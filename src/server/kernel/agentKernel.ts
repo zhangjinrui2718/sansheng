@@ -731,7 +731,17 @@ export class AgentKernel {
     await this.start();
   }
 
-  async prompt(text: string): Promise<void> {
+  /**
+   * 批次 5a.5 T1(docs/CODE-REVIEW-2026-10-01.md §B1):raw/enriched 分离。
+   * - `text` 是用户原文(raw):落 sansheng messages 表(见 pendingUserText →
+   *   message_start(user) handler)、喂 Communicator decide、生成会话标题。
+   * - `opts.contextBlock` 是 ws 层构建的记忆富集段(fragment/profile):只拼给
+   *   Pi session(`contextBlock + "\n\n---\n\nUser: " + text`,进 Pi JSONL 会话
+   *   历史,用户不可见)—— 旧实现把拼接后的 enriched 全文落库,UI 历史里用户
+   *   消息变成「# Relevant Memories…---User: 你好」blob。
+   * 其它调用方不带 contextBlock 即可,行为与旧签名一致。
+   */
+  async prompt(text: string, opts?: { contextBlock?: string }): Promise<void> {
     // S1(A7):不再接受 sink 覆盖 —— 事件统一走 this.emit 多播到 attachSink 的活连接。
     // sink 为空时假设 kernel 已 start(常规路径:ws.ts 先 ensureStarted)。
     if (!this.session) {
@@ -821,7 +831,12 @@ export class AgentKernel {
     // 本批次刻意不动 —— 留待批次 5b decide 升级为 LLM 判断时一并根治(§B2);
     // 现在提前 return 会让正则误判 task 时用户连 Pi 直答都失去,反而更糟。
     if (this.session) {
-      await this.session.prompt(text);
+      // 批次 5a.5 T1:Pi session 收 enriched(记忆能力保留);messages 表已在
+      // pendingUserText 处固定为 raw text(上方),两条路径彻底分离。
+      const full = opts?.contextBlock
+        ? `${opts.contextBlock}\n\n---\n\nUser: ${text}`
+        : text;
+      await this.session.prompt(full);
     }
   }
 
@@ -998,7 +1013,7 @@ export class AgentKernel {
               // 异步 fragment 提取(不阻塞 streaming)
               const bufRef = this.buf;
               this.buf = null;
-              void this.extractAndStoreFragments(text, bufRef.messageId, thinking);
+              void this.extractAndStoreFragments(text, bufRef.messageId);
             }
 
             sink({
@@ -1093,12 +1108,14 @@ export class AgentKernel {
   /**
    * 启发式提取 fragment → 写 fragments 表 → 异步 embed。
    * 不抛错:embed 失败只 warn,不影响 streaming。
+   * 批次 5a.5 T1:仅剩「记住:」触发词 fact 提取(assistant 全文 summary 提取已删,
+   * 见 extractor.ts);thinking 参数随之无用,已清理。智能提取属 M3+/批次 5b。
    */
-  private async extractAndStoreFragments(text: string, messageId: string, thinking?: string): Promise<void> {
-    if (!text && !thinking) return;
+  private async extractAndStoreFragments(text: string, messageId: string): Promise<void> {
+    if (!text) return;
     let frags;
     try {
-      frags = extractFragments({ role: "assistant", content: text, thinking });
+      frags = extractFragments({ role: "assistant", content: text });
     } catch (err) {
       log.warn("fragment: extractor failed:", err);
       return;

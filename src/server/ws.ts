@@ -456,7 +456,11 @@ export function attachWebSocket(
               await kernel.resume(cmd.conversationId);
             }
             // M3a B8: 注入 fragment / profile context (可选,失败不阻塞)
-            let enriched = cmd.content;
+            // 批次 5a.5 T1(§B1):富集段改经 contextBlock 参数传递 —— kernel 落库
+            // raw 原文(用户历史不再出现「# Relevant Memories…---User:」blob),
+            // Pi session 仍收到 enriched 全文(记忆能力保留)。summary kind 已被
+            // searchFragmentsByText 默认排除(存量垃圾失活,见 repo/fragments.ts)。
+            let contextBlock: string | undefined;
             if (storage) {
               try {
                 const { searchFragmentsByText, listProfile } = await import("./storage/index.js");
@@ -466,12 +470,12 @@ export function attachWebSocket(
                   fragments.map((f) => ({ kind: f.kind, content: f.content })),
                   profile.map((p) => ({ key: p.key, value: p.value, confidence: p.confidence })),
                 );
-                if (ctx) enriched = `${ctx}\n\n---\n\nUser: ${cmd.content}`;
+                if (ctx) contextBlock = ctx;
               } catch (err) {
                 log.warn("ws: context injection failed:", err);
               }
             }
-            await kernel.prompt(enriched);
+            await kernel.prompt(cmd.content, contextBlock ? { contextBlock } : undefined);
           })
           .catch((err) => {
             // M3c: 即使 ensureStarted 失败(如没 LLM provider),仍尝试 prompt,

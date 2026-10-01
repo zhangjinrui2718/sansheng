@@ -145,7 +145,12 @@ export function recordFragmentAccess(db: Database.Database, id: string): void {
  * M3a · 基于文本 LIKE 的轻量检索(用于 ws.ts prompt 上下文注入)
  * - 对每个 ≥2 字符的 word 跑 OR LIKE
  * - 评分:命中 token 数 * importance * (1 + access_count)
- * - kinds?:限定种类
+ * - kinds?:限定种类;**默认排除 "summary"**(批次 5a.5 T1,§B1)——
+ *   M2 占位启发式曾把 assistant 全文存成 summary(垃圾源已断,见 extractor.ts),
+ *   存量垃圾被 LIKE 命中 → 注入 → 模型模仿 → 自我放大。改默认值而非在唯一
+ *   生产调用方(ws.ts)显式传参 = 影响面最小且未来调用方天然免疫;数据不删,
+ *   显式传 kinds:["summary"] 仍可检索,清理 SQL 由用户自行决定。
+ *   显式传空数组 = 不过滤(保持旧语义)。
  * - limit:返回数量上限
  */
 export function searchFragmentsByText(
@@ -154,6 +159,7 @@ export function searchFragmentsByText(
   opts: { limit?: number; kinds?: FragmentRow["kind"][] } = {},
 ): FragmentRow[] {
   const limit = opts.limit ?? 5;
+  const kinds = opts.kinds ?? (["fact", "preference", "project", "context"] as FragmentRow["kind"][]);
   // 简单 tokenize:中文 char-by-char + 英文 word
   const words: string[] = [];
   for (const tok of query.split(/\s+/)) {
@@ -169,16 +175,17 @@ export function searchFragmentsByText(
   const tokens = Array.from(new Set(words));
   if (tokens.length === 0) return [];
 
-  // 构造可选 kind 过滤
-  let kindClause = "";
-  const params: unknown[] = [];
-  if (opts.kinds && opts.kinds.length > 0) {
-    kindClause = `AND f.kind IN (${opts.kinds.map(() => "?").join(",")})`;
-    params.push(...opts.kinds);
-  }
-  // OR 拼接 like 片段
+  // 参数顺序必须与 SQL 占位符严格一致:score×2(下方 .all 前置)→ LIKE×n → kind IN×k → LIMIT。
+  // 批次 5a.5 T1 顺带修复潜在 bug:旧代码先 push kinds 再 push LIKE tokens,与 SQL
+  // 里 WHERE (LIKE…) AND kind IN (…) 的占位符顺序相反 —— 生产此前无人传 kinds 未暴露,
+  // 默认 kinds 生效后该路径必走,错序会让 LIKE 绑定到 kind 值导致检索恒空。
   const likeClauses = tokens.map(() => "LOWER(f.content) LIKE ?").join(" OR ");
-  params.push(...tokens.map((t) => `%${t}%`));
+  const params: unknown[] = tokens.map((t) => `%${t}%`);
+  let kindClause = "";
+  if (kinds.length > 0) {
+    kindClause = `AND f.kind IN (${kinds.map(() => "?").join(",")})`;
+    params.push(...kinds);
+  }
   params.push(limit);
 
   const rows = db
