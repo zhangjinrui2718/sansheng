@@ -7,7 +7,7 @@
  * - Pi AgentSessionEvent → WS ServerEvent 翻译
  * - token usage 累积 + cost 估算
  */
-import { createAgentSession, type AgentSession } from "@earendil-works/pi-coding-agent";
+import { createAgentSession, DefaultResourceLoader, type AgentSession } from "@earendil-works/pi-coding-agent";
 import type { Model } from "@earendil-works/pi-ai";
 import { nanoid } from "nanoid";
 import { SettingsStore, type Settings, type ProviderConfig } from "../settings/store.js";
@@ -648,14 +648,48 @@ export class AgentKernel {
     return m;
   }
 
-  /** 用 Pi SDK 创建 session,带 8s 硬超时防 ModelRuntime 卡死。 */
+  /**
+   * 用 Pi SDK 创建 session,带 8s 硬超时防 ModelRuntime 卡死。
+   *
+   * 批次 5a.5 T2(5a open question #1):直答 session 消费
+   * harness/system_prompts/communicator.md —— 此前 harness prompt 只注入
+   * Communicator 类构造 opts(ensureSession 无生产调用方),直答 session 走
+   * Pi DefaultResourceLoader 默认路径,「落地了但没人读」。
+   *
+   * 注入点:createAgentSession({ resourceLoader }) —
+   * DefaultResourceLoader.appendSystemPromptOverride 把 harness prompt 追加在
+   * SDK 默认 prompt 之后(system-prompt.js 渲染为 <addendum> 段,保留默认
+   * preamble/tools/rules = append 语义,不整体替换);用 Override 而非
+   * appendSystemPrompt 选项,保留 SDK 对 agentDir 内 append 文件的自身发现。
+   *
+   * 时效:每次 start()/resume()/reset() 重建 session 都重新 loadHarness →
+   * 用户编辑 md 后重建即生效。harness prompt 为空/空白 → 不传 resourceLoader,
+   * 完全走 SDK 默认路径(不注入空段,要求③)。
+   */
   private async createPiSession(m: Model<any>, active: ProviderConfig): Promise<AgentSession> {
-    const createPromise = createAgentSession({
-      model: m,
-      cwd: this.cwd,
-      agentDir: this.agentDir,
-      thinkingLevel: active.thinkingLevel,
-    });
+    // dataDir 派生与 ensureCommunicator()/replayBus() 同一表达式
+    const dataDir = process.env.SANSHENG_DATA ?? this.agentDir.replace(/\/pi$/, "");
+    const harnessPrompt = loadHarness(dataDir).systemPrompts.communicator;
+    const createPromise = (async () => {
+      let resourceLoader: DefaultResourceLoader | undefined;
+      if (harnessPrompt.trim()) {
+        resourceLoader = new DefaultResourceLoader({
+          cwd: this.cwd,
+          agentDir: this.agentDir,
+          appendSystemPromptOverride: (base) => [...base, harnessPrompt],
+        });
+        // 外部传入 resourceLoader 时 sdk.js 不再代为 reload(只 reload 它自建的)
+        // → 必须显式 reload;放进 race 的 promise 内,沿用 8s 超时保护。
+        await resourceLoader.reload();
+      }
+      return createAgentSession({
+        model: m,
+        cwd: this.cwd,
+        agentDir: this.agentDir,
+        thinkingLevel: active.thinkingLevel,
+        ...(resourceLoader ? { resourceLoader } : {}),
+      });
+    })();
     const timeoutPromise = new Promise<never>((_, reject) =>
       setTimeout(() => reject(new Error("createAgentSession timeout (8s) — ModelRuntime refresh hung?")), 8000),
     );
