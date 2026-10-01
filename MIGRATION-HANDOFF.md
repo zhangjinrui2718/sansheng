@@ -59,7 +59,7 @@
 | shell | bash(`TMPDIR=~/.cache/tmp` 写在 `~/.bashrc`) | zsh(macOS 默认;无 systemd 清 /tmp 问题) |
 | node_modules | 排除在 bundle 外 | 已存在(324 包) |
 | npm registry | 官方 | **npmmirror**(工作区 `package-lock.json` 有未提交的镜像元数据漂移:`hasShrinkwrap`/`hasInstallScript` 字段变化) |
-| GitHub 推送 | PAT(`.ghp_token` / `$GITHUB_TOKEN` via `~/.bashrc`) | **待配置**(https remote,需 PAT 或改 SSH) |
+| GitHub 推送 | PAT(`.ghp_token` / `$GITHUB_TOKEN` via `~/.bashrc`) | **已可用**(https remote,2026-10-01 `27a784d` push 实测成功,凭据已在 macOS keychain/credential helper) |
 | jev skill | `~/.pi/skills/jev/`(依赖 `TYPESAFE_API_KEY`) | **不存在**(`~/.pi/skills/` 为空) |
 
 > ⚠️ **路径映射规则**:bundle 里所有 memory/handoff 文档中的绝对路径 `/root/projects/sansheng/...` 和 `/root/.pi/agent/...`,在新机一律读作 `/Users/fuyao/projects/sansheng/...` 和 `/Users/fuyao/.pi/agent/...`。
@@ -121,7 +121,7 @@ npm ci   # 或 npm install;node_modules 已存在时可跳过,验证(§7)通过�
 **bundle 之外、必须手工补的**:
 
 - **jev skill**:`~/.pi/skills/jev/`(3 primitives: noul/choice/score,需 `TYPESAFE_API_KEY` 环境变量)。**`jev-check.ts` 扩展依赖 `~/.pi/skills/jev/scripts/jev.sh` 路径**,skill 不装,扩展只会 nudge 而无法合规。从旧机 scp,或按旧机安装方式重装。
-- **GitHub 推送凭据**:remote 是 https。配 PAT(`git credential` 或 keychain)或改 SSH。旧机的 `.ghp_token` 未入 bundle(正确)。
+- ~~**GitHub 推送凭据**~~ ✅ 本机已可用(2026-10-01 实测 push 成功);旧机的 `.ghp_token` 未入 bundle(正确,无需迁移)。
 - **TMPDIR 习惯(可选)**:旧机为防 systemd 清 `/tmp` 把 `TMPDIR=~/.cache/tmp` 写进 `~/.bashrc`;macOS 无此问题,若仍想保留习惯写 `~/.zshrc`。
 - **(可选)pi 全局工具链**:本机 pi 0.99.1 已装,无需 `npm i -g @earendil-works/pi-coding-agent`。
 - **(可选)旧 sessions 归档**:旧机 `~/.pi/agent/sessions/`(18M)+ `session-hoarder/`(208M),需要历史会话时 scp。
@@ -140,7 +140,7 @@ npm ci   # 或 npm install;node_modules 已存在时可跳过,验证(§7)通过�
 | 6 | jev skill 不在 bundle | §5 手工补装,否则 jev-check 扩展空转 |
 | 7 | `package-lock.json` 有 npmmirror 元数据漂移(未提交) | 无实质影响;可 `git checkout -- package-lock.json` 还原,或单独提交说明 |
 | 8 | better-sqlite3 原生模块 | v13.0.3 N-API 在 Node 26 已验证;若新机 load 失败,`npm rebuild better-sqlite3 --build-from-source` 一次即可 |
-| 9 | GitHub push 凭据未配 | 首次 push 前配好 PAT/SSH,否则会复现旧机 9/29 的 auth 失败(见 MEMORY.md §"GitHub push auth 失效") |
+| 9 | ~~GitHub push 凭据未配~~ | ✅ 已验证:`27a784d` 推送成功,新机凭据可用,无需再配 |
 | 10 | 旧机记忆里的 `acp_delegate`/`/tmp/acp-delegate` 工作流细节 | 部分绑定 Linux/systemd 环境;新机沿用 `delegate_task isolated` 标准即可(MEMORY.md §"派工工具新标准") |
 
 ---
@@ -173,7 +173,7 @@ pi 侧:重启 pi(或 `/reload`)→ 确认扩展加载无报错、`jev-check` 生
 
 **迁移侧**(本次新增):
 4. 按 §5 完成 pi 配置合并 + jev skill 补装
-5. 配好 GitHub 推送凭据,验证一次 `git push`(迁移文档本身 + 后续 commits)
+5. ~~配好 GitHub 推送凭据~~ ✅ 已验证(`27a784d` 已推送 origin/master)
 6. 决定 `migration/setup-2026-10-01` 分支去留(bundle 建议保留在远端作为快照;本机恢复验证完毕后可不再 checkout)
 7. (可选)从旧机 scp sessions 归档
 8. (可选)处理 `package-lock.json` 镜像漂移(还原或提交)
