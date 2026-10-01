@@ -77,7 +77,7 @@ beforeAll(async () => {
   });
 
   kernel = new AgentKernel(settingsStore, join(dataDir, "pi"), dataDir, storage);
-  await kernel.start(() => {});
+  await kernel.start();
 
   httpServer = createServer();
   app = await createApp({ dataDir, kernel, httpServer, settingsStore, storage });

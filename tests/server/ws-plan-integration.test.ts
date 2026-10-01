@@ -102,7 +102,7 @@ beforeAll(async () => {
   // 场景④依赖 start() 里 ensureCommunicator 建出的 Communicator
   // (routeCallback → kernel.handleExecutorCallback → pending_question 的生产路径)。
   kernel = new AgentKernel(settingsStore, join(dataDir, "pi"), dataDir, storage);
-  await kernel.start(() => {});
+  await kernel.start();
   expect(kernel.getCommunicator()).toBeTruthy();
 
   httpServer = createServer();

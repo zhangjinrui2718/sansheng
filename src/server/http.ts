@@ -14,7 +14,7 @@ import type { Server } from "node:http";
 import { log } from "../shared/log.js";
 import { SettingsStore, genProviderId, isMaskedApiKey, type ProviderConfig, type ThinkingLevel } from "./settings/store.js";
 import { listProviders } from "./providers/registry.js";
-import type { AgentKernel, ServerEvent } from "./kernel/agentKernel.js";
+import type { AgentKernel } from "./kernel/agentKernel.js";
 import { attachWebSocket } from "./ws.js";
 import { Storage } from "./storage/index.js";
 import {
@@ -177,16 +177,18 @@ export async function createApp(opts: AppOptions): Promise<Hono> {
 
   // —— 新建对话 ——
   app.post("/api/conversation/new", (c) => {
-    const sink = (e: ServerEvent) => log.muted(`new-conv event: ${e.type}`);
-    // newConversation 是同步逻辑(dispose + 换 id),用 void 触发即可
-    void opts.kernel.newConversation(sink);
+    // S1(A7 根因之一):不再传 log-stub sink 劫持事件 —— newConversation 经
+    // kernel.emit 多播到当前 attachSink 的活 WS 连接(浏览器实时看到 conversation_reset)。
+    // newConversation 是同步逻辑(dispose + 换 id),用 void 触发即可。
+    void opts.kernel.newConversation();
     return c.json({ ok: true, conversationId: opts.kernel.getConversationId() });
   });
 
   // —— 强制重置 kernel(stuck 恢复用) ——
   app.post("/api/kernel/reset", async (c) => {
-    const sink = (e: ServerEvent) => log.muted(`reset-event: ${e.type}`);
-    await opts.kernel.reset(sink);
+    // S1(A7 根因之一):reset 不再被 log-stub sink 劫持 —— interrupt/ready 经 emit
+    // 到达活连接(reset 后浏览器继续收流,旧代码从此进死 stub 永久静默)。
+    await opts.kernel.reset();
     return c.json({ ok: true, conversationId: opts.kernel.getConversationId() });
   });
 

@@ -129,6 +129,20 @@ export type EventSink = (e: ServerEvent) => void;
 
 export class AgentKernel {
   private session: AgentSession | null = null;
+  /** S1(A7):start()/resume() 里 session.subscribe 的退订函数。
+   *  Pi subscribe 每个 session 恰好调用一次;事件分发靠 emit 动态多播,
+   *  连接增减永不重新 subscribe。dispose 路径调用它(与 SDK dispose() 自身
+   *  清空 _eventListeners 双保险)。 */
+  private sessionUnsubscribe: (() => void) | null = null;
+  /**
+   * S1(A7 主修):多播 sink 集合。
+   * 旧设计把单个 sink 一次性捕获进 session.subscribe / bus.subscribe 闭包,
+   * 首个连接关闭或 reset(传 log stub)后,流式输出与 bus 事件永久进死 socket。
+   * 现在:ws.ts 每连接 open 时 attachSink(connSink)、close 时 detach;
+   * kernel 所有事件出口统一走 this.emit(ev);start/reset/resume/prompt
+   * 不再接受 sink 覆盖。
+   */
+  private sinks = new Set<EventSink>();
   private model: Model<any> | null = null;
   private conversationId: string = `conv_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
   private inputTokens = 0;
@@ -176,6 +190,32 @@ export class AgentKernel {
     return this.session !== null;
   }
 
+  /**
+   * S1(A7 主修):注册一个多播 sink,返回 detach 函数。
+   * ws.ts 每连接 open 时 `const detach = kernel.attachSink(connSink)`,
+   * close 时 `detach()`。连接增减不触碰 Pi session 的 subscribe。
+   */
+  attachSink(fn: EventSink): () => void {
+    this.sinks.add(fn);
+    return () => {
+      this.sinks.delete(fn);
+    };
+  }
+
+  /**
+   * S1:统一事件出口。遍历当前所有 sink,逐个 try/catch —— 单个 sink 抛错
+   * (如已半关的 socket)不影响其他 sink,也不冒泡打断 kernel 事件流。
+   */
+  private emit(ev: ServerEvent): void {
+    for (const fn of this.sinks) {
+      try {
+        fn(ev);
+      } catch (err) {
+        log.warn("kernel sink threw (isolated):", err);
+      }
+    }
+  }
+
   /** M3b:ws.ts Orchestrator 需要知道 agentDir 路径 */
   getAgentDir(): string {
     return this.agentDir;
@@ -204,6 +244,9 @@ export class AgentKernel {
    */
   invalidate(): void {
     if (this.session) {
+      // S1(A7):退订 Pi listener(与 dispose() 清空 _eventListeners 双保险)。
+      try { this.sessionUnsubscribe?.(); } catch { /* noop */ }
+      this.sessionUnsubscribe = null;
       try {
         if (isStreaming(this.session) && this.session.isStreaming) this.session.abort();
         this.session.dispose?.();
@@ -236,7 +279,7 @@ export class AgentKernel {
    * M3c: 初始化 Communicator + Bus(在 start() 末尾调用)。
    * Communicator 永远在线 → kernel 一启动就建好。
    */
-  private ensureCommunicator(sink: EventSink): Communicator {
+  private ensureCommunicator(): Communicator {
     if (this.communicator) return this.communicator;
     const dataDir = process.env.SANSHENG_DATA ?? this.agentDir.replace(/\/pi$/, "");
     const harness = loadHarness(dataDir);
@@ -262,10 +305,12 @@ export class AgentKernel {
       comm.setOnTask(this._pendingOnTask);
       this._pendingOnTask = undefined;
     }
-    // bus 订阅:每条新 BusMessage → 推 ws(bus_event)+ 落 jsonl
+    // bus 订阅:每条新 BusMessage → emit 多播(bus_event)+ 落 jsonl。
+    // S1(A7):用 this.emit 而非捕获 sink —— 订阅只建立一次,连接增减靠 attachSink/detach,
+    // 事件永远发给当前活连接(旧代码这里捕获首个连接的 sink,重连后永久进死 socket)。
     if (!this.busUnsubscribe) {
       this.busUnsubscribe = this.bus.subscribe((msg) => {
-        sink({ type: "bus_event", message: msg });
+        this.emit({ type: "bus_event", message: msg });
         void appendBusMessage(dataDir, msg.conversationId, msg);
       });
     }
@@ -358,7 +403,6 @@ export class AgentKernel {
       executorSessionId: string;
     },
     conversationId: string,
-    sink: EventSink,
   ): Promise<void> {
     if (!this.communicator) {
       log.warn("handleExecutorCallback: communicator not ready, dropping");
@@ -382,11 +426,12 @@ export class AgentKernel {
       },
     };
     this.pendingExecutorCallbacks.set(id, arg.executorSessionId);
-    // CommunicatorSink → EventSink 翻译(只为 pending_question 感兴趣)
+    // CommunicatorSink → EventSink 翻译(只为 pending_question 感兴趣)。
+    // S1(A7):经 this.emit 多播到当前活连接,不再捕获调用方传入的单连接 sink。
     const commSink: CommunicatorSink = (e) => {
       if (e.type === "pending_question") {
         this.pendingQuestions.set(e.questionId, conversationId);
-        sink({
+        this.emit({
           type: "pending_question",
           conversationId,
           questionId: e.questionId,
@@ -422,17 +467,18 @@ export class AgentKernel {
     return this.communicator;
   }
 
-  /** 用当前 Settings 的 active provider 创建或重建 Session;Settings 变更后调用 */
-  async start(sink: EventSink): Promise<void> {
+  /** 用当前 Settings 的 active provider 创建或重建 Session;Settings 变更后调用。
+   *  S1(A7):不再接受 sink —— 事件经 this.emit 多播到 attachSink 的所有活连接。 */
+  async start(): Promise<void> {
     if (this.session) return; // already started
     this.settings = this.settingsStore.load();
     const active = this.settingsStore.activeProvider();
     if (!active) {
       const msg = "尚未配置任何 provider;请到「设置」添加一个";
-      sink({ type: "error", conversationId: this.conversationId, error: { code: "no_provider", message: msg } });
+      this.emit({ type: "error", conversationId: this.conversationId, error: { code: "no_provider", message: msg } });
       throw new Error(msg);
     }
-    const m = await this.resolveActiveModel(active, sink);
+    const m = await this.resolveActiveModel(active);
     this.model = m;
     log.info(`kernel start: provider=${active.provider} model=${active.modelId} cwd=${this.cwd}`);
 
@@ -444,7 +490,7 @@ export class AgentKernel {
     // "Agent is already processing"。等 isIdle=true 才安全。
     await this.waitSessionIdle(session);
 
-    sink({
+    this.emit({
       type: "ready",
       conversationId: this.conversationId,
       modelId: this.model?.id ?? active.modelId,
@@ -463,11 +509,12 @@ export class AgentKernel {
       log.warn("storage: upsertConversation failed:", err);
     }
 
-    // subscribe 把 Pi 事件翻译成 ServerEvent
-    this.session.subscribe(this.makeHandler(sink));
+    // S1(A7):Pi subscribe 每个 session 恰好一次 —— handler 走 this.emit 动态多播,
+    // 保存 unsubscribe 供 dispose 路径调用;连接增减永不重新 subscribe。
+    this.sessionUnsubscribe = this.session.subscribe(this.makeHandler());
     // M3c: 初始化 Communicator + bus(走非 LLM fallback 时 no-op)
     try {
-      this.ensureCommunicator(sink);
+      this.ensureCommunicator();
     } catch (err) {
       log.warn("kernel: ensureCommunicator failed:", err);
     }
@@ -485,7 +532,7 @@ export class AgentKernel {
    * Sansheng 这边不在 Pi session 里重放 messages(那是 SDK 内部 session file 的事)。
    * UI 侧 loadConversation() 已经负责把历史 messages 渲染;新 turn 用新会话上下文开始。
    */
-  async resume(conversationId: string, sink: EventSink): Promise<void> {
+  async resume(conversationId: string): Promise<void> {
     log.muted(`kernel resume: ${conversationId}`);
     if (this.conversationId !== conversationId) {
       this.disposeSession();
@@ -501,7 +548,7 @@ export class AgentKernel {
     const conv = getConversation(this.storage.db, conversationId);
     if (!conv) {
       const msg = `conversation ${conversationId} 不存在`;
-      sink({ type: "error", conversationId: this.conversationId, error: { code: "not_found", message: msg } });
+      this.emit({ type: "error", conversationId: this.conversationId, error: { code: "not_found", message: msg } });
       throw new Error(msg);
     }
 
@@ -512,10 +559,10 @@ export class AgentKernel {
     const active = this.settingsStore.activeProvider();
     if (!active) {
       const msg = "尚未配置任何 provider;请到「设置」填写";
-      sink({ type: "error", conversationId: this.conversationId, error: { code: "no_provider", message: msg } });
+      this.emit({ type: "error", conversationId: this.conversationId, error: { code: "no_provider", message: msg } });
       throw new Error(msg);
     }
-    const m = await this.resolveActiveModel(active, sink);
+    const m = await this.resolveActiveModel(active);
     this.model = m;
 
     const session = await this.createPiSession(m, active);
@@ -543,20 +590,25 @@ export class AgentKernel {
       log.warn("resume: persist agent_state failed:", err);
     }
 
-    sink({
+    this.emit({
       type: "ready",
       conversationId: this.conversationId,
       modelId: this.model?.id ?? active.modelId,
       provider: this.model?.provider ?? active.provider,
     });
 
-    this.session.subscribe(this.makeHandler(sink));
+    // S1(A7):新 session 恰好 subscribe 一次;handler 走 this.emit 动态多播。
+    // disposeSession() 已在上方退订旧 session 的 listener(若换了会话)。
+    this.sessionUnsubscribe = this.session.subscribe(this.makeHandler());
     log.info(`kernel resumed: ${conversationId} (history=${history.length})`);
   }
 
   /** 释放当前 Pi session 但保留 agent_states。供 resume() / invalidate() 复用。 */
   private disposeSession(): void {
     if (this.session) {
+      // S1(A7):退订本 session 的 Pi listener(与 SDK dispose() 清空 _eventListeners 双保险)。
+      try { this.sessionUnsubscribe?.(); } catch { /* noop */ }
+      this.sessionUnsubscribe = null;
       try {
         if (isStreaming(this.session) && this.session.isStreaming) {
           try { this.session.abort(); } catch { /* noop */ }
@@ -577,7 +629,7 @@ export class AgentKernel {
   }
 
   /** 用 active provider 解析 Pi Model;失败时 emit error + throw。 */
-  private async resolveActiveModel(active: ProviderConfig, sink: EventSink): Promise<Model<any>> {
+  private async resolveActiveModel(active: ProviderConfig): Promise<Model<any>> {
     const m = resolveModel({
       provider: active.provider,
       modelId: active.modelId,
@@ -590,7 +642,7 @@ export class AgentKernel {
       const msg = noKey
         ? `provider=${active.provider} 需要 API Key;请到「设置」填写`
         : `model ${active.provider}/${active.modelId} 不可用;请检查 provider/model 拼写`;
-      sink({ type: "error", conversationId: this.conversationId, error: { code, message: msg } });
+      this.emit({ type: "error", conversationId: this.conversationId, error: { code, message: msg } });
       throw new Error(msg);
     }
     return m;
@@ -623,8 +675,10 @@ export class AgentKernel {
    * 新建会话:丢弃当前 session,生成新 conversationId,重置计数。
    * 下一次 prompt 会重新 start()。M2 持久化后这里会先归档旧会话。
    */
-  async newConversation(sink: EventSink): Promise<string> {
+  async newConversation(): Promise<string> {
     if (this.session) {
+      try { this.sessionUnsubscribe?.(); } catch { /* noop */ }
+      this.sessionUnsubscribe = null;
       try {
         if (isStreaming(this.session) && this.session.isStreaming) this.session.abort();
         this.session.dispose?.();
@@ -644,7 +698,7 @@ export class AgentKernel {
     this.currentTurnIndex = 0;
     this.conversationId = `conv_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
     log.info(`new conversation: ${this.conversationId}`);
-    sink({ type: "conversation_reset", conversationId: this.conversationId });
+    this.emit({ type: "conversation_reset", conversationId: this.conversationId });
     return this.conversationId;
   }
 
@@ -654,9 +708,11 @@ export class AgentKernel {
    * - dispose 旧 session,清掉内部状态
    * - 下次 prompt 会重新 start()
    */
-  async reset(sink: EventSink): Promise<void> {
+  async reset(): Promise<void> {
     log.warn("kernel reset requested");
     if (this.session) {
+      try { this.sessionUnsubscribe?.(); } catch { /* noop */ }
+      this.sessionUnsubscribe = null;
       try {
         if (isStreaming(this.session) && this.session.isStreaming) {
           try { this.session.abort(); } catch {}
@@ -671,31 +727,27 @@ export class AgentKernel {
       this.currentMessageId = null;
       this.toolStartAt.clear();
     }
-    sink({ type: "interrupt", conversationId: this.conversationId });
-    await this.start(sink);
+    this.emit({ type: "interrupt", conversationId: this.conversationId });
+    await this.start();
   }
 
-  async prompt(text: string, sink?: EventSink): Promise<void> {
-    // sink 可选;为空时假设 kernel 已 start(常规路径)。
+  async prompt(text: string): Promise<void> {
+    // S1(A7):不再接受 sink 覆盖 —— 事件统一走 this.emit 多播到 attachSink 的活连接。
+    // sink 为空时假设 kernel 已 start(常规路径:ws.ts 先 ensureStarted)。
     if (!this.session) {
-      if (sink) {
-        // 还没 start 过,可能是用户改了 settings 后第一次发 — 触发一次 start
-        // start 可能 fail(如没 provider),它会 sink 错误再 throw。这里吞掉 throw,
-        // 让后续 Communicator / fallback 路径仍能尝试(M3c + PI_OFFLINE 场景)。
-        try {
-          await this.start(sink);
-        } catch (err) {
-          log.warn("kernel: lazy start failed (continuing to communicator):", (err as Error).message ?? err);
-        }
-      } else {
-        throw new Error("kernel not started");
+      // 还没 start 过(用户改了 settings 后第一次发,或 ensureStarted 失败后的 fallback):
+      // 触发一次 lazy start。start 可能 fail(如没 provider),它会 emit 错误再 throw。
+      // 这里吞掉 throw,让后续 Communicator / fallback 路径仍能尝试(M3c + PI_OFFLINE 场景)。
+      try {
+        await this.start();
+      } catch (err) {
+        log.warn("kernel: lazy start failed (continuing to communicator):", (err as Error).message ?? err);
       }
     }
-    const effectiveSink = sink ?? ((_e: ServerEvent) => {});
 
     // M3c: 先过 Communicator → decide(chat/task/feedback)
     try {
-      this.ensureCommunicator(effectiveSink);
+      this.ensureCommunicator();
     } catch (err) {
       log.warn("kernel: ensureCommunicator failed:", err);
     }
@@ -703,10 +755,10 @@ export class AgentKernel {
     if (comm) {
       try {
         const decision = await comm.routeUserMessage(text, this.conversationId, (e) => {
-          // Communicator → ServerEvent 翻译
+          // Communicator → ServerEvent 翻译(经 this.emit 多播到活连接)
           switch (e.type) {
             case "thinking":
-              effectiveSink({
+              this.emit({
                 type: "communicator_thinking",
                 conversationId: this.conversationId,
                 status: e.status,
@@ -722,10 +774,10 @@ export class AgentKernel {
               // pending_question:升级用户
               // user_reply: Communicator 的内部标记(delta/done 已经发了)
               if (e.type === "bus_event") {
-                effectiveSink({ type: "bus_event", message: e.message });
+                this.emit({ type: "bus_event", message: e.message });
               } else if (e.type === "pending_question") {
                 this.pendingQuestions.set(e.questionId, this.conversationId);
-                effectiveSink({
+                this.emit({
                   type: "pending_question",
                   conversationId: this.conversationId,
                   questionId: e.questionId,
@@ -737,7 +789,7 @@ export class AgentKernel {
               }
               break;
             case "artifact_created":
-              effectiveSink({ type: "artifact_created", artifact: e.artifact });
+              this.emit({ type: "artifact_created", artifact: e.artifact });
               break;
             default: {
               const _exhaustive: never = e;
@@ -780,8 +832,10 @@ export class AgentKernel {
   }
 
   /** 重新生成 session(M2+ 用于切模型时) */
-  async restart(sink: EventSink): Promise<void> {
+  async restart(): Promise<void> {
     if (this.session) {
+      try { this.sessionUnsubscribe?.(); } catch { /* noop */ }
+      this.sessionUnsubscribe = null;
       try {
         this.session.dispose?.();
       } catch {}
@@ -789,10 +843,13 @@ export class AgentKernel {
       this.inputTokens = 0;
       this.outputTokens = 0;
     }
-    await this.start(sink);
+    await this.start();
   }
 
-  private makeHandler(sink: EventSink) {
+  private makeHandler(): (event: any) => void {
+    // S1(A7):handler 不再捕获某个连接的 sink —— 所有事件经 this.emit 动态多播到
+    // 当前 attachSink 的活连接集合。局部别名 sink 只是转发到 emit,body 逻辑不变。
+    const sink: EventSink = (ev) => this.emit(ev);
     return (event: any) => {
       try {
         switch (event.type) {

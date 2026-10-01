@@ -121,9 +121,156 @@ export function attachWebSocket(
   const storage = opts.storage;
   const settingsStore = opts.settingsStore;
   const dataDir = opts.dataDir;
-  /** M3b:当前 connection 上正在跑的 Orchestrator(同时只允许 1 个) */
+  /** M3b:当前正在跑的 Orchestrator(同时只允许 1 个)。
+   *  C7(S2):挂在 attach 级 —— plan 生命周期与任何单个连接解耦,
+   *  发起连接中途关闭不打断 plan,也不允许 close handler abort 它。 */
   let activeOrchestrator: Orchestrator | null = null;
   const wss = new WebSocketServer({ noServer: true });
+
+  /**
+   * C7(S2):广播到所有 OPEN 客户端。
+   * runPlan 的进度/结果不再发给单个连接的 sink —— 旧实现把发起 plan 的 ws
+   * 捕获进闭包,刷新页面(连接关闭)后 plan_done/todo_failed 永久进死 socket。
+   */
+  const broadcast = (payload: ServerEvent): void => {
+    for (const client of wss.clients) {
+      if (client.readyState === WebSocket.OPEN) {
+        try {
+          client.send(JSON.stringify(payload));
+        } catch (err) {
+          log.warn("ws broadcast failed:", err);
+        }
+      }
+    }
+  };
+
+  /**
+   * M3b: 启动一个 Orchestrator,广播 blackboard_update / plan_done。
+   * C7(S2):从 per-connection 闭包提升到 attach 级 —— 进度与结果经 broadcast
+   * 发给所有活连接;闭包只依赖 attach 级状态(storage/settingsStore/dataDir/
+   * activeOrchestrator/kernel),不依赖任何 ws。
+   */
+  async function runPlan(conversationId: string, goal: string): Promise<void> {
+    if (!storage || !settingsStore || !dataDir) {
+      broadcast({
+        type: "error",
+        conversationId,
+        error: { code: "plan_unavailable", message: "Orchestrator 需要 storage + settingsStore + dataDir" },
+      });
+      return;
+    }
+    if (activeOrchestrator) {
+      broadcast({
+        type: "error",
+        conversationId,
+        error: { code: "plan_busy", message: "已有 plan 在跑,请先 abort_plan" },
+      });
+      return;
+    }
+    const settings = settingsStore.load();
+    const active = settings.providers.find((p) => p.id === settings.activeProviderId);
+    if (!active?.apiKey) {
+      broadcast({
+        type: "error",
+        conversationId,
+        error: { code: "no_api_key", message: "请先在设置中配置 API Key" },
+      });
+      return;
+    }
+    // DI seam:生产默认 makeLlmCall(kernel);集成测试可注入 fake(见 AttachOptions.llmCallFactory)
+    const llmCallFactory = opts.llmCallFactory ?? makeLlmCall;
+    const orchestrator = new Orchestrator({
+      storage,
+      dataDir,
+      agentDir: kernel.getAgentDir(),
+      // M3+ B1: 把 kernel.getModel() 包成 Planner/Executor LLM call
+      plannerLlmCall: llmCallFactory(kernel),
+      executorLlmCall: llmCallFactory(kernel),
+      // M3+ B3/B5: Executor 需要 help → kernel.handleExecutorCallback
+      // → Communicator.handleWorkerAsk(knowIt=false) → pending_question
+      // S1(A7):经 kernel.emit 多播到活连接,不再绑定发起连接的 sink。
+      routeCallback: (cbArg) => kernel.handleExecutorCallback(cbArg, conversationId),
+    });
+    activeOrchestrator = orchestrator;
+    try {
+      // A1 修复(docs/CODE-REVIEW-2026-10-01.md §A1):
+      // 旧实现在 sink 的 completed 分支里访问 `finalBb`(此时 `const finalBb = await ...`
+      // 仍在 TDZ,因为 completeRun 在 resolve 之前同步调 sink)→ ReferenceError →
+      // resolve 不可达 + runTimer 已失效 → run() 永久挂起、activeOrchestrator 永不清除。
+      // 现在:sink 的 completed 分支只记录 intentId;buildPlanSummary + plan_done
+      // 移到 `await orchestrator.run(...)` 返回(finalBb 已初始化)之后统一发送。
+      let completedIntentId: string | undefined;
+      const finalBb = await orchestrator.run(
+        conversationId,
+        goal,
+        // M3+ B2: 转发 ProgressEvent(C7:经 broadcast 到所有活连接)。
+        // - intent_received/todos_planned/todo_started/todo_resolved/callback_routed
+        //   /callback_escalated/decision_received → 不外发 ws(artifact_bus 订阅已转发
+        //   artifact_created/artifact_status_changed/executor_callback/executor_resume,
+        //   重复发会造成客户端重复消费 + 反馈回环)。
+        // - todo_failed → error
+        // - completed → 仅记录 intentId;plan_done 在 run() settle 之后发(见下,A1)
+        (progress: ProgressEvent) => {
+          switch (progress.type) {
+            case "todo_failed":
+              broadcast({
+                type: "error",
+                conversationId,
+                error: { code: "todo_failed", message: `${progress.todo.title}: ${progress.reason}` },
+              });
+              break;
+            case "completed":
+              completedIntentId = progress.intent.id;
+              break;
+            default:
+              break;
+          }
+        },
+      );
+      // run() 已 settle → finalBb 可用。intentId 优先取 completed 事件;
+      // sink 异常被 orchestrator 吞掉时(理论上不发生的兜底)从 artifacts 里找 intent。
+      const summary = buildPlanSummary(finalBb, goal);
+      const intentId =
+        completedIntentId ??
+        (finalBb.artifacts ?? []).filter((a) => a.kind === "intent").at(-1)?.id ??
+        "";
+      broadcast({
+        type: "plan_done",
+        conversationId,
+        intentId,
+        summary,
+        artifacts: finalBb.artifacts ?? [],
+      });
+    } catch (err) {
+      log.warn("Orchestrator failed:", err);
+      broadcast({
+        type: "plan_failed",
+        conversationId,
+        message: (err as Error).message ?? String(err),
+      });
+    } finally {
+      activeOrchestrator = null;
+      // A2 修复(docs/CODE-REVIEW-2026-10-01.md §A2):必须 shutdown —
+      // 退订全局 artifactBus + 清 watchdog/run timers + abort 在飞 executor。
+      // 旧实现只置 null:Orchestrator 变僵尸订阅者跨连接存活,下一个 plan 的
+      // intent 会被僵尸重复消费(实证 planner=2 executor=2 → 重复 LLM 调用、
+      // 重复落库、同一 todo 双方执行)。shutdown() 幂等;run 未 settle 时兜底
+      // reject(本路径 run 已 settle,通常为 no-op)。
+      try {
+        orchestrator.shutdown();
+      } catch (err) {
+        log.warn("runPlan: orchestrator.shutdown failed:", err);
+      }
+    }
+  }
+
+  // M3+ B4 / C7(S2):setOnTask 在 attach 级只接线一次(幂等,不再被后续连接覆盖)。
+  // handler 稳定:runPlan 经 broadcast 发进度 —— 即使触发 task 的连接已关闭,
+  // plan 照跑、结果到达所有活连接。setOnTask 会处理 communicator 未就绪的情况
+  // (_pendingOnTask 缓存,ensureCommunicator 时绑定)。
+  kernel.setOnTask(({ goal, conversationId: goalConvId }) => {
+    void runPlan(goalConvId, goal);
+  });
 
   server.on("upgrade", (req: IncomingMessage, socket: Duplex, head: Buffer) => {
     const url = new URL(req.url ?? "/", "http://localhost");
@@ -148,20 +295,21 @@ export function attachWebSocket(
 
   wss.on("connection", (ws: WebSocket) => {
     log.muted(`ws connected (clients=${wss.clients.size})`);
-    const sink = (e: ServerEvent) => send(ws, e);
+    // S1(A7):连接建立即 attachSink —— kernel 的流式 delta / bus_event / ready 等
+    // 经 emit 多播到所有活连接;close 时 detach。本连接死亡不再影响 kernel 输出,
+    // 重连的新连接立即开始收流(旧实现把首个连接的 sink 捕获进 kernel 闭包)。
+    const detachSink = kernel.attachSink((e: ServerEvent) => send(ws, e));
 
-    // 连接后立刻广播 ready 事件(前端可借此判断协议握手完成)
+    // 连接后立刻发握手 ready(连接级事件,只发本连接;start 内部的 ready 走多播)
     const meta = kernel.activeInfo() ?? { modelId: "unknown", provider: "unknown" };
     send(ws, { type: "ready", conversationId: kernel.getConversationId(), modelId: meta.modelId, provider: meta.provider });
 
     // 每次都实时查 kernel.isReady(),不缓存(settings 变更会 invalidate kernel)
     const ensureStarted = (): Promise<void> =>
-      kernel.isReady() ? Promise.resolve() : kernel.start(sink);
+      kernel.isReady() ? Promise.resolve() : kernel.start();
 
-    // M3b: Orchestrator runner 在 ws.on("error") 之后定义(依赖 send(ws, ...))
-    // 略(全量定义在下方)
-
-    // 连接时主动启动一次
+    // 连接时主动启动一次(start 的 ready/error 经 emit 到所有活连接;
+    // 这里的 catch 只兜 ensureStarted 自身 reject 时给本连接补一个 start_failed)
     ensureStarted().catch((err) => {
       send(ws, {
         type: "error",
@@ -214,133 +362,14 @@ export function attachWebSocket(
       }),
     );
     ws.on("close", () => {
+      // S1(A7):detach 本连接 sink —— kernel 多播集合移除,事件不再进死 socket。
+      detachSink();
       for (const u of busUnsubs) {
         try { u(); } catch { /* ignore */ }
       }
-    });
-
-    /**
-     * M3b: 启动一个 Orchestrator,在 ws 上发 blackboard_update / plan_done。
-     * 闭包依赖 send(ws, ...)、storage、settingsStore、dataDir、activeOrchestrator、kernel.getAgentDir()。
-     */
-    async function runPlan(conversationId: string, goal: string): Promise<void> {
-      if (!storage || !settingsStore || !dataDir) {
-        send(ws, {
-          type: "error",
-          conversationId,
-          error: { code: "plan_unavailable", message: "Orchestrator 需要 storage + settingsStore + dataDir" },
-        });
-        return;
-      }
-      if (activeOrchestrator) {
-        send(ws, {
-          type: "error",
-          conversationId,
-          error: { code: "plan_busy", message: "已有 plan 在跑,请先 abort_plan" },
-        });
-        return;
-      }
-      const settings = settingsStore.load();
-      const active = settings.providers.find((p) => p.id === settings.activeProviderId);
-      if (!active?.apiKey) {
-        send(ws, {
-          type: "error",
-          conversationId,
-          error: { code: "no_api_key", message: "请先在设置中配置 API Key" },
-        });
-        return;
-      }
-      // DI seam:生产默认 makeLlmCall(kernel);集成测试可注入 fake(见 AttachOptions.llmCallFactory)
-      const llmCallFactory = opts.llmCallFactory ?? makeLlmCall;
-      const orchestrator = new Orchestrator({
-        storage,
-        dataDir,
-        agentDir: kernel.getAgentDir(),
-        // M3+ B1: 把 kernel.getModel() 包成 Planner/Executor LLM call
-        plannerLlmCall: llmCallFactory(kernel),
-        executorLlmCall: llmCallFactory(kernel),
-        // M3+ B3/B5: Executor 需要 help → kernel.handleExecutorCallback
-        // → Communicator.handleWorkerAsk(knowIt=false) → pending_question → ws
-        routeCallback: (cbArg) => kernel.handleExecutorCallback(cbArg, conversationId, sink),
-      });
-      activeOrchestrator = orchestrator;
-      try {
-        // A1 修复(docs/CODE-REVIEW-2026-10-01.md §A1):
-        // 旧实现在 sink 的 completed 分支里访问 `finalBb`(此时 `const finalBb = await ...`
-        // 仍在 TDZ,因为 completeRun 在 resolve 之前同步调 sink)→ ReferenceError →
-        // resolve 不可达 + runTimer 已失效 → run() 永久挂起、activeOrchestrator 永不清除。
-        // 现在:sink 的 completed 分支只记录 intentId;buildPlanSummary + plan_done
-        // 移到 `await orchestrator.run(...)` 返回(finalBb 已初始化)之后统一发送。
-        let completedIntentId: string | undefined;
-        const finalBb = await orchestrator.run(
-          conversationId,
-          goal,
-          // M3+ B2: 转发 ProgressEvent 到 ws。
-          // - intent_received/todos_planned/todo_started/todo_resolved/callback_routed
-          //   /callback_escalated/decision_received → 不外发 ws(artifact_bus 订阅已转发
-          //   artifact_created/artifact_status_changed/executor_callback/executor_resume,
-          //   重复发会造成客户端重复消费 + 反馈回环)。
-          // - todo_failed → error
-          // - completed → 仅记录 intentId;plan_done 在 run() settle 之后发(见下,A1)
-          (progress: ProgressEvent) => {
-            switch (progress.type) {
-              case "todo_failed":
-                send(ws, {
-                  type: "error",
-                  conversationId,
-                  error: { code: "todo_failed", message: `${progress.todo.title}: ${progress.reason}` },
-                });
-                break;
-              case "completed":
-                completedIntentId = progress.intent.id;
-                break;
-              default:
-                break;
-            }
-          },
-        );
-        // run() 已 settle → finalBb 可用。intentId 优先取 completed 事件;
-        // sink 异常被 orchestrator 吞掉时(理论上不发生的兜底)从 artifacts 里找 intent。
-        const summary = buildPlanSummary(finalBb, goal);
-        const intentId =
-          completedIntentId ??
-          (finalBb.artifacts ?? []).filter((a) => a.kind === "intent").at(-1)?.id ??
-          "";
-        send(ws, {
-          type: "plan_done",
-          conversationId,
-          intentId,
-          summary,
-          artifacts: finalBb.artifacts ?? [],
-        });
-      } catch (err) {
-        log.warn("Orchestrator failed:", err);
-        send(ws, {
-          type: "plan_failed",
-          conversationId,
-          message: (err as Error).message ?? String(err),
-        });
-      } finally {
-        activeOrchestrator = null;
-        // A2 修复(docs/CODE-REVIEW-2026-10-01.md §A2):必须 shutdown —
-        // 退订全局 artifactBus + 清 watchdog/run timers + abort 在飞 executor。
-        // 旧实现只置 null:Orchestrator 变僵尸订阅者跨连接存活,下一个 plan 的
-        // intent 会被僵尸重复消费(实证 planner=2 executor=2 → 重复 LLM 调用、
-        // 重复落库、同一 todo 双方执行)。shutdown() 幂等;run 未 settle 时兜底
-        // reject(本路径 run 已 settle,通常为 no-op)。
-        try {
-          orchestrator.shutdown();
-        } catch (err) {
-          log.warn("runPlan: orchestrator.shutdown failed:", err);
-        }
-      }
-    }
-
-    // M3+ B4: Communicator.decide task 触发 → runPlan。
-    // 放在 runPlan 定义之后,以保证 closure 可访问。
-    // setOnTask 会处理 communicator 未就绪的情况(_pendingOnTask)。
-    kernel.setOnTask(({ goal, conversationId: goalConvId }) => {
-      void runPlan(goalConvId, goal);
+      // C7(S2):连接关闭 **不** abort activeOrchestrator —— plan 生命周期挂在
+      // attach 级,刷新/断线后 plan 继续跑,进度经 broadcast 到达重连的连接。
+      log.muted(`ws closed (clients=${wss.clients.size})`);
     });
 
     ws.on("message", async (raw) => {
@@ -389,7 +418,7 @@ export function attachWebSocket(
           await ensureStarted();
           // 只有 conversationId 不同时才 resume(避免无谓 dispose)
           if (kernel.getConversationId() !== cmd.conversationId) {
-            await kernel.resume(cmd.conversationId, sink);
+            await kernel.resume(cmd.conversationId);
           } else {
             // 同 id 也再 emit 一次 ready,便于前端在切 tab 后快速恢复 kernelReady
             const active = kernel.activeInfo();
@@ -424,7 +453,7 @@ export function attachWebSocket(
         ensureStarted()
           .then(async () => {
             if (cmd.conversationId && kernel.getConversationId() !== cmd.conversationId) {
-              await kernel.resume(cmd.conversationId, sink);
+              await kernel.resume(cmd.conversationId);
             }
             // M3a B8: 注入 fragment / profile context (可选,失败不阻塞)
             let enriched = cmd.content;
@@ -442,14 +471,14 @@ export function attachWebSocket(
                 log.warn("ws: context injection failed:", err);
               }
             }
-            await kernel.prompt(enriched, sink);
+            await kernel.prompt(enriched);
           })
           .catch((err) => {
             // M3c: 即使 ensureStarted 失败(如没 LLM provider),仍尝试 prompt,
             // Communicator 可以走启发式/禁用 LLM 路径提供反馈。
             if (err && (err as Error).message?.includes("尚未配置任何 provider")) {
               log.warn("ws: ensureStarted failed (no provider); continuing to prompt for Communicator:", err);
-              void kernel.prompt(cmd.content, sink).catch((err2) =>
+              void kernel.prompt(cmd.content).catch((err2) =>
                 send(ws, {
                   type: "error",
                   conversationId: kernel.getConversationId(),
@@ -524,7 +553,6 @@ export function attachWebSocket(
       }
     });
 
-    ws.on("close", () => log.muted(`ws closed (clients=${wss.clients.size})`));
     ws.on("error", (err) => log.warn("ws error:", err));
 
   });
