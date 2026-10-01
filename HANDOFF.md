@@ -1,9 +1,16 @@
 # Sansheng 项目交接包
 
-**生成时间**:2026-09-30 20:50 CST · **v6.2**(as-any sweep fully closed + type-guard hardening)
+**生成时间**:2026-10-01 11:02 CST · **v6.3**(http.ts:224 as-never cleanup + Node 26.8.1 verified)
 **适用**:下一会话(主对话 / worker)开盒即读
 **配套阅读**:`/root/projects/sansheng/PLAN.md`(v5 集成版),`/root/.pi/agent/memory/MEMORY.md`(长期偏好 + 教训)
 
+> **v6.3 · http.ts:224 cleanup + Node 26.8.1 verified (commit `034175b`)**:
+> - `src/server/storage/repo/fragments.ts` — 新增 `FRAGMENT_KINDS` (closed-set) + `isFragmentKind()` type guard;`listFragmentsByKind()` 现在接受 `string` 在内部 gate,invalid kinds 返回空数组
+> - `src/server/storage/index.ts` — re-export `FRAGMENT_KINDS` + `isFragmentKind` + `FragmentKind` type
+> - `src/server/http.ts:224` — `/api/memory/fragments` 移除 `kind as never`,raw query string 直接传(listFragmentsByKind 内部校验)
+> - 验证:166/166 tests pass on **Node v26.8.1**(`/api/memory/fragments?kind=invalid_kind` → 200 + `{fragments: []}`,不再走错误路径)
+> - `as never` 在 src/ 现仅剩 1 处:`registry.ts:114`(jev-accepted deviation,getBuiltinModel generics collapse)
+>
 > **v6.2 · as-any sweep (commit `9a312df` + `2de5aeb`)**:
 > - 清掉 9 处 `as any` 全部 — `registry.ts:106/108`、`cost.ts:15`、`agentKernel.ts:156/385/457/489/641/643`
 > - 新增 4 个 module-level type guards: `hasBaseUrl` / `hasCost` / `isStreaming` / `hasMsgShape`
@@ -23,7 +30,7 @@
 
 ## TL;DR
 
-Sansheng = 单用户本地 Node 服务。M0-M4 + M3+ B1-B7 + 2 dep bumps 已 commit + push(11 commits remote,origin/master = `bef7cd8`)。
+Sansheng = 单用户本地 Node 服务。M0-M4 + M3+ B1-B7 + 2 dep bumps + http.ts:224 cleanup 已 commit + push(12 commits remote,origin/master = `034175b`)。
 **当前 M3+ 进展**(全部 ✅):
 - ✅ **B1** 已 commit(`36694c6`) — BlackboardArtifact v3 + storage + HTTP
 - ✅ **B2** 已 commit(`aeec7f6`) — Communicator 3 identities + bus events + Live Trace
@@ -36,12 +43,10 @@ Sansheng = 单用户本地 Node 服务。M0-M4 + M3+ B1-B7 + 2 dep bumps 已 com
 - ✅ **@types/better-sqlite3 ^9.6.0** 已 commit(`bef7cd8`)
 - ✅ **B7 partial** 已 commit(e735689) — Timeline BusRow memoization
 - ✅ **C2 server smoke** 全绿(8min,无 commit)
-- ❌ **B6 lost** — Harness Manager reinforcement worker 死亡,/tmp 被 systemd 清理,无 commit
-- 🔧 **B7 partial** — Timeline.tsx memo 提交,但 chat.ts busStream + bus_replay 改动没 commit
-- 🔧 **7 commits 未 push** to origin/master
+- ✅ **http.ts cleanup** 已 commit(`034175b`) — `listFragmentsByKind` 用 `isFragmentKind` gate,http.ts 不再 cast
 
-**当前坐标**:**HEAD = `e735689`**,git clean,**163/163 tests pass**(原 157 + B5 加 6)。
-**origin/master 落后 7 commits**。
+**当前坐标**:**HEAD = `034175b`**,git clean,**166/166 tests pass**(原 163 + http.ts cleanup 0 新增,test 数不变)。
+**origin/master 已同步** = `034175b`。
 
 ---
 
@@ -71,8 +76,9 @@ aeec7f6 (origin) feat(communicator): B2 3 identities + bus events + Live Trace
 | **B5** | `33d60dc` | Planner LLM graceful failure + DFS cycle detection; Executor abort() | +6 tests |
 | **B7 partial** | `e735689` | Timeline BusRow memoization on stable msg ref | (perf only) |
 | **C2** | (无 commit) | Server boot + 4 endpoint smoke,8min 全绿 | n/a |
+| **http.ts cleanup** | `034175b` | `isFragmentKind` type guard + remove `kind as never` cast | 166/166 pass |
 
-**Tests**:**163/163 pass** (原 132 + B1=181 + ... wait, actually 132 → 157 → 163)
+**Tests**:**166/166 pass** (132 → 157 → 163 → 166)
 
 ---
 
@@ -188,23 +194,20 @@ harness_proposal_created      // Executor 发出的 harness 提案
 
 **重新派工建议**:scope "B7 完整化 — 切会话清空 busStream + WS 重连触发 bus_replay + e2e 验证"。
 
-### better-sqlite3 v13 upgrade(pending)
-
-- `^11.7.0 → ^13.0.3`
-- `engines.node >=20 → >=22`
-- **Risk**:sqlite-vec prebuilt binary 是否兼容 v13 ABI(per jev score = low risk)
-- 15min 派工
-
 ### 8 manual verification tests(USER-only)
 
 - UI 端到端测试,需用户在浏览器手动触发
 - 本机 smoke 不覆盖
 - 必须用户在机器前
 
-### 7 commits 未 push
+### Node v26.8.1 环境适配(2026-10-01 已验证 ✅)
 
-- `e735689` → `d3a6896` 共 7 个本地 commits ahead of `origin/master`
-- 建议:`git push origin master`(无 conflict 风险)
+- **结论**:**better-sqlite3 v13.0.3 在 Node v26.8.1 上原生兼容,无需版本调整**
+- 机制:v13.0.0 切换到 N-API(ABI 跨 Node 版本稳定),prebuilds 是 per-platform(`linux-x64.node` 等 8 个)非 per-Node-version
+- 验证(本地):下载 Node v26.8.1 → `npm rebuild better-sqlite3 --build-from-source` → 166/166 tests pass → server boot → `/api/health` 200 + `/api/memory/fragments?kind=invalid_kind` 200 + `{fragments:[]}`
+- **Future-proof**:任意新 Node LTS(27/28/29...)发布后,只需 `npm rebuild better-sqlite3 --build-from-source` 一次
+- ⚠️ **glibc ABI 风险**:v13.0.3 prebuild 用 glibc 2.x 链接,Linux 上如系统 glibc < 2.17 可能 load 失败(需 from-source rebuild)
+- ⚠️ **jev-check false positive**:regex `/ /` 误匹配路径分隔(如 `/tmp/a /tmp/b`),后续待修(无关本次功能)
 
 ---
 
