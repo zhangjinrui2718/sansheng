@@ -1,9 +1,21 @@
 # Sansheng 项目交接包
 
-**生成时间**:2026-10-01 11:02 CST · **v6.3**(http.ts:224 as-never cleanup + Node 26.8.1 verified)
+**生成时间**:2026-10-01 12:38 CST · **v6.4**(5 E2E blocker 一锅端 + ARCHITECTURE.md)
 **适用**:下一会话(主对话 / worker)开盒即读
-**配套阅读**:`/root/projects/sansheng/PLAN.md`(v5 集成版),`/root/.pi/agent/memory/MEMORY.md`(长期偏好 + 教训)
+**配套阅读**:`/root/projects/sansheng/PLAN.md`(v5 集成版),`/root/projects/sansheng/ARCHITECTURE.md`(12 层模块图,v6.4 新增),`/root/.pi/agent/memory/MEMORY.md`(长期偏好 + 教训)
 
+> **v6.4 · 5 E2E blocker 一锅端 (commits `6a522c4`..`e27a3c2`) + ARCHITECTURE.md (`c32c5c6`)**:
+> - **B1** Planner/Executor llmCall 注入:`OrchestratorOptions.plannerLlmCall/executorLlmCall` + `ws.ts` 的 `makeLlmCall(kernel)` 工厂(包装 kernel.prompt streaming → Promise<string>)
+> - **B2** Orchestrator 完成/失败 → 用户:`ws.ts runPlan` 的 sink 翻译 `completed` → ServerEvent `plan_done` (含 `buildPlanSummary()`) + `todo_failed` → `error` + Orchestrator run catch → `plan_failed`
+> - **B3** Communicator ↔ Executor 回路:`kernel.handleExecutorCallback()` 桥接,Communicator 订阅 artifactBus 的 `executor_callback`,Executor emit hypothesis 时既发 bus 也写 messageBus 问题供 Communicator 决策
+> - **B4** Communicator.task → Orchestrator.run:`CommunicatorOptions.onTask` 注入 + `setOnTask()` setter,ws.ts 在构造 Communicator 时挂 `({goal, convId}) => void runPlan(convId, goal)`
+> - **B5** Orchestrator.routeCallback 默认:覆盖在 B3 修复(Communicator 走 bus 订阅)+ 测试覆盖 default router
+> - **新文件** `tests/agents/e2e-blockers.test.ts` 443 行,11 个 it 块覆盖 B1-B5(10 passed + 1 skipped 是 placeholder)
+> - 验证:176/176 tests pass on Node v22.23.3(typecheck / build / node sanity 全绿,dist = `dist/src/server/`)
+> - **新文档** `/root/projects/sansheng/ARCHITECTURE.md`(12 层模块图,严格自顶向下,无交叉)
+> - **5 commits 全部 push origin/master** = `e27a3c2`(HEAD + origin 同步)
+> - **dist 路径变化**:`dist/server/` → `dist/src/server/`(tsconfig 输出 src 目录)— node sanity 用 `dist/src/server/ws.js`
+>
 > **v6.3 · http.ts:224 cleanup + Node 26.8.1 verified (commit `034175b`)**:
 > - `src/server/storage/repo/fragments.ts` — 新增 `FRAGMENT_KINDS` (closed-set) + `isFragmentKind()` type guard;`listFragmentsByKind()` 现在接受 `string` 在内部 gate,invalid kinds 返回空数组
 > - `src/server/storage/index.ts` — re-export `FRAGMENT_KINDS` + `isFragmentKind` + `FragmentKind` type
@@ -30,7 +42,7 @@
 
 ## TL;DR
 
-Sansheng = 单用户本地 Node 服务。M0-M4 + M3+ B1-B7 + 2 dep bumps + http.ts:224 cleanup 已 commit + push(12 commits remote,origin/master = `034175b`)。
+Sansheng = 单用户本地 Node 服务。M0-M4 + M3+ B1-B7 + 2 dep bumps + http.ts:224 cleanup + **5 E2E blocker closure** + **ARCHITECTURE.md** 已 commit + push(17 commits remote,origin/master = `e27a3c2`)。
 **当前 M3+ 进展**(全部 ✅):
 - ✅ **B1** 已 commit(`36694c6`) — BlackboardArtifact v3 + storage + HTTP
 - ✅ **B2** 已 commit(`aeec7f6`) — Communicator 3 identities + bus events + Live Trace
@@ -41,12 +53,13 @@ Sansheng = 单用户本地 Node 服务。M0-M4 + M3+ B1-B7 + 2 dep bumps + http.
 - ✅ **B7 partial** 已 commit(`e735689`) — Timeline BusRow memo
 - ✅ **better-sqlite3 ^13 + Node 22** 已 commit(`b7a8784`)
 - ✅ **@types/better-sqlite3 ^9.6.0** 已 commit(`bef7cd8`)
-- ✅ **B7 partial** 已 commit(e735689) — Timeline BusRow memoization
 - ✅ **C2 server smoke** 全绿(8min,无 commit)
 - ✅ **http.ts cleanup** 已 commit(`034175b`) — `listFragmentsByKind` 用 `isFragmentKind` gate,http.ts 不再 cast
+- ✅ **5 E2E blocker closure** 已 commit(`6a522c4`..`e27a3c2`) — user→communicator→blackboard→workers→communicator→user 端到端流程可跑通
+- ✅ **ARCHITECTURE.md** 已 commit(`c32c5c6`) — 12 层模块图,严格自顶向下,无交叉
 
-**当前坐标**:**HEAD = `034175b`**,git clean,**166/166 tests pass**(原 163 + http.ts cleanup 0 新增,test 数不变)。
-**origin/master 已同步** = `034175b`。
+**当前坐标**:**HEAD = `e27a3c2`**,git clean,**176/176 tests pass**(166 → 176,+10 E2E 测试覆盖 B1-B5,1 skipped placeholder)。
+**origin/master 已同步** = `e27a3c2`。
 
 ---
 
@@ -77,6 +90,8 @@ aeec7f6 (origin) feat(communicator): B2 3 identities + bus events + Live Trace
 | **B7 partial** | `e735689` | Timeline BusRow memoization on stable msg ref | (perf only) |
 | **C2** | (无 commit) | Server boot + 4 endpoint smoke,8min 全绿 | n/a |
 | **http.ts cleanup** | `034175b` | `isFragmentKind` type guard + remove `kind as never` cast | 166/166 pass |
+| **5 E2E blocker closure** | `6a522c4`..`e27a3c2` | Planner/Executor llmCall 注入 + sink 翻译 plan_done/plan_failed + Communicator.handleExecutorCallback 桥接 + onTask 注入 + E2E 测试 | 176/176 pass |
+| **ARCHITECTURE.md** | `c32c5c6` | 12 层模块图,严格自顶向下,无交叉 | n/a |
 
 **Tests**:**166/166 pass** (132 → 157 → 163 → 166)
 
@@ -347,10 +362,13 @@ git log / status / typecheck / test / build / 改进点 / files / open questions
 3. ~~**B6 重派时**: 用 `TMPDIR=~/.cache/tmp` 新会话(避免 /tmp 被清)~~ ✅ **CLOSED (v6.1)** — B6 已 commit `df5d388`
 4. ~~**push 7 commits**: 本地 `master` 领先 `origin/master` 7 个,建议 `git push origin master`~~ ✅ **CLOSED (v6.1)** — 已 push 11 commits (origin/master = `bef7cd8`)
 5. **8 manual verification tests**:USER-only,需在浏览器触发。**STILL OPEN** — 见 PLAN.md §manual-verification / HANDOFF §C2,需 user 手动跑。
+6. **E2E 1 skipped placeholder**:`tests/agents/e2e-blockers.test.ts` 含 1 个 `it.skip()` placeholder,可能后续边缘 case 待补。**STILL OPEN** — 边缘 case 覆盖待定。
+7. **jev-check slash-alts false positive**:regex `looksLikeMenuOptions()` 会误匹配 bash 路径分隔(如 "8 manual tests / AGENTS.md / jev-check regex")。**STILL OPEN (低优先)** — 需 word-letter pattern 精修,用户已 ack。
+8. **AGENTS.md literal 文件**:把 MEMORY 中分散的 rule(as any 禁止 / 9 项 report / push-first / jev-check 流程等)收成 single source of truth。**STILL OPEN** — user 决定何时做。
 
 ---
 
-## 附录 C: M3+ 闭环总结 (v6.1 新增)
+## 附录 C: M3+ 闭环总结 (v6.1 / v6.4 增量)
 
 ### 架构落地完整链
 
@@ -364,29 +382,37 @@ M3+ B5 Planner + Executor reinforcement             ✅ 33d60dc
 M3+ B7 partial (Timeline BusRow memo)               ✅ e735689
 M3+ B6 HarnessManager v0 reinforcement             ✅ df5d388
 better-sqlite3 ^13 + Node 22 + @types v9            ✅ b7a8784 + bef7cd8
+http.ts cleanup (kind as never removal)             ✅ 034175b
+5 E2E blocker closure (B1 wiring + B2 plan_done + B3 callback bridge + B4 onTask + B5) ✅ 6a522c4..e27a3c2
+ARCHITECTURE.md (12 层模块图)                       ✅ c32c5c6
 ```
 
 ### Sprint metrics
 
-| Metric | Value |
-| --- | --- |
-| Commits this sprint | 11 (10 M3+ + 2 dep bump - 1 overlap) |
-| Test count | 132 → **166** (+34, all passing) |
-| Type errors | 0 |
-| Build status | ✅ OK |
-| Origin/master | `bef7cd8` (in sync) |
-| Native bindings | better-sqlite3 v13.0.3 on Node 22.23.3 |
+| Metric | v6.1 (B1-B7) | v6.4 (今日) |
+| --- | --- | --- |
+| Commits this sprint | 11 (10 M3+ + 2 dep bump - 1 overlap) | +6 (5 blocker + 1 ARCHITECTURE) |
+| Test count | 132 → **166** (+34, all passing) | 166 → **176** (+10 E2E, 1 skipped) |
+| Type errors | 0 | 0 |
+| Build status | ✅ OK | ✅ OK (dist = `dist/src/server/`) |
+| Origin/master | `bef7cd8` (in sync) | `e27a3c2` (in sync) |
+| Native bindings | better-sqlite3 v13.0.3 on Node 22.23.3 | (unchanged) |
 
-### Worker prompts (本 session 实际用的,可复用)
+### Worker runIds 本 session(可复用)
 
-- **B6 (HarnessManager reinforcement)** — 5min worker `del_munuje5l_3irf` → `df5d388`
-- **better-sqlite3 upgrade** — 3min worker `del_munv9lml_1qpg` → `b7a8784`
-- **@types/better-sqlite3 bump** — 3min worker `del_munvf5rd_pien` → `bef7cd8`
+- **5 E2E blocker(attempt 1)** — 5min worker `del_mup0g23q_mniy` → 派生 sub-worker `del_mup0jgvo_qray`,**watchdog SIGKILL**(5min no-output)。留下 partial B1 → commit `6a522c4` 作为 checkpoint。
+- **5 E2E blocker(attempt 2)** — 11min worker `del_mup0txjw_66zi` → 完成所有 B1-B5 + E2E tests + push。被 watchdog 在写 9-item report 时 kill。**最终 HEAD = `e27a3c2`**。
+
+### 教训(v6.4 新增)
+
+- **Worker self-delegation 陷阱**:大任务 worker 可能觉得太长 → 自作主张派生 sub-worker。本案例 sub-worker 派生后父 worker 等待 → watchdog 抓 no-output → 父子双双 SIGKILL。**下次派工时显式禁止派生 sub-worker**。
+- **Worker SIGKILL ≠ 任务失败**:5min idle watchdog 经常在 worker 写最终 report 时杀进程,但实际工作 100% 完成。本案:5 commits 已 push / tests 176/176 / build OK / node sanity OK,只差 9-item report 文本。**修复路径**:worker 死了之后,Main 自己读 .out/.session.jsonl 补全 report(本案做法)。
+- **Partial work 提早 commit**:本次 6a522c4 partial B1 commit 起 checkpoint 作用 — 即使后续 worker 再次死,已 commit 不会丢。**下次派大任务时让 worker 第一件事 commit "wip:" checkpoint**。
 
 ### 下一会话起手 3 件事
 
 1. **8 manual browser verification tests**(USER-only) — 起 `npm run dev`,浏览器按 HANDOFF §C2 跑 8 个 test case
-2. **(可选)Orchestrator 2 unhandled rejection** — `tests/agents/orchestrator.test.ts` 中 pre-existing 2 errors,baseline 不影响 pass,但可清理
-3. **(可选)HANDOFF §C2 实测** — `/api/profile` 空 state 是已知 empty,需 UI 触发 M3 reflection 才会有内容
+2. **5 blocker 端到端实测**:B1-B5 已 commit 但只在 vitest fakeLlmCall 下验证过,真实 LLM 路径需浏览器触发 /plan 看 plan_done summary 是否渲染正确
+3. **(可选)派 worker 处理附录 B #6**(E2E skipped placeholder)或 **#7**(jev-check regex 精修)— 看 user 优先级
 
-#sansheng #m3-plus #v6-1 #b3-b7-done #166-tests #11-commits-pushed #node-22 #better-sqlite3-v13
+#sansheng #m3-plus #v6-4 #b1-b7-done #5-blockers-closed #176-tests #17-commits-pushed #node-22 #better-sqlite3-v13 #architecture-12-layer
