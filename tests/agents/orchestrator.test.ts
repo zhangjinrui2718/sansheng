@@ -195,16 +195,19 @@ describe("agents/orchestrator (event-sourced API)", () => {
     orch.shutdown();
   });
 
-  // A2 后的过渡形态:旧版用 todoId 冒充 executorSessionId 发 resume(实际 no-op),
-  // 本 commit 只保证它在新语义下仍然有界(单 callback → failMs watchdog → failed);
-  // A4 commit 会把它重写成真实 depth-loop 断言(real sessionId + 按 todoId 累计)。
-  it("depth limit + routeCallback loop → bounded by maxCallbackDepth", async () => {
+  // A4 重写(docs/CODE-REVIEW-2026-10-01.md §A4):旧版用 todoId 冒充 executorSessionId
+  // 发 resume(todoByExecutorSession 查不到 → 实际 no-op),断言又是三选一宽松集合,
+  // 没测到真实 depth 路径。现在:routeCallback 用**真实 executorSessionId** 发 resume,
+  // executor 每次重跑都产 hypothesis → depth 按 todoId 跨 session 累计,
+  // 超过 maxCallbackDepth 走 failTodoDueToDepth(旧实现按 session 计数恒 1,生产不可达)。
+  it("depth limit: same todo across sessions → failTodoDueToDepth after maxCallbackDepth", async () => {
     const planner: PlannerLlmCall = async () =>
       JSON.stringify([
         { id: "t-depth", title: "loop", body: "endless callback", dependsOn: [] },
       ]);
 
-    const executor: ExecutorLlmCall = async () =>
+    // 每次执行都产 hypothesis → 若无 depth 防线即无界循环
+    const executor: ExecutorLlmCall = vi.fn(async () =>
       JSON.stringify({
         outcome: "hypothesis",
         hypothesis: {
@@ -212,12 +215,15 @@ describe("agents/orchestrator (event-sourced API)", () => {
           body: "again",
           callbackReason: "judgment",
         },
-      });
+      }),
+    );
 
-    // routeCallback: synchronously publish executor_resume so executor is re-run,
-    // emitting yet another hypothesis. After maxCallbackDepth rounds, Orchestrator
-    // should mark the todo as failed and stop routing.
-    const routeCallback = vi.fn(async () => {
+    // routeCallback:用真实 executorSessionId 回 decision + executor_resume。
+    // setTimeout(0):executor_callback 在 executor.execute 调用栈内 publish,
+    // 此时 spawnExecutor 的 activeExecutors 尚未释放,同步 resume 会被忽略;
+    // 延到下一个宏任务,模拟真实「用户回答稍后到达」。
+    const routeCallback = vi.fn(async (arg: { executorSessionId: string }) => {
+      await new Promise((r) => setTimeout(r, 0));
       const dec = makeArtifact({
         kind: "decision",
         title: "test decision",
@@ -227,12 +233,11 @@ describe("agents/orchestrator (event-sourced API)", () => {
         author: "communicator",
         status: "open",
       });
-      dec.parentIntent = "t-depth";
       upsertArtifact(db, dec);
       artifactBus.publish({ type: "artifact_created", artifact: dec });
       artifactBus.publish({
         type: "executor_resume",
-        executorSessionId: "t-depth",
+        executorSessionId: arg.executorSessionId,
         decisionArtifactId: dec.id,
       });
     });
@@ -242,19 +247,37 @@ describe("agents/orchestrator (event-sourced API)", () => {
       executor,
       routeCallback: routeCallback as never,
       maxCallbackDepth: 2,
-      failMs: 5000,
+      failMs: 60_000, // watchdog 不参与:run 必须由 depth 防线收尾
     });
 
     const events: ProgressEvent[] = [];
+    // cb#1(depth1)→resume→cb#2(depth2)→resume→cb#3(depth3>2)→failTodoDueToDepth
+    // → intent failed → run settle
     await orch.run("conv-depth", "infinite loop", (e) => events.push(e));
 
-    // depth limit or failMs watchdog: todo should not stay in waiting_for_decision forever
     const todo = getArtifact(db, "t-depth");
-    expect(todo).toBeTruthy();
-    expect(["failed", "waiting_for_decision", "resolved"]).toContain(todo?.status);
+    expect(todo?.status).toBe("failed");
+
+    // executor 恰好跑 maxCallbackDepth+1 次(1 初始 + 2 resume),第 3 次 callback 被掐断
+    expect(executor).toHaveBeenCalledTimes(3);
+    // routeCallback 只路由前 2 次(第 3 次超限直接 failed,不再提问)
+    expect(routeCallback).toHaveBeenCalledTimes(2);
+
+    // 失败 reason 来自 depth 防线(而非 watchdog / executor 错误)
+    expect(
+      events.some(
+        (e) => e.type === "todo_failed" && /max callback depth exceeded/.test(e.reason),
+      ),
+    ).toBe(true);
+
+    // depth 失败 note 已落库
+    const notes = listArtifacts(db, {
+      scope: "conversation",
+      conversationId: "conv-depth",
+    }).filter((a) => a.kind === "note");
+    expect(notes.some((n) => n.title.includes("max callback depth"))).toBe(true);
 
     orch.shutdown();
-    // A2 后 run 经 failMs(5s)watchdog 收尾,给足超时余量
   }, 20_000);
 
   it("shutdown() unsubscribes from bus (no further events processed)", async () => {

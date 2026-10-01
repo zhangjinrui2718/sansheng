@@ -13,7 +13,7 @@
  * - **依赖注入**:Planner/Executor 工厂 + bus + storage 全部可替换 → 测试 easy
  * - **Watchdog**:callback 5min 未响应 → 写 escalation note + 发 user message
  *   1hr 未响应 → mark todo failed
- * - **Depth limit**(默认 3):同一 executor session 多次 callback 时循环防御
+ * - **Depth limit**(默认 3):同一 todo 多次 callback(跨 executor session 累计,A4)循环防御
  * - **回调路由**:通过注入 `routeCallback` 函数调用 Communicator(B2 产物),
  *   不直接 import Communicator(避免循环依赖,Communicator 在测试中可被 fake 替换)
  *
@@ -94,7 +94,7 @@ export interface OrchestratorOptions {
   /** Watchdog 阈值(ms)。默认 5min escalation / 1hr fail。 */
   escalationMs?: number;
   failMs?: number;
-  /** callback depth 上限(同一 executorSessionId 累计)。默认 3。 */
+  /** callback depth 上限(A4:同一 todoId 跨 executor session 累计)。默认 3。 */
   maxCallbackDepth?: number;
   /** run() 的最大等待时长(ms);默认 30min。 */
   maxRunMs?: number;
@@ -136,7 +136,9 @@ export class Orchestrator {
   private activeExecutors = new Map<string, Executor>(); // todoId → Executor
   private todoByExecutorSession = new Map<string, string>(); // executorSessionId → todoId
   private waiting = new Map<string, WaitingEntry>(); // executorSessionId → waiting state
-  private depthBySession = new Map<string, number>(); // executorSessionId → callback depth
+  // A4:todoId → 跨 executor session 累计的 callback depth(旧实现按
+  // executorSessionId 计,resume 每次换新 session → 计数恒 1 → depth limit 死代码)
+  private depthByTodo = new Map<string, number>();
 
   private unsubs: Array<() => void> = [];
   private runPromise: Promise<BlackboardShape> | null = null;
@@ -395,8 +397,11 @@ export class Orchestrator {
     if (!todo || !hypothesis) return;
 
     // 1. depth tracking
-    const currentDepth = (this.depthBySession.get(e.executorSessionId) ?? 0) + 1;
-    this.depthBySession.set(e.executorSessionId, currentDepth);
+    //    A4 修复(docs/CODE-REVIEW-2026-10-01.md §A4):按 todoId 跨 session 累计 —
+    //    旧实现按 executorSessionId 计,而每次 resume 都新建 Executor(新 sessionId),
+    //    计数恒从 1 起 → failTodoDueToDepth 生产不可达 → 无界提问循环没有防线。
+    const currentDepth = (this.depthByTodo.get(todoId) ?? 0) + 1;
+    this.depthByTodo.set(todoId, currentDepth);
     if (currentDepth > this.maxCallbackDepth) {
       // 死循环防御:直接 mark todo failed + 写 note
       this.failTodoDueToDepth(todo, hypothesis, currentDepth);
@@ -458,8 +463,9 @@ export class Orchestrator {
     this.sink?.({ type: "decision_received", todo, decision });
 
     // 3. 触发 Executor 重新执行(todo 从 waiting_for_decision → in_progress)
-    //    Executor 端拿到 decision 后,在新的 execute() 轮次里结合 context 用
-    await this.resumeExecutor(todo);
+    //    A4:decision 的 title+body 随 resume 注入重跑 prompt(此前只喂了 sink,
+    //    Executor 端拿不到用户回答全文 → 大概率重复提问)
+    await this.resumeExecutor(todo, decision);
   }
 
   /* ── Private orchestration logic ───────────────────────── */
@@ -545,9 +551,14 @@ export class Orchestrator {
     return out;
   }
 
-  private async spawnExecutor(todo: BlackboardArtifact): Promise<void> {
+  private async spawnExecutor(
+    todo: BlackboardArtifact,
+    pendingDecision?: { title: string; body: string },
+  ): Promise<void> {
     if (this.activeExecutors.has(todo.id)) return;
-    const executor = this.executorFactory({ storage: this.storage });
+    // A4:resume 重跑时把 decision 传给 Executor → buildUserPrompt 输出
+    // 「# Decision(来自用户/Communicator)」段落(用户回答全文在 body,逐字注入)
+    const executor = this.executorFactory({ storage: this.storage, pendingDecision });
     this.activeExecutors.set(todo.id, executor);
     this.todoByExecutorSession.set(executor.sessionId, todo.id);
     this.sink?.({ type: "todo_started", todo });
@@ -564,14 +575,20 @@ export class Orchestrator {
     }
   }
 
-  private async resumeExecutor(todo: BlackboardArtifact): Promise<void> {
-    // Resume:在原 Executor 上重新 execute();它会再次跑 llmCall + 这次 context 包含 decision
-    // 这里不复用原 Executor(它已 dispose) — 新建一个
-    // 注意:depth 已经在 onExecutorCallback 里累计,这里清掉 waiting 不重置 depth
-    // (深度限制针对 callback chain,不是 resume)
+  private async resumeExecutor(
+    todo: BlackboardArtifact,
+    decision?: BlackboardArtifact,
+  ): Promise<void> {
+    // Resume:新建 Executor 重新 execute()(原实例已结束生命周期,不复用)。
+    // A4:decision artifact 的 title+body 经 pendingDecision 注入重跑 userPrompt。
+    // 注意:depth 在 onExecutorCallback 按 todoId 跨 session 累计,这里不重置
+    // (深度限制针对整条 callback chain,不是单个 session)。
     if (this.activeExecutors.has(todo.id)) return;
     if (this.areDepsResolved(todo)) {
-      await this.spawnExecutor(todo);
+      await this.spawnExecutor(
+        todo,
+        decision ? { title: decision.title, body: decision.body } : undefined,
+      );
     } else {
       // 还有依赖未 ready(罕见)— 等下一次 tryUnblockDependents
     }

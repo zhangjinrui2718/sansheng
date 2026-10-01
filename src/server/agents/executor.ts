@@ -41,6 +41,13 @@ export interface ExecutorOptions {
   llmCall?: ExecutorLlmCall;
   systemPrompt?: string;
   now?: () => number;
+  /**
+   * A4(docs/CODE-REVIEW-2026-10-01.md §A4):resume 重跑时注入的用户/Communicator
+   * decision(decision artifact 的 title+body)。用户回答全文在 body 里 —
+   * 不注入时 LLM 只能在 siblings 上下文里看到一行标题(`[decision/open] User
+   * decision for q-exec-x`),大概率重复产同一 hypothesis → 无界提问循环。
+   */
+  pendingDecision?: { title: string; body: string };
 }
 
 export type ExecutorOutcome =
@@ -88,6 +95,8 @@ export class Executor {
   private readonly llmCall: ExecutorLlmCall;
   private readonly systemPrompt: string;
   private readonly now: () => number;
+  /** A4:resume 重跑时携带的用户/Communicator decision(首次执行为 undefined)。 */
+  private readonly pendingDecision: { title: string; body: string } | undefined;
   /** 暴露给 Orchestrator 的 session id(由 ctor 时生成,稳定到本 Executor 生命周期)。 */
   readonly sessionId: string;
   private aborted = false;
@@ -98,6 +107,7 @@ export class Executor {
     this.llmCall = opts.llmCall ?? defaultExecutorLlmCall;
     this.systemPrompt = opts.systemPrompt ?? DEFAULT_EXECUTOR_PROMPT;
     this.now = opts.now ?? Date.now;
+    this.pendingDecision = opts.pendingDecision;
     this.sessionId = `exec-${nanoid(10)}`;
   }
 
@@ -205,6 +215,15 @@ export class Executor {
     if (todo.parentIntent) parts.push(`parentIntent: ${todo.parentIntent}`);
     if (todo.dependsOn && todo.dependsOn.length > 0) {
       parts.push(`dependsOn (all resolved): ${todo.dependsOn.join(", ")}`);
+    }
+    // A4(docs/CODE-REVIEW-2026-10-01.md §A4):resume 重跑时逐字注入用户/Communicator
+    // 的 decision(回答全文在 decision.body)。放在 siblings 之前 — 这是本次重跑
+    // 最关键的上下文;不注入时 LLM 只能在 siblings 里看到一行 decision 标题。
+    if (this.pendingDecision) {
+      parts.push("");
+      parts.push(`# Decision(来自用户/Communicator)`);
+      parts.push(`title: ${this.pendingDecision.title}`);
+      parts.push(this.pendingDecision.body);
     }
     if (siblings.length > 0) {
       parts.push("");
