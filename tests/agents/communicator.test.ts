@@ -47,6 +47,7 @@ vi.mock("../../src/server/providers/registry.js", async () => {
 import { MessageBus } from "../../src/server/agents/messageBus.js";
 import {
   Communicator,
+  defaultCommunicatorDecide,
   type CommunicatorSink,
   type CommunicatorEvent,
 } from "../../src/server/agents/communicator.js";
@@ -258,5 +259,93 @@ describe("agents/communicator", () => {
     // 验证 createAgentSession 收到了 resourceLoader
     expect(__loaderCapture.sessionCalls.length).toBe(1);
     expect(__loaderCapture.sessionCalls[0].resourceLoader).toBeDefined();
+  });
+});
+
+/**
+ * 批次 5a · T2 — chat 双回复修复(docs/CODE-REVIEW-2026-10-01.md §B2)
+ *
+ * 旧行为:defaultCommunicatorDecide chat 分支产 canned「已收到:…」占位回复,
+ * routeUserMessage 将其 sink(delta/done)+ bus broadcast;随后 kernel.prompt
+ * 无条件 session.prompt(text) 产生 Pi 真回复 → 用户看到两条。
+ *
+ * 新行为:chat 路径只保留 Pi session 真回复 —— 默认 decide 不再产占位文本,
+ * routeUserMessage 对空 reply 不 sink / 不 broadcast。
+ * task 分支(broadcast + onTask + 确认 delta)行为不变;task 双执行留待批次 5b。
+ */
+describe("batch5a · B2 chat 双回复修复", () => {
+  it("defaultCommunicatorDecide chat 分支不再产 canned「已收到」占位回复", async () => {
+    const decision = await defaultCommunicatorDecide({
+      userText: "你好呀",
+      conversationId: "conv-b2",
+    });
+    expect(decision.kind).toBe("chat");
+    if (decision.kind === "chat") {
+      expect(decision.reply).not.toContain("已收到");
+      // chat 占位回复清空 → kernel 里 Pi session 的真回复是唯一回复
+      expect(decision.reply).toBe("");
+    }
+  });
+
+  it("routeUserMessage chat 分支(默认 decide)不 sink 占位回复、不 broadcast", async () => {
+    const bus = new MessageBus();
+    const events: CommunicatorEvent[] = [];
+    const sink: CommunicatorSink = (e) => events.push(e);
+    // 不注入 decideFn → 走 defaultCommunicatorDecide(生产同路径)
+    const comm = new Communicator({
+      bus,
+      settings: { provider: "fake", apiKey: "sk-fake", modelId: "fake", thinkingLevel: "off" },
+      agentDir: "/tmp/agentdir/communicator",
+      cwd: "/tmp",
+      systemPrompt: "",
+      disableLlm: true,
+    });
+
+    const decision = await comm.routeUserMessage("今天天气不错", "conv-b2", sink);
+    expect(decision.kind).toBe("chat");
+
+    // 无占位 delta/done —— chat 回复只来自 Pi session(kernel.prompt 后置调用)
+    expect(events.filter((e) => e.type === "delta")).toHaveLength(0);
+    expect(events.filter((e) => e.type === "done")).toHaveLength(0);
+    // bus 上不再落「已收到」broadcast(timeline 不会出现占位气泡)
+    expect(bus.size()).toBe(0);
+    expect(events.filter((e) => e.type === "bus_event")).toHaveLength(0);
+    // thinking 生命周期事件保留(UI 状态不受影响)
+    const thinking = events.filter((e) => e.type === "thinking");
+    expect(thinking.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("task 分支行为不变:broadcast 给 planner + onTask 仍被调 + 确认 delta 保留", async () => {
+    const bus = new MessageBus();
+    const events: CommunicatorEvent[] = [];
+    const sink: CommunicatorSink = (e) => events.push(e);
+    const onTask = vi.fn();
+    const comm = new Communicator({
+      bus,
+      settings: { provider: "fake", apiKey: "sk-fake", modelId: "fake", thinkingLevel: "off" },
+      agentDir: "/tmp/agentdir/communicator",
+      cwd: "/tmp",
+      systemPrompt: "",
+      disableLlm: true,
+      onTask,
+    });
+
+    // 用默认 decide:「重构 X 模块」命中 task 正则(生产同路径)
+    const decision = await comm.routeUserMessage("重构 X 模块", "conv-b2", sink);
+    expect(decision.kind).toBe("task");
+
+    // broadcast 给 planner 不变
+    expect(bus.size()).toBe(1);
+    const m = bus.snapshot()[0]!;
+    expect(m.kind).toBe("broadcast");
+    expect(m.toRole).toBe("planner");
+    expect(m.payload).toBe("重构 X 模块");
+    // onTask 仍被调(task 双执行问题留待批次 5b,见 §B2;本批次不动)
+    expect(onTask).toHaveBeenCalledTimes(1);
+    expect(onTask).toHaveBeenCalledWith({ goal: "重构 X 模块", conversationId: "conv-b2" });
+    // 用户确认 delta 保留
+    const deltas = events.filter((e) => e.type === "delta");
+    expect(deltas).toHaveLength(1);
+    expect((deltas[0] as Extract<CommunicatorEvent, { type: "delta" }>).text).toContain("收到任务");
   });
 });
