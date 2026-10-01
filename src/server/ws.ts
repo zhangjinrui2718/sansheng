@@ -127,6 +127,13 @@ export interface AttachOptions {
   storage?: Storage;
   settingsStore?: SettingsStore;
   dataDir?: string;
+  /**
+   * 测试注入 seam(仅集成测试用):替换默认的 makeLlmCall。
+   * 生产(index.ts)不传 → 行为不变(makeLlmCall(kernel))。
+   * 只有 llmCall 允许 fake — runPlan 闭包 / Orchestrator / sink / 生命周期全部走生产路径
+   * (docs/CODE-REVIEW-2026-10-01.md §E 批次 1 验收标准)。
+   */
+  llmCallFactory?: (kernel: AgentKernel) => PlannerLlmCall & ExecutorLlmCall;
 }
 
 export function attachWebSocket(
@@ -254,13 +261,15 @@ export function attachWebSocket(
         });
         return;
       }
+      // DI seam:生产默认 makeLlmCall(kernel);集成测试可注入 fake(见 AttachOptions.llmCallFactory)
+      const llmCallFactory = opts.llmCallFactory ?? makeLlmCall;
       const orchestrator = new Orchestrator({
         storage,
         dataDir,
         agentDir: kernel.getAgentDir(),
         // M3+ B1: 把 kernel.getModel() 包成 Planner/Executor LLM call
-        plannerLlmCall: makeLlmCall(kernel),
-        executorLlmCall: makeLlmCall(kernel),
+        plannerLlmCall: llmCallFactory(kernel),
+        executorLlmCall: llmCallFactory(kernel),
         // M3+ B3/B5: Executor 需要 help → kernel.handleExecutorCallback
         // → Communicator.handleWorkerAsk(knowIt=false) → pending_question → ws
         routeCallback: (cbArg) => kernel.handleExecutorCallback(cbArg, conversationId, sink),
