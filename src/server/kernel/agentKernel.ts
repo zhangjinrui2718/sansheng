@@ -14,7 +14,7 @@ import { SettingsStore, type Settings, type ProviderConfig } from "../settings/s
 import { estimateCost } from "../providers/cost.js";
 import { log } from "../../shared/log.js";
 import { MessageBus } from "../agents/messageBus.js";
-import { Communicator } from "../agents/communicator.js";
+import { Communicator, type CommunicatorSink } from "../agents/communicator.js";
 import type { BusMessage as BusMessageFromTypes } from "@shared/types/agents";
 import type { RunnerSettings } from "../agents/runner.js";
 import { loadHarness } from "../harness/loader.js";
@@ -23,6 +23,8 @@ import { appendBusMessage, loadBusMessages } from "../agents/busPersister.js";
 /** 本文件用到 BusMessage 类型 */
 type BusMessage = BusMessageFromTypes;
 import { resolveModel } from "../providers/registry.js";
+import { artifactBus, makeArtifact } from "../bus/index.js";
+import { upsertArtifact } from "../storage/index.js";
 import {
   Storage,
   embedText,
@@ -137,6 +139,11 @@ export class AgentKernel {
   private bus: MessageBus = new MessageBus();
   private communicator: Communicator | null = null;
   private pendingQuestions = new Map<string, string>(); // questionId → conversationId
+  /** M3+ B3/B5: Executor callback(orchestrator.routeCallback 注入此 kernel)。
+   *  Synthesized BusMessage questionId → executorSessionId。
+   *  user answer 时反查 → publish executor_resume。
+   */
+  private pendingExecutorCallbacks = new Map<string, string>();
   /** bus 的所有 BusMessage 都走这个 subscriber → 推 ws + 落 jsonl */
   private busUnsubscribe: (() => void) | null = null;
 
@@ -156,6 +163,15 @@ export class AgentKernel {
   /** M3b:ws.ts Orchestrator 需要知道 agentDir 路径 */
   getAgentDir(): string {
     return this.agentDir;
+  }
+
+  /**
+   * M3+ B1: ws.ts makeLlmCall 需要 resolved Model 来跑 Planner/Executor 推理。
+   * 返回 Model<any> 是为了与 pi-ai 泛型 API(completeSimple 等)兼容 — provider
+   * api 类型在调用时由 pi-ai runtime dispatch,不需要 TS 端固定 TApi。
+   */
+  getModel(): Model<any> | null {
+    return this.model;
   }
 
   /**
@@ -216,6 +232,12 @@ export class AgentKernel {
       // kernel 层拿不到模型时(无 API key)降级为 disableLlm
       disableLlm: !active?.apiKey,
     });
+    // M3+ B4: 若 ws 层先调 setOnTask(此时 Communicator 尚未构造),
+    // pending 引用在这里应用;否则保持 undefined。
+    if (this._pendingOnTask) {
+      comm.setOnTask(this._pendingOnTask);
+      this._pendingOnTask = undefined;
+    }
     // bus 订阅:每条新 BusMessage → 推 ws(bus_event)+ 落 jsonl
     if (!this.busUnsubscribe) {
       this.busUnsubscribe = this.bus.subscribe((msg) => {
@@ -235,10 +257,128 @@ export class AgentKernel {
     return this.communicator.answerPending(questionId, payload);
   }
 
+  /**
+   * M3+ B3/B5: 把 user 回答路由回 Orchestrator。
+   * - bus.reply 清理 Communicator 内部 pending
+   * - 反查 questionId → executorSessionId;若找到 → 写 decision artifact + publish executor_resume
+   * 返回 {replied, resumed?}。resumed 不为空表示已经触发了 Executor 恢复。
+   */
+  handleUserAnswer(
+    questionId: string,
+    payload: string,
+    conversationId: string,
+  ): { replied: boolean; resumed?: { executorSessionId: string; decisionArtifactId: string } } {
+    const replied = this.answerPendingQuestion(questionId, payload);
+    const executorSessionId = this.pendingExecutorCallbacks.get(questionId);
+    if (!executorSessionId) {
+      return { replied };
+    }
+    this.pendingExecutorCallbacks.delete(questionId);
+    // 写 decision artifact + publish executor_resume
+    const decision = makeArtifact({
+      kind: "decision",
+      title: `User decision for ${questionId.slice(0, 8)}`,
+      body: payload,
+      scope: "conversation",
+      conversationId,
+      author: "communicator",
+      status: "open",
+    });
+    try {
+      upsertArtifact(this.storage.db, decision);
+    } catch (err) {
+      log.warn(`handleUserAnswer: upsertArtifact failed: ${(err as Error).message ?? err}`);
+    }
+    artifactBus.publish({ type: "artifact_created", artifact: decision });
+    artifactBus.publish({
+      type: "executor_resume",
+      executorSessionId,
+      decisionArtifactId: decision.id,
+    });
+    return { replied, resumed: { executorSessionId, decisionArtifactId: decision.id } };
+  }
+
   /** M3c:ws 层调这个取消一个挂起的 question。 */
   cancelPendingQuestion(questionId: string): boolean {
     if (!this.communicator) return false;
     return this.communicator.cancelPending(questionId);
+  }
+
+  /**
+   * M3+ B4: 设置 Communicator.task 触发 callback。
+   * ws 层每个 connection 调用一次(runPlan 闭包依赖 connection-local state)。
+   * kernel 层只做转发 — 不会验证 callback 签名(允许 undefined 以解绑)。
+   * 若 Communicator 尚未构造,缓存到 _pendingOnTask,待 ensureCommunicator() 时绑定。
+   */
+  setOnTask(cb: ((input: { goal: string; conversationId: string }) => void) | undefined): void {
+    if (this.communicator) {
+      this.communicator.setOnTask(cb);
+      return;
+    }
+    this._pendingOnTask = cb;
+  }
+  private _pendingOnTask: ((input: { goal: string; conversationId: string }) => void) | undefined = undefined;
+
+  /**
+   * M3+ B3/B5: 由 Orchestrator.routeCallback 注入调入。
+   * 1. 合成 BusMessage(kind="question")—— Executor 暂无 bus.ask 路径。
+   * 2. 存 questionId → executorSessionId。
+   * 3. Communicator.handleWorkerAsk(knowIt=false) → 发出 pending_question sink 事件
+   *    (CommunicatorSink → EventSink 翻译:在这里做)。
+   */
+  async handleExecutorCallback(
+    arg: {
+      todoId: string;
+      reason: "judgment" | "harness_proposal";
+      hypothesisId: string;
+      executorSessionId: string;
+    },
+    conversationId: string,
+    sink: EventSink,
+  ): Promise<void> {
+    if (!this.communicator) {
+      log.warn("handleExecutorCallback: communicator not ready, dropping");
+      return;
+    }
+    const id = `q-exec-${nanoid(8)}`;
+    const msg: BusMessage = {
+      id,
+      ts: Date.now(),
+      direction: "worker→comm",
+      fromRole: "executor",
+      toRole: "communicator",
+      conversationId,
+      kind: "question",
+      payload: `Executor needs help (${arg.reason}) for todo ${arg.todoId.slice(0, 8)}`,
+      context: {
+        todoId: arg.todoId,
+        hypothesisId: arg.hypothesisId,
+        executorSessionId: arg.executorSessionId,
+        reason: arg.reason,
+      },
+    };
+    this.pendingExecutorCallbacks.set(id, arg.executorSessionId);
+    // CommunicatorSink → EventSink 翻译(只为 pending_question 感兴趣)
+    const commSink: CommunicatorSink = (e) => {
+      if (e.type === "pending_question") {
+        this.pendingQuestions.set(e.questionId, conversationId);
+        sink({
+          type: "pending_question",
+          conversationId,
+          questionId: e.questionId,
+          payload: e.payload,
+          fromRole: e.fromRole,
+        });
+      }
+      // 其他 CommunicatorEvent 在 callback 路径下不暴露给 ws(避免噪音)
+    };
+    try {
+      await this.communicator.handleWorkerAsk(msg, /* knowIt */ false, "", commSink);
+    } catch (err) {
+      log.warn(`handleExecutorCallback: handleWorkerAsk threw: ${(err as Error).message ?? err}`);
+      // 出错时清掉 pending,避免悬挂
+      this.pendingExecutorCallbacks.delete(id);
+    }
   }
 
   /** M3c:ws 层调这个从 jsonl 重放 bus 流(给浏览器的 timeline)。 */
