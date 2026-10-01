@@ -364,9 +364,13 @@ export class Orchestrator {
     const intent = getArtifact(this.storage.db, intentId);
     if (!intent || intent.kind !== "intent") return;
     if (intent.status !== "open") return; // 已有 resolution
+    // A3:废除 "*" 魔法值(listArtifacts 当字面量处理 → 恒空)。
+    // intent 由 run() 创建时必带 conversationId;兜底取本 run 的记录值。
+    const convId = intent.conversationId ?? this.runConversationId;
+    if (!convId) return;
     const todos = listArtifacts(this.storage.db, {
       scope: "conversation",
-      conversationId: intent.conversationId ?? "*",
+      conversationId: convId,
     }).filter((a) => a.kind === "todo" && a.parentIntent === intentId);
     if (todos.length === 0) return;
     const pending = todos.filter((t) => t.status === "open" || t.status === "in_progress" || t.status === "waiting_for_decision");
@@ -514,19 +518,29 @@ export class Orchestrator {
   }
 
   private findTodosDependingOn(artifactId: string): string[] {
-    // 简化:扫同 conversation 全局 bb 的 todos
-    // 对于 global scope 不限制 conversationId
+    // A3 修复(docs/CODE-REVIEW-2026-10-01.md §A3):旧实现在 conversation scope 传
+    // conversationId:"*",而 storage/repo/blackboards.ts listArtifacts 把它当**字面量**
+    // SQL 参数(无通配语义)→ 恒返回 0 条 → tryUnblockDependents 永远找不到下游 →
+    // 任何带 dependsOn 的计划上游 resolve 后下游永不 spawn → 挂到 maxRunMs 超时。
+    // 现在传本 run 的真实 conversationId(Planner 落库的 todos 全部继承 intent 的
+    // conversationId);global scope 扫描保留(不限 conversationId)。
     const out: string[] = [];
-    for (const scope of ["global", "conversation"] as const) {
-      const opts =
-        scope === "global"
-          ? { scope: "global" as const, limit: 200 }
-          : { scope: "conversation" as const, conversationId: "*", limit: 200 };
-      const all = listArtifacts(this.storage.db, opts);
+    const collect = (all: BlackboardArtifact[]) => {
       for (const a of all) {
         if (a.kind !== "todo") continue;
         if (a.dependsOn && a.dependsOn.includes(artifactId)) out.push(a.id);
       }
+    };
+    collect(listArtifacts(this.storage.db, { scope: "global", limit: 200 }));
+    const convId = this.runConversationId;
+    if (convId) {
+      collect(
+        listArtifacts(this.storage.db, {
+          scope: "conversation",
+          conversationId: convId,
+          limit: 200,
+        }),
+      );
     }
     return out;
   }
@@ -691,13 +705,16 @@ export class Orchestrator {
     const resolve = this.runResolve;
     this.runResolve = null;
     this.runReject = null;
+    // A3:废除 "*" 魔法值 — conversation scope 必须用真实 conversationId,
+    // 否则 listArtifacts 按字面量 "*" 查询恒空,plan_done 的 artifacts/summary 全丢。
+    const convId = intent.conversationId ?? this.runConversationId ?? "";
     const artifacts = listArtifacts(this.storage.db, {
       scope: intent.scope === "global" ? "global" : "conversation",
-      conversationId: intent.conversationId ?? "*",
+      conversationId: convId,
       limit: 500,
     });
     const shape: BlackboardShape = {
-      conversationId: intent.conversationId ?? "*",
+      conversationId: convId,
       artifacts,
       scope: intent.scope ?? "global",
     };
