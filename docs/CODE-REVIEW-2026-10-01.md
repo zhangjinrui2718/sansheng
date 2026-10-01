@@ -1,6 +1,8 @@
 # Sansheng 代码审查报告 · 2026-10-01
 
 > **修复状态(2026-10-01 晚更新)**:§E 批次 1-3 已全部落地(15 commits,`f620c28..dba03e6`,jev 裁决 scope=B)——**8 个 P0 全清**+B10 组前端缺陷+C7;新基线 244 passed|1 skipped(28 files)。批次 4(P1 生产卫生:sqlite-vec/reset 僵尸/resolveModel/keyring/settings/B8/B9/C 组)与批次 5(设计接线:D7/prompts/HarnessManager/M5)**未动工**,§B/§C 清单仍然有效。各项修复细节见 HANDOFF.md v6.6。
+>
+> **修复状态追加(2026-10-01 深夜,批次 5a/5a.5,`304ff04..602a718`)**:§B1 **部分修复**——communicator 设计协议子集(44 行)已成 harness 默认并经 `appendSystemPromptOverride` 真正注入直答 session(「生产谁读它」最后一跳已通);D7 respond 管道/HarnessManager/planner/executor prompt 加载仍未接线(5b)。§B2 **chat 双回复已修**(canned 占位移除);task 双执行刻意保留至 5b(提前 return 会让 decide 正则误判时失去直答)。§B9 未动。另修复非清单项:M3a 记忆注入把 enriched 全文落库致 UI 消息变 blob + extractor M2 占位存 assistant 全文为 summary 致垃圾自放大(raw/enriched 分离+断源+检索默认排除 summary,含 kinds 参数错序潜在 bug;详见 HANDOFF v6.7)。新基线 263 passed|1 skipped(33 files)。
 
 **审查基线**:HEAD = `4910240`(master,clean)· typecheck 0 error · 176/176 tests · build OK
 **方法**:主会话独立深读核心接线(ws/orchestrator/executor/communicator/kernel/bus)+ 3 个并行只读 review(agents 协调层 / 传输存储基础设施 / 前端 shared CLI);所有关键断言均经主会话抽查源码核实;A1/A2(主会话 repro)、A3/A5/A6/B3/B6/C4 及 A8(pty 探针)均有一次性脚本实证(输出摘录见各条,脚本已删)。

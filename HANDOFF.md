@@ -1,8 +1,19 @@
 # Sansheng 项目交接包
 
-**生成时间**:2026-10-01 22:05 CST · **v6.6**(全仓代码审查 + 批次 1-3 修复:8 个 P0 全清)
+**生成时间**:2026-10-01 23:55 CST · **v6.7**(批次 5a/5a.5:沟通员 prompt 接线 + 记忆循环修复)
 **适用**:下一会话(主对话 / worker)开盒即读
 **配套阅读**:`/root/projects/sansheng/PLAN.md`(v5 集成版),`/root/projects/sansheng/ARCHITECTURE.md`(12 层模块图,v6.4 新增),`/root/.pi/agent/memory/MEMORY.md`(长期偏好 + 教训)
+
+> **v6.7 · 批次 5a + 5a.5(2026-10-01 深夜,DSH 会话,用户实测触发的两个问题)**:
+> - **用户报障①**(沟通员需要提示词?)→ **5a**(3 commits `304ff04..0b854be`):44 行新默认 communicator prompt 融入 loader(「三生」第一人称/三重身份/直答模式禁 JSON/Observer 最小噪音;D7 结构化协议段排除,留 5b);`ensureHarness` 三分支升级(legacy 未编辑→覆盖升级、用户编辑→保留+log、新默认→幂等),用户手笔至上;chat 双回复修复(canned「已收到」移除,chat 唯一回复=Pi 直答)。**5a 关键发现**:`Communicator.ensureSession()` 无生产调用方,harness prompt 此前根本到不了直答 session(=审查 B1 实锤)。
+> - **用户报障②**(发送的消息变成「# Relevant Memories...---User: xxx」blob + 垃圾记忆自我放大)→ 根因三层:ws.ts M3a 富集拼进用户消息 + kernel 把 enriched 全文落库(:884)+ extractor M2 占位把每条 ≥50 字符 assistant 回复原文存 summary(用户库已积 13 条 reasoning+回复垃圾,LIKE 检索命中→注入→模型模仿→再存,自放大)→ **5a.5**(4 commits `0459ba2..602a718`,jev B conf 0.99):
+>   - **T1 raw/enriched 分离**:`kernel.prompt(text, {contextBlock})` — Pi session 收富集全文(记忆能力保留,进 Pi JSONL 用户不可见),**messages 表落 raw 原文**;extractor 删「assistant 全文存 summary」分支(留「记住:」fact);`searchFragmentsByText` 默认 kinds 排除 summary(存量垃圾失活不删数据)+ **顺带修复 kinds 参数与 SQL 占位符错序的潜在 bug**(默认生效后必炸,守护测试覆盖)。
+>   - **T2 prompt 最后一跳**:`createPiSession` 改经 `createAgentSession({resourceLoader})`,`DefaultResourceLoader.appendSystemPromptOverride` 把 harness prompt 追加为 `<addendum>` 段(SDK 默认 preamble/tools 保留,append 非替换;start/resume/reset 重建即重新 loadHarness,用户编辑 md 即生效;空串回退零 diff)。选型论证:SDK CreateAgentSessionOptions 无 systemPrompt 直字段,before_agent_start 重且 request 级,agentDir 文件生成有覆盖用户风险。
+>   - **T3 离线兜底**:无 session 分支 emit `error{code:"offline_no_session"}` 中文提示,前端 chat.ts 零改动兼容(主会话实测确认)。
+> - **新基线**:typecheck 0 · **263 passed / 1 skipped(33 files)**(v6.6 的 244+1 → +19)· build OK · `as any` src/=0。
+> - **代码 HEAD = `602a718`**(已 push origin)。主会话独立验证:三件套复跑全中 + diff 抽查 + T3 实测 + 端到端 smoke 受 keyring 隔离阻断(minimax-cn key 不随 settings.json 副本走——B7 设计使然,非回归;raw 落库由 kernel-context-block 测试 + 5a.5 subagent sqlite3/JSONL smoke 原文双覆盖)。
+> - **生效条件**:用户生产 server(2718)重启后 — harness md 自动升级(有 log)+ 新 prompt 进直答 session + 消息不再变 blob。存量 13 条垃圾 summary 已检索失活;物理清理(可选,用户决定):`sqlite3 ~/.sansheng/sansheng.db "DELETE FROM fragments WHERE kind='summary';"`
+> - **遗留**:task 双执行(onTask→runPlan ∥ session.prompt)刻意留 5b(提前 return 会让正则误判时失去直答);decide 正则升级 LLM、D7 respond 管道、HarnessManager 启动、Communicator.ensureSession 死路径统一、工件/Harness/目标 UI(三 disabled tab,M5/M6/M7)= 批次 5b+UI 批次;批次 4(生产卫生)草案在 /tmp/sansheng-batch4-prompt-draft.md;5a.5 open questions(task offline 事件并列抑制/LLM decide 是否吃 contextBlock)记入 5b 输入。
 
 > **v6.6 · 全仓代码审查 + 批次 1-3 修复(2026-10-01 晚,DSH 会话,jev 全程决策闸门)**:
 > - **审查**:`docs/CODE-REVIEW-2026-10-01.md`(commit `cef17ac`)——3 个并行只读 review subagent + 主会话抽查核实 + 脚本实证;8 P0 / P1×10 组 / P2×12;根因=组合根零测试覆盖(176 全绿是组件级假象)。

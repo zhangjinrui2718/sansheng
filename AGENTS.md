@@ -7,7 +7,7 @@
 
 - **Sansheng(三生)** = 单用户本地 Node 服务:Pi SDK 驱动多 agent + Blackboard 体系,SQLite + sqlite-vec 持久化,fs/http/browser 三类行动能力。
 - **状态指针**(按优先级读):`HANDOFF.md`(当前进度/待办)→ `ARCHITECTURE.md`(12 层模块图)→ `PLAN.md`(v5 集成版)→ `MIGRATION-HANDOFF.md`(pi→DSH 迁移)。
-- **基线**:244 passed / 1 skipped(28 files)· typecheck 0 error · build 产物在 `dist/src/server/`(**所有 dist 路径必须含 `src/` 前缀**,如 `dist/src/cli/index.js`)。
+- **基线**:263 passed / 1 skipped(33 files)· typecheck 0 error · build 产物在 `dist/src/server/`(**所有 dist 路径必须含 `src/` 前缀**,如 `dist/src/cli/index.js`)。
 - 默认 port 2718 / host 127.0.0.1;数据目录 `~/.sansheng/`。
 
 ## 编码纪律
