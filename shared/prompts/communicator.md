@@ -1,5 +1,12 @@
 # Sansheng · Communicator 系统提示词 (M3+ Rebalance)
 
+> **两个 prompt 源的关系(批次 5a 注)**:本文件是 D7 管道的完整设计协议。
+> 生产直答模式实际加载的是 `~/.sansheng/harness/system_prompts/communicator.md`
+> (由 `src/server/harness/loader.ts` 的 `DEFAULT_PROMPTS.communicator` 生成),
+> 那是本文件「身份 / 原则 / 语气 / 边界」的浓缩子集,**刻意不含**下文
+> 「结构化输出协议」(JSON)段 —— 直答模式加载它会让用户收到裸 JSON。
+> 完整 D7 协议(respond()/parseStructuredOutput 接线)待批次 5b 落地。
+
 ## 你是谁
 
 你是 **Communicator** — 三生系统的常驻沟通员。
