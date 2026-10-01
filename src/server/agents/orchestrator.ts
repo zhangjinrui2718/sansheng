@@ -128,6 +128,10 @@ export class Orchestrator {
   private readonly maxRunMs: number;
 
   private sink: ProgressSink | null = null;
+  /** A2 ownership:本次 run() 创建的 intent id — bus handler 只处理它及其派生 todos。 */
+  private myIntentId: string | null = null;
+  /** A2/A3:本次 run() 的 conversationId(DAG 解锁查询需要真实值,不能用 "*" 通配)。 */
+  private runConversationId: string | null = null;
   private intentByPlanner = new Map<string, string>(); // plannerSessionId → intentId (1:1, but tracked)
   private activeExecutors = new Map<string, Executor>(); // todoId → Executor
   private todoByExecutorSession = new Map<string, string>(); // executorSessionId → todoId
@@ -192,8 +196,27 @@ export class Orchestrator {
 
   /**
    * 取消所有订阅,清 timers。
+   * A2④:若 run() 尚未 settle,兜底 reject — 调用方(如 runPlan 的 finally)
+   * 关闭实例时绝不让 await 永久挂起。幂等,可重复调用。
    */
   shutdown(): void {
+    this.dispose();
+    this.settlePendingRun(new Error("Orchestrator shutdown before run completed"));
+  }
+
+  /**
+   * 取消当前 run(若有)。
+   * A2③:abort 同步退订 bus(与 shutdown 共用 dispose)— 旧实现不退订,
+   * abort 后的实例仍是全局 bus 订阅者(僵尸),会继续消费后续 run 的事件。
+   * reject 语义保持:Error("Orchestrator aborted")。
+   */
+  abort(): void {
+    this.dispose();
+    this.settlePendingRun(new Error("Orchestrator aborted"));
+  }
+
+  /** shutdown/abort 共用清理:退订 bus + 清 watchdog/run timers + abort 在飞 executor。 */
+  private dispose(): void {
     for (const u of this.unsubs) {
       try {
         u();
@@ -221,6 +244,15 @@ export class Orchestrator {
     this.activeExecutors.clear();
   }
 
+  /** run() 未 settle 时以 err 兜底 reject(已 settle 则 no-op)。 */
+  private settlePendingRun(err: Error): void {
+    if (!this.runReject) return;
+    const reject = this.runReject;
+    this.runResolve = null;
+    this.runReject = null;
+    reject(err);
+  }
+
   /**
    * 向后兼容 ws.ts 的入口:创建 intent,publish 到 bus,等待 Blackboard 完成。
    * 返回 BlackboardShape(包含 conversationId + artifacts[])。
@@ -243,6 +275,10 @@ export class Orchestrator {
       author: "communicator",
       status: "open",
     });
+    // A2 ownership:先记录本 run 的 intentId + conversationId,再 publish —
+    // bus handler 靠它们过滤「别人的 artifact」(僵尸实例/并行 run 的事件一律忽略)。
+    this.myIntentId = intent.id;
+    this.runConversationId = convId;
     upsertArtifact(this.storage.db, intent);
     this.bus.publish({ type: "artifact_created", artifact: intent });
 
@@ -263,39 +299,14 @@ export class Orchestrator {
     });
   }
 
-  /**
-   * 取消当前 run(若有)。
-   */
-  abort(): void {
-    if (this.runTimer) {
-      clearTimeout(this.runTimer);
-      this.runTimer = null;
-    }
-    for (const w of this.waiting.values()) {
-      clearTimeout(w.escalationTimer);
-      clearTimeout(w.failTimer);
-    }
-    this.waiting.clear();
-    for (const e of this.activeExecutors.values()) {
-      try {
-        e.abort();
-      } catch {
-        /* ignore */
-      }
-    }
-    this.activeExecutors.clear();
-    if (this.runReject) {
-      this.runReject(new Error("Orchestrator aborted"));
-      this.runResolve = null;
-      this.runReject = null;
-    }
-  }
-
   /* ── Bus event handlers ─────────────────────────────────── */
 
   private async onArtifactCreated(e: ArtifactCreatedEvent): Promise<void> {
     const a = e.artifact;
-    if (a.kind === "intent" && a.status === "open") {
+    // A2 ownership:只响应本实例 run() 创建的 intent — 僵尸实例/别的 run 的
+    // intent 一律忽略(旧实现无校验,导致每个新 intent 被所有历史实例重复
+    // spawnPlanner + spawnExecutor,实证 planner=2 executor=2)。
+    if (a.kind === "intent" && a.status === "open" && a.id === this.myIntentId) {
       this.sink?.({ type: "intent_received", intent: a });
       await this.spawnPlanner(a);
     }
@@ -303,7 +314,13 @@ export class Orchestrator {
 
   private async onArtifactStatusChanged(e: ArtifactStatusChangedEvent): Promise<void> {
     // 1. intent resolved / failed → run() 收尾
-    if (this.runResolve && (e.newStatus === "resolved" || e.newStatus === "failed")) {
+    //    A2 ownership:只认本实例 run() 创建的 intent(旧实现对任何 intent 的
+    //    终态都 completeRun,僵尸的旧 intent 收尾会用旧 blackboard resolve 新 run)。
+    if (
+      this.runResolve &&
+      e.artifactId === this.myIntentId &&
+      (e.newStatus === "resolved" || e.newStatus === "failed")
+    ) {
       const intent = getArtifact(this.storage.db, e.artifactId);
       if (intent && intent.kind === "intent") {
         this.completeRun(intent);
@@ -311,28 +328,26 @@ export class Orchestrator {
       }
     }
 
-    // 2. dependency 解决 → 看是否有 waiting todo 可启动
-    if (e.newStatus === "resolved" || e.newStatus === "failed") {
-      this.tryUnblockDependents(e.artifactId);
-    }
+    if (e.newStatus !== "resolved" && e.newStatus !== "failed") return;
+    // A2 ownership:2/3 只处理本 run intent 派生的 todo,别人的 artifact 一律忽略。
+    const a = e.artifactId ? getArtifact(this.storage.db, e.artifactId) : null;
+    if (!a || a.kind !== "todo" || a.parentIntent !== this.myIntentId) return;
+
+    // 2. dependency 终态 → 看是否有 waiting 下游 todo 可启动
+    this.tryUnblockDependents(e.artifactId);
 
     // 3. todo resolved / failed → 上报
-    if (e.artifactId && (e.newStatus === "resolved" || e.newStatus === "failed")) {
-      const a = getArtifact(this.storage.db, e.artifactId);
-      if (a && a.kind === "todo") {
-        if (e.newStatus === "resolved") {
-          this.sink?.({ type: "todo_resolved", todo: a });
-          // 上报后检查:本 todo 是否属于当前 run 的 intent,且所有 sibling todos 已终结
-          this.maybeResolveIntent(a);
-        } else if (e.newStatus === "failed") {
-          this.sink?.({
-            type: "todo_failed",
-            todo: a,
-            reason: typeof a.metadata?.errorReason === "string" ? a.metadata.errorReason : "executor reported failure",
-          });
-          this.maybeResolveIntent(a);
-        }
-      }
+    if (e.newStatus === "resolved") {
+      this.sink?.({ type: "todo_resolved", todo: a });
+      // 上报后检查:本 todo 所属 intent 的所有 sibling todos 是否已终结
+      this.maybeResolveIntent(a);
+    } else {
+      this.sink?.({
+        type: "todo_failed",
+        todo: a,
+        reason: typeof a.metadata?.errorReason === "string" ? a.metadata.errorReason : "executor reported failure",
+      });
+      this.maybeResolveIntent(a);
     }
   }
 
@@ -344,6 +359,8 @@ export class Orchestrator {
   private maybeResolveIntent(todo: BlackboardArtifact): void {
     const intentId = todo.parentIntent;
     if (!intentId) return;
+    // A2 ownership(防御:调用方已过滤,这里兜底)
+    if (intentId !== this.myIntentId) return;
     const intent = getArtifact(this.storage.db, intentId);
     if (!intent || intent.kind !== "intent") return;
     if (intent.status !== "open") return; // 已有 resolution
@@ -408,7 +425,15 @@ export class Orchestrator {
         hypothesisId: e.hypothesisId,
         executorSessionId: e.executorSessionId,
       });
-      this.maybeResolveRunOnBlocked(todo);
+      // A2 语义(移除旧 maybeResolveRunOnBlocked 的提前 settle):
+      // todo 进入 waiting_for_decision 后 run() 保持 pending,跨越
+      // 「提问 → 用户 decision → executor_resume → 重跑」完整周期,intent 终态
+      // (或 abort/shutdown/maxRunMs 超时)才收尾。理由:
+      //  - ws.ts runPlan 的 finally 在 run() 返回后立即 shutdown()(退订 bus);
+      //    若阻塞时提前 settle,之后的 executor_resume 无人消费,用户回答永远
+      //    无法恢复 executor(集成测试场景④ / 审查报告 §A4 回路)。
+      //  - plan_done 在问题还挂起时发出(summary "完成 0/1")对用户是错误信号。
+      //  - 挂起有界:escalation(5min)/fail(1hr)watchdog + maxRunMs(默认 30min)。
     } catch (err) {
       // 路由失败不影响 Orchestrator 状态 — watchdog 会兜底
       // 但取消 timers,避免悬挂
@@ -478,6 +503,9 @@ export class Orchestrator {
       if (this.activeExecutors.has(todoId)) continue;
       const todo = getArtifact(this.storage.db, todoId);
       if (!todo) continue;
+      // A2 ownership:只解锁本 run intent 派生的 todo(同 conversation 里
+      // 其他 run 的 todo 一律不碰,避免跨实例重复执行)
+      if (todo.parentIntent !== this.myIntentId) continue;
       if (todo.status !== "open") continue;
       if (this.areDepsResolved(todo)) {
         void this.spawnExecutor(todo);
@@ -650,17 +678,9 @@ export class Orchestrator {
     this.waiting.delete(executorSessionId);
   }
 
-  private maybeResolveRunOnBlocked(blockedTodo: BlackboardArtifact): void {
-    if (!this.runResolve) return;
-    const intentId = blockedTodo.parentIntent;
-    if (!intentId) return;
-    const intent = getArtifact(this.storage.db, intentId);
-    if (!intent || intent.kind !== "intent") return;
-    // 只有当该 todo 属于当前 run 的 intent,才 resolve run()
-    if (intent.status !== "open") return;
-    // 意图:run() 返回 = orchestrator 的 orchestration 阶段结束(分发给 Communicator / HarnessManager)
-    this.completeRun(intent);
-  }
+  // A2 注:旧 maybeResolveRunOnBlocked(阻塞回调时提前 settle run())已移除 —
+  // 见 onExecutorCallback 内的语义说明。run() 的 settle 路径收敛为:
+  // intent 终态(completeRun)/ abort / shutdown / maxRunMs 超时,四者必居其一。
 
   private completeRun(intent: BlackboardArtifact): void {
     if (!this.runResolve) return;

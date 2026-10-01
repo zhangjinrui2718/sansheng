@@ -250,11 +250,15 @@ describe("E2E blockers (M3+ B1-B5)", () => {
     const routeCallback = vi.fn();
     const orch = makeOrch({ planner, executor, routeCallback });
 
-    // 等 Orchestrator 跑完(intent 状态因为 todo 阻塞在 waiting_for_decision 而 open)
-    await orch.run("conv-b3", "B3 callback test", () => {});
+    // A2 语义:todo 阻塞在 waiting_for_decision 时 run() 不再提前 settle
+    // (跨越「提问 → decision → resume」周期)。这里只验 callback 路由:
+    // 等 routeCallback 触发 → 断言参数 → abort() 收尾。
+    const runP = orch.run("conv-b3", "B3 callback test", () => {});
+    const runGuard = runP.catch((err) => err); // 防 abort 后 unhandled rejection
+
+    await vi.waitFor(() => expect(routeCallback).toHaveBeenCalled());
 
     // routeCallback 必须被调用,reason="judgment"
-    expect(routeCallback).toHaveBeenCalled();
     const arg = routeCallback.mock.calls[0]?.[0];
     expect(arg).toBeTruthy();
     expect(arg.todoId).toBe("t-b3");
@@ -262,6 +266,8 @@ describe("E2E blockers (M3+ B1-B5)", () => {
     expect(arg.hypothesisId).toBeTruthy();
     expect(arg.executorSessionId).toBeTruthy();
 
+    orch.abort();
+    await runGuard;
     orch.shutdown();
   });
 
@@ -289,11 +295,15 @@ describe("E2E blockers (M3+ B1-B5)", () => {
       seen.push({ hypothesisId: e.hypothesisId });
     });
 
-    await orch.run("conv-b5", "default route", () => {});
+    // A2 语义:阻塞 todo 不再提前 settle run() — 等 bus event 到达后 abort() 收尾。
+    const runP = orch.run("conv-b5", "default route", () => {});
+    const runGuard = runP.catch((err) => err); // 防 abort 后 unhandled rejection
 
-    expect(seen.length).toBeGreaterThan(0);
+    await vi.waitFor(() => expect(seen.length).toBeGreaterThan(0));
     expect(seen[0]?.hypothesisId).toBeTruthy();
 
+    orch.abort();
+    await runGuard;
     unsub();
     orch.shutdown();
   });

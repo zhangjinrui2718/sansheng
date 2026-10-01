@@ -168,6 +168,21 @@ async function connectClient(): Promise<TestClient> {
   };
 }
 
+/**
+ * 场景收尾隔离:abort 掉 server 端可能仍在跑的 plan。
+ * activeOrchestrator 是 wss 级(跨连接共享)— 若某场景的 run 挂起(RED 状态),
+ * 不 abort 会让后续所有场景收到 plan_busy,掩盖各自的失败模式。
+ * GREEN 状态下 run 已 settle,abort_plan 是 no-op(等 1s plan_failed 不到即忽略)。
+ */
+async function abortActivePlan(client: TestClient): Promise<void> {
+  client.send({ type: "abort_plan" });
+  try {
+    await waitForEvent(client, "plan_failed", { timeoutMs: 1_000 });
+  } catch {
+    /* 没有在跑的 plan(正常收尾路径)— 忽略 */
+  }
+}
+
 /** 等待某类型事件到达;超时抛错并附已见事件序列(RED 证据可读性) */
 async function waitForEvent<T extends ServerEvent["type"]>(
   client: TestClient,
@@ -223,6 +238,7 @@ describe("ws /plan integration (real attachWebSocket + runPlan + Orchestrator + 
         (done.artifacts ?? []).some((a) => a.id === "it1-t1" && a.status === "resolved"),
       ).toBe(true);
     } finally {
+      await abortActivePlan(c);
       await c.close();
     }
   }, 30_000);
@@ -264,6 +280,7 @@ describe("ws /plan integration (real attachWebSocket + runPlan + Orchestrator + 
       expect(firstA).toBeGreaterThanOrEqual(0);
       expect(firstB).toBeGreaterThan(firstA);
     } finally {
+      await abortActivePlan(c);
       await c.close();
     }
   }, 40_000);
@@ -309,6 +326,7 @@ describe("ws /plan integration (real attachWebSocket + runPlan + Orchestrator + 
       );
       expect(busy.length).toBe(0);
     } finally {
+      await abortActivePlan(c);
       await c.close();
     }
   }, 40_000);
@@ -378,6 +396,7 @@ describe("ws /plan integration (real attachWebSocket + runPlan + Orchestrator + 
       expect(done.conversationId).toBe("conv-it-4");
       expect(done.summary).toContain("完成 1/1");
     } finally {
+      await abortActivePlan(c);
       await c.close();
     }
   }, 60_000);

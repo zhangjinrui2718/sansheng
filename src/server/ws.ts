@@ -308,6 +308,17 @@ export function attachWebSocket(
         });
       } finally {
         activeOrchestrator = null;
+        // A2 修复(docs/CODE-REVIEW-2026-10-01.md §A2):必须 shutdown —
+        // 退订全局 artifactBus + 清 watchdog/run timers + abort 在飞 executor。
+        // 旧实现只置 null:Orchestrator 变僵尸订阅者跨连接存活,下一个 plan 的
+        // intent 会被僵尸重复消费(实证 planner=2 executor=2 → 重复 LLM 调用、
+        // 重复落库、同一 todo 双方执行)。shutdown() 幂等;run 未 settle 时兜底
+        // reject(本路径 run 已 settle,通常为 no-op)。
+        try {
+          orchestrator.shutdown();
+        } catch (err) {
+          log.warn("runPlan: orchestrator.shutdown failed:", err);
+        }
       }
     }
 

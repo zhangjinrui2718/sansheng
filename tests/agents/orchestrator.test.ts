@@ -138,20 +138,27 @@ describe("agents/orchestrator (event-sourced API)", () => {
       planner,
       executor,
       routeCallback: routeCallback as never,
-      failMs: 1000,
+      failMs: 5000,
     });
 
     const events: ProgressEvent[] = [];
-    await orch.run("conv-cb", "trigger callback", (e) => events.push(e));
+    // A2 语义:todo 进入 waiting_for_decision 后 run() 不再提前 settle —
+    // run 跨越「提问 → decision → resume」完整周期(由 watchdog/maxRunMs 兜底)。
+    // 所以这里不 await run,等回调路由发生后断言,最后 abort() 收尾。
+    const runP = orch.run("conv-cb", "trigger callback", (e) => events.push(e));
+    const runGuard = runP.catch((err) => err); // 防 abort 后 unhandled rejection
 
-    expect(routeCallback).toHaveBeenCalledTimes(1);
+    await vi.waitFor(() => expect(routeCallback).toHaveBeenCalledTimes(1));
     const arg = routeCallback.mock.calls[0]![0]!;
     expect(arg.todoId).toBe("t-cb");
     expect(arg.reason).toBe("judgment");
 
     const todo = getArtifact(db, "t-cb");
     expect(todo?.status).toBe("waiting_for_decision");
+    expect(events.some((e) => e.type === "callback_routed")).toBe(true);
 
+    orch.abort();
+    expect(await runGuard).toBeInstanceOf(Error);
     orch.shutdown();
   });
 
@@ -188,6 +195,9 @@ describe("agents/orchestrator (event-sourced API)", () => {
     orch.shutdown();
   });
 
+  // A2 后的过渡形态:旧版用 todoId 冒充 executorSessionId 发 resume(实际 no-op),
+  // 本 commit 只保证它在新语义下仍然有界(单 callback → failMs watchdog → failed);
+  // A4 commit 会把它重写成真实 depth-loop 断言(real sessionId + 按 todoId 累计)。
   it("depth limit + routeCallback loop → bounded by maxCallbackDepth", async () => {
     const planner: PlannerLlmCall = async () =>
       JSON.stringify([
@@ -244,7 +254,8 @@ describe("agents/orchestrator (event-sourced API)", () => {
     expect(["failed", "waiting_for_decision", "resolved"]).toContain(todo?.status);
 
     orch.shutdown();
-  });
+    // A2 后 run 经 failMs(5s)watchdog 收尾,给足超时余量
+  }, 20_000);
 
   it("shutdown() unsubscribes from bus (no further events processed)", async () => {
     const planner: PlannerLlmCall = async () => "[]";
