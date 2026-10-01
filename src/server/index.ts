@@ -7,7 +7,7 @@ import { createServer } from "node:http";
 import { serve } from "@hono/node-server";
 import { createApp } from "./http.js";
 import { log } from "../shared/log.js";
-import { ensureDirs } from "../cli/commands.js";
+import { ensureDirs, clearOwnPidFile } from "../cli/commands.js";
 import { SettingsStore } from "./settings/store.js";
 import { AgentKernel } from "./kernel/agentKernel.js";
 import { attachWebSocket } from "./ws.js";
@@ -69,25 +69,27 @@ export async function startServer(opts: ServerOptions): Promise<void> {
     dataDir: opts.dataDir,
   });
 
-  // daemon 模式响应 SIGTERM
-  if (process.env.SANSHENG_DAEMON === "1") {
-    process.on("SIGTERM", () => {
-      log.muted("SIGTERM received, closing server");
-      try {
-        httpServer.close();
-        storage.close();
-      } catch (err) {
-        log.warn("shutdown close failed:", err);
-      }
-      process.exit(0);
-    });
-  }
+  // B10-6:SIGTERM 优雅退出不再限 daemon 模式 —— 前台 start 也写 pid 文件,
+  // runStop 对前台进程同样发 SIGTERM;daemon 路径行为不变。
+  process.on("SIGTERM", () => {
+    log.muted("SIGTERM received, closing server");
+    try {
+      httpServer.close();
+      storage.close();
+    } catch (err) {
+      log.warn("shutdown close failed:", err);
+    }
+    process.exit(0);
+  });
 
-  // 进程退出兜底关 SQLite
+  // 进程退出兜底:关 SQLite + 删自己的 pid 文件(B10-6)。
+  // SIGINT/SIGTERM/崩溃退出都会触发 exit 事件 → 不再残留 stale pid;
+  // clearOwnPidFile 只在 pid 文件指向本进程时删除(防误删新实例的 pid)。
   const closeStorage = () => {
     try {
       storage.close();
     } catch {}
+    clearOwnPidFile();
   };
   process.on("exit", closeStorage);
   process.on("SIGINT", () => {

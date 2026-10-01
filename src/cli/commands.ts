@@ -6,8 +6,8 @@
  * PID file: ~/.sansheng/sansheng.pid
  * Log file:  ~/.sansheng/logs/sansheng.log
  */
-import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync, openSync } from "node:fs";
+import { execFileSync, spawn } from "node:child_process";
+import { closeSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync, openSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
@@ -43,12 +43,85 @@ export function readPid(): number | null {
   }
 }
 
+/**
+ * B10-6:进程退出时清理自己的 pid 文件 —— 仅当文件内容指向本进程才删,
+ * 避免误删「新实例刚写入的 pid」。index.ts 在 exit/SIGINT/SIGTERM 路径调用。
+ */
+export function clearOwnPidFile(): void {
+  try {
+    if (readPid() === process.pid) rmSync(PID_FILE());
+  } catch { /* ignore */ }
+}
+
+/**
+ * B10-6:进程名身份校验(纯函数,便于单测)。
+ * macOS/Linux 的 `ps -o comm=` 给出可执行文件完整路径
+ * (如 /opt/homebrew/Cellar/node/26/bin/node),含 "node" 即认为是本项目的 daemon。
+ * 已知取舍:pid 被另一个无关 node 进程复用时仍会误判(见报告 open question)。
+ */
+export function isNodeComm(comm: string | null): boolean {
+  if (!comm) return false;
+  return comm.includes("node");
+}
+
+/** B10-6:读取 pid 的可执行文件路径;死 pid / 查询失败 → null。 */
+export function readPidComm(pid: number): string | null {
+  try {
+    const out = execFileSync("ps", ["-p", String(pid), "-o", "comm="], {
+      encoding: "utf-8",
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+    const comm = out.trim();
+    return comm.length > 0 ? comm : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * B10-6:pid 存活 + 身份校验。
+ * 旧实现只做 process.kill(pid,0):stale pid 文件里的 pid 被无关进程复用时
+ * 误判「在跑」→ runStop 会对无关进程 SIGTERM→SIGKILL(杀错进程)。
+ * 现在额外要求 comm 含 "node" 才算 sansheng daemon 活着。
+ */
 export function isAlive(pid: number): boolean {
   try {
     process.kill(pid, 0);
-    return true;
   } catch {
     return false;
+  }
+  return isNodeComm(readPidComm(pid));
+}
+
+export interface WaitForHealthOptions {
+  /** 总超时(默认 10s) */
+  timeoutMs?: number;
+  /** 轮询间隔(默认 250ms) */
+  intervalMs?: number;
+  /** 每轮探测前调用;返回 true(daemon 子进程已早死)→ 立即放弃返回 false */
+  isAborted?: () => boolean;
+}
+
+/**
+ * B10-6:轮询健康端点直到 HTTP 200 或超时。
+ * start -d 专用:旧实现 spawn 后不探测即写 pid + 报 ok —— 子进程秒死
+ * (EADDRINUSE / dist 缺失 / 配置崩溃)时用户拿到假成功 + 僵尸 pid 文件。
+ * 用全局 fetch(Node ≥18),无新依赖;拒连/非 200 都视为未就绪继续轮询。
+ */
+export async function waitForHealth(url: string, opts: WaitForHealthOptions = {}): Promise<boolean> {
+  const timeoutMs = opts.timeoutMs ?? 10_000;
+  const intervalMs = opts.intervalMs ?? 250;
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    if (opts.isAborted?.()) return false;
+    try {
+      const res = await fetch(url, { signal: AbortSignal.timeout(Math.max(500, intervalMs * 2)) });
+      if (res.status === 200) return true;
+    } catch {
+      // 拒连 / 单次请求超时 —— daemon 还没就绪,继续轮询
+    }
+    if (Date.now() >= deadline) return false;
+    await new Promise((r) => setTimeout(r, intervalMs));
   }
 }
 
@@ -90,6 +163,35 @@ export async function runStart(opts: StartOptions): Promise<void> {
       env: { ...process.env, SANSHENG_DATA: opts.data ?? dataDir(), SANSHENG_DAEMON: "1", PI_OFFLINE: "1" },
     });
     child.unref();
+    // B10-6:早死检测 —— 子进程在健康检查通过前 exit(EADDRINUSE / dist 缺失 /
+    // 配置崩溃)时,waitForHealth 经 isAborted 立即放弃,不再假报成功。
+    let childExited = false;
+    child.on("exit", () => {
+      childExited = true;
+    });
+    // 0.0.0.0/:: 绑定所有接口 → 健康探测走 loopback
+    const healthHost = opts.host === "0.0.0.0" || opts.host === "::" ? "127.0.0.1" : opts.host;
+    const healthUrl = `http://${healthHost}:${opts.port}/api/health`;
+    const healthy = await waitForHealth(healthUrl, {
+      timeoutMs: 10_000,
+      intervalMs: 250,
+      isAborted: () => childExited,
+    });
+    // 父进程不再需要 log fd(子进程持有自己的 dup)
+    try { closeSync(logFd); } catch { /* ignore */ }
+    if (!healthy) {
+      // 子进程还活着但不健康(如卡在启动)→ 回收,不留半死进程
+      if (!childExited && child.pid) {
+        try { process.kill(child.pid, "SIGTERM"); } catch { /* ignore */ }
+      }
+      log.error(
+        `Sansheng failed to start: ${healthUrl} 未在 10s 内就绪${childExited ? "(子进程已提前退出)" : ""}。`,
+      );
+      log.muted(`查看日志: ${LOG_FILE()}`);
+      process.exitCode = 1;
+      return;
+    }
+    // B10-6:pid 只在健康检查通过后写入 —— 不再出现「报 ok 但 pid 指向死进程」
     writeFileSync(PID_FILE(), String(child.pid ?? ""));
     log.ok(`Sansheng started (pid=${child.pid}) on http://${opts.host}:${opts.port}`);
     log.muted(`log: ${LOG_FILE()}`);
@@ -198,16 +300,25 @@ export async function runReset(opts: { yes: boolean }): Promise<void> {
     process.stdin.setEncoding("utf8");
     const ok = await new Promise<boolean>((resolve) => {
       let buf = "";
-      const t = setTimeout(() => {
+      // A8:确认/超时两条 resolve 路径都必须恢复 stdin 状态 ——
+      // resume() 让 stdin 进入 flowing 模式,active handle 会挂住 event loop:
+      // reset 跑完后进程永不退出(实证:输出 "reset complete" 后 hang 8s+ 不退出)。
+      // pause() 停读 + setRawMode(false) 恢复 TTY 规范模式(管道下均为安全 no-op);
+      // 管道 stdin 一旦被 resume 过,pause() 不足以 deref(实证仍挂住),
+      // 还需 unref() 把 handle 从 event loop 引用中摘除,进程才能自然退出。
+      const finish = (v: boolean) => {
         process.stdin.removeListener("data", on);
-        resolve(false);
-      }, 5000);
+        process.stdin.pause();
+        process.stdin.setRawMode?.(false);
+        process.stdin.unref?.();
+        resolve(v);
+      };
+      const t = setTimeout(() => finish(false), 5000);
       const on = (chunk: string) => {
         buf += chunk;
         if (buf.trim() === "yes") {
           clearTimeout(t);
-          process.stdin.removeListener("data", on);
-          resolve(true);
+          finish(true);
         }
       };
       process.stdin.on("data", on);
