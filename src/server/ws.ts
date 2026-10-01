@@ -46,6 +46,8 @@ import { artifactBus } from "./bus/index.js";
 import { completeSimple } from "@earendil-works/pi-ai/compat";
 // M3+ B2(批次 1 提取):plan_done 的 summary 拼装,与 e2e-blockers.test.ts 共用同一实现
 import { buildPlanSummary } from "./agents/planSummary.js";
+// B4:WS 握手 Origin 校验与 HTTP 安全中间件共用同一 hostname 白名单(单一来源)
+import { isAllowedOriginHeader } from "./http/security.js";
 
 /**
  * 把 user message 包成含历史 context 的 prompt
@@ -126,6 +128,18 @@ export function attachWebSocket(
   server.on("upgrade", (req: IncomingMessage, socket: Duplex, head: Buffer) => {
     const url = new URL(req.url ?? "/", "http://localhost");
     if (url.pathname !== "/ws") {
+      socket.destroy();
+      return;
+    }
+    // B4(docs/CODE-REVIEW-2026-10-01.md §B4):WS 握手 Origin 校验 ——
+    // 有 Origin 头 → hostname 必须在本地白名单(127.0.0.1/localhost/::1,任意端口,
+    // 与 HTTP 安全中间件同源);无 Origin → 放行(curl/CLI/测试 ws client 等非浏览器
+    // 客户端,批次 1 集成测试即此形态)。拒绝时回 403 再 destroy,客户端可诊断。
+    const originRaw = req.headers.origin;
+    const origin = Array.isArray(originRaw) ? originRaw[0] : originRaw;
+    if (typeof origin === "string" && !isAllowedOriginHeader(origin)) {
+      log.muted(`ws upgrade rejected: Origin not local: ${origin}`);
+      socket.write("HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n");
       socket.destroy();
       return;
     }

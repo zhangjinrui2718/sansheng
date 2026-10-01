@@ -33,6 +33,7 @@ import {
   type CreateToolRegistryOptions,
 } from "./tools/integration.js";
 import { registerBlackboardArtifactRoutes } from "./http/blackboardRoutes.js";
+import { createSecurityMiddleware } from "./http/security.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = import.meta.dirname ?? join(__filename, "..");
@@ -77,6 +78,11 @@ function toPublic(s: ReturnType<SettingsStore["load"]>) {
 
 export async function createApp(opts: AppOptions): Promise<Hono> {
   const app = new Hono();
+  // —— B4: 安全守卫(Host + Origin/Sec-Fetch-Site 校验)——
+  // 必须注册在所有中间件(含下方 logger)与路由之前:Hono 按注册顺序执行,
+  // 之后注册的任何处理路径(含 serveStatic 兜底)都先过校验。
+  // (docs/CODE-REVIEW-2026-10-01.md §B4:CSRF 删库面 + DNS rebinding)
+  app.use("*", createSecurityMiddleware());
   const settingsStore = opts.settingsStore;
   // M4: ToolRegistry(fs+http 6 件套)全局单例,每次 HTTP request 复用。
   // 创建可能涉及 ~/.sansheng/{sandbox,net}.json 读盘,所以是 async;直接 await。
