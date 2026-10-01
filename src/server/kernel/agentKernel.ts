@@ -871,6 +871,22 @@ export class AgentKernel {
         ? `${opts.contextBlock}\n\n---\n\nUser: ${text}`
         : text;
       await this.session.prompt(full);
+    } else {
+      // 批次 5a.5 T3(5a open question #2):离线兜底 —— 5a 删除 canned「已收到」
+      // 占位后,PI_OFFLINE / 未配置 provider(无 Pi session,含 disableLlm
+      // Communicator 场景)时 chat 路径完全静默,用户以为服务挂了。
+      // 复用 error 事件形态 = 前端 chat.ts 现有 case "error"(status:"error"
+      // + banner)直接消费的最小方案,前端零改动;code=offline_no_session 与
+      // start() 的内部诊断(no_provider/no_api_key)区分 —— 这是面向用户的
+      // 「本条消息没有得到直答」结论。
+      this.emit({
+        type: "error",
+        conversationId: this.conversationId,
+        error: {
+          code: "offline_no_session",
+          message: "当前离线(无可用 Pi session),沟通员无法直答本条消息;请到「设置」配置 provider / API Key 后重发",
+        },
+      });
     }
   }
 
