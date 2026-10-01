@@ -24,8 +24,10 @@ export {
   searchFragmentsByText,
   recordFragmentAccess,
   isVecAvailable,
+  isFragmentKind,
+  FRAGMENT_KINDS,
 } from "./repo/fragments.js";
-export type { FragmentRow, FragmentSearchOpts } from "./repo/fragments.js";
+export type { FragmentRow, FragmentKind, FragmentSearchOpts } from "./repo/fragments.js";
 export { getProfile, listProfile, upsertProfile, reinforceProfile } from "./repo/profile.js";
 export type { ProfileEntry } from "./repo/profile.js";
 export { upsertAgentState, getAgentState, deleteAgentState } from "./repo/agentStates.js";

@@ -220,8 +220,10 @@ export async function createApp(opts: AppOptions): Promise<Hono> {
     const kind = c.req.query("kind");
     const limit = Math.min(Number(c.req.query("limit") ?? "100"), 500);
     try {
+      // listFragmentsByKind validates internally; passing the raw query string
+      // (no `as never` cast) is safe — invalid kinds yield an empty array.
       const fragments = kind
-        ? listFragmentsByKind(opts.storage.db, kind as never, limit)
+        ? listFragmentsByKind(opts.storage.db, kind, limit)
         : listFragmentsAll(opts.storage.db, limit);
       return c.json({ fragments });
     } catch (err) {

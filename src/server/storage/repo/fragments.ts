@@ -14,6 +14,15 @@ export interface FragmentRow {
   metadata: string | null;
 }
 
+/** Closed-set of fragment kinds — single source of truth for validation. */
+export const FRAGMENT_KINDS = ["fact", "preference", "project", "context", "summary"] as const;
+export type FragmentKind = (typeof FRAGMENT_KINDS)[number];
+
+/** Narrow a raw string to the closed FragmentKind set; false otherwise. */
+export function isFragmentKind(s: string | null | undefined): s is FragmentKind {
+  return typeof s === "string" && (FRAGMENT_KINDS as readonly string[]).includes(s);
+}
+
 export interface FragmentSearchOpts {
   /** 已有 embedding 时走向量检索;否则 fallback 到 importance 排序 */
   embedding?: number[] | null;
@@ -71,11 +80,19 @@ export function getFragment(db: Database.Database, id: string): FragmentRow | nu
   return r ? rowToFragment(r) : null;
 }
 
+/**
+ * List fragments filtered by `kind`. Accepts any string for `kind` — invalid
+ * values return an empty array (safe for URL query params that have not been
+ * pre-validated by the caller). This is the validated boundary for fragment
+ * kind access; callers should NOT cast `unknown` strings to `FragmentKind`
+ * upstream — pass the raw string and let this function gate.
+ */
 export function listFragmentsByKind(
   db: Database.Database,
-  kind: FragmentRow["kind"],
+  kind: string,
   limit: number,
 ): FragmentRow[] {
+  if (!isFragmentKind(kind)) return [];
   const rows = db
     .prepare(`SELECT * FROM fragments WHERE kind = ? ORDER BY importance DESC, created_at DESC LIMIT ?`)
     .all(kind, limit) as Array<Record<string, unknown>>;
