@@ -814,8 +814,12 @@ export class AgentKernel {
     }
     // M2:buffer 起来,handler 在 message_start(role=user) 时落库
     this.pendingUserText = text;
-    // M3c: 只有 session 存在时才回退 Pi session(M3c + PI_OFFLINE 场景下 kernel 无 session,
-    // Communicator 自己已经在 sink emit 了 delta/done,不需要再补一次)
+    // M3c: 只有 session 存在时才回退 Pi session(PI_OFFLINE 场景下 kernel 无 session)。
+    // B2(批次 5a,docs/CODE-REVIEW-2026-10-01.md §B2):chat 路径的 canned「已收到」
+    // 占位 sink 已在 Communicator 侧移除 → 这里的 Pi 直答是 chat 的唯一回复(双回复已治)。
+    // 已知边界:task 路径 onTask→runPlan 与本行 session.prompt 仍并行(双执行),
+    // 本批次刻意不动 —— 留待批次 5b decide 升级为 LLM 判断时一并根治(§B2);
+    // 现在提前 return 会让正则误判 task 时用户连 Pi 直答都失去,反而更糟。
     if (this.session) {
       await this.session.prompt(text);
     }

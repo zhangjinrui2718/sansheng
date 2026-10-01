@@ -73,6 +73,12 @@ export interface CommunicatorDecideFn {
 /**
  * 默认 decide:用 Communicator 自身的 Pi session 跑一次轻量判断。
  * PI_OFFLINE=1 / 没模型时降级为启发式(闲聊 = chat,含动作关键词 = task)。
+ *
+ * 批次 5a(B2 修复,docs/CODE-REVIEW-2026-10-01.md §B2):chat 分支不再产
+ * canned「已收到:…」占位回复 —— kernel.prompt 在 routeUserMessage 之后总会
+ * 走 Pi session 直答,占位回复会造成用户看到两条回复(chat 双回复)。
+ * 现在 chat reply 为空串 → routeUserMessage 不 sink,唯一回复来自 Pi session。
+ * decide 本体仍是正则启发式;升级为真 LLM 判断属批次 5b(§B2),此处不动。
  */
 export async function defaultCommunicatorDecide(
   input: { userText: string; conversationId: string },
@@ -89,7 +95,8 @@ export async function defaultCommunicatorDecide(
       profileDelta: { preference: t },
     };
   }
-  return { kind: "chat", reply: `已收到:${t.slice(0, 80)}` };
+  // B2:空 reply = 「chat 交由 Pi session 直答」;不再 sink 占位文本
+  return { kind: "chat", reply: "" };
 }
 
 export interface CommunicatorOptions {
@@ -164,19 +171,30 @@ export class Communicator {
       const decision = await this.decideFn({ userText, conversationId });
 
       if (decision.kind === "chat") {
-        // chat:不阻塞 bus,但仍 emit assistant delta 让 UI 有回复
-        const messageId = nanoid();
-        sink({ type: "delta", messageId, text: decision.reply });
-        sink({ type: "done", messageId });
-        // 同时落一条 bus broadcast 让 timeline 可见
-        const msg = this.opts.bus.broadcast({
-          fromRole: "communicator",
-          toRole: "user",
-          conversationId,
-          payload: decision.reply,
-          context: { source: "decide_chat" },
-        });
-        sink({ type: "bus_event", message: msg });
+        // B2 修复(批次 5a,docs/CODE-REVIEW-2026-10-01.md §B2):
+        // 旧代码无条件 sink decide 的 canned「已收到:…」占位回复(delta/done +
+        // broadcast),而 kernel.prompt 随后总会 await session.prompt(text) 产生
+        // Pi 真回复 → 用户看到两条(chat 双回复)。
+        // 现在:reply 为空(defaultCommunicatorDecide 的 chat 路径)→ 不 sink、
+        // 不 broadcast,chat 回复只来自 Pi session;仅当注入了自定义 decideFn
+        // 且返回非空 reply(测试 / 未来 5b 的 LLM decide)时保留原 sink 行为。
+        // 注意:task 分支的双执行(onTask→runPlan 与 session.prompt 并行)本批次
+        // 刻意不动,留待批次 5b decide 升级为 LLM 判断时一并根治(§B2)——现在
+        // 改成 return 会让正则误判 task 时用户连 Pi 直答都失去,反而更糟。
+        if (decision.reply) {
+          const messageId = nanoid();
+          sink({ type: "delta", messageId, text: decision.reply });
+          sink({ type: "done", messageId });
+          // 同时落一条 bus broadcast 让 timeline 可见
+          const msg = this.opts.bus.broadcast({
+            fromRole: "communicator",
+            toRole: "user",
+            conversationId,
+            payload: decision.reply,
+            context: { source: "decide_chat" },
+          });
+          sink({ type: "bus_event", message: msg });
+        }
       } else if (decision.kind === "task") {
         // task:转发给 planner(走 M3b 的 Orchestrator 由 ws 层负责 trigger)
         // 这里只 emit 一条 broadcast 表示「已接收任务」
