@@ -37,7 +37,9 @@ import type {
   BusMessage,
   RoleId,
 } from "../../shared/types/agents.js";
-import type { BlackboardShape } from "../../shared/types/blackboard.js";
+// 批次 1 去重(docs/CODE-REVIEW-2026-10-01.md §D1):import ws.ts 生产路径的真身
+// (已提取到 agents/planSummary.ts),不再在本文件复刻 — 复刻版恰好掩盖了 §A1 的 TDZ。
+import { buildPlanSummary } from "../../src/server/agents/planSummary.js";
 
 let storage: Storage;
 let db: Database.Database;
@@ -95,25 +97,6 @@ function makeCommunicator(
     disableLlm: true,
   });
   return { bus, comm, events, sink };
-}
-
-/** buildPlanSummary 模拟 — 与 ws.ts 实现一致(避免 export 增加 API surface) */
-function buildPlanSummary(
-  finalBb: BlackboardShape,
-  goalTitle: string,
-): string {
-  const todos = (finalBb.artifacts ?? []).filter((a) => a.kind === "todo");
-  if (todos.length === 0) {
-    return `计划 "${goalTitle.slice(0, 60)}" 没有产生任何 todo。`;
-  }
-  const resolved = todos.filter((t) => t.status === "resolved");
-  const failed = todos.filter((t) => t.status === "failed");
-  const parts: string[] = [];
-  parts.push(`计划 "${goalTitle.slice(0, 60)}" 完成 ${resolved.length}/${todos.length}`);
-  if (failed.length > 0) {
-    parts.push(`失败 ${failed.length}:${failed.map((t) => t.title.slice(0, 30)).join(", ")}`);
-  }
-  return parts.join(";");
 }
 
 describe("E2E blockers (M3+ B1-B5)", () => {
@@ -212,7 +195,7 @@ describe("E2E blockers (M3+ B1-B5)", () => {
     const completed = events.find((e) => e.type === "completed");
     expect(completed).toBeTruthy();
 
-    // buildPlanSummary 模拟 — 验证 summary 形态
+    // buildPlanSummary 真身(ws.ts 生产路径同一实现)— 验证 summary 形态
     const summary = buildPlanSummary(finalBb, "B2 mixed plan");
     expect(summary).toContain("B2 mixed plan");
     expect(summary).toContain("完成 1/2");

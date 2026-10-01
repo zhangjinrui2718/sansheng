@@ -42,35 +42,10 @@ import { Storage } from "./storage/index.js";
 import { Orchestrator, type ProgressEvent } from "./agents/orchestrator.js";
 import type { PlannerLlmCall } from "./agents/planner.js";
 import type { ExecutorLlmCall } from "./agents/executor.js";
-import type { Blackboard } from "@shared/types/agents";
-import type { BlackboardArtifact, BlackboardShape } from "../../shared/types/blackboard.js";
 import { artifactBus } from "./bus/index.js";
 import { completeSimple } from "@earendil-works/pi-ai/compat";
-
-/**
- * M3+ B2: 从 BlackboardShape 产一个可读的 plan 总结。
- * 给前端 plan_done 渲染总结卡用 — 1~3 行:
- *  - "完成了 N 个 todo:M1, M2"
- *  - "失败 K 个 todo:K1"
- *  - "未触发任何 todo"
- */
-function buildPlanSummary(
-  finalBb: BlackboardShape,
-  goalTitle: string,
-): string {
-  const todos = (finalBb.artifacts ?? []).filter((a: BlackboardArtifact) => a.kind === "todo");
-  if (todos.length === 0) {
-    return `计划 "${goalTitle.slice(0, 60)}" 没有产生任何 todo。`;
-  }
-  const resolved = todos.filter((t) => t.status === "resolved");
-  const failed = todos.filter((t) => t.status === "failed");
-  const parts: string[] = [];
-  parts.push(`计划 "${goalTitle.slice(0, 60)}" 完成 ${resolved.length}/${todos.length}`);
-  if (failed.length > 0) {
-    parts.push(`失败 ${failed.length}:${failed.map((t) => t.title.slice(0, 30)).join(", ")}`);
-  }
-  return parts.join(";");
-}
+// M3+ B2(批次 1 提取):plan_done 的 summary 拼装,与 e2e-blockers.test.ts 共用同一实现
+import { buildPlanSummary } from "./agents/planSummary.js";
 
 /**
  * 把 user message 包成含历史 context 的 prompt
@@ -276,6 +251,13 @@ export function attachWebSocket(
       });
       activeOrchestrator = orchestrator;
       try {
+        // A1 修复(docs/CODE-REVIEW-2026-10-01.md §A1):
+        // 旧实现在 sink 的 completed 分支里访问 `finalBb`(此时 `const finalBb = await ...`
+        // 仍在 TDZ,因为 completeRun 在 resolve 之前同步调 sink)→ ReferenceError →
+        // resolve 不可达 + runTimer 已失效 → run() 永久挂起、activeOrchestrator 永不清除。
+        // 现在:sink 的 completed 分支只记录 intentId;buildPlanSummary + plan_done
+        // 移到 `await orchestrator.run(...)` 返回(finalBb 已初始化)之后统一发送。
+        let completedIntentId: string | undefined;
         const finalBb = await orchestrator.run(
           conversationId,
           goal,
@@ -285,7 +267,7 @@ export function attachWebSocket(
           //   artifact_created/artifact_status_changed/executor_callback/executor_resume,
           //   重复发会造成客户端重复消费 + 反馈回环)。
           // - todo_failed → error
-          // - completed → plan_done(用 BlackboardShape.artifacts 拼 summary)
+          // - completed → 仅记录 intentId;plan_done 在 run() settle 之后发(见下,A1)
           (progress: ProgressEvent) => {
             switch (progress.type) {
               case "todo_failed":
@@ -296,24 +278,27 @@ export function attachWebSocket(
                 });
                 break;
               case "completed":
-                {
-                  const summary = buildPlanSummary(finalBb, progress.intent.title);
-                  send(ws, {
-                    type: "plan_done",
-                    conversationId,
-                    intentId: progress.intent.id,
-                    summary,
-                    artifacts: finalBb.artifacts ?? [],
-                  });
-                }
+                completedIntentId = progress.intent.id;
                 break;
               default:
                 break;
             }
           },
         );
-        // 显式吞掉 finalBb:本路径只关心 status code,summary 已在 sink 内取走。
-        void finalBb;
+        // run() 已 settle → finalBb 可用。intentId 优先取 completed 事件;
+        // sink 异常被 orchestrator 吞掉时(理论上不发生的兜底)从 artifacts 里找 intent。
+        const summary = buildPlanSummary(finalBb, goal);
+        const intentId =
+          completedIntentId ??
+          (finalBb.artifacts ?? []).filter((a) => a.kind === "intent").at(-1)?.id ??
+          "";
+        send(ws, {
+          type: "plan_done",
+          conversationId,
+          intentId,
+          summary,
+          artifacts: finalBb.artifacts ?? [],
+        });
       } catch (err) {
         log.warn("Orchestrator failed:", err);
         send(ws, {

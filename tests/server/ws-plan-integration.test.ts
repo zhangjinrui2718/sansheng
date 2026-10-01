@@ -232,9 +232,14 @@ describe("ws /plan integration (real attachWebSocket + runPlan + Orchestrator + 
     executorPrompts.length = 0;
     fakeLlm = async (input) => {
       if (isPlannerInput(input)) {
+        // 关键:下游 todo 排在数组前面(Planner 输出顺序不保证拓扑序,LLM 完全可能
+        // 先列子任务)。spawnPlanner 循环先检查 it2-b → 依赖未 resolve → 跳过;
+        // it2-a resolve 之后,解锁 it2-b 的唯一路径是 tryUnblockDependents →
+        // findTodosDependingOn —— 正是 A3 的 conversationId:"*" 通配恒空 bug 的必经之路。
+        // (若按 [a, b] 拓扑序输出,spawnPlanner 的顺序 await 会掩盖 A3:a 跑完才检查 b。)
         return JSON.stringify([
-          { id: "it2-a", title: "上游", body: "先做", dependsOn: [] },
           { id: "it2-b", title: "下游", body: "后做", dependsOn: ["it2-a"] },
+          { id: "it2-a", title: "上游", body: "先做", dependsOn: [] },
         ]);
       }
       if (input.userPrompt.includes("id: it2-a")) {

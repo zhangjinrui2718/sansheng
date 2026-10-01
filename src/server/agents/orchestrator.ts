@@ -36,6 +36,7 @@ import type {
   ExecutorResumeEvent,
 } from "../../../shared/types/bus.js";
 import { artifactBus, makeArtifact } from "../bus/index.js";
+import { log } from "../../shared/log.js";
 import {
   upsertArtifact,
   updateArtifactStatus,
@@ -680,8 +681,17 @@ export class Orchestrator {
       artifacts,
       scope: intent.scope ?? "global",
     };
-    this.sink?.({ type: "completed", intent });
+    // A1 修复(docs/CODE-REVIEW-2026-10-01.md §A1):先 settle promise,再调 sink。
+    // 旧实现先 sink 后 resolve:ws.ts 的 sink 在 completed 分支抛错(TDZ)时
+    // resolve 不可达,且 runResolve/runReject 已置 null → runTimer 变 no-op →
+    // run() 永久挂起;sink 异常还会沿 bus 的 void handler 逃逸成 unhandled rejection。
+    // 现在:resolve 先行保证 run() 必然 settle;sink 异常就地捕获记录,不再外逃。
     resolve(shape);
+    try {
+      this.sink?.({ type: "completed", intent });
+    } catch (err) {
+      log.warn("completeRun: progress sink threw (run already settled):", err);
+    }
   }
 }
 
