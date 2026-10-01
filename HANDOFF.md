@@ -1,8 +1,20 @@
 # Sansheng 项目交接包
 
-**生成时间**:2026-10-01 14:40 CST · **v6.5**(DSH 迁移后新机 macOS 基线修复 + jev 恢复)
+**生成时间**:2026-10-01 22:05 CST · **v6.6**(全仓代码审查 + 批次 1-3 修复:8 个 P0 全清)
 **适用**:下一会话(主对话 / worker)开盒即读
 **配套阅读**:`/root/projects/sansheng/PLAN.md`(v5 集成版),`/root/projects/sansheng/ARCHITECTURE.md`(12 层模块图,v6.4 新增),`/root/.pi/agent/memory/MEMORY.md`(长期偏好 + 教训)
+
+> **v6.6 · 全仓代码审查 + 批次 1-3 修复(2026-10-01 晚,DSH 会话,jev 全程决策闸门)**:
+> - **审查**:`docs/CODE-REVIEW-2026-10-01.md`(commit `cef17ac`)——3 个并行只读 review subagent + 主会话抽查核实 + 脚本实证;8 P0 / P1×10 组 / P2×12;根因=组合根零测试覆盖(176 全绿是组件级假象)。
+> - **修复范围 jev 裁决**:scope=B(批次 1-3=全部 P0,0.92/conf0.87);单 subagent 串行派工(0.86);批次间主会话独立验证(git 为准+三件套复跑+smoke)。
+> - **批次 1(/plan 主链路,7 commits `f620c28..a02865b`)**:A1 TDZ(plan_done 移到 run settle 后,completeRun 先 resolve)、A2 僵尸 Orchestrator(finally shutdown + intent ownership + dispose 兜底)、A3 DAG 通配恒空(废 `"*"` 传真实 convId)、A4 decision.body 注入 resumed prompt + depth 按 todoId、B10-5 plan_done/plan_failed 进 shared union+chat store、**新集成防线 `tests/server/ws-plan-integration.test.ts`(真实 attachWebSocket+runPlan+Orchestrator+Storage,唯一 fake=llmCall 经 `AttachOptions.llmCallFactory` seam)**、追加 dep-failed 级联(上游 failed 即时递归 fail open 下游,run 不再等满 30min)。
+> - **批次 1 语义决策(jev 校准)**:移除 `maybeResolveRunOnBlocked` 提前 settle(0.86 STRONG)——run() 现跨「提问→decision→resume」完整周期,settle 收敛为 intent 终态/abort/shutdown/maxRunMs 四路;todo 级失败 → **plan_done 带失败 summary**(与 B2 混合计划一致),plan_failed 保留给编排级错误(timeout/abort/shutdown)。
+> - **批次 2(安全三件套,4 commits `1c13a65..77150c2`)**:A5 sandbox 写路径(parent real-vs-real 双闸门 + 最终组件 lstat default-deny + canvas 迁 `~/.sansheng/canvas` mkdtemp)、A6 redirect SSRF(`redirect:"manual"` 循环每跳重过 checkNetRequest,5 跳上限,`too_many_redirects`)、B4 CSRF/rebinding(新 `src/server/http/security.ts`:Host 白名单 421 + Origin hostname 级白名单 403(任意端口,保 vite proxy)+ SFS cross-site 拒 + WS upgrade Origin 钩子;注册在 logger/路由之前)。主会话独立攻击面实测:evil Origin POST /api/reset → 403,evil Host → 421,无 Origin curl → 放行。
+> - **批次 3(连接与进程生命周期,4 commits `5f93ccc..dba03e6`)**:S1 kernel **多播 sink**(`sinks:Set` + `attachSink→detach` + `emit` 逐 sink 隔离;Pi session.subscribe 每 session 一次+存退订;start/reset/resume/prompt 全部去 sink 参数;`/api/kernel/reset` stub-sink 劫持根治)、S2 runPlan 进度 **broadcast**(wss.clients)+ setOnTask attach 级接线 + close 不 abort plan、S3 CLI reset 挂死(pause+setRawMode(false)+**unref**,实证仅 pause 不足)、S4 daemon 健康轮询(waitForHealth 10s)+ pid 身份校验(isNodeComm/readPidComm)+ 退出钩子 clearOwnPidFile、F1 App 级 socket 单例(`web/src/lib/appSocket.ts`,Timeline 按钮复活)、F2 bus_replay 客户端接线+按 id 去重+切会话清空(**B7 丢失的另一半补上**)、F3 ready 会话对齐(本地有 turns → load_conversation 让 server resume)、F4 pendingQuestions 乐观移除、F5 BusRow memo 修复(`busRow.ts` 30s 桶比较器)。listener 泄漏审计:无现存泄漏(真缺陷是 sink 闭包陈旧)。
+> - **新基线**:typecheck 0 error · **244 passed / 1 skipped(28 files)**(+68 新测试,skip 仍为既有 e2e placeholder)· build OK · boot smoke(health 200 + WS ready + evil Origin 403 + evil Host 421 + vite proxy 200)。`as any` src/=0。
+> - **代码 HEAD = `dba03e6`**(已 push origin,master 同步)。
+> - **遗留(批次 4/5,见审查文档 §B/§C)**:sqlite-vec 生产死路径+migration MAX 不自愈、/api/reset 僵尸化、resolveModel 共享 catalog 改写+env key、keyring/db 权限形态、settings 静默清空+非原子写、B8 重启对账、B9 MessageBus 审计缺口、C 组杂项;批次5=D7/prompts/HarnessManager 接线+M5 角色。审查文档顶部已加修复状态横幅。
+> - **USER-side**:批次 3 报告含 8 项手动浏览器验证清单(流式跨刷新/Timeline 按钮/重连回放/会话对齐/plan 跨刷新/重置按钮/时间标签/daemon 端口占用);真实 LLM E2E **现在才真正可测**(主链路已修通)。
 
 > **v6.5 · 新机(macOS)基线修复 + jev 恢复(2026-10-01 下午,DSH 会话)**:
 > - **新机验证全绿**:Node v26.8.1 · typecheck 0 error · **176 passed / 1 skipped(18 files)** · build OK · boot smoke(`/api/health` + `/api/conversations` + `/api/blackboard/global` + `/api/profile` 全 200,`PI_OFFLINE=1`)

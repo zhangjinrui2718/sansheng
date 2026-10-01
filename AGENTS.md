@@ -7,7 +7,7 @@
 
 - **Sansheng(三生)** = 单用户本地 Node 服务:Pi SDK 驱动多 agent + Blackboard 体系,SQLite + sqlite-vec 持久化,fs/http/browser 三类行动能力。
 - **状态指针**(按优先级读):`HANDOFF.md`(当前进度/待办)→ `ARCHITECTURE.md`(12 层模块图)→ `PLAN.md`(v5 集成版)→ `MIGRATION-HANDOFF.md`(pi→DSH 迁移)。
-- **基线**:176/176 tests · typecheck 0 error · build 产物在 `dist/src/server/`(**所有 dist 路径必须含 `src/` 前缀**,如 `dist/src/cli/index.js`)。
+- **基线**:244 passed / 1 skipped(28 files)· typecheck 0 error · build 产物在 `dist/src/server/`(**所有 dist 路径必须含 `src/` 前缀**,如 `dist/src/cli/index.js`)。
 - 默认 port 2718 / host 127.0.0.1;数据目录 `~/.sansheng/`。
 
 ## 编码纪律
@@ -47,8 +47,8 @@
 
 ## 已知待办(接 HANDOFF.md v6.4)
 
-1. 8 个 manual browser verification tests(USER-only,浏览器手动触发)。
-2. 5 个 E2E blocker 的真实 LLM 端到端实测(目前仅 vitest fakeLlmCall 验证)。
+1. 8 个 manual browser verification tests(USER-only,浏览器手动触发)+ 批次 3 新增 8 项连接生命周期手动验证(清单见 HANDOFF.md v6.6)。
+2. 5 个 E2E blocker 的真实 LLM 端到端实测(目前仅 vitest fakeLlmCall 验证;**2026-10-01 批次 1-3 修复后主链路已真正可测**——此前 TDZ/僵尸/DAG 通配 bug 只在真实路径暴露,见 docs/CODE-REVIEW-2026-10-01.md)。
 3. `tests/agents/e2e-blockers.test.ts` 中 1 个 `it.skip()` placeholder 补边缘 case。
 4. ~~jev skill 恢复(旧机 → `~/.dsh/skills/jev/`),恢复后把 jev 决策流程加回本文件~~ ✅ 已恢复 + 本文件 §决策自主 已补 jev 工作流(2026-10-01)。
 5. ~~AGENTS.md literal 文件~~ ✅ 本文件即落地(2026-10-01)。

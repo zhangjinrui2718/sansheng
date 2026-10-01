@@ -1,5 +1,7 @@
 # Sansheng 代码审查报告 · 2026-10-01
 
+> **修复状态(2026-10-01 晚更新)**:§E 批次 1-3 已全部落地(15 commits,`f620c28..dba03e6`,jev 裁决 scope=B)——**8 个 P0 全清**+B10 组前端缺陷+C7;新基线 244 passed|1 skipped(28 files)。批次 4(P1 生产卫生:sqlite-vec/reset 僵尸/resolveModel/keyring/settings/B8/B9/C 组)与批次 5(设计接线:D7/prompts/HarnessManager/M5)**未动工**,§B/§C 清单仍然有效。各项修复细节见 HANDOFF.md v6.6。
+
 **审查基线**:HEAD = `4910240`(master,clean)· typecheck 0 error · 176/176 tests · build OK
 **方法**:主会话独立深读核心接线(ws/orchestrator/executor/communicator/kernel/bus)+ 3 个并行只读 review(agents 协调层 / 传输存储基础设施 / 前端 shared CLI);所有关键断言均经主会话抽查源码核实;A1/A2(主会话 repro)、A3/A5/A6/B3/B6/C4 及 A8(pty 探针)均有一次性脚本实证(输出摘录见各条,脚本已删)。
 **结论一句话**:组件单体质量良好(类型纪律、参数化 SQL、错误处理规范),但**组合根(boot/ws/kernel 接线层)存在系统性断裂——设计文档描述的系统与实际运行的系统不是同一个东西**。176 测试全绿是"组件级测试 + 模拟式 e2e"的假象:所有关键集成路径(DAG 解锁、真实 sink 闭包、跨 run 生命周期、重连、重启对账)零覆盖。
