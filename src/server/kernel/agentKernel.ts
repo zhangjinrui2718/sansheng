@@ -70,7 +70,22 @@ export type ServerEvent =
   | { type: "conversation_reset"; conversationId: string }
   // M3b: 多 agent Blackboard 流
   | { type: "blackboard_update"; blackboard: import("@shared/types/agents").Blackboard; agents: Record<string, import("@shared/types/agents").AgentRunSummary> }
-  | { type: "plan_done"; blackboard: import("@shared/types/agents").Blackboard }
+  // M3+ B2:Orchestrator 完成 / 失败(Sansheng front-end 订阅 plan_done 渲染总结卡)。
+  // 旧的 Blackboard 字段被废弃 — 新形态用 conversationId + summary + artifacts。
+  // 前端不在此处消费(尚未接线),所以只改后端 type + 注释,不动 client。
+  | {
+      type: "plan_done";
+      conversationId: string;
+      intentId: string;
+      summary: string;
+      artifacts?: import("@shared/types/blackboard.js").BlackboardArtifact[];
+    }
+  | {
+      type: "plan_failed";
+      conversationId: string;
+      intentId?: string;
+      message: string;
+    }
   // M3c: Communicator / MessageBus
   | { type: "bus_event"; message: import("@shared/types/agents").BusMessage }
   | { type: "communicator_thinking"; conversationId: string; status: "idle" | "thinking" | "tool_use" }
@@ -163,6 +178,14 @@ export class AgentKernel {
   /** M3b:ws.ts Orchestrator 需要知道 agentDir 路径 */
   getAgentDir(): string {
     return this.agentDir;
+  }
+
+  /** M3+ B1: 暴露底层 Pi session,供 Orchestrator llmCall 注入使用。
+   *  makeLlmCall 用它直接 prompt 而不走 kernel.prompt(避免 Communicator 递归)。
+   *  返回 null 时表示 session 还没启动(Orchestrator 应抛错或 defer)。
+   */
+  getSession(): AgentSession | null {
+    return this.session;
   }
 
   /**

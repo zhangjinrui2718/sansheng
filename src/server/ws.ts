@@ -39,9 +39,38 @@ export type ClientCommand =
 import type { AgentKernel, ServerEvent } from "./kernel/agentKernel.js";
 import { SettingsStore } from "./settings/store.js";
 import { Storage } from "./storage/index.js";
-import { Orchestrator } from "./agents/orchestrator.js";
+import { Orchestrator, type ProgressEvent } from "./agents/orchestrator.js";
+import type { PlannerLlmCall } from "./agents/planner.js";
+import type { ExecutorLlmCall } from "./agents/executor.js";
 import type { Blackboard } from "@shared/types/agents";
+import type { BlackboardArtifact, BlackboardShape } from "../../shared/types/blackboard.js";
 import { artifactBus } from "./bus/index.js";
+import { completeSimple } from "@earendil-works/pi-ai/compat";
+
+/**
+ * M3+ B2: 从 BlackboardShape 产一个可读的 plan 总结。
+ * 给前端 plan_done 渲染总结卡用 — 1~3 行:
+ *  - "完成了 N 个 todo:M1, M2"
+ *  - "失败 K 个 todo:K1"
+ *  - "未触发任何 todo"
+ */
+function buildPlanSummary(
+  finalBb: BlackboardShape,
+  goalTitle: string,
+): string {
+  const todos = (finalBb.artifacts ?? []).filter((a: BlackboardArtifact) => a.kind === "todo");
+  if (todos.length === 0) {
+    return `计划 "${goalTitle.slice(0, 60)}" 没有产生任何 todo。`;
+  }
+  const resolved = todos.filter((t) => t.status === "resolved");
+  const failed = todos.filter((t) => t.status === "failed");
+  const parts: string[] = [];
+  parts.push(`计划 "${goalTitle.slice(0, 60)}" 完成 ${resolved.length}/${todos.length}`);
+  if (failed.length > 0) {
+    parts.push(`失败 ${failed.length}:${failed.map((t) => t.title.slice(0, 30)).join(", ")}`);
+  }
+  return parts.join(";");
+}
 
 /**
  * 把 user message 包成含历史 context 的 prompt
@@ -63,6 +92,35 @@ function buildContextBlock(fragments: Array<{ kind: string; content: string }>, 
     }
   }
   return parts.join("\n");
+}
+
+/**
+ * M3+ B1: 把 kernel 的 resolved Model 包装成 PlannerLlmCall/ExecutorLlmCall。
+ * 两个接口签名相同((input:{systemPrompt,userPrompt})=>Promise<string>),
+ * 所以一个 factory 同时满足两者。
+ *
+ * 实现:用 pi-ai/compat 的 completeSimple() 跑一次单轮对话,
+ * 把 AssistantMessage 的 text blocks 拼成 raw string 返回(Planner/Executor 后续自行 parse)。
+ */
+function makeLlmCall(kernel: AgentKernel): PlannerLlmCall & ExecutorLlmCall {
+  return async (input: { systemPrompt: string; userPrompt: string }) => {
+    const model = kernel.getModel();
+    if (!model) {
+      throw new Error("makeLlmCall: kernel has no resolved model (start kernel first)");
+    }
+    const result = await completeSimple(model as Parameters<typeof completeSimple>[0], {
+      systemPrompt: input.systemPrompt,
+      messages: [{ role: "user", content: input.userPrompt, timestamp: Date.now() }],
+    });
+    if (result.stopReason === "error" || result.errorMessage) {
+      throw new Error(`makeLlmCall: ${result.errorMessage ?? "unknown error"}`);
+    }
+    const out: string[] = [];
+    for (const c of result.content) {
+      if (c.type === "text") out.push(c.text);
+    }
+    return out.join("");
+  };
 }
 
 export interface AttachOptions {
@@ -200,41 +258,71 @@ export function attachWebSocket(
         storage,
         dataDir,
         agentDir: kernel.getAgentDir(),
-        // M3+ partial:真实 llmCall 由 M5+ 注入;这里保留 active provider 校验
-        // 以保证缺少 API key 的用户在 UI 上能看到明确错误。Planner/Executor
-        // 在生产路径里需要通过 boot 流程把 settings 转换成 llmCall — 当前
-        // 尚未实现(默认 llmCall 会抛错),所以 OrchestratorOptions 不接收
-        // settings 字段以避免悄悄接受却忽略的陷阱。
+        // M3+ B1: 把 kernel.getModel() 包成 Planner/Executor LLM call
+        plannerLlmCall: makeLlmCall(kernel),
+        executorLlmCall: makeLlmCall(kernel),
+        // M3+ B3/B5: Executor 需要 help → kernel.handleExecutorCallback
+        // → Communicator.handleWorkerAsk(knowIt=false) → pending_question → ws
+        routeCallback: (cbArg) => kernel.handleExecutorCallback(cbArg, conversationId, sink),
       });
       activeOrchestrator = orchestrator;
       try {
         const finalBb = await orchestrator.run(
           conversationId,
           goal,
-          // M3+:新的 Orchestrator.run 沿 artifact_bus 推送进度
-          // (intent_received/todos_planned/todo_started/todo_resolved/
-          //  todo_failed),由 kernel 订阅 bus 后转成 ServerEvent 发给客户端。
-          // 这里不再合成 'blackboard_update' / 'plan_done' — wire 协议
-          // 在 M5 重设计后才有完整的 blackboard 快照流(B1 BlackboardShape 与
-          // legacy Blackboard 字段不重叠,目前没法直接喂给 'plan_done')。
-          // 'finalBb' 保留满足 run() 返回类型,后续 M5 接 snapshot。
-          (_progress) => {
-            /* progress forwarded via artifactBus → kernel.bus subscribe */
+          // M3+ B2: 转发 ProgressEvent 到 ws。
+          // - intent_received/todos_planned/todo_started/todo_resolved/callback_routed
+          //   /callback_escalated/decision_received → 不外发 ws(artifact_bus 订阅已转发
+          //   artifact_created/artifact_status_changed/executor_callback/executor_resume,
+          //   重复发会造成客户端重复消费 + 反馈回环)。
+          // - todo_failed → error
+          // - completed → plan_done(用 BlackboardShape.artifacts 拼 summary)
+          (progress: ProgressEvent) => {
+            switch (progress.type) {
+              case "todo_failed":
+                send(ws, {
+                  type: "error",
+                  conversationId,
+                  error: { code: "todo_failed", message: `${progress.todo.title}: ${progress.reason}` },
+                });
+                break;
+              case "completed":
+                {
+                  const summary = buildPlanSummary(finalBb, progress.intent.title);
+                  send(ws, {
+                    type: "plan_done",
+                    conversationId,
+                    intentId: progress.intent.id,
+                    summary,
+                    artifacts: finalBb.artifacts ?? [],
+                  });
+                }
+                break;
+              default:
+                break;
+            }
           },
         );
-        // 显式吞掉 finalBb:后续 M5 plan_done 推送 snapshot 时再启用
+        // 显式吞掉 finalBb:本路径只关心 status code,summary 已在 sink 内取走。
         void finalBb;
       } catch (err) {
         log.warn("Orchestrator failed:", err);
         send(ws, {
-          type: "error",
+          type: "plan_failed",
           conversationId,
-          error: { code: "plan_failed", message: (err as Error).message ?? String(err) },
+          message: (err as Error).message ?? String(err),
         });
       } finally {
         activeOrchestrator = null;
       }
     }
+
+    // M3+ B4: Communicator.decide task 触发 → runPlan。
+    // 放在 runPlan 定义之后,以保证 closure 可访问。
+    // setOnTask 会处理 communicator 未就绪的情况(_pendingOnTask)。
+    kernel.setOnTask(({ goal, conversationId: goalConvId }) => {
+      void runPlan(goalConvId, goal);
+    });
 
     ws.on("message", async (raw) => {
       let cmd: ClientCommand;
@@ -375,16 +463,19 @@ export function attachWebSocket(
         return;
       }
 
-      // M3c: 用户回答 worker 提问 → communicator.answerPending
+      // M3c/B3/B5: 用户回答 worker 提问 → kernel.handleUserAnswer
+      // 不仅 bus.reply,还反查 pendingExecutorCallbacks → publish executor_resume
       if (cmd.type === "answer_question") {
-        const ok = kernel.answerPendingQuestion(cmd.questionId, cmd.payload);
-        if (!ok) {
+        const { replied, resumed } = kernel.handleUserAnswer(cmd.questionId, cmd.payload, cmd.conversationId);
+        if (!replied && !resumed) {
           send(ws, {
             type: "error",
             conversationId: cmd.conversationId,
             error: { code: "no_pending_question", message: `question ${cmd.questionId} 不在 pending` },
           });
         }
+        // resumed 在内部已经 publish executor_resume(artifactBus → kernel.handleUserAnswer)，
+        // artifactBus 订阅会把 executor_resume 推到 ws(本连接已订阅)。
         return;
       }
 
