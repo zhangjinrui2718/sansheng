@@ -43,8 +43,8 @@ import {
   getArtifact,
 } from "../storage/index.js";
 import type { Storage } from "../storage/index.js";
-import { Planner, type PlannerOptions } from "./planner.js";
-import { Executor, type ExecutorOptions } from "./executor.js";
+import { Planner, type PlannerOptions, type PlannerLlmCall } from "./planner.js";
+import { Executor, type ExecutorOptions, type ExecutorLlmCall } from "./executor.js";
 
 /* ────────────────────────────────────────────────────────── *
  * Public types
@@ -78,6 +78,10 @@ export interface OrchestratorOptions {
   storage: Storage;
   dataDir: string;
   agentDir: string;
+  /** Planner LLM call(real impl 由 boot 注入)。若提供,会写入 Planner.llmCall(覆盖 factory 默认 throw)。 */
+  plannerLlmCall?: PlannerLlmCall;
+  /** Executor LLM call(real impl 由 boot 注入)。若提供,会写入 Executor.llmCall。 */
+  executorLlmCall?: ExecutorLlmCall;
   /** 测试可覆盖:Planner factory */
   plannerFactory?: (opts: PlannerOptions) => Planner;
   /** 测试可覆盖:Executor factory */
@@ -114,6 +118,8 @@ export class Orchestrator {
   private readonly bus: typeof artifactBus;
   private readonly plannerFactory: (opts: PlannerOptions) => Planner;
   private readonly executorFactory: (opts: ExecutorOptions) => Executor;
+  private readonly plannerLlmCall: PlannerLlmCall | undefined;
+  private readonly executorLlmCall: ExecutorLlmCall | undefined;
   private readonly routeCallback: CallbackRouter;
   private readonly escalationMs: number;
   private readonly failMs: number;
@@ -138,10 +144,23 @@ export class Orchestrator {
     this.dataDir = opts.dataDir;
     this.agentDir = opts.agentDir;
     this.bus = opts.bus ?? artifactBus;
+    this.plannerLlmCall = opts.plannerLlmCall;
+    this.executorLlmCall = opts.executorLlmCall;
+    // 注入 llmCall 的策略:wrapper factory 在 Planner/Executor 构造前修改 opts.llmCall,
+    // 这样测试 factory 也能受益(若 factory 没显式设置 llmCall,默认会拿到 orchestrator 注入的值)。
+    // 这避免了「factory 设置了一个会 throw 的 llmCall」的边界陷阱。
     this.plannerFactory =
-      opts.plannerFactory ?? ((p) => new Planner(p));
+      opts.plannerFactory ??
+      ((p) => {
+        if (this.plannerLlmCall && !p.llmCall) p.llmCall = this.plannerLlmCall;
+        return new Planner(p);
+      });
     this.executorFactory =
-      opts.executorFactory ?? ((e) => new Executor(e));
+      opts.executorFactory ??
+      ((e) => {
+        if (this.executorLlmCall && !e.llmCall) e.llmCall = this.executorLlmCall;
+        return new Executor(e);
+      });
     this.routeCallback = opts.routeCallback ?? defaultRouteCallback;
     this.escalationMs = opts.escalationMs ?? 5 * 60 * 1000;
     this.failMs = opts.failMs ?? 60 * 60 * 1000;
