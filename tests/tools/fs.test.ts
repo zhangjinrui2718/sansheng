@@ -269,8 +269,13 @@ describe("Sandbox · dynamic canvas", () => {
         tmpdir: base,
       });
       const canvas = await sb.newCanvasDir("session-abc");
-      expect(canvas.startsWith(base)).toBe(true);
-      expect(canvas.endsWith("sansheng-session-abc")).toBe(true);
+      // A5 加固:canvas 在数据目录 <homedir>/.sansheng/canvas/ 下,mkdtemp 随机后缀
+      const canvasRoot = join(base, ".sansheng", "canvas");
+      expect(canvas.startsWith(canvasRoot)).toBe(true);
+      expect(canvas).toMatch(/sansheng-session-abc-[A-Za-z0-9]{6}$/);
+      // 不再幂等复用固定名 — 两次调用不同目录(/tmp race 纵深防御)
+      const canvas2 = await sb.newCanvasDir("session-abc");
+      expect(canvas2).not.toBe(canvas);
       // 现在能在 canvas 内写文件
       const r = await writeFile(sb, join(canvas, "note.txt"), "ok");
       expect(r.bytesWritten).toBe(2);

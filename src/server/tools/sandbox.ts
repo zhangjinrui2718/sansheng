@@ -13,13 +13,19 @@
  * Policy 来源优先级:
  *   显式 SandboxOptions.policy > Sandbox.create() 读 ~/.sansheng/sandbox.json > 默认 policy
  *
+ * resolveForWrite(A5 修复后)与 resolve() 同款 real-vs-real:
+ *   parent 词法 matchAllow + realFormOf→matchAllowReal 双闸门,最终组件用 lstat
+ *   (不跟随 symlink)检查 — 目标已存在且是 symlink → 拒绝写(default-deny)。
+ *
  * 默认 allowlist:
  *   - ~/.sansheng/workspace/      (递归)
- *   - /tmp/sansheng-canvas/       (单例 canvas,可被 newCanvasDir 按需创建)
+ *   - ~/.sansheng/canvas/         (canvas 根;per-session 目录由 newCanvasDir mkdtemp 按需创建)
+ *   (A5 加固:canvas 从世界可写的 /tmp 迁入数据目录 — 固定名 /tmp/sansheng-canvas
+ *    可被任何本地进程预埋 symlink,经典 /tmp race;newCanvasDir 用 mkdtemp 随机后缀)
  *
  * 默认单文件大小上限 30KB(防止 context blowup)。
  */
-import { realpath, stat as fsStat, mkdir, readFile } from "node:fs/promises";
+import { realpath, stat as fsStat, lstat, mkdir, mkdtemp, readFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { homedir as osHomedir, tmpdir as osTmpdir } from "node:os";
 import { basename, isAbsolute, join, resolve, sep } from "node:path";
@@ -72,10 +78,13 @@ export interface SandboxOptions {
 
 const DEFAULT_MAX_BYTES = 30 * 1024;
 
-/** 计算默认 policy(home + /tmp/sansheng-canvas/ 单例目录,非 per-session)。 */
-export function defaultPolicy(homedir: string, tmpdir: string): SandboxPolicy {
+/**
+ * 计算默认 policy(workspace + canvas 根,均在数据目录 ~/.sansheng/ 下)。
+ * A5 加固:canvas 不再落 /tmp(世界可写 + 固定名 → symlink 预埋/race 面)。
+ */
+export function defaultPolicy(homedir: string): SandboxPolicy {
   const ws = join(homedir, ".sansheng", "workspace");
-  const canvas = join(tmpdir, "sansheng-canvas");
+  const canvas = join(homedir, ".sansheng", "canvas");
   return {
     allowlist: [
       { path: ws, kind: "dir" },
@@ -130,7 +139,7 @@ export class Sandbox {
     this.tmpdir = opts.tmpdir ?? osTmpdir();
     this.policy = opts.policy
       ? { ...opts.policy, maxBytes: opts.policy.maxBytes ?? DEFAULT_MAX_BYTES }
-      : { ...defaultPolicy(this.homedir, this.tmpdir) };
+      : { ...defaultPolicy(this.homedir) };
   }
 
   /**
@@ -237,14 +246,12 @@ export class Sandbox {
   private realEntryCache = new Map<string, string>();
 
   /**
-   * 计算 allowlist entry 的 real(symlink-resolved)形式。
-   * entry 可能尚未创建(如 canvas 目录懒创建)→ 向上找最长已存在祖先,
-   * realpath 该祖先后拼回剩余段。Linux 上无 symlink 前缀时结果 = 原路径。
+   * 最长已存在祖先 → realpath → 拼回剩余段(无缓存)。
+   * A5:resolveForWrite 对任意 parent 计算 real 形式用它 — 写路径的 parent
+   * 不可进 entry 缓存(路径无界,Map 会无限增长)。
    */
-  private async realFormOf(entryPath: string): Promise<string> {
-    const cached = this.realEntryCache.get(entryPath);
-    if (cached !== undefined) return cached;
-    let existing = entryPath;
+  private async realForm(path: string): Promise<string> {
+    let existing = path;
     const rest: string[] = [];
     for (;;) {
       if (existsSync(existing)) break;
@@ -259,7 +266,18 @@ export class Sandbox {
     } catch {
       realBase = existing; // 理论上不可达(根目录必存在);保守回退
     }
-    const real = rest.length > 0 ? join(realBase, ...rest) : realBase;
+    return rest.length > 0 ? join(realBase, ...rest) : realBase;
+  }
+
+  /**
+   * 计算 allowlist entry 的 real(symlink-resolved)形式(带缓存,entry 数有界)。
+   * entry 可能尚未创建(如 canvas 目录懒创建)→ 向上找最长已存在祖先,
+   * realpath 该祖先后拼回剩余段。Linux 上无 symlink 前缀时结果 = 原路径。
+   */
+  private async realFormOf(entryPath: string): Promise<string> {
+    const cached = this.realEntryCache.get(entryPath);
+    if (cached !== undefined) return cached;
+    const real = await this.realForm(entryPath);
     this.realEntryCache.set(entryPath, real);
     return real;
   }
@@ -283,18 +301,24 @@ export class Sandbox {
   }
 
   /**
-   * 工厂:为指定 session 创建 canvas 目录(`/tmp/sansheng-<id>`)。
-   * 会自动把此目录加入 policy.collateral(动态写入 allowlist)。
-   * 返回绝对路径。
+   * 工厂:为指定 session 创建 canvas 目录。
+   *
+   * A5 加固(docs/CODE-REVIEW-2026-10-01.md §A5):
+   *   - 位置从 `/tmp/sansheng-<id>`(世界可写 + 固定名 → 任何本地进程可预埋
+   *     symlink / race)迁到数据目录 `~/.sansheng/canvas/` 下(与 workspace 同一
+   *     homedir 注入约定,SandboxOptions.homedir 是测试 seam);
+   *   - 创建改用 mkdtemp 随机后缀(纵深防御:目录名不可预测,无法预埋)。
+   *   注意语义变化:不再幂等复用同名目录,每次调用创建新随机目录。
+   *
+   * 会自动把此目录加入 policy.allowlist(动态写入)。返回绝对路径。
    */
   async newCanvasDir(sessionId: string): Promise<string> {
     if (!/^[a-zA-Z0-9_-]+$/.test(sessionId)) {
       throw new Error(`invalid sessionId: ${sessionId}`);
     }
-    const dir = join(this.tmpdir, `sansheng-${sessionId}`);
-    if (!existsSync(dir)) {
-      await mkdir(dir, { recursive: true });
-    }
+    const root = join(this.homedir, ".sansheng", "canvas");
+    await mkdir(root, { recursive: true });
+    const dir = await mkdtemp(join(root, `sansheng-${sessionId}-`));
     // 动态追加到 allowlist(mutable 引用)
     const exists = this.policy.allowlist.some((e) => e.path === dir);
     if (!exists) {
@@ -320,6 +344,18 @@ export class Sandbox {
   /**
    * 给 writeFile 用:resolve 后校验 size + 可选创建 parent dirs。
    * 返回 absolute target path(可直接用 fs.writeFile(target, ...))。
+   *
+   * A5 修复(docs/CODE-REVIEW-2026-10-01.md §A5,实证 PWNED-A/PWNED-B):
+   *   - parent 在词法 matchAllow 之外必须再过 real-vs-real matchAllowReal —
+   *     堵死「allowlist 内 symlink 父目录指向外部」的写穿(旧实现词法前缀
+   *     命中即放行,fsStat 跟随 symlink 使越界检查恒过);
+   *   - 最终组件检查改 lstat(不跟随 symlink)— 目标已存在且是 symlink →
+   *     拒绝写(default-deny,不做 realpath-then-allow 宽松版);旧 fsStat 版
+   *     isSymbolicLink() 恒 false,是死代码;
+   *   - 顺序纪律:词法 → real 两道闸门全过之后才允许 mkdir 副作用(RED 状态
+   *     createDirs 会先经 symlink 在沙箱外创建目录再抛);
+   *   - macOS /tmp、/var symlink 前缀由 realForm(parent) vs realFormOf(entry)
+   *     的 real-vs-real 比较消除(与读路径 resolve() 同款基建,不误杀)。
    */
   async resolveForWrite(
     inputPath: string,
@@ -330,31 +366,29 @@ export class Sandbox {
     const abs = isAbsolute(inputPath) ? inputPath : resolve(inputPath);
     const normalized = resolve(abs);
 
-    // 1) 父目录必须落在 allowlist 内 — 若不存在且 createDirs,递归建
+    // 1) 词法闸门:parent 必须落在 allowlist 内(语义不变 — outside_allowlist)
     const parent = resolve(normalized, "..");
-    const parentInAllow = this.matchAllow(parent) !== undefined;
-    if (!parentInAllow) {
-      if (opts.createDirs) {
-        // createDirs 模式:递归 mkdir,但前提是 parent 的祖先路径最终会落在 allowlist
-        await this.ensureDirs(parent);
-        // 创建后再校验
-        if (this.matchAllow(parent) === undefined) {
-          throw new SandboxError(
-            `parent ${parent} is outside allowlist even after createDirs`,
-            "outside_allowlist",
-            parent,
-          );
-        }
-      } else {
-        throw new SandboxError(
-          `parent ${parent} is outside allowlist`,
-          "outside_allowlist",
-          parent,
-        );
-      }
+    if (this.matchAllow(parent) === undefined) {
+      throw new SandboxError(
+        `parent ${parent} is outside allowlist`,
+        "outside_allowlist",
+        parent,
+      );
     }
 
-    // 2) parent 实际可访问 — 若 parent 不存在,按 createDirs 决定是否 mkdir
+    // 2) A5 real-vs-real 闸门:parent 解链后的 real 形式必须仍在某条 entry
+    //    的 real 形式内。parent 不存在时 realForm 走「最长已存在祖先」重接 —
+    //    createDirs 的深层新目录同样先校验后创建。
+    const realParent = await this.realForm(parent);
+    if (!(await this.matchAllowReal(realParent))) {
+      throw new SandboxError(
+        `parent realpath ${realParent} (from ${parent}) escapes sandbox allowlist`,
+        "symlink_escape",
+        parent,
+      );
+    }
+
+    // 3) 两道闸门都过了才允许副作用:parent 不存在时按 createDirs 决定 mkdir
     try {
       await fsStat(parent);
     } catch (err) {
@@ -367,9 +401,10 @@ export class Sandbox {
       }
     }
 
-    // 3) target 自身:不存在 OK(写新文件);存在且是目录/symlink 则拒绝
+    // 4) target 自身:不存在 OK(写新文件);存在且是目录/symlink 则拒绝。
+    //    A5:lstat 不跟随 symlink — isSymbolicLink() 从此真实可达(死代码修复)。
     try {
-      const targetStat = await fsStat(normalized);
+      const targetStat = await lstat(normalized);
       if (targetStat.isDirectory()) {
         throw new SandboxError(`target is a directory: ${inputPath}`, "denied_kind", inputPath);
       }
@@ -387,17 +422,5 @@ export class Sandbox {
       // 写新文件,继续
     }
     return normalized;
-  }
-
-  /** 递归创建中间目录(在 allowlist 校验前提下)。 */
-  private async ensureDirs(dir: string): Promise<string> {
-    const abs = resolve(dir);
-    if (existsSync(abs)) return abs;
-    const parent = resolve(abs, "..");
-    if (parent !== abs) {
-      await this.ensureDirs(parent);
-    }
-    await mkdir(abs, { recursive: true });
-    return abs;
   }
 }
