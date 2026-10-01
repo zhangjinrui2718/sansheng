@@ -103,6 +103,12 @@ export interface CommunicatorOptions {
   disableLlm?: boolean;
   /** M3+ respond 函数(产 JSON output);默认使用 LLM 或离线 fallback */
   respondFn?: CommunicatorRespondFn;
+  /**
+   * M3+ B4: 当 decide 判定为 task 时,Communicator 触发此 callback
+   * (通常是 ws 层挂入的「启动 Orchestrator」)。
+   * 若未提供,Communicator 仅 emit bus broadcast + 给用户确认,不主动触发 plan。
+   */
+  onTask?: (input: { goal: string; conversationId: string }) => void;
 }
 
 /**
@@ -186,6 +192,18 @@ export class Communicator {
         const messageId = nanoid();
         sink({ type: "delta", messageId, text: `收到任务:${decision.goal.slice(0, 60)}` });
         sink({ type: "done", messageId });
+        // M3+ B4:触发 Orchestrator(由 ws 层注入的 onTask callback)。
+        // 若未注入则保持 v3 行为(只 emit broadcast)。
+        try {
+          this.opts.onTask?.({ goal: decision.goal, conversationId });
+        } catch (err) {
+          sink({
+            type: "error",
+            code: "onTask_failed",
+            message: (err as Error).message ?? String(err),
+          });
+          log.warn(`Communicator.onTask threw: ${(err as Error).message ?? err}`);
+        }
       } else {
         // feedback:写 profile(M3c 占位 — 实际由 storage 层接管,这里只 emit 提示)
         const messageId = nanoid();
@@ -263,6 +281,16 @@ export class Communicator {
   cancelPending(questionId: string): boolean {
     const replied = this.opts.bus.reply(questionId, "(用户取消)");
     return replied;
+  }
+
+  /**
+   * M3+ B4: 注入/更新 task 触发 callback。
+   * Communicator 的 opts 是 readonly ref,但 object 内部属性可变 — 所以这里直接 mutate。
+   * 设计为 setter 而非 options.onTask 一次性传入,是因为 Communicator 在
+   * kernel.ensureCommunicator() 内构造,此时 ws 层的 runPlan closure 还没建好。
+   */
+  setOnTask(cb: ((input: { goal: string; conversationId: string }) => void) | undefined): void {
+    this.opts.onTask = cb;
   }
 
   /**
