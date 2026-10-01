@@ -1,15 +1,12 @@
-import { useEffect, useRef, useState } from "react";
-import { ChatSocket } from "@/lib/ws";
+import { useState } from "react";
+import { getAppSocket } from "@/lib/appSocket";
 import { useChatStore } from "@/stores/chat";
 import { useSettingsStore, activeProviderOf } from "@/stores/settings";
 import { MessageList } from "./MessageList";
 import { ChatComposer } from "./ChatComposer";
-import type { ServerEvent } from "@shared/types/ws";
 
 export function ChatSurface() {
   const [input, setInput] = useState("");
-  const socketRef = useRef<ChatSocket | null>(null);
-  const apply = useChatStore((s) => s.applyEvent);
   const status = useChatStore((s) => s.status);
   const kernelReady = useChatStore((s) => s.kernelReady);
   const error = useChatStore((s) => s.error);
@@ -19,18 +16,10 @@ export function ChatSurface() {
   const settings = useSettingsStore((s) => s.settings);
   const hasKey = !!activeProviderOf(settings)?.hasApiKey;
 
-  useEffect(() => {
-    const sock = new ChatSocket();
-    socketRef.current = sock;
-    sock.on((e: ServerEvent) => apply(e));
-    sock.connect();
-    // M3a: 让 store 转发 load_conversation / send-with-conversationId
-    useChatStore.getState().attachSocket(sock);
-    return () => {
-      sock.close();
-      useChatStore.getState().attachSocket(null);
-    };
-  }, [apply]);
+  // F1(A7-2):socket 不再由本组件持有 —— 旧实现在 useEffect 里 new ChatSocket,
+  // 路由切走即 close(Timeline 的回答/取消按钮对 null socket 静默 no-op,
+  // 且每次切路由断流重连)。现在单例在 App mount 时建立(lib/appSocket.ts),
+  // 本组件经 getAppSocket() 取用。
 
   async function reset() {
     await fetch("/api/kernel/reset", { method: "POST" });
@@ -50,7 +39,7 @@ export function ChatSurface() {
       const goal = text.slice(6).trim();
       if (goal) {
         useChatStore.getState().appendUserTurn(text);
-        socketRef.current?.send({ type: "plan", goal, conversationId: convId });
+        getAppSocket()?.send({ type: "plan", goal, conversationId: convId });
         setInput("");
         return;
       }
@@ -58,7 +47,7 @@ export function ChatSurface() {
     // kernelReady=false 允许发:server 端 ws.ts 的 ensureStarted 会自动 start。
     // 但 client 看到的"推演中"还是 idle,UI 上按钮文案会提示"未连接 · 点发送自动恢复"。
     useChatStore.getState().appendUserTurn(text);
-    socketRef.current?.send({
+    getAppSocket()?.send({
       type: "send",
       content: text,
       conversationId: convId,

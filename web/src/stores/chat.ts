@@ -133,11 +133,31 @@ export const useChatStore = create<ChatState>((set, get) => ({
   sendAnswerQuestion(questionId: string, payload: string) {
     const socket = get().socket as { send(cmd: unknown): void } | null;
     const conversationId = get().conversationId ?? "";
+    // B10-3(F4):乐观移除 —— server 对 answer_question 成功路径不回发任何事件,
+    // 不移除则已回答的提问卡永久残留(Timeline 幽灵卡片)。回答错了大不了
+    // no_pending_question error 兜底(也会移除)。顺带清掉该项草稿。
+    set((s) => {
+      const draft = new Map(s.answerDraft);
+      draft.delete(questionId);
+      return {
+        pendingQuestions: s.pendingQuestions.filter((q) => q.questionId !== questionId),
+        answerDraft: draft,
+      };
+    });
     socket?.send({ type: "answer_question", questionId, payload, conversationId });
   },
   sendCancelQuestion(questionId: string) {
     const socket = get().socket as { send(cmd: unknown): void } | null;
     const conversationId = get().conversationId ?? "";
+    // B10-3(F4):同上,乐观移除(cancel_question 成功路径 server 也不回发事件)。
+    set((s) => {
+      const draft = new Map(s.answerDraft);
+      draft.delete(questionId);
+      return {
+        pendingQuestions: s.pendingQuestions.filter((q) => q.questionId !== questionId),
+        answerDraft: draft,
+      };
+    });
     socket?.send({ type: "cancel_question", questionId, conversationId });
   },
   setAnswerDraft(questionId: string, text: string) {
@@ -181,6 +201,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
         // kernelReady 保持:后端 invalidate 了 session,下次 send 会重建;
         // 但 provider/model 不变,所以不清 kernelReady,避免 UI 闪 "未连接"
         kernelReady: s.kernelReady,
+        // B10-1(F2):新会话 → 清空旧会话 bus 流与遗留提问
+        busStream: [],
+        pendingQuestions: [],
       }));
     } catch {
       // 忽略,UI 保持原状
@@ -240,22 +263,59 @@ export const useChatStore = create<ChatState>((set, get) => ({
       kernelReady: false,
       modelId: conversation.modelId ?? s.modelId,
       provider: conversation.provider ?? s.provider,
+      // B10-1(F2):切会话清空 bus 流与遗留提问 —— Timeline 只显示当前会话,
+      // 残留会让「全局流」混入上一会话的消息;ready/bus_replay 会重新拉本会话的。
+      busStream: [],
+      pendingQuestions: [],
     }));
   },
 
   applyEvent(e: ServerEvent) {
     const state = get();
     switch (e.type) {
-      case "ready":
+      case "ready": {
+        // B10-2(F3):server (重)启会重置 kernel conversationId,无条件覆盖会让
+        // 本地 UI 与 server 会话错位(后续 send 全落到 server 的新会话上)。
+        // - 本地有内容(turns/currentTurn)且 id 不同 → 保留本地 id,发
+        //   load_conversation 让 server resume 过来(ws.ts handler 先 ensureStarted
+        //   再按需 resume,session 未启动也安全);server resume 成功后会再发一个
+        //   id 一致的 ready,自然收敛,不会回环。
+        // - 本地无内容 → 直接采用 server id,并清掉旧会话的 busStream。
+        const local = state.conversationId;
+        const hasLocalContent = state.turns.length > 0 || state.currentTurn !== null;
+        let conversationId = e.conversationId;
+        let busStream = state.busStream;
+        const socket = state.socket as { send(cmd: unknown): void } | null;
+        if (local && local !== e.conversationId && hasLocalContent) {
+          conversationId = local;
+          socket?.send({ type: "load_conversation", conversationId: local });
+        } else if (local !== e.conversationId) {
+          busStream = [];
+        }
         set({
-          conversationId: e.conversationId,
+          conversationId,
           modelId: e.modelId,
           provider: e.provider,
           error: null,
           status: "idle",
           kernelReady: true,
+          // B10-2:ready = kernel 会话(重)建,旧的 pending question 已随旧 session
+          // 失效 —— 清空,防止幽灵提问卡常驻(回答必然 no_pending_question)。
+          pendingQuestions: [],
+          busStream,
         });
+        // B10-1(F2):ready 后拉 bus 历史重放 —— 刷新/重连后 Timeline 能看到之前的
+        // 消息。fromTs 取本地该会话已有消息的最大 ts(server 端过滤 ts >= fromTs,
+        // 边界重叠由 bus_event 的 id 去重兜住);本地没有则从 0 全量拉。
+        if (socket) {
+          const fromTs = busStream.reduce(
+            (mx, m) => (m.conversationId === conversationId && m.ts > mx ? m.ts : mx),
+            0,
+          );
+          socket.send({ type: "bus_replay", conversationId, fromTs });
+        }
         return;
+      }
       case "agent_start":
         set({ status: "streaming", error: null });
         return;
@@ -346,9 +406,23 @@ export const useChatStore = create<ChatState>((set, get) => ({
         });
         return;
       }
-      case "error":
-        set({ status: "error", error: e.error });
+      case "error": {
+        // B10-3(F4):no_pending_question 说明该 question 在 server 端已不存在
+        // (已答/已取消/超时)→ 本地幽灵卡片同步移除。questionId 从错误消息解析
+        // (server 端格式:`question ${id} 不在 pending`),无需新增 server 事件。
+        const staleQid =
+          e.error.code === "no_pending_question"
+            ? (/question\s+(\S+)/.exec(e.error.message)?.[1] ?? null)
+            : null;
+        set((s) => ({
+          status: "error",
+          error: e.error,
+          ...(staleQid
+            ? { pendingQuestions: s.pendingQuestions.filter((q) => q.questionId !== staleQid) }
+            : {}),
+        }));
         return;
+      }
       case "interrupt":
         set({ status: "idle" });
         return;
@@ -360,6 +434,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
           currentUsage: { input: 0, output: 0, costUsd: 0 },
           error: null,
           status: "idle",
+          // B10-1(F2)/B10-2:server 端开了新会话 → 旧会话 bus 流与遗留提问全部作废
+          busStream: [],
+          pendingQuestions: [],
         });
         return;
       case "title_changed":
@@ -371,7 +448,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
         return;
       case "bus_event":
         // 任何 BusMessage 都进 busStream;cap 2000,内存只留最近。
+        // B10-1(F2):按 message.id 去重 —— 重连后的 bus_replay(fromTs 含边界)
+        // 与实时推送可能重叠,不去重 Timeline 会出现成对重复消息。
         set((s) => {
+          if (s.busStream.some((m) => m.id === e.message.id)) return s;
           const next = [...s.busStream, e.message];
           if (next.length > 2000) next.splice(0, next.length - 2000);
           return { busStream: next };

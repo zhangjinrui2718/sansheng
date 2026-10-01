@@ -9,6 +9,7 @@ import { MemoryPage } from "./routes/Memory";
 import { TimelinePage } from "./routes/Timeline";
 import { useSettingsStore, activeProviderOf } from "./stores/settings";
 import { useChatStore } from "./stores/chat";
+import { initAppSocket } from "./lib/appSocket";
 
 interface RuntimeConfig {
   name: string;
@@ -38,6 +39,14 @@ export function App() {
   const currentUsage = useChatStore((s) => s.currentUsage);
   const status = useChatStore((s) => s.status);
   const conversationId = useChatStore((s) => s.conversationId);
+
+  // F1(A7-2):App 级 socket 单例 —— mount 即连接,生命周期与 App 相同,
+  // 路由切换(chat ↔ timeline ↔ …)不再断流;Timeline 的回答/取消按钮经
+  // store.attachSocket 走同一实例,不再对 null socket 静默 no-op。
+  // initAppSocket 幂等(StrictMode 双 effect 安全);无 cleanup —— 单例常驻。
+  useEffect(() => {
+    initAppSocket();
+  }, []);
 
   useEffect(() => {
     fetch("/api/config")

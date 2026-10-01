@@ -6,6 +6,7 @@
  */
 import { memo, useEffect, useMemo, useRef, useState } from "react";
 import { useChatStore } from "@/stores/chat";
+import { BUS_ROW_NOW_BUCKET_MS, busRowPropsEqual, nowBucket } from "@/lib/busRow";
 import type { BusDirection, BusMessage, BusKind } from "@shared/types/agents";
 
 const DIR_ICON: Record<BusDirection, string> = {
@@ -48,13 +49,15 @@ export function TimelinePage({ conversationId }: Props) {
   const sendCancelQuestion = useChatStore((s) => s.sendCancelQuestion);
   const answerDraft = useChatStore((s) => s.answerDraft);
   const setAnswerDraft = useChatStore((s) => s.setAnswerDraft);
-  const [now, setNow] = useState(Date.now());
+  // B10-4(F5):now 用 30s 桶值 + 30s tick —— 与 busRowPropsEqual 的桶粒度一致,
+  // 相对时间标签每 30s 刷一次(旧实现 5s tick 但比较器丢弃 now,标签实际冻结)。
+  const [now, setNow] = useState(() => nowBucket(Date.now()));
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const [stickToBottom, setStickToBottom] = useState(true);
 
   // 时间相对显示
   useEffect(() => {
-    const id = setInterval(() => setNow(Date.now()), 5000);
+    const id = setInterval(() => setNow(nowBucket(Date.now())), BUS_ROW_NOW_BUCKET_MS);
     return () => clearInterval(id);
   }, []);
 
@@ -301,8 +304,12 @@ function BusRowImpl({ msg, now }: { msg: BusMessage; now: number }) {
 }
 
 /**
- * B7: 用 React.memo 包裹,避免 now(每 5s 更新)触发所有 bus row 重渲染。
- * 自定义比较:msg 对象稳定引用 + now 数字。msg 内容变更会重渲,时间戳更新只重渲时间标签
- * (实际 now 的影响只 fmtRel,而 fmtRel 不影响 DOM 结构,React.memo 也会放行变更)。
+ * B7 + B10-4(F5):React.memo 包裹,避免无关状态变化触发所有 bus row 重渲染。
+ * 比较器(lib/busRow.ts 纯函数,可单测):msg 引用相同 **且** now 落在同一 30s
+ * 桶 → 跳过重渲;msg 变更或 now 跨桶 → 重渲。
+ *
+ * 勘误(旧注释是对 memo 语义的误解):自定义比较器返回 true 时 React **一定**
+ * 跳过重渲,不存在「React.memo 也会放行变更」的兜底 —— 旧比较器
+ * `prev.msg === next.msg` 丢弃 now prop,导致相对时间标签永久冻结(B10-4)。
  */
-export const BusRow = memo(BusRowImpl, (prev, next) => prev.msg === next.msg);
+export const BusRow = memo(BusRowImpl, busRowPropsEqual);
