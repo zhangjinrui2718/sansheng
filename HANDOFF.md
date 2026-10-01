@@ -1,9 +1,18 @@
 # Sansheng 项目交接包
 
-**生成时间**:2026-10-01 12:38 CST · **v6.4**(5 E2E blocker 一锅端 + ARCHITECTURE.md)
+**生成时间**:2026-10-01 14:40 CST · **v6.5**(DSH 迁移后新机 macOS 基线修复 + jev 恢复)
 **适用**:下一会话(主对话 / worker)开盒即读
 **配套阅读**:`/root/projects/sansheng/PLAN.md`(v5 集成版),`/root/projects/sansheng/ARCHITECTURE.md`(12 层模块图,v6.4 新增),`/root/.pi/agent/memory/MEMORY.md`(长期偏好 + 教训)
 
+> **v6.5 · 新机(macOS)基线修复 + jev 恢复(2026-10-01 下午,DSH 会话)**:
+> - **新机验证全绿**:Node v26.8.1 · typecheck 0 error · **176 passed / 1 skipped(18 files)** · build OK · boot smoke(`/api/health` + `/api/conversations` + `/api/blackboard/global` + `/api/profile` 全 200,`PI_OFFLINE=1`)
+> - **修复 2 个 macOS 兼容 bug(`f379c50`)**,新机首跑曾 10 tests failed:
+>   1. `sandbox.ts resolve()` 校验 2 拿 realpath 结果与**未解链**的 allowlist entry 比较 → macOS 的 `/tmp`、`/var` 本身是 symlink(→ `/private/*`),合法 tmp 路径全部误报 `symlink_escape`。**不止测试,生产路径同样受影响**(默认 canvas `/tmp/sansheng-canvas` + `newCanvasDir()` 用 `osTmpdir()`)。修复:real-vs-real 比较(新增 `realFormOf` + `matchAllowReal`,entry 不存在时解最长已存在祖先后拼回);安全语义保留(case 10 workspace→/etc/passwd symlink 仍被拒);Linux 行为不变。
+>   2. `fs.test.ts` / `integration.test.ts` afterAll 的 `rm(workspace+'/..')` → macOS `rmdir` 拒绝尾段 `..`(EINVAL)→ 改 `rm(dirname(workspace))`。
+> - `package-lock.json` npmmirror 元数据漂移单独提交(`bfbf032`,hasShrinkwrap/hasInstallScript 字段,无依赖变化)
+> - **jev skill 已恢复**(`~/.dsh/skills/jev/`,selftest 通过,model jev-1.13.0):全局 `~/.dsh/AGENTS.md` 新增 Jev 决策工作流段(用户手笔)+ 本项目 `AGENTS.md` §决策自主 补 jev 流程,待办 #4 关闭
+> - MIGRATION-HANDOFF §7 项目侧验证清单已勾完;附录 B #7(jev-check regex)随 pi 扩展弃用,可关闭
+> - 代码 HEAD = `bfbf032`(已 push origin);剩余待办以 USER-side 为主(8 manual browser tests + 5 blocker 真实 LLM 实测)+ e2e skipped placeholder
 > **v6.4 · 5 E2E blocker 一锅端 (commits `6a522c4`..`e27a3c2`) + ARCHITECTURE.md (`c32c5c6`)**:
 > - **B1** Planner/Executor llmCall 注入:`OrchestratorOptions.plannerLlmCall/executorLlmCall` + `ws.ts` 的 `makeLlmCall(kernel)` 工厂(包装 kernel.prompt streaming → Promise<string>)
 > - **B2** Orchestrator 完成/失败 → 用户:`ws.ts runPlan` 的 sink 翻译 `completed` → ServerEvent `plan_done` (含 `buildPlanSummary()`) + `todo_failed` → `error` + Orchestrator run catch → `plan_failed`
@@ -58,8 +67,8 @@ Sansheng = 单用户本地 Node 服务。M0-M4 + M3+ B1-B7 + 2 dep bumps + http.
 - ✅ **5 E2E blocker closure** 已 commit(`6a522c4`..`e27a3c2`) — user→communicator→blackboard→workers→communicator→user 端到端流程可跑通
 - ✅ **ARCHITECTURE.md** 已 commit(`c32c5c6`) — 12 层模块图,严格自顶向下,无交叉
 
-**当前坐标**:**HEAD = `e27a3c2`**,git clean,**176/176 tests pass**(166 → 176,+10 E2E 测试覆盖 B1-B5,1 skipped placeholder)。
-**origin/master 已同步** = `e27a3c2`。
+**当前坐标**:**代码 HEAD = `bfbf032`**(v6.5 macOS 修复 `f379c50` + lockfile 漂移 `bfbf032`,其上是本次 docs commit),git clean,**176/176 tests pass**(Node v26.8.1 · macOS 全绿,1 skipped placeholder)。
+**origin/master 已同步**(push-first)。
 
 ---
 

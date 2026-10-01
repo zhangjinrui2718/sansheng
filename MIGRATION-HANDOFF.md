@@ -116,22 +116,22 @@
 - [x] `docs/pi-memory/` 行数核对:MEMORY 792 / SCRATCHPAD 26 / daily 634+627+170
 - [x] GitHub push 凭据可用(`27a784d`、`674a9ad` 推送成功)
 
-**待验证(项目侧,接 HANDOFF v6.4)**:
-- [ ] `npm run typecheck` / `npm test`(176/176)/ `npm run build` 在新机全绿(node_modules 已存在;若原生模块报错按 §6-8 处理)
-- [ ] `PI_OFFLINE=1 npm run dev` boot + curl `:2718/api/health` → 200
-- [ ] 新开一个 DSH 会话,确认两级 AGENTS.md 在首个请求即生效
-- [ ] 8 个 manual browser tests(USER-only)+ 5 blocker 真实 LLM 实测
+**已验证(项目侧,2026-10-01 下午 DSH 会话,详见 HANDOFF v6.5)**:
+- [x] `npm run typecheck` / `npm test`(176/176)/ `npm run build` 在新机全绿 — **前提:修复了 2 个 macOS 兼容 bug**(`f379c50`:sandbox realpath 校验改 real-vs-real 比较 + 测试清理 `dirname`;首跑曾 10 failed,生产 canvas 路径同受影响,非纯测试问题)
+- [x] `PI_OFFLINE=1 npm run dev:server` boot + curl `:2718/api/health` → 200(`/api/conversations`、`/api/blackboard/global`、`/api/profile` 也全 200)。⚠️ 注意:DSH 会话 sandbox(workspace-write)内 server 无法写 `~/.sansheng/`(SQLITE_CANTOPEN),smoke 需在更宽 file policy 下运行
+- [x] 新开 DSH 会话,两级 AGENTS.md 首个请求即生效(项目级 + user-global 注入均观察到;会话中途修改 `~/.dsh/AGENTS.md` 也被 reconcile 即时生效)
+- [ ] 8 个 manual browser tests(USER-only)+ 5 blocker 真实 LLM 实测 — **仍为 USER-side,未跑**
 
 ---
 
 ## 8. 迁移后待办
 
-1. **(USER)** 决定 jev skill 是否恢复(旧机 → `~/.dsh/skills/jev/`);恢复后把 jev 决策流程补回两级 AGENTS.md
+1. ~~**(USER)** 决定 jev skill 是否恢复(旧机 → `~/.dsh/skills/jev/`);恢复后把 jev 决策流程补回两级 AGENTS.md~~ ✅ **已完成(2026-10-01)**:skill 恢复到 `~/.dsh/skills/jev/`(selftest 通过),全局 `~/.dsh/AGENTS.md` §Jev 决策工作流(用户手笔)+ 项目 `AGENTS.md` §决策自主 均已补
 2. **(USER)** 决定 `migration/setup-2026-10-01` 分支去留:记忆已归档 master,分支唯一剩余价值是 `restore.sh` + 原始 bundle + pi 恢复路线;建议保留远端、本机可删
 3. **(USER)** 决定旧机数据处置:sessions(18M)/ session-hoarder(208M)/ auth.json 仍只在旧机
-4. **(可选)** 跑一遍 §7 项目侧验证(typecheck/test/build/dev boot)
+4. ~~**(可选)** 跑一遍 §7 项目侧验证(typecheck/test/build/dev boot)~~ ✅ 已完成(2026-10-01,全绿,见 §7)
 5. **(可选)** minimax-cn provider 接入 DSH(§6-4)
-6. **(可选)** 处理 package-lock.json 漂移(§6-7)
+6. ~~**(可选)** 处理 package-lock.json 漂移(§6-7)~~ ✅ 已单独提交(`bfbf032`)
 7. 项目待办接 `HANDOFF.md` v6.4(8 manual tests / 真实 LLM E2E / e2e skipped placeholder / jev-check regex 精修——最后这条随扩展弃用可关闭)
 
 ---

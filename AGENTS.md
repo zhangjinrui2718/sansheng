@@ -25,7 +25,7 @@
 
 ### 决策自主
 - **可逆、有依据的决策:直接执行并汇报结果,不要把选项抛回用户。** 只有四类情况才问用户:不可逆操作(删除/push --force)、审美与主观偏好、信息不足、高风险(资金/个人/团队)。
-- 原 pi 工作流用 jev(calibrated 概率)辅助决策;jev skill 尚未迁移到本机(见 `MIGRATION-HANDOFF.md` 缺口清单),期间以"证据充分即执行"为准则。
+- jev skill **已恢复**(`~/.dsh/skills/jev/`,2026-10-01,selftest 通过):准备抛 A/B/C 选择题前,只要 5 段 state(现状数据/选项细节/依赖图/用户历史信号/risk profile)写得出 → 先 `jev.sh ask` 拿校准概率;conf≥0.7 直接采用,0.4–0.7 看 margin,<0.4 才问用户。完整工作流见 `~/.dsh/AGENTS.md` §Jev + `~/.dsh/skills/jev/SKILL.md`。
 
 ### 委派(DSH 工具映射)
 - 大的、bounded 的编码任务派 subagent(`subagent` / `subagent_fork` / 多任务用 `workflow`),主会话不手写大量代码;文档更新、小 refactor、验证类工作主会话直接做(委派 overhead 不值)。
@@ -43,12 +43,12 @@
 - 旧文档(pi 时代)中 `/root/projects/sansheng/...` → `/Users/fuyao/projects/sansheng/...`;`/root/.pi/agent/...` → 本机 `~/.pi/agent/...`(**注意:本机 pi 数据是旧的,项目已迁 DSH,pi 配置不再是工作依赖**)。
 - 本机 Node v26.8.1;better-sqlite3 v13.0.3 走 N-API,任意新 Node 版本只需 `npm rebuild better-sqlite3 --build-from-source` 一次。
 - npm registry 为 npmmirror;`package-lock.json` 可能出现镜像元数据漂移(`hasShrinkwrap` 等字段),无实质影响。
-- 旧机遗留(需要时从旧机取):pi sessions 归档、`~/.pi/skills/jev/`、session-hoarder。
+- 旧机遗留(需要时从旧机取):pi sessions 归档、session-hoarder。(jev skill 已于 2026-10-01 恢复到 `~/.dsh/skills/jev/`,不再是遗留项)
 
 ## 已知待办(接 HANDOFF.md v6.4)
 
 1. 8 个 manual browser verification tests(USER-only,浏览器手动触发)。
 2. 5 个 E2E blocker 的真实 LLM 端到端实测(目前仅 vitest fakeLlmCall 验证)。
 3. `tests/agents/e2e-blockers.test.ts` 中 1 个 `it.skip()` placeholder 补边缘 case。
-4. jev skill 恢复(旧机 → `~/.dsh/skills/jev/`),恢复后把 jev 决策流程加回本文件。
+4. ~~jev skill 恢复(旧机 → `~/.dsh/skills/jev/`),恢复后把 jev 决策流程加回本文件~~ ✅ 已恢复 + 本文件 §决策自主 已补 jev 工作流(2026-10-01)。
 5. ~~AGENTS.md literal 文件~~ ✅ 本文件即落地(2026-10-01)。
