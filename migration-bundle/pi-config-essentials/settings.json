@@ -1,0 +1,17 @@
+{
+  "lastChangelogVersion": "0.99.1",
+  "theme": "dark",
+  "defaultProvider": "minimax-cn",
+  "defaultModel": "MiniMax-M3",
+  "packages": [
+    "npm:@henryqw/pi-task-models",
+    "npm:@henryqw/pi-subagent",
+    "npm:@narumitw/pi-plan-mode",
+    "npm:pi-memory",
+    "npm:cc-safety-net",
+    "npm:@ikuma.cloud/pix-mcp",
+    "npm:@moyai/pi-session-hoarder",
+    "npm:billion-context-pi",
+    "npm:pi-cc-extensions"
+  ]
+}

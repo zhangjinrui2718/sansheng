@@ -1,0 +1,13 @@
+{
+  "profiles": {
+    "fav": {
+      "primary": {
+        "model": "minimax-cn/MiniMax-M3",
+        "thinkingLevel": "medium"
+      }
+    }
+  },
+  "tasks": {
+    "pi-subagent/delegateTask": "fav"
+  }
+}
