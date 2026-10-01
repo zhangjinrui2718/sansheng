@@ -393,6 +393,39 @@ export const useChatStore = create<ChatState>((set, get) => ({
           ],
         }));
         return;
+      case "plan_done": {
+        // B10-5:server 一直在发 plan_done(ws.ts runPlan),但旧版 shared/types/ws.ts
+        // 的 ServerEvent union 缺这个成员 → 前端静默丢弃,/plan 完成用户零反馈。
+        // 最小接线:summary 作为一条可见 assistant 消息追加到当前会话(总结卡渲染
+        // 属批次 3 的 UI 范围,这里先保证「完成有反馈」)。
+        const t = newTurn(`plan_done_${Date.now().toString(36)}`, "assistant");
+        set((s) => ({
+          turns: [
+            ...s.turns,
+            { ...t, blocks: [{ kind: "text", text: e.summary }], endedAt: Date.now() },
+          ],
+          status: "idle",
+          error: null,
+        }));
+        return;
+      }
+      case "plan_failed": {
+        // B10-5:plan 失败 → 追加可见错误消息 + 置 error 状态(ChatSurface 横幅)。
+        const t = newTurn(`plan_failed_${Date.now().toString(36)}`, "assistant");
+        set((s) => ({
+          turns: [
+            ...s.turns,
+            {
+              ...t,
+              blocks: [{ kind: "text", text: `计划失败:${e.message}` }],
+              endedAt: Date.now(),
+            },
+          ],
+          status: "error",
+          error: { code: "plan_failed", message: e.message },
+        }));
+        return;
+      }
     }
   },
 }));

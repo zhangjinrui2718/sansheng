@@ -74,6 +74,25 @@ export type ServerEvent =
   | {
       type: "harness_proposal_created";
       artifact: import("./blackboard.js").BlackboardArtifact;
+    }
+  // M3+ B2 · 批次 1 B10-5 前端接线:Orchestrator plan 完成/失败。
+  // ⚠️ 镜像关系:server 侧的 ServerEvent 真身定义在 src/server/kernel/agentKernel.ts
+  // (server 端不能 value-import @shared/*,所以两边各自定义)— 下面的字段形状
+  // 必须与 agentKernel.ts 的 plan_done/plan_failed 成员**逐字一致**,改动需两边同步。
+  // 消费方:web/src/stores/chat.ts applyEvent(plan_done → summary 追加为可见消息;
+  // plan_failed → 追加错误消息 + error 状态)。
+  | {
+      type: "plan_done";
+      conversationId: string;
+      intentId: string;
+      summary: string;
+      artifacts?: import("./blackboard.js").BlackboardArtifact[];
+    }
+  | {
+      type: "plan_failed";
+      conversationId: string;
+      intentId?: string;
+      message: string;
     };
 
 export type ClientCommand =

@@ -72,7 +72,8 @@ export type ServerEvent =
   | { type: "blackboard_update"; blackboard: import("@shared/types/agents").Blackboard; agents: Record<string, import("@shared/types/agents").AgentRunSummary> }
   // M3+ B2:Orchestrator 完成 / 失败(Sansheng front-end 订阅 plan_done 渲染总结卡)。
   // 旧的 Blackboard 字段被废弃 — 新形态用 conversationId + summary + artifacts。
-  // 前端不在此处消费(尚未接线),所以只改后端 type + 注释,不动 client。
+  // 批次 1 B10-5:前端已接线 — shared/types/ws.ts 的 ServerEvent union 有逐字镜像
+  // (web/src/stores/chat.ts applyEvent 消费);改动这两个成员时两边必须同步。
   | {
       type: "plan_done";
       conversationId: string;
