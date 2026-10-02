@@ -28,6 +28,7 @@ import {
   listFragmentsByKind,
   listFragmentsAll,
   listArtifacts,
+  isVecAvailable,
 } from "./storage/index.js";
 import {
   createToolRegistry,
@@ -107,8 +108,21 @@ export async function createApp(opts: AppOptions): Promise<Hono> {
   });
 
   // —— 健康检查 ——
+  // 批次 UI U3(4a-OQ5「vec 降级态用户不可见」):vecLoaded 是**真实**能力面 ——
+  // 用 isVecAvailable(storage.db)(fragments repo 自己的探测,碎片检索实际走的就是
+  // 它),而不是 Storage.vecLoaded 那个「构造器是否加载成功」的历史标志:后者在
+  // B5 的 reopen() 之后仍是**首次**构造时的值(db.ts 字段注释自述「诊断用」),
+  // 与当前连接的真实可用性会脱节。降级时 fragments 检索自动退回 text/importance
+  // 排序(功能不受影响),但用户此前完全看不到这件事。
   app.get("/api/health", (c) =>
-    c.json({ ok: true, name: "sansheng", version: "0.1.0", ts: Date.now(), dataDir: opts.dataDir }),
+    c.json({
+      ok: true,
+      name: "sansheng",
+      version: "0.1.0",
+      ts: Date.now(),
+      dataDir: opts.dataDir,
+      vecLoaded: isVecAvailable(opts.storage.db),
+    }),
   );
 
   // —— 配置(meta) ——

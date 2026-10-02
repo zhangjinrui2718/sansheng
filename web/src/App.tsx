@@ -49,6 +49,9 @@ export function App() {
   const [route, setRoute] = useState<Route>("chat");
   const [cfg, setCfg] = useState<RuntimeConfig | null>(null);
   const [serverTime, setServerTime] = useState<string>("—");
+  // 批次 UI U3:vec 降级态。null = 还没探到(server 未起/网络断),不渲染提示;
+  // false = sqlite-vec 真的不可用(碎片检索已退回 text/importance 排序)。
+  const [vecLoaded, setVecLoaded] = useState<boolean | null>(null);
   const loadSettings = useSettingsStore((s) => s.loadSettings);
   const settings = useSettingsStore((s) => s.settings);
   const provider = useChatStore((s) => s.provider);
@@ -81,6 +84,9 @@ export function App() {
           const mm = String(t.getMinutes()).padStart(2, "0");
           const ss = String(t.getSeconds()).padStart(2, "0");
           setServerTime(`${hh}:${mm}:${ss}`);
+          // U3:vecLoaded 只在真降级(false)时置值;老 server 没有这个字段 → undefined
+          // → 保持 null 不提示,避免对着旧版本刷无意义的降级噪音。
+          if (typeof d.vecLoaded === "boolean") setVecLoaded(d.vecLoaded);
         })
         .catch(() => setServerTime("—"));
     tick();
@@ -105,6 +111,7 @@ export function App() {
         currentUsage={currentUsage}
         totalUsage={totalUsage}
         status={status}
+        vecLoaded={vecLoaded}
       />
       {route === "chat" ? (
         <main className="grid grid-cols-app gap-3 px-4 pb-4" style={{ minHeight: 0 }}>

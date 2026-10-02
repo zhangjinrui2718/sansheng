@@ -25,6 +25,12 @@ interface Props {
   currentUsage: { input: number; output: number; costUsd: number };
   totalUsage: { input: number; output: number; costUsd: number };
   status: "idle" | "streaming" | "error" | "connecting";
+  /**
+   * 批次 UI U3:null = 未知(旧 server 无此字段 / 还没探到)→ 不渲染;
+   * false = sqlite-vec 真不可用 → 在状态栏显示降级提示。
+   * 只在真降级时出现,常态(向量可用)是零噪音。
+   */
+  vecLoaded: boolean | null;
 }
 
 export function TopBar({
@@ -35,6 +41,7 @@ export function TopBar({
   currentUsage,
   totalUsage,
   status,
+  vecLoaded,
 }: Props) {
   return (
     <header
@@ -97,6 +104,18 @@ export function TopBar({
           />
           <span className="font-mono sansheng-text-dim">{serverTime}</span>
         </div>
+        {/* 批次 UI U3(4a-OQ5):vec 降级只在这里、且只在真降级时出现一次。
+            功能不受影响(碎片检索自动退回 text/importance 排序),所以用 ochre
+            而不是 cinnabar —— 是提示不是报错。 */}
+        {vecLoaded === false && (
+          <span
+            className="font-mono sansheng-text-ochre"
+            style={{ fontSize: 10 }}
+            title="sqlite-vec 不可用:记忆检索已降级为 text/importance 排序(功能不受影响)。"
+          >
+            ⌁ vec 降级
+          </span>
+        )}
       </div>
     </header>
   );
