@@ -32,6 +32,16 @@ export interface ChatState {
   kernelReady: boolean;
   /** 递增计数,HistoryRail useEffect 依赖它来重新拉取。 */
   historyRefreshTrigger: number;
+  /**
+   * 批次 UI U1:递增计数,工件/目标页 useEffect 依赖它来重新拉取。
+   *
+   * 为什么用计数而不是把 artifact 直接塞进 store:工件页的权威数据源是
+   * `GET /api/artifacts?conversationId=`(SQLite 里带完整 body/metadata/依赖),
+   * WS 事件只是「有变更」的信号;真值永远回查后端,避免前后端两份不一致。
+   * 触发源:artifact_created / artifact_status_changed / harness_proposal_created
+   * / plan_done(带 artifacts[])/ conversation_reset(换会话后 id 变了)。
+   */
+  artifactRevision: number;
   /** M3c: MessageBus 收到的全部 BusMessage 流(可被 Timeline 页订阅) */
   busStream: import("@shared/types/agents").BusMessage[];
   /** M3c: Communicator 当前状态 */
@@ -111,6 +121,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   status: "connecting",
   kernelReady: false,
   historyRefreshTrigger: 0,
+  artifactRevision: 0,
   busStream: [],
   communicatorStatus: "idle",
   pendingQuestions: [],
@@ -426,6 +437,21 @@ export const useChatStore = create<ChatState>((set, get) => ({
       case "interrupt":
         set({ status: "idle" });
         return;
+      case "artifact_created":
+      case "artifact_status_changed":
+      case "harness_proposal_created": {
+        // 批次 UI U1:这三种事件只作「有变更」信号,工件/目标页经 artifactRevision
+        // 回查 GET /api/artifacts 拿权威数据(此前这三个成员在 switch 里没有 case,
+        // 到达即被静默丢弃 —— 审查 §A5 记录的「artifact 生命周期 UI 不可见」)。
+        set((s) => ({ artifactRevision: s.artifactRevision + 1 }));
+        return;
+      }
+      case "executor_callback":
+      case "executor_resume":
+        // executor 阻塞/恢复本身不改工件字段(状态由 executor 的 artifact_status_changed
+        // 落库),但用户视图需要即时刷新(目标页的「等决策」计数),故同样打戳。
+        set((s) => ({ artifactRevision: s.artifactRevision + 1 }));
+        return;
       case "conversation_reset":
         set({
           conversationId: e.conversationId,
@@ -486,6 +512,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
           ],
           status: "idle",
           error: null,
+          // 一轮 plan 收尾(工件状态批量改写)→ 工件/目标页该重新拉一次
+          artifactRevision: s.artifactRevision + 1,
         }));
         return;
       }

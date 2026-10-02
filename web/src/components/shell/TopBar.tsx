@@ -1,4 +1,5 @@
 import { Seal } from "../brand/Seal";
+import type { Route } from "../../App";
 
 interface RuntimeConfig {
   name: string;
@@ -19,8 +20,8 @@ interface RuntimeConfig {
 interface Props {
   config: RuntimeConfig | null;
   serverTime: string;
-  route: "chat" | "agents" | "memory" | "timeline" | "settings";
-  onRoute: (r: "chat" | "agents" | "memory" | "timeline" | "settings") => void;
+  route: Route;
+  onRoute: (r: Route) => void;
   currentUsage: { input: number; output: number; costUsd: number };
   totalUsage: { input: number; output: number; costUsd: number };
   status: "idle" | "streaming" | "error" | "connecting";
@@ -75,9 +76,9 @@ export function TopBar({
         <NavTab label="Agent" active={route === "agents"} onClick={() => onRoute("agents")} />
         <NavTab label="总线" active={route === "timeline"} onClick={() => onRoute("timeline")} />
         <NavTab label="记忆" active={route === "memory"} onClick={() => onRoute("memory")} />
-        <NavTab label="工件" disabled hint="M5" />
-        <NavTab label="目标" disabled hint="M7" />
-        <NavTab label="Harness" disabled hint="M6" />
+        <NavTab label="工件" active={route === "artifacts"} onClick={() => onRoute("artifacts")} />
+        <NavTab label="目标" active={route === "goals"} onClick={() => onRoute("goals")} />
+        <NavTab label="Harness" active={route === "harness"} onClick={() => onRoute("harness")} />
         <NavTab label="设置" active={route === "settings"} onClick={() => onRoute("settings")} />
       </nav>
 

@@ -7,6 +7,9 @@ import { SettingsPanel } from "./components/settings/SettingsPanel";
 import { AgentsPage } from "./routes/Agents";
 import { MemoryPage } from "./routes/Memory";
 import { TimelinePage } from "./routes/Timeline";
+import { ArtifactsPage } from "./routes/Artifacts";
+import { GoalsPage } from "./routes/Goals";
+import { HarnessPage } from "./routes/Harness";
 import { useSettingsStore, activeProviderOf } from "./stores/settings";
 import { useChatStore } from "./stores/chat";
 import { initAppSocket } from "./lib/appSocket";
@@ -27,8 +30,23 @@ interface RuntimeConfig {
   personaName: string;
 }
 
+/**
+ * 路由态(批次 UI U1:工件/目标/Harness 三 tab 从占位变成真页面)。
+ * 单一来源 —— TopBar 的 NavTab 与 App 的分支渲染共用这个 union,
+ * 避免两处各写一份字面量后悄悄漂移。
+ */
+export type Route =
+  | "chat"
+  | "agents"
+  | "memory"
+  | "timeline"
+  | "artifacts"
+  | "goals"
+  | "harness"
+  | "settings";
+
 export function App() {
-  const [route, setRoute] = useState<"chat" | "agents" | "memory" | "timeline" | "settings">("chat");
+  const [route, setRoute] = useState<Route>("chat");
   const [cfg, setCfg] = useState<RuntimeConfig | null>(null);
   const [serverTime, setServerTime] = useState<string>("—");
   const loadSettings = useSettingsStore((s) => s.loadSettings);
@@ -119,6 +137,27 @@ export function App() {
           style={{ background: "var(--ink-0)", minHeight: 0 }}
         >
           <TimelinePage conversationId={conversationId} />
+        </main>
+      ) : route === "artifacts" ? (
+        <main
+          className="overflow-y-auto"
+          style={{ background: "var(--ink-0)", minHeight: 0 }}
+        >
+          <ArtifactsPage conversationId={conversationId} />
+        </main>
+      ) : route === "goals" ? (
+        <main
+          className="overflow-y-auto"
+          style={{ background: "var(--ink-0)", minHeight: 0 }}
+        >
+          <GoalsPage conversationId={conversationId} />
+        </main>
+      ) : route === "harness" ? (
+        <main
+          className="overflow-y-auto"
+          style={{ background: "var(--ink-0)", minHeight: 0 }}
+        >
+          <HarnessPage />
         </main>
       ) : (
         <main
