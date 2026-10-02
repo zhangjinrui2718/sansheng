@@ -29,17 +29,24 @@ export interface FragmentSearchOpts {
   limit?: number;
 }
 
-let vecAvailable: boolean | null = null;
+// C9-1(审查 §C9):旧实现用模块级变量缓存首个探测结果 —— 任一 DB 实例先探出
+// false(如无 vec 的测试内存库),之后**所有**实例都被误判 false(true 反向同理
+// → upsert 对不存在的表 INSERT 直接 throw)。向量检索可用性被“第一个调用者”
+// 决定,跨实例串味。改为按实例 WeakMap,且**只缓存肯定结果**:
+//  - true 在进程生命周期内单调(运行期无人 DROP fragments_vec)→ 永久缓存安全;
+//  - false 不缓存 → B3 自愈(补跑 002 建表)后同进程立即可见,
+//    且否定结果永不泄漏到其它实例。
+const vecAvailableByDb = new WeakMap<Database.Database, true>();
 
 export function isVecAvailable(db: Database.Database): boolean {
-  if (vecAvailable !== null) return vecAvailable;
+  if (vecAvailableByDb.has(db)) return true;
   try {
     db.prepare(`SELECT COUNT(*) FROM fragments_vec LIMIT 1`).get();
-    vecAvailable = true;
+    vecAvailableByDb.set(db, true);
+    return true;
   } catch {
-    vecAvailable = false;
+    return false;
   }
-  return vecAvailable;
 }
 
 export function insertFragment(db: Database.Database, f: FragmentRow): void {
