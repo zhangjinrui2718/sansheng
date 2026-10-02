@@ -106,13 +106,22 @@
 
 > **接新会话先读这一节,再往下读旧的 TL;DR(旧的已过时)。**
 
-**HEAD = `47541d6`,已 push origin/master。验证:typecheck 0 error · 全量
-`npm test` 494 passed / 1 failed / 1 skipped(69 files)· `npm run build` 成功 · 规则范围内 `as any` = 0。**
+**HEAD = `79ac7eb`,已 push origin/master。验证:typecheck 0 error · 全量
+`npm test` **495 passed / 0 failed / 1 skipped(69 files)** · `npm run build` 成功 · 规则范围内 `as any` = 0。**
 
-⚠️ **那 1 个失败是既有问题,不是本批引入**:`tests/cli/daemon-start.test.ts:70` `isAlive(process.pid)`。
-已用 worktree 检出 P0 之前的 `15f5ebc` 单独跑同一测试**同样失败**。根因在 `src/cli/commands.ts:87-93`,
-`isAlive` 依赖 `readPidComm` 读进程命令名,平台相关(本机 macOS)。本批只动 `web/` + 文档,不碰 CLI。
-**修它需要单独处理,别再当成 P0 的账。**
+✅ **此前记为「既有的 1 个失败」的 `tests/cli/daemon-start.test.ts:70` 已定性 —— 不是代码缺陷,
+是 DSH 沙箱的假象(2026-10-02 20:06 更正)。** 本节早前版本归因为「`isAlive` 依赖 `readPidComm`,
+平台相关(本机 macOS)」——**该归因是错的**,已在无沙箱环境证伪。
+
+**真根因**:`readPidComm`(`src/cli/commands.ts:68-79`)用 `execFileSync("ps", ...)` 读进程命令名。
+在 DSH file-sandbox(`workspace-write`)下,**spawn 子进程被拒,抛 `spawnSync ps EPERM`**;
+`readPidComm` 的 `catch` 吞掉异常返回 `null` → `isNodeComm(null) === false` →
+`isAlive` 对**任何** pid 都返回 false → 「对本测试进程返回 true」这唯一一条反向断言必然挂。
+同文件另外两条断言(非 node 进程→false、不存在 pid→false)在 `ps` 挂掉时**恰好蒙对**,所以只挂一条。
+
+**证据**:同一测试文件在无沙箱下 **8/8 全过**;`ps -p $$ -o comm=` 在无沙箱下正常返回(`/bin/ps`,Darwin 27.0.0)。
+**结论:代码无需改动。** 在 DSH 沙箱内跑 `npm test` 会稳定复现这 1 条假失败;换普通终端或无沙箱环境即消失。
+判定这类假失败的通用手法:先单独 `node -e` 复现被禁的 spawn,再无沙箱对照跑一次同一测试。
 
 **P0 六项已全部落地**(4 个并行子任务 + 1 项集成补录,文件互不重叠):
 
