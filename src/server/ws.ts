@@ -20,8 +20,16 @@ import type { Duplex } from "node:stream";
 import { WebSocketServer, WebSocket } from "ws";
 import { log } from "../shared/log.js";
 /**
- * WS 命令类型 - 镜像 shared/types/ws.ts(避免 server build rootDir 问题)
- * 同步点:ClientCommand 变更时两边同步改。
+ * 批次 4b C12(审查 §C12「ws.ts:22-25 镜像注释自相矛盾」)修正:
+ * 旧注释「镜像 shared/types/ws.ts(**避免 server build rootDir 问题**)」自相矛盾 ——
+ * 本文件下方 import 的一长串类型本来就来自 `../shared/log.js` 等**相对路径**,
+ * 真正的原因只是 AGENTS.md 的纪律:server 端**禁 value import** `@shared/*`
+ * (type-only import 允许,tsconfig.server.json 的 include 本就含 shared 目录,
+ *  dist/shared 确实会 emit)。所以「避免 rootDir 问题」是错的说法。
+ * 顺带更正真身位置:ClientCommand 的对端在 shared/types/ws.ts:98,
+ * 而 **ServerEvent 的真身镜像在 `src/server/kernel/agentKernel.ts`(export type ServerEvent),
+ *   不在本文件** —— 本文件只 import 它来 send(见下方 `import type { AgentKernel, ServerEvent }`)。
+ * 同步点:两侧任一变更时,另一侧同步改。
  */
 export type ClientCommand =
   | { type: "send"; content: string; conversationId?: string }
@@ -651,9 +659,11 @@ export function attachWebSocket(
             error: { code: "no_pending_question", message: `question ${cmd.questionId} 不在 pending` },
           });
         }
-        // executor_resume 由 kernel.handleUserAnswer 直接 publish 到 artifactBus,
-        // Orchestrator(attach 级 activeOrchestrator)订阅后重启 executor;
-        // 该订阅也会经 kernel 的 bus sink 回到 ws(本连接已订阅)。
+        // executor_resume 由 kernel.handleUserAnswer **直接** publish 到 artifactBus
+        // (不是「经 artifactBus 绕回 kernel.handleUserAnswer」—— 那样的描述是循环的,
+        //  且与代码不符;批次 4b C12 更正)。Orchestrator(attach 级 activeOrchestrator)
+        // 订阅该事件后重启 executor;kernel 侧的 bus sink 另有一条
+        // bus_event → ws 通路,但 executor_resume 本身不是 BusMessage,不经过它。
         return;
       }
 

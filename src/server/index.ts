@@ -1,7 +1,11 @@
 /**
  * Sansheng HTTP/WS server entry.
  * - `sansheng start` (CLI) 调用 startServer()
- * - 后台 fork 启动时,直接 `node dist/server/index.js --host ...`
+ * - 后台 fork 启动时,直接 `node dist/src/server/index.js --host ...`
+ *   (批次 4b C12 更正:旧注释写 `dist/server/index.js`,漏了 `src/` ——
+ *    AGENTS.md 红线「所有 dist 路径必须含 src/ 前缀」,bin 同理是
+ *    `dist/src/cli/index.js`;commands.ts 的 entry 计算 `join(__dirname,"..","server","index.js")`
+ *    从 dist/src/cli 出发正好落到 dist/src/server/index.js)
  */
 import { createServer } from "node:http";
 import { serve } from "@hono/node-server";

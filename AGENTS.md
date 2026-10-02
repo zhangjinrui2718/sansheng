@@ -7,15 +7,15 @@
 
 - **Sansheng(三生)** = 单用户本地 Node 服务:Pi SDK 驱动多 agent + Blackboard 体系,SQLite + sqlite-vec 持久化,fs/http/browser 三类行动能力。
 - **状态指针**(按优先级读):`HANDOFF.md`(当前进度/待办)→ `ARCHITECTURE.md`(12 层模块图)→ `PLAN.md`(v5 集成版)→ `MIGRATION-HANDOFF.md`(pi→DSH 迁移)。
-- **基线**:263 passed / 1 skipped(33 files)· typecheck 0 error · build 产物在 `dist/src/server/`(**所有 dist 路径必须含 `src/` 前缀**,如 `dist/src/cli/index.js`)。
+- **基线**:419 passed / 1 skipped(58 files)· typecheck 0 error · build 产物在 `dist/src/server/`(**所有 dist 路径必须含 `src/` 前缀**,如 `dist/src/cli/index.js`)。*2026-10-01 批次 4b(进程与卫生)收尾时点;此前数字(263/33、340/48)是更早的时点,以本行为准。*
 - 默认 port 2718 / host 127.0.0.1;数据目录 `~/.sansheng/`。
 
 ## 编码纪律
 
-- **`as any` 禁止**:`grep -rn 'as any' src/` 必须为 0;`as never` 仅容忍 `registry.ts:114` 一处(getBuiltinModel generics collapse,jev-accepted deviation)。
+- **`as any` 禁止**:`grep -rn 'as any' src/` 必须为 0;`as never` 仅容忍 `src/server/providers/registry.ts` 内 `getBuiltinModel` 调用处一处(getBuiltinModel generics collapse,jev-accepted deviation;批次 4b B6 后行号已漂移,以 grep 为准)。
 - 需要类型收窄时写 module-level type guard(参考 `hasBaseUrl` / `hasCost` / `isStreaming` / `hasMsgShape`)。
 - **改完代码验证三件套**:`npm run typecheck` → `npm test` → `npm run build`;新增 HTTP endpoint 时另加 server boot smoke(`PI_OFFLINE=1 npm run dev` + curl `/api/health`)。fs-only / 内部模块改动可免 smoke。
-- **不要改 tsconfig 的 rootDir/include**(会破坏 `dist/src/cli` bin 路径);server 端不要 import `@shared/*`,需要的类型在 `src/server/ws.ts` 重复定义并注释同步来源。
+- **不要改 tsconfig 的 rootDir/include**(会破坏 `dist/src/cli` bin 路径);server 端**禁 value import `@shared/*`**(批次 4b C12 更正措辞:旧写法「不要 import @shared/*」自相矛盾 —— `import type { ... } from "@shared/types/agents"` 遍地都是,tsconfig.server.json 的 include 本就含 `shared/**/*`,`dist/shared/**` 确实会 emit,**type-only import 是允许且推荐的**)。被禁的是会**产生运行时依赖**的 value import(`import { X } from "@shared/..."` 会把 shared 拉进 server 的运行时依赖图)。需要在 server 侧重复定义的**协议类型**(如 ClientCommand)在 `src/server/ws.ts` 镜像一份并注释同步来源。
 - DB migration 编号跟随已有文件顺延(v002 已被 vec.sql 占用,agent_states 是 v003),不要照抄 spec 里的数字。
 - `FragmentRow.kind` 是闭合 union(`fact|preference|project|context|summary`),**不要扩展**;reflection fragment 用 `kind:"context"` + `[reflection]` 前缀。
 - SettingsStore 全局单例(createApp 注入,不要内部 new);kernel cwd = settings.cwd(默认 $HOME),不是 sansheng 启动目录。

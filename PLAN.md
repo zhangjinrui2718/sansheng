@@ -767,7 +767,7 @@ M4 ✓ 行动工具(fs + http + net sandbox + registry)
   - Step 5(worker B5+B6+B7 parallel):Orchestrator 重构 + Planner + Executor + Harness Manager v0 + Live Trace cards
   - Step 6(用户验证):跑 §验收标准 8 个 manual tests
 
-M5 ✓(M3+ 后)完整 Executor / Critic / Memory / Reflection 实现 + 全量 Artifacts UI
+M5 ◐ 部分(批次 4b C12 更正:旧行写「M5 ✓」失实)—— 已实现:Executor(完整)、Memory(fragments + embeddings + 回合后沉淀);**未实现**:Critic、Reflection 的完整形态(现只有沉淀产出的 `[reflection]` context fragment)、全量 Artifacts UI(只有 Timeline 的简化渲染)
 M6(scaffolded in M3+ v0 stub,full in 后续 plan)Harness 自优真应用:proposer / riskClassifier / shadowRunner / rollback
 M7 守护调度 + Goals + Scheduler UI
 M8 失败兜底 + 状态报告 + 进度报告
