@@ -7,6 +7,7 @@
 
 - **Sansheng(三生)** = 单用户本地 Node 服务:Pi SDK 驱动多 agent + Blackboard 体系,SQLite + sqlite-vec 持久化,fs/http/browser 三类行动能力。
 - **状态指针**(按优先级读):`HANDOFF.md`(当前进度/待办)→ `ARCHITECTURE.md`(12 层模块图)→ `PLAN.md`(v5 集成版)→ `MIGRATION-HANDOFF.md`(pi→DSH 迁移)。
+- **排查「跑出来不对/失败了/行为怪」** → 读 `docs/TROUBLESHOOTING.md` + 跑 `npm run diagnose`(只读;概览 / 单会话全量 / harness 提示词体检)。**关键事实:artifacts 存在 `blackboards.artifacts_json` 列里(没有独立表);`goal`/`plan_json`/`todos_json` 是恒空的遗留列,别被带偏;`logs/sansheng.log` 恒为 0 字节,日志只走 stdout。**
 - **基线**:481 passed / 1 skipped(67 files)· typecheck 0 error · build 产物在 `dist/src/server/`(**所有 dist 路径必须含 `src/` 前缀**,如 `dist/src/cli/index.js`)。*2026-10-02 批次 7(7-A 截断救回 / 7-B harness prompt 接线 / 7-C clarify 对齐)收尾时点;此前数字(446/63、428/61、419/58、340/48、263/33)是更早的时点,以本行为准。*
 - 默认 port 2718 / host 127.0.0.1;数据目录 `~/.sansheng/`。
 - **harness prompt 生效性(批次 7-B 教训)**:`~/.sansheng/harness/system_prompts/{planner,executor}.md` 由 `Orchestrator` 构造时经 `loadHarness(dataDir)` 解析并注入。7-B 之前这段是**死接线**(`this.dataDir` 存了没用,spawn 只传 `{ storage }`),Planner/Executor 一直拿模块内 6-9 行 stub,`shared/prompts/planner.md` 那份 91 行正经提示词是死代码(`loadPlannerPrompt` 无调用方)。**改提示词前先确认它真的到达模型** —— 见 `tests/agents/orchestrator-harness-prompt.test.ts`。communicator 侧的 harness prompt 一直是对的(agentKernel 走 loadHarness)。

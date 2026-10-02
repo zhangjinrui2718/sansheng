@@ -28,6 +28,7 @@
     "typecheck": "tsc -p tsconfig.server.json --noEmit && tsc -p tsconfig.web.json --noEmit",
     "test": "vitest --run",
     "test:watch": "vitest",
+    "diagnose": "node scripts/diagnose.mjs",
     "prepublishOnly": "npm run build"
   },
   "dependencies": {
