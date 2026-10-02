@@ -204,6 +204,22 @@ Pi 自己还落了一份更全的 session log(见 §2.1)。
 **② DAG 区** —— todo 作为节点,`dependsOn` 作为依赖边。节点显示:标题、状态色、承接的 executor、
 以及它产出的结果工件(evidence / hypothesis / failure)直接挂在节点下。
 
+> **实施勘误(P0-A,commit `6b45d39`)—— 「结果工件挂到 todo 节点下」不能用 `dependsOn` 查。**
+> 本节初稿写的是「找 `dependsOn` 含该 todo id 的 evidence / hypothesis / note」,**这条是错的**:
+> `executor.ts` **从不**给自己的结果工件写 `dependsOn` —— 该文件里 `dependsOn` 只出现在两处**读取**
+> (依赖检查 `:145`、注入提示词 `:268`)。它写的真实关联通道是
+> **`metadata.relatedArtifacts: [todo.id]`**(`executor.ts:417/447/489/531/562`,共 5 处)。
+>
+> 只按 `dependsOn` 查的后果:**每个 DAG 节点都挂不上任何结果工件**,且 P0-6 的失败原因
+> 也看不到真实报错现场 —— 这个错误**在实施期才暴露**(设计阶段我按字段名直觉得出,没查写入侧)。
+> 故实现为**三通道并查**:`dependsOn` / `refs` / `metadata.relatedArtifacts`。
+>
+> 同批确认的第二件事:executor 直接失败时 orchestrator 只 `updateArtifactStatus(failed)`、
+> **不写 `errorReason`**(`blackboards.ts:352-397`),所以失败原因取值链
+> `errorReason → body → 该节点产出的 note` 里的 **`body` 档是 planner 写的待办描述,不是失败原因** ——
+> 当成失败原因展示等于说谎。处置:保留该链但**明标每档出处**,
+> 并把该节点产出的 note(真实报错现场)一并展开。
+
 - 用**缩进/树状布局**,不用画布图。6–20 个 todo 的规模,树状可读性足够,画布的成本不划算
   (这是判断,不是数据结论)。
 - `waiting_for_decision` 的节点要**最醒目** —— 这是整个系统最有信息量的状态
