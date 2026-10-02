@@ -36,6 +36,13 @@ import type {
 } from "@shared/types/agents";
 import type { MessageBus } from "./messageBus.js";
 import { log } from "../../shared/log.js";
+// 批次 7-G:两个提示词搬进 harness 版本链(promptUnits.ts),此处 re-export 保持
+// 既有 import 路径可用;消费方的回退值来自 deps.systemPrompt ?? 内置常量。
+import {
+  DECIDE_SYSTEM_PROMPT,
+  ALIGN_SYSTEM_PROMPT,
+} from "../harness/promptUnits.js";
+export { DECIDE_SYSTEM_PROMPT, ALIGN_SYSTEM_PROMPT };
 import { parseJsonLenient } from "../../shared/jsonRepair.js";
 import {
   IMPERATIVE_VERBS,
@@ -105,37 +112,6 @@ export async function defaultCommunicatorDecide(
  * 批次 5b-1 · P1 — decide 升级 LLM(正则启发式降级兜底)
  * ───────────────────────────────────────────────────────── */
 
-/** 微型分类 prompt(system)。极简、限制输出长度 → 控制 decide 主路径延迟。 */
-const DECIDE_SYSTEM_PROMPT = `你是三生系统的消息分类器。把用户消息分成四类之一,只输出一个 JSON 对象,不要任何解释或代码块围栏:
-- chat:闲聊 / 提问 / 讨论,可由对话助手直接回答,无需改动系统或执行多步动作。
-- task:需要多步执行 / 修改文件 / 运行命令 / 部署 / 调研并产出结果的明确动作请求,且关键信息已经说清。
-- clarify:用户想要一件**明确的活**,但关键信息没说清 —— 你不问清就做,大概率做出来不是他要的。
-- feedback:用户自我披露或要求记住的偏好 / 事实(我叫… / 我是… / 我喜欢… / 我讨厌… / 记住…)。
-输出格式(严格 JSON):
-{"kind":"chat"|"task"|"clarify"|"feedback","taskGoal":"kind=task 时给规划器的一句话目标;否则空串","ack":"kind=task/feedback 时给用户的一句交接/收录确认(≤40字);chat/clarify 时空串","question":"kind=clarify 时问用户的那一个关键问题"}
-判别要点:含明显动作词(重构/修复/实现/添加/删除/迁移/部署/写代码/测试/跑一下/安装/配置/查一下/分析/总结)通常是 task;拿不准的寒暄 / 讨论归 chat。
-
-## 什么时候用 clarify(这一条最重要,别滥用)
-
-只在**同时**满足这两条时才用:
-① 用户确实要一件明确的活(是 task,不是闲聊);
-② 存在一个**你猜错就会整份返工**的关键信息没给。
-
-判定②的信号:目标/范围有歧义、用了一个你不敢确定的说法、交付形态没讲、
-评判标准没有、"等等/之类/差不多"后面跟着大范围、或者这个任务的规模分档
-差一个数量级。
-
-**绝对不要**为了保险而问:用户已经把「做什么、做成什么样」说清楚了;
-或者缺的只是偏好(颜色/措辞/风格)——那种直接做;或者一次能问完的小事。
-
-## 怎么问
-
-- **只问一个**问题,问最关键的那个。一次问三个等于没问。
-- 说清楚你为什么需要这个信息,一句话带过即可,别长篇铺垫。
-- 给出你的猜测供用户点头或否定,例如「你说的『百外』是指面向百万人规模的
-  业务场景吗?如果是,我就按这个口径来调研。」
-- 绝对不要用 clarify 来推迟干活 —— 能开工就 task,别拿问题当缓冲。`;
-
 /** decide LLM 分类调用超时(ms)。主路径,超时即降级正则。 */
 const DECIDE_LLM_TIMEOUT_MS = 3500;
 /**
@@ -166,6 +142,12 @@ export interface LlmDecideDeps {
    * (显式注入 = 显式测试意图)。生产不传 → 走 completeSimple(getModel())。
    */
   llmCall?: (input: { systemPrompt: string; userPrompt: string }) => Promise<string>;
+  /**
+   * 批次 7-G:harness `system_prompts/communicator.decide.md` 的内容。
+   * 空/未注入 → 回退 `DECIDE_SYSTEM_PROMPT`(编译内置)。
+   * **sensitivity=contract**:改坏了会破坏 classify JSON 的解析,靠回退兜底。
+   */
+  systemPrompt?: string;
   /** 覆盖超时(ms);默认 3500。 */
   timeoutMs?: number;
   /** 降级函数;默认 defaultCommunicatorDecide(正则启发式,保留不删)。 */
@@ -322,7 +304,7 @@ export function makeLlmCommunicatorDecide(deps: LlmDecideDeps): CommunicatorDeci
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       const raw = await Promise.race([
-        call({ systemPrompt: DECIDE_SYSTEM_PROMPT, userPrompt }),
+        call({ systemPrompt: deps.systemPrompt?.trim() ? deps.systemPrompt : DECIDE_SYSTEM_PROMPT, userPrompt }),
         new Promise<never>((_, reject) => {
           timer = setTimeout(() => reject(new Error("decide timeout")), timeoutMs);
         }),
@@ -347,37 +329,6 @@ export function makeLlmCommunicatorDecide(deps: LlmDecideDeps): CommunicatorDeci
  * 批次 7-E · 对齐闸门(开工前先确认「这是不是他想要的」)
  * ───────────────────────────────────────────────────────── */
 
-/**
- * 对齐提问 prompt。**刻意与 decide 分开成一次独立调用**,而不是给 decide 再加一类:
- *
- * - decide 已经是四选一 + 3.5s 硬超时,再塞一个「要不要问」的判断进去,它会
- *   倾向于选省事的那条(实测 7-C 之后仍稳定判 task,从不 clarify);
- * - 单一职责的提示词可靠得多 —— 只问「开工前最该确认的一件事是什么」;
- * - 有明确的 `NONE` 出口,「别烦用户」这件事可以被显式表达;
- * - 只在 task 分支跑,chat 路径延迟不受影响。
- */
-const ALIGN_SYSTEM_PROMPT = `你在开工前做一次对齐检查。用户提了一个要执行的任务,你的唯一职责是:判断**有没有一件你猜错就会整份返工的关键信息**,用户没给。
-
-有的话,问**一个**问题(用户一次只想回答一件事),带上你的猜测让他点头或否定。
-没有的话,只输出 NONE,一个字都不要多。
-
-只在下面这些情况才提问:
-- 目标或范围有歧义(用了一个你不敢确定的说法、缩写、圈内黑话)
-- 交付形态没讲(要文档?代码?数据?还是就要个结论)
-- 评判标准没有(怎么算做好了)
-- 这个任务跑起来很贵 / 很不可逆,而需求边界又不清楚
-
-**不要**问这些(它们不值得打断用户):
-- 措辞、风格、颜色这类偏好 —— 你自己定就行
-- 你可以从上下文合理推断的东西
-- 一次问三个问题(那等于没问)
-- 已经说清楚的任务(用户把「做什么、做成什么样」都讲了)
-- **已经问过并且用户已经回答过的**(见「最近对话」)—— 换个说法再问一遍就是骚扰,
-  用户会陷入无限澄清循环。已回答就输出 NONE,直接开工。
-
-输出格式(严格 JSON,不要代码块围栏):
-{"question":"要问的那一个问题,或字符串 NONE"}`;
-
 const ALIGN_MAX_TOKENS = 256;
 const ALIGN_TIMEOUT_MS = 6000;
 
@@ -386,6 +337,11 @@ export interface AlignCheckDeps {
   getApiKey?: () => string | undefined;
   /** DI seam(测试注入):替换 completeSimple。注入时绕过模型/开关闸门。 */
   llmCall?: (input: { systemPrompt: string; userPrompt: string }) => Promise<string>;
+  /**
+   * 批次 7-G:harness `system_prompts/communicator.align.md` 的内容。
+   * 空/未注入 → 回退 `ALIGN_SYSTEM_PROMPT`。**sensitivity=contract**。
+   */
+  systemPrompt?: string;
   /**
    * 开工前检查会把问题**重复问一遍** —— 因为它看不到自己上一轮问了什么、
    * 用户答了什么,于是对着同一个 goal 重新发现「百外」不确定,再问一次。
@@ -423,9 +379,11 @@ export function makeAlignmentCheck(deps: AlignCheckDeps): AlignmentCheckFn {
     try {
       const buildPrompt = () =>
         buildAlignUserPrompt(input.goal, input.userText, readRecent(deps, input.conversationId));
+      // 批次 7-G:harness 值优先,空则回退编译内置(与 decide 同款语义)
+      const alignPrompt = deps.systemPrompt?.trim() ? deps.systemPrompt : ALIGN_SYSTEM_PROMPT;
       const call = async (): Promise<string> => {
         if (deps.llmCall) {
-          return deps.llmCall({ systemPrompt: ALIGN_SYSTEM_PROMPT, userPrompt: buildPrompt() });
+          return deps.llmCall({ systemPrompt: alignPrompt, userPrompt: buildPrompt() });
         }
         const model = deps.getModel();
         if (!model) return "";
@@ -433,7 +391,7 @@ export function makeAlignmentCheck(deps: AlignCheckDeps): AlignmentCheckFn {
         const result = await completeSimple(
           model as Parameters<typeof completeSimple>[0],
           {
-            systemPrompt: ALIGN_SYSTEM_PROMPT,
+            systemPrompt: alignPrompt,
             messages: [
               { role: "user", content: buildPrompt(), timestamp: Date.now() },
             ],
@@ -859,7 +817,7 @@ export class Communicator {
     syncActiveProviderApiKeyEnv(this.opts.settings.provider, this.opts.settings.apiKey);
     this.model = model as Model<string>;
     // 注入 user-customized systemPrompt:用户 ~/.sansheng/system_prompts/communicator.md
-    // 覆盖或 DEFAULT_PROMPTS.communicator fallback(undefined → loader 用默认 AGENTS.md)
+    // 覆盖或内置沟通员提示词 fallback(undefined → loader 用默认 AGENTS.md)
     const resourceLoader = new DefaultResourceLoader({
       cwd: this.opts.cwd,
       agentDir: this.opts.agentDir,

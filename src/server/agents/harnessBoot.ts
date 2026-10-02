@@ -27,6 +27,7 @@ import { completeSimple } from "@earendil-works/pi-ai/compat";
 import type { Model } from "@earendil-works/pi-ai";
 import { log } from "../../shared/log.js";
 import type { AgentKernel } from "../kernel/agentKernel.js";
+import { loadHarness } from "../harness/loader.js";
 import type { Storage } from "../storage/db.js";
 import type { FileChange } from "../../../shared/types/blackboard.js";
 import {
@@ -51,7 +52,15 @@ export interface HarnessBootKernel {
 export interface HarnessBootOptions {
   storage: Storage;
   kernel: Pick<AgentKernel, "getModel" | "getModelApiKey">;
-  /** 覆盖 harness system prompt;默认 FALLBACK_HARNESS_PROMPT(内置精简版)。 */
+  /**
+   * 批次 7-G:数据目录 —— 用来读 `harness/system_prompts/harness_manager.md`。
+   * 不传(旧调用方 / 多数测试)→ 直接用 FALLBACK_HARNESS_PROMPT,行为与 7-G 前一致。
+   */
+  dataDir?: string;
+  /**
+   * 覆盖 harness system prompt。**优先级高于 harness 文件**;都不给时回退
+   * FALLBACK_HARNESS_PROMPT(内置精简版)。
+   */
   systemPrompt?: string;
   /** DI seam(测试注入);不传 → 生产 completeSimple(kernel.getModel())。 */
   decideFn?: HarnessDecideFn;
@@ -163,10 +172,18 @@ export function bootHarnessManager(opts: HarnessBootOptions): HarnessManager {
       /* ignore */
     }
   }
-  const systemPrompt = opts.systemPrompt ?? FALLBACK_HARNESS_PROMPT;
+  // 批次 7-G:优先 harness system_prompts/harness_manager.md(空则回退编译内置)。
+  // 与其余单元同一套语义:harness 值非空才用,否则用 FALLBACK_HARNESS_PROMPT。
+  const harnessPrompt = opts.dataDir
+    ? loadHarness(opts.dataDir).systemPrompts["harness_manager"]
+    : "";
+  const systemPrompt =
+    opts.systemPrompt ?? (harnessPrompt.trim() ? harnessPrompt : FALLBACK_HARNESS_PROMPT);
   const injected = opts.decideFn !== undefined;
   const mgr = new HarnessManager({
     storage: opts.storage,
+    // 批次 7-G:管理面需要 dataDir 才能按需读各面
+    ...(opts.dataDir !== undefined ? { dataDir: opts.dataDir } : {}),
     systemPrompt,
     decideFn: opts.decideFn ?? makeProductionHarnessDecideFn(opts.kernel, systemPrompt),
     ...(opts.notifyUser ? { notifyUser: opts.notifyUser } : {}),

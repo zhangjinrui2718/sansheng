@@ -389,6 +389,8 @@ export class AgentKernel {
         // B6:显式传 apiKey 给 completeSimple,不再依赖 process.env 回落。
         getApiKey: () => this.getModelApiKey(),
         ...(this.opts.decideLlmCall ? { llmCall: this.opts.decideLlmCall } : {}),
+        // 批次 7-G:harness system_prompts/communicator.decide.md;空 → 内置常量回退
+        systemPrompt: harness.systemPrompts["communicator.decide"],
         recentHistory: (conversationId) => this.recentTurns(conversationId),
       }),
       // 批次 7-E:对齐闸门 —— decide 判 task 后、onTask 开工前再问一次
@@ -400,6 +402,8 @@ export class AgentKernel {
         getModel: () => this.getModel(),
         getApiKey: () => this.getModelApiKey(),
         ...(this.opts.alignLlmCall ? { llmCall: this.opts.alignLlmCall } : {}),
+        // 批次 7-G:harness system_prompts/communicator.align.md;空 → 内置常量回退
+        systemPrompt: harness.systemPrompts["communicator.align"],
         // 闸门也要看最近对话 —— 否则它会把自己上一轮问过、用户已答的问题
         // 再问一遍,陷入无限澄清循环(7-E 集成测试实测抓到)。
         recentHistory: (conversationId) => this.recentTurns(conversationId),
@@ -1730,6 +1734,13 @@ export class AgentKernel {
         // B6:显式传 apiKey 给 completeSimple,不再依赖 process.env 回落。
         getApiKey: () => this.getModelApiKey(),
         ...(this.opts.sedimentLlmCall ? { llmCall: this.opts.sedimentLlmCall } : {}),
+        // 批次 7-G:harness system_prompts/sedimentation.md;空 → 内置常量回退。
+        // 每次触发都重新 loadHarness(沉淀是回合后异步触发,读盘成本可忽略),
+        // 用户改完 sedimentation.md 无需重启即可生效 —— 与 prompt 单元
+        // apply 字段「每次沉淀触发时读盘」的声明一致。
+        systemPrompt: loadHarness(
+          process.env.SANSHENG_DATA ?? this.agentDir.replace(/\/pi$/, ""),
+        ).systemPrompts.sedimentation,
       },
       this.storage,
       { conversationId, userText, assistantText, assistantMessageId, recentTranscript: prior },

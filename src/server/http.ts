@@ -38,6 +38,7 @@ import { registerBlackboardArtifactRoutes } from "./http/blackboardRoutes.js";
 import { createSecurityMiddleware } from "./http/security.js";
 // 批次 5b-2 T2:Harness 状态 API(manager 运行态 + prompts 摘要 + proposals/previews)
 import { loadHarness, describePrompts, describeToolSets } from "./harness/loader.js";
+import { describeHarness } from "./harness/facet.js";
 import { FALLBACK_HARNESS_PROMPT, getHarnessManager } from "./agents/harnessManager.js";
 import { getHarnessBootMeta } from "./agents/harnessBoot.js";
 
@@ -289,23 +290,33 @@ export async function createApp(opts: AppOptions): Promise<Hono> {
           decideSource: mgr && boot ? boot.decideSource : null,
           startedAt: mgr && boot ? boot.startedAt : null,
         },
-        // 6 角色 prompt 摘要(行数/字符数/default|legacy_factory|user_edited|empty,
-        // loader 版本链信息;state=user_edited 即「用户编辑过,ensureHarness 永不覆盖」)
+        // ── 批次 7-G:统一管理面 ────────────────────────────────────────
+        // `facets` 是**唯一数据源**:tools / prompts / skills / rag 四个面
+        // 各自的条目都由 src/server/harness/facet.ts 的注册表算出,manager /
+        // API / UI / diagnose 共用同一形状。加第五个面 = 写一个模块 + 注册
+        // 一行,这四处**都不用改**。
+        //   id / title / implemented / notImplementedNote
+        //   entries[]: { id, enforced, basis, chars?, lines?, source, warnings, detail }
+        // `implemented: false` 的面**照样出现在数组里**并说明缺什么 ——
+        // 「有一行写着未实现」与「根本没这一行」对用户的意义完全不同。
+        // 优先走 manager(7-G:消灭「manager 被绕过」);未 boot 时退回直调 ——
+        // 两条路读同一份数据,不会分叉。
+        facets: mgr?.describeFacets() ?? describeHarness(opts.dataDir),
+
+        // 以下两个字段是 `facets` 的**派生视图**(同一份计算,不是第二个真相源),
+        // 为尚未迁移到 facets 渲染的 UI 保留。批次 7-H 之后可以删。
+        //   prompts  : 每单元 行数/字符数/state(含 7-G 新增的 orphan)
+        //              + enforced/consumer/apply/sensitivity
+        //   toolSets : per-agent 工具集合。字段语义见 src/server/harness/tools.ts
         prompts: describePrompts(opts.dataDir),
-        // 批次 7-E:per-agent 工具集合(**真配置**,取代已删除的 config.enabledTools)。
-        // 字段语义见 src/server/harness/tools.ts:
-        //   allowed          = 真正交给 SDK 的名单(allow − deny − ceiling 外)
-        //   blockedByCeiling = 集合文件里写了但被架构上界拒绝的(提权失败,可见)
-        //   enforced         = 该角色当前有没有工具执行点;false 时集合是「已就位、未接线」
-        //   enforceBasis     = 执行点位置 / 缺失原因
-        //   source           = factory(等于出厂默认) | user(用户手笔)
-        //   warnings         = 解析告警(非法工具名 / 未知字段 / deny 冲突 / 上界拒绝)
         toolSets: describeToolSets(opts.dataDir),
         harnessManagerPrompt: {
-          source: "builtin_fallback",
+          // 7-G 起不再是「编译内置,尚未纳入版本链」—— harness/system_prompts/
+          // harness_manager.md 已进版本链,这里的 source 随文件状态变化。
+          source: describePrompts(opts.dataDir).find((p) => p.role === "harness_manager")?.state ?? "empty",
           lines: FALLBACK_HARNESS_PROMPT.split("\n").length,
-          editable: false,
-          note: "内置 FALLBACK_HARNESS_PROMPT(shared/prompts/harness_manager.md 精简版);manager prompt 尚未纳入 dataDir harness 版本链(5c)",
+          editable: true,
+          note: "批次 7-G 已纳入 dataDir harness 版本链(harness/system_prompts/harness_manager.md);文件为空时回退内置 FALLBACK_HARNESS_PROMPT。",
         },
         config: {
           // enabledTools 已删除(批次 7-E):它是 M3c 的扁平占位

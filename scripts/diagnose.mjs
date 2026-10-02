@@ -10,13 +10,14 @@
  * 用法:
  *   node scripts/diagnose.mjs                概览:所有会话 + 失败统计(先看这个)
  *   node scripts/diagnose.mjs <convId>       单会话全量诊断(含失败现场原文)
- *   node scripts/diagnose.mjs --harness      harness 提示词体检(抓 stub 死接线)
+ *   node scripts/diagnose.mjs --harness      harness 管理面体检(5 个面 + 提示词单元 + 死接线)
  *   node scripts/diagnose.mjs --help
  *
  * 只读。不会写库、不改文件。
  */
 import { readFileSync, existsSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { homedir } from "node:os";
 import Database from "better-sqlite3";
 
@@ -172,7 +173,7 @@ function overview(db) {
 
 /* ─────────────────────── 单会话详情 ─────────────────────── */
 
-function detail(db, convId) {
+async function detail(db, convId) {
   const cv = db.prepare(`SELECT * FROM conversations WHERE id = ?`).get(convId);
   if (!cv) {
     console.error(c.red(`找不到会话 ${convId}`));
@@ -272,42 +273,120 @@ function detail(db, convId) {
     console.log(c.dim("  注意:direction 字段形如 comm→user,但 toRole 才是真实收件人 —— 该字段有误导性,别信。"));
   }
 
-  /* harness 提示词体检 */
-  harnessReport();
+  /* harness 管理面体检 */
+  await harnessReport();
 }
 
-/* ──────────────────── harness 提示词体检 ──────────────────── */
+/* ──────────────────── harness 管理面体检(批次 7-G)──────────────────── */
 
-function harnessReport() {
-  const dir = join(DIR, "harness", "system_prompts");
-  console.log(c.bold(`\n── Harness 提示词 (${dir.replace(homedir(), "~")}) ──`));
-  if (!existsSync(dir)) {
+/**
+ * 7-G 起这一节体检的是**整个管理面**,不只是 3 个提示词文件。
+ *
+ * 关键设计:提示词单元元数据**从 dist 直读**(promptUnits.js 零运行时 import,
+ * 是纯叶子模块),所以 diagnose 看到的单元表与生产/UI 看到的**是同一份**,
+ * 不会出现「脚本里写死一份、代码里改了脚本不知道」。
+ * dist 缺失或过期 → 降级成只报目录内容,并明确说降级了(不假装拿到了元数据)。
+ */
+async function loadPromptUnitMeta() {
+  const dist = join(process.cwd(), "dist", "src", "server", "harness", "promptUnits.js");
+  if (!existsSync(dist)) return null;
+  try {
+    const mod = await import(pathToFileURL(dist).href);
+    if (!Array.isArray(mod.PROMPT_UNITS) || !mod.BUILTIN_PROMPTS) return null;
+    return { units: mod.PROMPT_UNITS, builtins: mod.BUILTIN_PROMPTS };
+  } catch {
+    return null;
+  }
+}
+
+function promptState(text, builtin) {
+  if (!text.trim()) return "empty";
+  if (builtin && text === builtin) return "factory";
+  return "user_edited";
+}
+
+const STATE_LABEL = {
+  factory: "出厂默认",
+  user_edited: "用户手笔",
+  empty: "空(回退内置)",
+};
+
+async function harnessReport() {
+  const harnessDir = join(DIR, "harness");
+  console.log(c.bold(`\n── Harness 管理面 (${harnessDir.replace(homedir(), "~")}) ──`));
+  if (!existsSync(harnessDir)) {
     console.log(c.yellow("  目录不存在 —— 服务还没启动过,或数据目录不对。"));
     return;
   }
-  const expected = {
-    "planner.md": ["Planner"],
-    "executor.md": ["Executor"],
-    "communicator.md": ["Communicator"],
-  };
-  for (const [file, marker] of Object.entries(expected)) {
-    const p = join(dir, file);
-    if (!existsSync(p)) {
-      console.log(`  ${c.yellow("?")} ${file.padEnd(18)} ${c.dim("缺失")}`);
-      continue;
-    }
-    const text = readFileSync(p, "utf-8");
-    const ok = marker.every((m) => text.includes(m));
-    // 经验阈值:<400 字符的提示词基本等于「没写内容」
-    const thin = text.trim().length < 400;
-    const icon = thin ? c.red("!") : ok ? c.green("✓") : c.yellow("?");
-    const note = thin ? c.red("  ← 过于单薄,疑似 stub") : "";
-    console.log(`  ${icon} ${file.padEnd(18)} ${String(text.length).padStart(6)} 字符${note}`);
+
+  const meta = await loadPromptUnitMeta();
+
+  /* ── 面 1:提示词 ── */
+  const promptsDir = join(harnessDir, "system_prompts");
+  console.log(c.bold("\n  [prompts] 提示词单元"));
+  if (!meta) {
+    console.log(c.yellow("  ? 无法从 dist 读到单元注册表(promptUnits.js 缺失或过期)。"));
+    console.log(c.dim("    先跑一次 npm run build;下面前面的检查仍按目录内容走。"));
   }
+  const units = meta ? meta.units : null;
+  if (units) {
+    for (const u of units) {
+      const p = join(promptsDir, `${u.id}.md`);
+      let state, chars = 0;
+      if (!existsSync(p)) {
+        state = "empty";
+      } else {
+        const text = readFileSync(p, "utf-8");
+        chars = text.length;
+        state = promptState(text, meta.builtins[u.id]);
+      }
+      // orphan 优先:文件状态再正常,没人读就是没人读
+      const label = u.enforced ? (STATE_LABEL[state] ?? state) : "无消费方(改了没用)";
+      const icon = !u.enforced ? c.yellow("○") : state === "factory" ? c.green("✓") : state === "empty" ? c.yellow("?") : c.cyan("✎");
+      console.log(`  ${icon} ${u.id.padEnd(22)} ${String(chars).padStart(6)} 字符  ${label}`);
+      if (!u.enforced) console.log(c.dim(`      ↳ ${u.orphanReason}`));
+      else if (state === "empty") console.log(c.dim(`      ↳ 正在用内置 ${u.id} 常量;改文件后 ${u.apply} 生效`));
+    }
+  } else if (existsSync(promptsDir)) {
+    for (const f of readdirSync(promptsDir).filter((f) => f.endsWith(".md")).sort()) {
+      const text = readFileSync(join(promptsDir, f), "utf-8");
+      const thin = text.trim().length < 400;
+      console.log(`  ${thin ? c.red("!") : c.green("✓")} ${f.padEnd(22)} ${String(text.length).padStart(6)} 字符${thin ? c.red("  ← 过于单薄,疑似 stub") : ""}`);
+    }
+  }
+
+  /* ── 面 2:工具集合 ── */
+  const toolsDir = join(harnessDir, "tools");
+  console.log(c.bold("\n  [tools] 工具集合"));
+  if (!existsSync(toolsDir)) {
+    console.log(c.yellow("  ? 目录不存在 —— 7-E 起 server 启动会自动生成。"));
+  } else {
+    for (const f of readdirSync(toolsDir).filter((f) => f.endsWith(".json")).sort()) {
+      let allowed = [], blocked = [];
+      try {
+        const j = JSON.parse(readFileSync(join(toolsDir, f), "utf-8"));
+        allowed = Array.isArray(j.allow) ? j.allow : [];
+        blocked = Array.isArray(j.deny) ? j.deny : [];
+      } catch (e) {
+        console.log(`  ${c.red("!")} ${f.padEnd(22)} ${c.red("JSON 解析失败 —— 解析器会回退出厂集合")}`);
+        continue;
+      }
+      const tag = allowed.length > 0 ? c.green(allowed.join(" ")) : c.dim("空集合");
+      console.log(`  ${allowed.length > 0 ? c.green("✓") : c.dim("○")} ${f.replace(/\.json$/, "").padEnd(22)} ${tag}${blocked.length ? c.dim(`  deny: ${blocked.join(" ")}`) : ""}`);
+    }
+  }
+
+  /* ── 面 3/4:未实现,显式说明 ── */
+  console.log(c.bold("\n  [skills] / [rag]"));
+  console.log(c.dim("  ○ skills  未实现 —— src/ 里 skill 零命中;SDK 侧 loadSkills / formatSkillsForPrompt 已就绪。"));
+  console.log(c.dim("  ○ rag     未实现管理面 —— 检索本身已在生产跑(ws.ts 每条消息 top-3 注入),"));
+  console.log(c.dim("             但语料源/切分/embedding 模型(硬编码 text-embedding-3-small)/检索参数全写死。"));
+
   console.log(
-    c.dim("  这些文件真的到达模型了吗?批次 7-B 之前 planner/executor 是死接线 ——\n" +
-          "  orchestrator 只传 { storage },拿到的永远是模块内 stub。守护测试见\n" +
-          "  tests/agents/orchestrator-harness-prompt.test.ts。"),
+    c.dim("\n  这些文件真的到达模型了吗?批次 7-B 之前 planner/executor 是死接线 ——\n" +
+          "  orchestrator 只传 { storage },拿到的永远是模块内 stub。7-G 起的守卫:\n" +
+          "  tests/agents/prompt-units.test.ts 会按 PROMPT_UNITS[].consumer 逐条\n" +
+          "  打开 src/server/ 下的文件 grep 符号,找不到就红(写下当天就抓到 2 处错名)。"),
   );
 }
 
@@ -330,7 +409,7 @@ sansheng 诊断工具(只读)
 const db = open();
 try {
   if (argv.includes("--harness")) {
-    harnessReport();
+    await harnessReport();
   } else if (argv.length > 0 && !argv[0].startsWith("-")) {
     detail(db, argv[0]);
   } else {

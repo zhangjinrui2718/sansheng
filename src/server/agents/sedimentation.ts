@@ -40,6 +40,9 @@
 import { completeSimple } from "@earendil-works/pi-ai/compat";
 import type { Model } from "@earendil-works/pi-ai";
 import { log } from "../../shared/log.js";
+// 批次 7-G:提示词搬进 harness 版本链;此处 import + re-export 保持既有路径可用。
+import { SEDIMENT_SYSTEM_PROMPT } from "../harness/promptUnits.js";
+export { SEDIMENT_SYSTEM_PROMPT };
 import {
   isArtifactAuthor,
   type ArtifactKind,
@@ -75,26 +78,6 @@ const TRANSCRIPT_ASSISTANT_MAX = 2_000;
 const TRANSCRIPT_PRIOR_ITEMS = 4;
 const TRANSCRIPT_PRIOR_CHARS = 150;
 
-/** 提取 prompt(system)。质量闸门写进 prompt(代码层再强制一遍,双层防线)。 */
-export const SEDIMENT_SYSTEM_PROMPT = `你是三生系统的「沉淀器」。沟通员与用户的一轮对话刚刚结束;请从转录中提炼值得长期保留的结构化记忆(artifacts)。
-
-只输出一个 JSON 对象,禁止 markdown 围栏、禁止任何解释文字:
-{"artifacts":[{"kind":"...","title":"...","body":"..."}]}
-
-kind 只能四选一:
-- intent:用户明确表达了想做什么(含动作目标),每轮最多 1 个;
-- decision:对话中已确认的结论或决定,会影响后续行动;
-- hypothesis:尚未验证的推断、猜测或待确认的问题;
-- note:中性但有信息量的事实、上下文或结果记录。
-
-质量闸门(宁缺毋滥,这是硬性要求):
-1. 无实质内容的回合——寒暄、致谢、单句问答、纯闲聊、情绪表达——必须输出 {"artifacts":[]}。
-2. 每轮最多 3 条,只保留最有长期价值的;可要可不要的一律不要。
-3. title ≤ 60 字,具体、可检索;禁止「对话记录」「用户提问」「本次讨论」这类空泛标题。
-4. body < 200 字,提炼信息本身(结论/事实/目标),不复述对话原文,不写过程性废话。
-5. 不沉淀沟通员的客套话、系统内部细节、工具输出噪音。
-6. 拿不准就输出空数组——错误的沉淀比没有沉淀更糟。`;
-
 /* ───────────────────────────── 类型 ───────────────────────────── */
 
 export interface SedimentLlmDeps {
@@ -117,6 +100,12 @@ export interface SedimentLlmDeps {
   maxTokens?: number;
   /** 覆盖每回合条数上限;默认 3。 */
   maxArtifacts?: number;
+  /**
+   * 批次 7-G:harness `system_prompts/sedimentation.md` 的内容。
+   * 空/未注入 → 回退 `SEDIMENT_SYSTEM_PROMPT`。**sensitivity=contract**:
+   * 改坏了会破坏 artifacts JSON 的解析(5b-2 的 kind 白名单解析依赖它)。
+   */
+  systemPrompt?: string;
 }
 
 export interface SedimentTurnInput {
@@ -253,7 +242,8 @@ export async function sedimentTurn(
   try {
     raw = await Promise.race([
       (injected ?? productionCall)({
-        systemPrompt: SEDIMENT_SYSTEM_PROMPT,
+        // 批次 7-G:harness 值优先,空则回退编译内置(与 decide / align 同款语义)
+        systemPrompt: deps.systemPrompt?.trim() ? deps.systemPrompt : SEDIMENT_SYSTEM_PROMPT,
         userPrompt: buildSedimentUserPrompt(input),
       }),
       new Promise<never>((_, reject) => {

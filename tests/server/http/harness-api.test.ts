@@ -126,7 +126,25 @@ describe("batch5b-2 T2 · GET /api/harness(真实 createApp 接线)", () => {
     expect(res.status).toBe(200); // RED 基线:404 not_found
     const body = (await res.json()) as Record<string, never> & {
       manager: { running: boolean; stats: unknown; decideSource: unknown; startedAt: unknown };
-      prompts: Array<{ role: string; lines: number; chars: number; state: string }>;
+      prompts: Array<{
+        role: string;
+        owner: string;
+        lines: number;
+        chars: number;
+        state: string;
+        enforced: boolean;
+        consumer: string;
+        apply: string;
+        sensitivity: string;
+        orphanReason?: string;
+      }>;
+      facets: Array<{
+        id: string;
+        title: string;
+        implemented: boolean;
+        notImplementedNote?: string;
+        entries: Array<{ id: string; enforced: boolean; basis: string; source: string; warnings: string[] }>;
+      }>;
       toolSets: Array<{
         role: string;
         allowed: string[];
@@ -134,7 +152,7 @@ describe("batch5b-2 T2 · GET /api/harness(真实 createApp 接线)", () => {
         enforced: boolean;
         source: string;
       }>;
-      harnessManagerPrompt: { source: string; lines: number };
+      harnessManagerPrompt: { source: string; lines: number; editable: boolean };
       config: { redLines: string[]; budget: Record<string, number> };
       proposals: unknown[];
       previews: unknown[];
@@ -142,14 +160,57 @@ describe("batch5b-2 T2 · GET /api/harness(真实 createApp 接线)", () => {
     };
     expect(body.manager.running).toBe(false);
     expect(body.manager.stats).toBeNull();
-    expect(Array.isArray(body.prompts)).toBe(true);
-    expect(body.prompts.length).toBe(6);
-    for (const p of body.prompts) {
-      expect(p.lines).toBeGreaterThan(0);
-      expect(p.state).toBe("default"); // ensureHarness 刚写出厂默认
+
+    // ── 批次 7-G:统一管理面 ──
+    // 五个面**全部出现**,含未实现的 skills / rag —— 「有一行写着未实现」与
+    // 「根本没这一行」对用户的意义完全不同(与 tools 的 enforced:false 同理)。
+    expect(body.facets.map((f) => f.id)).toEqual(["tools", "prompts", "skills", "rag"]);
+    const toolsFacet = body.facets.find((f) => f.id === "tools");
+    const promptsFacet = body.facets.find((f) => f.id === "prompts");
+    expect(toolsFacet?.implemented).toBe(true);
+    expect(toolsFacet?.entries.length).toBe(7); // RoleKind 6 + harness_manager
+    expect(promptsFacet?.implemented).toBe(true);
+    expect(promptsFacet?.entries.length).toBe(10); // 6 角色 + decide/align/sedimentation/harness_manager
+    for (const id of ["skills", "rag"]) {
+      const f = body.facets.find((x) => x.id === id);
+      expect(f?.implemented, `${id} 未实现`).toBe(false);
+      expect(f?.notImplementedNote?.length, `${id} 缺「缺什么」的说明`).toBeGreaterThan(10);
+      // 未实现的面**不许编造条目**
+      expect(f?.entries).toEqual([]);
     }
+
+    expect(Array.isArray(body.prompts)).toBe(true);
+    // 批次 7-G:6 角色 → **10 个提示词单元**(unit ≠ role)
+    expect(body.prompts.length).toBe(10);
+    const ORPHANS = ["critic", "memory", "reflection"];
+    for (const p of body.prompts) {
+      if (ORPHANS.includes(p.role)) {
+        // 7-G 的核心行为变更:零消费方的单元**不再报 default**,
+        // 而是显式 orphan + 给出原因。改这个文件不会有任何效果,必须说清。
+        expect(p.state, `${p.role} 应报 orphan`).toBe("orphan");
+        expect(p.enforced).toBe(false);
+        expect(p.orphanReason?.length, `${p.role} 缺 orphanReason`).toBeGreaterThan(5);
+      } else {
+        expect(p.lines).toBeGreaterThan(0);
+        expect(p.state, `${p.role} 刚写出厂默认`).toBe("default");
+        expect(p.enforced).toBe(true);
+        expect(p.consumer.length).toBeGreaterThan(0);
+        expect(p.apply.length).toBeGreaterThan(0);
+      }
+    }
+    // decide / align / sedimentation / harness_manager 是 7-G 新纳入版本链的
+    expect(body.prompts.map((p) => p.role)).toEqual(
+      expect.arrayContaining([
+        "communicator", "communicator.decide", "communicator.align",
+        "planner", "executor", "sedimentation", "harness_manager",
+        "critic", "memory", "reflection",
+      ]),
+    );
+
     expect(body.harnessManagerPrompt.source).toBeTruthy();
     expect(body.harnessManagerPrompt.lines).toBeGreaterThan(0);
+    // 7-G:已进版本链,不再是「不可编辑的编译内置」
+    expect(body.harnessManagerPrompt.editable).toBe(true);
     // 批次 7-E:toolSets 取代已删除的 config.enabledTools。
     // 断言的是**真实生效的那一个**(communicator),不是"字段存在"。
     expect(body.toolSets.length).toBe(7); // RoleKind 6 + harness_manager

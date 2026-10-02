@@ -60,7 +60,7 @@ export async function startServer(opts: ServerOptions): Promise<void> {
   // proposals 生产发射点当前不存在(executor D13 待 5c)→ 启动即待命,
   // GET /api/harness 如实暴露运行态,不造假数据。
   try {
-    bootHarnessManager({ storage, kernel });
+    bootHarnessManager({ storage, kernel, dataDir: opts.dataDir });
   } catch (err) {
     log.warn("harness manager boot failed:", err);
   }

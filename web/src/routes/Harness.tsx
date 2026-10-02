@@ -96,9 +96,16 @@ import {
 
 interface HarnessPromptInfo {
   role: string;
+  owner: string;
   lines: number;
   chars: number;
-  state: "default" | "legacy_factory" | "user_edited" | "empty";
+  /** 批次 7-G 新增 orphan —— 零消费方,与 empty(有消费方但文件空)是两件事 */
+  state: "default" | "legacy_factory" | "user_edited" | "empty" | "orphan";
+  enforced: boolean;
+  consumer: string;
+  apply: string;
+  sensitivity: string;
+  orphanReason?: string;
 }
 
 interface HarnessStats {
@@ -214,6 +221,10 @@ const STATE_LABEL: Record<string, string> = {
   legacy_factory: "旧出厂版",
   user_edited: "用户编辑过",
   empty: "空",
+  // 批次 7-G:orphan = 零消费方。它与 empty 是两件完全不同的事 ——
+  // empty 有消费方(正在用内置常量兜底),orphan 改了文件不会有任何效果。
+  // 7-G 之前 orphan 被报成 default,让三份没人读的文件看起来像生效中的配置。
+  orphan: "无消费方",
 };
 
 const STATE_TONE: Record<string, Tone> = {
@@ -221,6 +232,7 @@ const STATE_TONE: Record<string, Tone> = {
   legacy_factory: "mute",
   user_edited: "jade",
   empty: "ochre",
+  orphan: "ochre",
 };
 
 const STATE_HINT: Record<string, string> = {
@@ -228,6 +240,7 @@ const STATE_HINT: Record<string, string> = {
   user_edited: "用户编辑过 · ensureHarness 永不覆盖",
   legacy_factory: "出厂旧版 · 下次启动会被 ensureHarness 自动升级为当前默认",
   empty: "无文件/空文件 · 不注入 harness prompt,回退内置 stub 或 SDK 默认",
+  orphan: "**没有任何读取方** —— 改这个文件不会影响任何行为。它只是历史遗留。",
 };
 
 function StatePill({ state }: { state: string }) {

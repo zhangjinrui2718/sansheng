@@ -36,6 +36,9 @@
  */
 
 import { log } from "../../shared/log.js";
+// 批次 7-G:提示词搬进 harness 版本链;此处 import + re-export 保持既有路径可用。
+import { FALLBACK_HARNESS_PROMPT } from "../harness/promptUnits.js";
+export { FALLBACK_HARNESS_PROMPT };
 import type { BlackboardArtifact, FileChange } from "../../../shared/types/blackboard.js";
 import type { BusEventPayload } from "../../../shared/types/bus.js";
 import {
@@ -45,6 +48,7 @@ import {
 } from "../../../shared/types/harness.js";
 import { artifactBus, makeArtifact } from "../bus/index.js";
 import { upsertArtifact, listArtifacts } from "../storage/repo/blackboards.js";
+import { describeHarness, type HarnessFacetSnapshot } from "../harness/facet.js";
 import type { Storage } from "../storage/db.js";
 
 // ───────────────────────────── Decide / Notify 注入 ─────────────────────────────
@@ -103,6 +107,13 @@ export interface HarnessManagerStats {
 
 export interface HarnessManagerOptions {
   storage: Storage;
+  /**
+   * 批次 7-G:数据目录。**管理面**(facets)靠它读盘;不传 → `describeFacets()`
+   * 不可用(调用方应退回 `describeHarness(dataDir)` 直调)。
+   * 注意这与 `systemPrompt` 的关系:后者是 harness_manager 单元**已经读好的
+   * 内容**,由 boot 层注入;这里只是让 manager 具备「按需再读一遍各面」的能力。
+   */
+  dataDir?: string;
   /** system prompt — 从 harness loader 读;若空用内置 fallback。 */
   systemPrompt?: string;
   /** LLM 决策函数(注入式)。生产走 Pi session,测试用 FakeLLM。 */
@@ -117,30 +128,6 @@ export interface HarnessManagerOptions {
 }
 
 // ───────────────────────────── HarnessManager ─────────────────────────────
-
-/**
- * 默认 harness 系统 prompt(若 harness loader 没读到对应文件)。
- * 同步嵌入的简短版 — 完整版在 `shared/prompts/harness_manager.md`。
- * 批次 5b-2 T2:导出 — harnessBoot.ts 生产 decideFn 用它做 systemPrompt;
- * GET /api/harness 用它做摘要(来源/行数)。
- */
-export const FALLBACK_HARNESS_PROMPT = `# Harness Manager v0
-
-你是 Harness Manager — 三生系统的工装升级顾问。
-绝不写文件,只生成只读的 implementation preview。
-输出严格 JSON(无 markdown wrapper):
-
-{
-  "previewMarkdown": "<markdown 预览>",
-  "riskLevel": "low"|"medium"|"high",
-  "targetFiles": ["src/..."],
-  "estimatedLines": <number>,
-  "mode": "create"|"modify"|"refactor"
-}
-
-previewMarkdown 必须用 markdown,代码块 \`\`\`ts 包裹,
-顶部注释 // <relative path> 表明目标文件。
-150-600 字,章节:概要 / 目标文件 + 改动 / 风险与注意事项。`;
 
 export class HarnessManager {
   /** 已处理过(或正在处理)的 proposalId — 内存去重。 */
@@ -211,6 +198,21 @@ export class HarnessManager {
    */
   isRunning(): boolean {
     return this.started;
+  }
+
+  /**
+   * 批次 7-G · 管理面:按需读出全部受管面(tools / prompts / skills / rag)。
+   *
+   * 存在的意义是**消灭绕过**:7-G 之前 `http.ts` 直接调 `loadHarness` /
+   * `describePrompts` / `describeToolSets`,manager 名义上管 harness、实际上一行
+   * 都没管。现在 manager boot 后就是 harness 的唯一读路径,`http.ts` 优先走它。
+   *
+   * 未 boot 或未传 dataDir → 返回 null,由调用方退回 `describeHarness(dataDir)`
+   * 直调(两条路读的是同一份数据,不会分叉)。
+   */
+  public describeFacets(): HarnessFacetSnapshot[] | null {
+    if (!this.opts.dataDir) return null;
+    return describeHarness(this.opts.dataDir);
   }
 
   /** 返回当前运行期计数器的快照(对外只读)。 */
