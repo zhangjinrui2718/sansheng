@@ -127,10 +127,20 @@ export interface BusMessage {
  * 执行链路」而非回答;feedback=「已记下」),由 kernel 落为唯一一条 assistant
  * 消息(§B2 双执行根治后 task/feedback 不再走 Pi 直答)。降级路径无 ack → 用
  * 固定默认文案。`goal`=给 Planner 的提炼目标(taskGoal,缺省回退用户 raw)。
+ *
+ * 批次 7-C:新增 `clarify`。此前 decide 只有 chat/task/feedback 三选一,
+ * **没有「需求没说清」这个出口** —— 分类器一旦判 task,LLM 凭空补全的
+ * taskGoal 就直接进 Planner,用户全程没有机会补充一句。真实案例
+ * (conv_muqsidb0_wgru):用户说「调研一份能够服务百外用户的语音机器人技术
+ * 方案」,「百外」是什么、交付什么形态、先进性怎么衡量,全都没问,直接
+ * 派了 6 个 todo 下去。clarify 让沟通员可以先问一个**最关键**的问题再委派。
+ * `question` 必须是单个问题(用户一次只想回答一件事),落为普通 assistant
+ * 消息,**不触发** onTask。
  */
 export type CommunicatorDecision =
   | { kind: "chat"; reply: string }
   | { kind: "task"; goal: string; toPlanner?: string; ack?: string }
+  | { kind: "clarify"; question: string; context?: string }
   | { kind: "feedback"; profileDelta: Record<string, string>; ack?: string };
 
 /** M3c: 前端 Timeline 页看到的 pending question 提示。 */

@@ -131,6 +131,74 @@ describe("agents/communicator", () => {
     expect(dsevent?.message.toRole).toBe("planner");
   });
 
+  it("clarify:需求没说清 → 问用户一个问题,**不**委派 planner(批次 7-C)", async () => {
+    const bus = new MessageBus();
+    const events: CommunicatorEvent[] = [];
+    let onTaskCalls = 0;
+    const comm = new Communicator({
+      bus,
+      settings: { provider: "fake", apiKey: "sk-fake", modelId: "fake", thinkingLevel: "off" },
+      agentDir: "/tmp/agentdir/communicator-clarify",
+      cwd: "/tmp",
+      systemPrompt: "",
+      disableLlm: true,
+      decideFn: async () => ({
+        kind: "clarify",
+        question: "你说的『百外』是指面向百万用户规模的业务场景吗?",
+      }),
+      onTask: () => {
+        onTaskCalls++;
+      },
+    });
+
+    const decision = await comm.routeUserMessage(
+      "调研一份能够服务百外用户的语音机器人技术方案",
+      "conv-clarify",
+      (e) => events.push(e),
+    );
+
+    expect(decision.kind).toBe("clarify");
+    // 关键断言:没问清就不委派
+    expect(onTaskCalls).toBe(0);
+    // bus 上没有给 planner 的 broadcast
+    const toPlanner = bus.snapshot().filter((m) => m.toRole === "planner");
+    expect(toPlanner).toHaveLength(0);
+    // 用户确实看到了这个问题(delta + done)
+    const deltas = events.filter(
+      (e): e is Extract<CommunicatorEvent, { type: "delta" }> => e.type === "delta",
+    );
+    expect(deltas.length).toBe(1);
+    expect(deltas[0]!.text).toContain("百外");
+    expect(events.some((e) => e.type === "done")).toBe(true);
+    // 走的是 comm→user 的 bus 通道,timeline 可见
+    expect(bus.snapshot()[0]!.toRole).toBe("user");
+  });
+
+  it("clarify:context + question 拼成一条完整回复", async () => {
+    const bus = new MessageBus();
+    const events: CommunicatorEvent[] = [];
+    const comm = new Communicator({
+      bus,
+      settings: { provider: "fake", apiKey: "sk-fake", modelId: "fake", thinkingLevel: "off" },
+      agentDir: "/tmp/agentdir/communicator-clarify2",
+      cwd: "/tmp",
+      systemPrompt: "",
+      disableLlm: true,
+      decideFn: async () => ({
+        kind: "clarify",
+        context: "我先确认一件事,免得做出来不是你要的。",
+        question: "交付一份文档还是可运行的代码?",
+      }),
+    });
+
+    await comm.routeUserMessage("调研语音方案", "conv-clarify2", (e) => events.push(e));
+    const delta = events.find(
+      (e): e is Extract<CommunicatorEvent, { type: "delta" }> => e.type === "delta",
+    );
+    expect(delta?.text).toContain("免得做出来不是你要的");
+    expect(delta?.text).toContain("交付一份文档还是可运行的代码");
+  });
+
   it("handleWorkerAsk + knowIt=true → reply 自己答,worker 解阻塞", async () => {
     const { comm, bus } = makeCommunicator(async () => ({ kind: "chat", reply: "" }));
     // 1. 先模拟 worker 发 ask

@@ -140,6 +140,72 @@ describe("batch5b-1 P1 · makeLlmCommunicatorDecide(LLM 分类 + 正则降级)",
     }
   });
 
+  it("clarify:kind=clarify → question 透传(批次 7-C)", async () => {
+    const decide = makeDecide({
+      getModel: () => FAKE_MODEL,
+      llmCall: async () =>
+        JSON.stringify({
+          kind: "clarify",
+          taskGoal: "",
+          ack: "",
+          question: "你说的『百外』是指面向百万用户规模的业务场景吗?",
+        }),
+    });
+    const d = await decide({
+      userText: "调研一份能够服务百外用户的语音机器人技术方案",
+      conversationId: "conv-p1",
+    });
+    expect(d.kind).toBe("clarify");
+    if (d.kind === "clarify") {
+      expect(d.question).toBe("你说的『百外』是指面向百万用户规模的业务场景吗?");
+    }
+  });
+
+  it("clarify:question 为空 → 解析失败降级正则(宁可 task 也不空问一句)", async () => {
+    const decide = makeDecide({
+      getModel: () => FAKE_MODEL,
+      llmCall: async () => JSON.stringify({ kind: "clarify", taskGoal: "", ack: "", question: "  " }),
+    });
+    const d = await decide({ userText: "帮我重构 X 模块", conversationId: "conv-p1" });
+    // 降级到正则启发式 → 明确动作词 → task
+    expect(d.kind).toBe("task");
+  });
+
+  it("clarify:context 字段在时透传", async () => {
+    const decide = makeDecide({
+      getModel: () => FAKE_MODEL,
+      llmCall: async () =>
+        JSON.stringify({
+          kind: "clarify",
+          question: "交付一份文档还是可运行的代码?",
+          context: "我先确认两件事,免得做出来不是你要的。",
+        }),
+    });
+    const d = await decide({ userText: "调研语音机器人方案", conversationId: "conv-p1" });
+    expect(d.kind).toBe("clarify");
+    if (d.kind === "clarify") {
+      expect(d.context).toBe("我先确认两件事,免得做出来不是你要的。");
+    }
+  });
+
+  it("decide system prompt 含 clarify 的使用边界(防滥问 / 防不问)", async () => {
+    const seen: Array<{ systemPrompt: string; userPrompt: string }> = [];
+    const decide = makeDecide({
+      getModel: () => FAKE_MODEL,
+      llmCall: async (input) => {
+        seen.push(input);
+        return JSON.stringify({ kind: "chat" });
+      },
+    });
+    await decide({ userText: "你好", conversationId: "conv-p1" });
+    const sys = seen[0]!.systemPrompt;
+    expect(sys).toContain("clarify");
+    // 明确的反滥用约束:不许拿问题当缓冲、能开工就 task
+    expect(sys).toContain("别滥用");
+    expect(sys).toContain("只问一个");
+    expect(sys).toContain("绝对不要");
+  });
+
   it("模型输出带 ```json fence / 前后噪音 → 仍能解析(宽容提取首个 JSON 对象)", async () => {
     const decide = makeDecide({
       getModel: () => FAKE_MODEL,
@@ -237,9 +303,13 @@ describe("batch5b-1 P1 · makeLlmCommunicatorDecide(LLM 分类 + 正则降级)",
     expect(ctx.systemPrompt).toContain("JSON");
     expect(ctx.messages?.[0]?.role).toBe("user");
     expect(ctx.messages?.[0]?.content).toContain("帮我迁移数据库");
-    // 延迟控制:输出长度受限(微型 JSON)
+    // 延迟控制:输出长度受限(微型 JSON)。
+    // 批次 7-C:上限 120 → 320 —— clarify 分支要多带一个中文 question
+    // (约 80-120 字,中文 token 密度高),120 会把它截断导致 JSON 解析失败
+    // → 静默降级回 task,新功能形同没加。maxTokens 是上限不是目标,
+    // 模型写完即停,放宽不增加正常路径延迟。仍远小于模型自报的 maxTokens。
     expect(typeof call.options.maxTokens).toBe("number");
-    expect((call.options.maxTokens as number)).toBeLessThanOrEqual(300);
+    expect((call.options.maxTokens as number)).toBeLessThanOrEqual(400);
   });
 
   it("completeSimple 返回 stopReason=error → 降级正则(不抛错)", async () => {

@@ -105,18 +105,47 @@ export async function defaultCommunicatorDecide(
  * ───────────────────────────────────────────────────────── */
 
 /** 微型分类 prompt(system)。极简、限制输出长度 → 控制 decide 主路径延迟。 */
-const DECIDE_SYSTEM_PROMPT = `你是三生系统的消息分类器。把用户消息分成三类之一,只输出一个 JSON 对象,不要任何解释或代码块围栏:
+const DECIDE_SYSTEM_PROMPT = `你是三生系统的消息分类器。把用户消息分成四类之一,只输出一个 JSON 对象,不要任何解释或代码块围栏:
 - chat:闲聊 / 提问 / 讨论,可由对话助手直接回答,无需改动系统或执行多步动作。
-- task:需要多步执行 / 修改文件 / 运行命令 / 部署 / 调研并产出结果的明确动作请求。
+- task:需要多步执行 / 修改文件 / 运行命令 / 部署 / 调研并产出结果的明确动作请求,且关键信息已经说清。
+- clarify:用户想要一件**明确的活**,但关键信息没说清 —— 你不问清就做,大概率做出来不是他要的。
 - feedback:用户自我披露或要求记住的偏好 / 事实(我叫… / 我是… / 我喜欢… / 我讨厌… / 记住…)。
 输出格式(严格 JSON):
-{"kind":"chat"|"task"|"feedback","taskGoal":"kind=task 时给规划器的一句话目标;否则空串","ack":"kind=task/feedback 时给用户的一句交接/收录确认(≤40字);chat 时空串"}
-判别要点:含明显动作词(重构/修复/实现/添加/删除/迁移/部署/写代码/测试/跑一下/安装/配置/查一下/分析/总结)通常是 task;拿不准的寒暄 / 讨论归 chat。`;
+{"kind":"chat"|"task"|"clarify"|"feedback","taskGoal":"kind=task 时给规划器的一句话目标;否则空串","ack":"kind=task/feedback 时给用户的一句交接/收录确认(≤40字);chat/clarify 时空串","question":"kind=clarify 时问用户的那一个关键问题"}
+判别要点:含明显动作词(重构/修复/实现/添加/删除/迁移/部署/写代码/测试/跑一下/安装/配置/查一下/分析/总结)通常是 task;拿不准的寒暄 / 讨论归 chat。
+
+## 什么时候用 clarify(这一条最重要,别滥用)
+
+只在**同时**满足这两条时才用:
+① 用户确实要一件明确的活(是 task,不是闲聊);
+② 存在一个**你猜错就会整份返工**的关键信息没给。
+
+判定②的信号:目标/范围有歧义、用了一个你不敢确定的说法、交付形态没讲、
+评判标准没有、"等等/之类/差不多"后面跟着大范围、或者这个任务的规模分档
+差一个数量级。
+
+**绝对不要**为了保险而问:用户已经把「做什么、做成什么样」说清楚了;
+或者缺的只是偏好(颜色/措辞/风格)——那种直接做;或者一次能问完的小事。
+
+## 怎么问
+
+- **只问一个**问题,问最关键的那个。一次问三个等于没问。
+- 说清楚你为什么需要这个信息,一句话带过即可,别长篇铺垫。
+- 给出你的猜测供用户点头或否定,例如「你说的『百外』是指面向百万人规模的
+  业务场景吗?如果是,我就按这个口径来调研。」
+- 绝对不要用 clarify 来推迟干活 —— 能开工就 task,别拿问题当缓冲。`;
 
 /** decide LLM 分类调用超时(ms)。主路径,超时即降级正则。 */
 const DECIDE_LLM_TIMEOUT_MS = 3500;
-/** 分类输出上限(token)。JSON 很短,限制它避免模型跑飞拉长延迟。 */
-const DECIDE_LLM_MAX_TOKENS = 120;
+/**
+ * 分类输出上限(token)。JSON 很短,限制它避免模型跑飞拉长延迟。
+ *
+ * 批次 7-C:120 → 320。clarify 分支要多带一个 `question`(中文问题约 80-120 字,
+ * 中文 token 密度高于英文,120 会把它截断 → JSON 解析失败 → 静默降级回
+ * task,新功能等于没加)。maxTokens 是**上限不是目标**,模型写完就停,
+ * 放宽上限不增加正常路径延迟。
+ */
+const DECIDE_LLM_MAX_TOKENS = 320;
 /** 最近上下文:条数 / 单条截断长度。消歧「继续 / 再跑一次」类省略句,代价可忽略。 */
 const DECIDE_HISTORY_MAX = 3;
 const DECIDE_HISTORY_CHARS = 80;
@@ -189,6 +218,12 @@ function parseDecide(
   }
   if (kind === "chat") {
     return { kind: "chat", reply: "" };
+  }
+  if (kind === "clarify") {
+    // question 为空 → 当作没问出来,降级正则(宁可 task 也不要空问一句)
+    const question = str(o.question);
+    if (!question) return null;
+    return { kind: "clarify", question, ...(str(o.context) ? { context: str(o.context) } : {}) };
   }
   if (kind === "feedback") {
     return {
@@ -404,6 +439,31 @@ export class Communicator {
           });
           sink({ type: "bus_event", message: msg });
         }
+      } else if (decision.kind === "clarify") {
+        // 批次 7-C:需求没说清 → 先问一个关键问题,**不委派**。
+        //
+        // 语义与 chat 相同(普通 assistant 回复,用户看得见),但**必须**走
+        // 显式 sink:chat 的回复来自 Pi session 直答,clarify 没有 Pi turn
+        // —— kernel 侧对 clarify 与 task 一样提前 return(见 agentKernel
+        // promptInner),不会 fallback 到 session.prompt。所以这条问题
+        // 完全由这里发出。
+        //
+        // 不调 onTask:用户还没确认要什么,派下去就是在赌。
+        const messageId = nanoid();
+        const text = decision.context
+          ? `${decision.context}\n\n${decision.question}`
+          : decision.question;
+        sink({ type: "delta", messageId, text });
+        sink({ type: "done", messageId });
+        const msg = this.opts.bus.broadcast({
+          fromRole: "communicator",
+          toRole: "user",
+          conversationId,
+          payload: text,
+          context: { source: "decide_clarify" },
+        });
+        sink({ type: "bus_event", message: msg });
+        log.muted(`decide: clarify asked, awaiting user answer (conv=${conversationId})`);
       } else if (decision.kind === "task") {
         // task:转发给 planner(走 M3b 的 Orchestrator 由 ws 层负责 trigger)
         // 这里只 emit 一条 broadcast 表示「已接收任务」

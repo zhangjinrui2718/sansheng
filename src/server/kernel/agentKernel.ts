@@ -1213,7 +1213,19 @@ export class AgentKernel {
     // - feedback:收录确认即回复(P4 记忆入库在 persistHandoff 内)。
     // 无 session / 离线时本分支先于 offline_no_session return → task 不再与
     // plan 链路自己的 no_api_key 并列重复(5a.5 open#2 收编)。
-    if (decision && (decision.kind === "task" || decision.kind === "feedback")) {
+    //
+    // 批次 7-C:clarify 与 task/feedback 同属「不走 Pi 直答」的一类 ——
+    // 问题的正文已由 Communicator.routeUserMessage 经 delta/done 合成 turn
+    // 发出(ackFinal),用户已经看到。若不在此 return,会**再**掉进下面的
+    // session.prompt(text) 让 Pi 把用户原话重新答一遍 → 用户看到
+    // 「沟通员问了一个问题」+「Pi 自己回答了一遍需求」两条,正是 §B2 治过的
+    // 双回复病。persistHandoff 负责把 raw 原文 + 这条问题落库,刷新后历史完整。
+    if (
+      decision &&
+      (decision.kind === "task" ||
+        decision.kind === "feedback" ||
+        decision.kind === "clarify")
+    ) {
       this.persistHandoff(text, ackFinal, decision);
       return;
     }
