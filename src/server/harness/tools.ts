@@ -62,6 +62,7 @@ import { join } from "node:path";
 import type { RoleKind } from "@shared/types/agents";
 import { log } from "../../shared/log.js";
 import { BRIDGED_TOOL_NAMES, type BridgedToolName } from "./toolBridge.js";
+import { NATIVE_TOOL_NAMES, type NativeToolName } from "./nativeTools.js";
 
 /** Pi SDK 内置的 8 个工具(闭合联合,core/tools/index.d.ts `ToolName`)。 */
 export const SDK_TOOL_NAMES = ["read", "grep", "find", "ls", "edit", "write", "bash", "powershell"] as const;
@@ -71,8 +72,8 @@ export type SdkToolName = (typeof SDK_TOOL_NAMES)[number];
  * 工具闭合联合 = SDK 内置 8 个 + 批次 7-F 桥接进来的 sansheng sandbox 6 个。
  * 加新工具必须先在 SDK 侧存在、或先在 toolBridge.ts 里桥接 —— 不能凭空扩。
  */
-export const TOOL_NAMES = [...SDK_TOOL_NAMES, ...BRIDGED_TOOL_NAMES] as const;
-export type ToolName = SdkToolName | BridgedToolName;
+export const TOOL_NAMES = [...SDK_TOOL_NAMES, ...BRIDGED_TOOL_NAMES, ...NATIVE_TOOL_NAMES] as const;
+export type ToolName = SdkToolName | BridgedToolName | NativeToolName;
 
 /**
  * 风险分级。**只用于展示与将来做策略,不参与 allow/deny 判定** ——
@@ -123,6 +124,22 @@ export const TOOL_CATALOG: Readonly<Record<ToolName, { risk: ToolRisk; origin: T
     origin: "sansheng",
     summary: "向 allowlist 内公网 URL POST JSON —— 不在任何角色的上界内,且与既有红线「禁止外发邮件」冲突",
   },
+  // ── 批次 7-H:原生工具(Blackboard 与记忆,SDK 工具**完全够不着**的系统原语)──
+  board_list: {
+    risk: "readonly",
+    origin: "sansheng",
+    summary: "列本会话 Blackboard 工件(todo/evidence/hypothesis/decision),可按 kind/status 过滤 —— 了解「别人已经做了什么」的唯一途径",
+  },
+  board_read: {
+    risk: "readonly",
+    origin: "sansheng",
+    summary: "按 id 读一条工件的完整正文。写结论前先读同题已有结论,好过凭空再写一份",
+  },
+  memory_search: {
+    risk: "readonly",
+    origin: "sansheng",
+    summary: "检索长期记忆片段(偏好/事实/项目背景),与 ws.ts 记忆富集走同一个函数同一套默认值",
+  },
 };
 
 /**
@@ -144,18 +161,15 @@ export const TOOL_ROLES: readonly ToolRole[] = [
 ];
 
 /**
- * 只读上界。= SDK createReadOnlyTools 的 4 个 + 批次 7-F 桥接进来的 3 个
- * canvas 只读工具。
+ * 只读上界 = SDK 只读四件 + canvas 只读三件 + **sansheng 原生三件**。
  *
- * **为什么 canvas_* 只读侧进上界、而 canvas_write / net_* 不进**:
- * - 进的三個(`canvas_read/canvas_list/canvas_stat`)经 `Sandbox` 强制,根被
- *   钉死在 `~/.sansheng/workspace` 与 `~/.sansheng/canvas`,30 KiB 上限、不跟随
- *   symlink —— 与内置只读工具同性质(只读),只是换了一个根,给沟通员/执行者
- *   一双看 sansheng 自己的眼睛。
- * - 不进的三个:`canvas_write` 是唯一的写入口;`net_fetch` / `net_post` 是**网络
- *   出口**。v1 原则是「上界里不含任何能改变状态或对外发包的路径」—— 保持
- *   5b-1 P3(沟通员只读不写)与 redLines(禁止外发邮件)的原有强度。
- *   三个工具都已桥接、已测试、可被点名;放开只需改本表,不是改集合文件。
+ * 7-H 起加了 board_list / board_read / memory_search:它们是 Blackboard 与记忆
+ * 的读取入口,**任何 SDK 工具都够不着**(`read` 读磁盘、`bash` 跑命令)。
+ * 7-G 之前系统最实质的空洞就在这里 —— executor 看不到兄弟 todo 的产出、
+ * communicator 看不到 blackboard 就无法转述、planner 看不到已有 todo 会重复规划。
+ *
+ * 仍然**不含**任何写 / 执行 / 网络出口路径:`edit` / `write` / `bash` /
+ * `powershell` / `canvas_write` / `net_fetch` / `net_post`。
  */
 const READ_ONLY_CEILING: readonly ToolName[] = [
   "read",
@@ -165,21 +179,47 @@ const READ_ONLY_CEILING: readonly ToolName[] = [
   "canvas_read",
   "canvas_list",
   "canvas_stat",
+  "board_list",
+  "board_read",
+  "memory_search",
 ];
+
+/**
+ * 执行者上界 = 只读面 + 写与执行。
+ *
+ * **为什么只有执行者有**:批次 5b-1 P3(jev conf 1.00)那条裁决的对象是**沟通员**
+ * —— 「沟通员从机制上杜绝直接干活,一切改动类请求经 decide=task 走规划执行链路」。
+ * 裁决同时把「干活」这件事**划给了 task→plan→executor 链路**,但链路终点从来没
+ * 被给过动手能力:executor 的出厂提示词里明确写着「没有工具能力时…不要编造
+ * 具体的文件路径、API 参数、benchmark 数字」—— 那是对能力缺失的**诚实补偿**,
+ * 不是能力本身。7-H 补上这一环,整条链路才闭合。
+ *
+ * jev 裁决(批次 7-H,needsUser 0.67 < 0.70 闸门,conf 0.56 / margin 0.52)= A2:
+ * 给 write + edit + bash。A3(不给 bash)占 0.23,是次优项。
+ *
+ * 风险与回收:
+ *   - SDK 的 edit/write/bash **不经 Sansheng 的 Sandbox**,只沿 `createAgentSession`
+ *     的 cwd 走,根是 `settings.cwd`(默认 `~/sansheng-workspace`,与用户项目目录
+ *     物理分离);Sandbox 那道防线只作用于 canvas_*。
+ *   - **随时可收回**:把 `harness/tools/executor.json` 的 allow 里的 `write` /
+ *     `edit` / `bash` 删掉,下一次 plan 生效,不需要改代码、不需要重启。
+ *   - 执行者拿不准时的既有出路没变:产出 `hypothesis`(status=waiting_for_decision)
+ *     把决定交回用户,而不是硬改。
+ */
+const EXECUTOR_CEILING: readonly ToolName[] = [...READ_ONLY_CEILING, "edit", "write", "bash"];
 
 /**
  * 每角色的架构上界 —— **集合文件突破不了**。放开某角色 = 改本表(显式代码评审),
  * 不是往 tools/{role}.json 里加一行。
- *
- * v1 全部取只读:v0 没有任何角色被允许在用户磁盘上写入 / 执行 / 联网。Executor
- * 的默认 prompt 里那句「工具调用前先确认 sandbox 范围」目前是悬空的(它没有工具),
- * 保持只读上界意味着即便接线,写与执行仍然需要一次显式的架构决策。
  */
 const ROLE_CEILING: Readonly<Record<ToolRole, readonly ToolName[]>> = {
-  // 批次 5b-1 P3(jev conf 1.00):沟通员只读不写,写/执行类工具永久不在上界内。
+  // 批次 5b-1 P3:沟通员只读不写,写/执行/网络出口永久不在上界内。
   communicator: READ_ONLY_CEILING,
-  planner: READ_ONLY_CEILING,
-  executor: READ_ONLY_CEILING,
+  // 规划员:只需要 Blackboard 读面(避免重复规划)。刻意**不给文件读** ——
+  // 它不读代码,拆解靠意图理解;给了反而会去翻无关文件浪费 token。
+  planner: ["board_list", "board_read"],
+  // 执行者:唯一被允许写与执行的角色(见 EXECUTOR_CEILING 的理由)。
+  executor: EXECUTOR_CEILING,
   harness_manager: READ_ONLY_CEILING,
   critic: READ_ONLY_CEILING,
   memory: READ_ONLY_CEILING,
@@ -197,18 +237,16 @@ export interface ToolSetFile {
  * 非空名单 = 换个姿势继续撒谎。空集合 + enforced:false 才是当前事实。
  */
 const FACTORY_SETS: Readonly<Record<ToolRole, ToolSetFile>> = {
-  // 沟通员:只读面全部保留 —— SDK 四个(自查能力:worker 升级前先自己读 README /
-  // 查文件)+ 7-F 桥接的 canvas 三个(看 sansheng 自己的允许根)。写与执行被
-  // ceiling 挡下。
-  //
-  // ⚠️ 7-F 起这是**行为变更**:出厂集合比 5b-1 P3 的硬编码名单多了 3 个工具。
-  // 三者都是只读 + sandbox 钉根,没有权限放宽;但存量用户的
-  // harness/tools/communicator.json 仍是 7-E 写下的四工具版本 —— 按
-  // LEGACY_TOOL_SETS 的版本链语义,那个文件已被标记为「出厂旧默认」,下次
-  // 启动会自动升级为含 canvas_* 的新默认(用户手笔则永不覆盖)。
+  // 沟通员:只读面全给。SDK 四件(自查:worker 升级前先读 README / 查文件)+
+  // canvas 三件(看 sansheng 自己的允许根)+ 原生三件(转述执行方产出、记用户偏好)。
+  // **Observer 身份没有 board_read 就没法履约** —— 它得先看见才能转述。
   communicator: { allow: [...READ_ONLY_CEILING], deny: [] },
-  planner: { allow: [], deny: [] },
-  executor: { allow: [], deny: [] },
+  // 规划员:只要 Blackboard 读面。它的工作是拆 DAG,重复规划是它最大的失败模式。
+  planner: { allow: ["board_list", "board_read"], deny: [] },
+  // 执行者:整个上界。它是系统里唯一该动手的角色。
+  executor: { allow: [...EXECUTOR_CEILING], deny: [] },
+  // 以下四个角色**仍无工具循环**(走 completeSimple 单轮),集合照常生成但为空 ——
+  // 7-H 只给 planner / executor 接了工具循环(见 agents/toolLoop.ts)。
   harness_manager: { allow: [], deny: [] },
   critic: { allow: [], deny: [] },
   memory: { allow: [], deny: [] },
@@ -227,7 +265,15 @@ const LEGACY_TOOL_SETS: Partial<Record<ToolRole, string[]>> = {
   // 7-E 出厂默认 = SDK 只读四件套(与 5b-1 P3 的硬编码名单逐字一致)。
   // 7-F 起 communicator 的出厂集合多了 canvas_read / canvas_list / canvas_stat,
   // 存量用户的这份四工具文件因此被标记为「出厂旧默认」→ 下次启动自动升级。
-  communicator: ['{\n  "allow": [\n    "read",\n    "grep",\n    "find",\n    "ls"\n  ],\n  "deny": []\n}\n'],
+  communicator: [
+    // 7-E 出厂默认:SDK 只读四件
+    '{\n  "allow": [\n    "read",\n    "grep",\n    "find",\n    "ls"\n  ],\n  "deny": []\n}\n',
+    // 7-F 出厂默认:加 canvas 只读三件
+    '{\n  "allow": [\n    "read",\n    "grep",\n    "find",\n    "ls",\n    "canvas_read",\n    "canvas_list",\n    "canvas_stat"\n  ],\n  "deny": []\n}\n',
+  ],
+  // 7-H 之前 planner / executor 的出厂集合是空的;7-H 起非空 → 追加旧值
+  planner: ['{\n  "allow": [],\n  "deny": []\n}\n'],
+  executor: ['{\n  "allow": [],\n  "deny": []\n}\n'],
 };
 
 /** 该角色当前有没有工具执行点。enforced:false 时集合是「已就位、未接线」。 */
@@ -243,12 +289,12 @@ const TOOL_ENFORCEMENT: Readonly<Record<ToolRole, Enforcement>> = {
     basis: "kernel/agentKernel.ts:createPiSession → createAgentSession({ tools: allowed })",
   },
   planner: {
-    enforced: false,
-    basis: "无执行点:走 llmCall → ws.ts:191 completeSimple 单轮补全,不经 Pi session,没有工具循环",
+    enforced: true,
+    basis: "agents/planner.ts:plan → toolLoop.runWithTools(在 completeSimple 外包循环,签名不变)",
   },
   executor: {
-    enforced: false,
-    basis: "无执行点:executor.ts:182 走 llmCall → completeSimple 单轮补全,没有工具循环",
+    enforced: true,
+    basis: "agents/executor.ts:execute → toolLoop.runWithTools(同上)",
   },
   harness_manager: {
     enforced: false,

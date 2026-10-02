@@ -19,6 +19,7 @@
 
 import { nanoid } from "nanoid";
 import type { BlackboardArtifact, ArtifactStatus } from "../../../shared/types/blackboard.js";
+import { runWithTools, type LoopTool, type ToolLoopCall } from "./toolLoop.js";
 import { artifactBus, makeArtifact } from "../bus/index.js";
 import { log } from "../../shared/log.js";
 import { parseJsonLenient } from "../../shared/jsonRepair.js";
@@ -143,6 +144,13 @@ export interface PlannerOptions {
   systemPrompt?: string;
   /** 现在时间(测试用)。 */
   now?: () => number;
+  /**
+   * 批次 7-H:可用工具全集 + 本角色的授权名单。
+   * **过滤在 Planner 内部完成**(授权是安全边界,不能交给调用方)——
+   * 与 Executor 同款设计。都不给 → 空工具 → 走原来的单轮路径。
+   */
+  tools?: LoopTool[];
+  allowedTools?: string[];
 }
 
 export interface PlannedTodo {
@@ -167,6 +175,10 @@ export class Planner {
   private readonly bus: typeof artifactBus;
   private readonly llmCall: PlannerLlmCall;
   private readonly systemPrompt: string;
+  /** 批次 7-H:按 allowedTools 过滤后的工具(构造时一次算好)。 */
+  private readonly tools: LoopTool[];
+  /** 批次 7-H:最近一次 plan 实际发生的工具调用(供 UI/日志/测试观察)。 */
+  lastToolCalls: ToolLoopCall[] = [];
   private readonly now: () => number;
 
   constructor(opts: PlannerOptions) {
@@ -174,6 +186,9 @@ export class Planner {
     this.bus = opts.bus ?? artifactBus;
     this.llmCall = opts.llmCall ?? defaultPlannerLlmCall;
     this.systemPrompt = opts.systemPrompt ?? DEFAULT_PLANNER_PROMPT;
+    // 授权过滤在构造时完成(与 Executor 同款:唯一裁决点在被授权方自己手里)
+    const allow = new Set(opts.allowedTools ?? []);
+    this.tools = (opts.tools ?? []).filter((t) => allow.has(t.name));
     this.now = opts.now ?? Date.now;
   }
 
@@ -194,10 +209,25 @@ export class Planner {
     const userPrompt = this.buildUserPrompt(intent, siblings);
     let raw: string;
     try {
-      raw = await this.llmCall({
+      // 批次 7-H:有工具时走工具循环(planner 的工具面是 board_list / board_read,
+      // 用途是**避免重复规划** —— 看同会话已有的 intent / todo)。无工具时等价单轮。
+      const loop = await runWithTools({
+        llmCall: this.llmCall,
         systemPrompt: this.systemPrompt,
         userPrompt,
+        tools: this.tools,
       });
+      this.lastToolCalls = loop.calls;
+      if (loop.truncated) {
+        await this.handleLlmFailure(
+          intent,
+          new Error(
+            `planner: 工具调用 ${loop.toolTurns} 轮后仍未给出最终答案(上限内未收敛),已中止以免产出半成品`,
+          ),
+        );
+        return { intent, todos: [] };
+      }
+      raw = loop.finalText;
     } catch (err) {
       await this.handleLlmFailure(intent, err);
       return { intent, todos: [] };

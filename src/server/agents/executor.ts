@@ -28,6 +28,7 @@ import {
   getArtifact,
 } from "../storage/index.js";
 import type { Storage } from "../storage/index.js";
+import { runWithTools, type LoopTool, type ToolLoopCall } from "./toolLoop.js";
 
 /* ────────────────────────────────────────────────────────── *
  * 注入接口(测试可替换)
@@ -50,6 +51,20 @@ export interface ExecutorOptions {
    * decision for q-exec-x`),大概率重复产同一 hypothesis → 无界提问循环。
    */
   pendingDecision?: { title: string; body: string };
+  /**
+   * 批次 7-H:可用的完整工具列表(由 Orchestrator 组装:SDK sandbox 桥接 6 个 +
+   * sansheng 原生 3 个)。
+   * **不给 = 无工具**,保持 7-G 之前的行为。
+   */
+  tools?: LoopTool[];
+  /**
+   * 批次 7-H:本角色被授权的工具名(harness `tools/executor.json` 的 `allowed`)。
+   *
+   * 过滤刻意放在 **Executor 内部**而不是 Orchestrator:授权是安全边界,放在
+   * 被授权方自己手里,任何调用方都无法因为疏忽而给超权限 —— 与 tools.ts 的
+   * ceiling 分层同一思路(唯一裁决点)。不给 → 空名单 → 一律过滤掉。
+   */
+  allowedTools?: string[];
 }
 
 export type ExecutorOutcome =
@@ -113,6 +128,10 @@ export class Executor {
   private readonly now: () => number;
   /** A4:resume 重跑时携带的用户/Communicator decision(首次执行为 undefined)。 */
   private readonly pendingDecision: { title: string; body: string } | undefined;
+  /** 批次 7-H:按 allowedTools 过滤后的工具(构造时一次算好)。 */
+  private readonly tools: LoopTool[];
+  /** 批次 7-H:最近一次执行实际发生的工具调用(供 UI/日志/测试观察,不影响产物)。 */
+  lastToolCalls: ToolLoopCall[] = [];
   /** 暴露给 Orchestrator 的 session id(由 ctor 时生成,稳定到本 Executor 生命周期)。 */
   readonly sessionId: string;
   private aborted = false;
@@ -124,6 +143,10 @@ export class Executor {
     this.systemPrompt = opts.systemPrompt ?? DEFAULT_EXECUTOR_PROMPT;
     this.now = opts.now ?? Date.now;
     this.pendingDecision = opts.pendingDecision;
+    // 授权过滤在构造时完成:tools 是全集,allowedTools 是本角色的上界。
+    // 两者任一缺失 → 空工具 → 走 7-G 之前的单轮路径。
+    const allow = new Set(opts.allowedTools ?? []);
+    this.tools = (opts.tools ?? []).filter((t) => allow.has(t.name));
     this.sessionId = `exec-${nanoid(10)}`;
   }
 
@@ -175,11 +198,28 @@ export class Executor {
     const context = await this.gatherContext(todo);
     if (this.aborted) return this.abortedResult(todo);
 
-    // 4. 调 LLM
+    // 4. 调 LLM(批次 7-H:有工具时走工具循环;无工具时等价于原来的单轮)
     const userPrompt = this.buildUserPrompt(todo, context);
     let raw: string;
     try {
-      raw = await this.llmCall({ systemPrompt: this.systemPrompt, userPrompt });
+      const loop = await runWithTools({
+        llmCall: this.llmCall,
+        systemPrompt: this.systemPrompt,
+        userPrompt,
+        tools: this.tools,
+      });
+      this.lastToolCalls = loop.calls;
+      if (loop.truncated) {
+        // 轮数用尽仍不收敛 → 不拿半成品当结论(5b-1「残缺的产物不如没有」)
+        await this.handleLlmFailure(
+          todo,
+          new Error(
+            `executor: 工具调用 ${loop.toolTurns} 轮后仍未给出最终答案(上限内未收敛),已中止以免产出半成品`,
+          ),
+        );
+        return { todoId: todo.id, executorSessionId: this.sessionId, outcome: "failed", artifactIds: [] };
+      }
+      raw = loop.finalText;
     } catch (err) {
       // C2(审查 §C2「abort 后 persist/事件发射加 aborted 守卫」):用户已经按停,
       // 迟到的失败不该再被翻译成 note + todo_failed 事件。

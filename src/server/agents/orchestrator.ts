@@ -39,6 +39,9 @@ import type {
 import { artifactBus, makeArtifact } from "../bus/index.js";
 import { log } from "../../shared/log.js";
 import { loadHarness } from "../harness/loader.js";
+import { createBridgedLoopTools } from "../harness/toolBridge.js";
+import { buildNativeLoopTools } from "../harness/nativeTools.js";
+import type { LoopTool } from "./toolLoop.js";
 import {
   upsertArtifact,
   updateArtifactStatus,
@@ -89,6 +92,14 @@ export interface OrchestratorOptions {
   plannerFactory?: (opts: PlannerOptions) => Planner;
   /** 测试可覆盖:Executor factory */
   executorFactory?: (opts: ExecutorOptions) => Executor;
+  /**
+   * 批次 7-H:显式提供工具全集(测试用;不给则由 `loadTools` 或默认组装)。
+   * **注意这不是授权** —— Planner / Executor 内部还会按各自 harness 的
+   * `allowed` 再过滤一次,授权的唯一裁决点仍在被授权方。
+   */
+  tools?: LoopTool[];
+  /** 批次 7-H:自定义工具装配(默认 buildOrchestratorTools)。 */
+  loadTools?: () => Promise<LoopTool[]>;
   /** 注入 bus(默认全局 artifactBus);测试可注入 mock */
   bus?: typeof artifactBus;
   /** callback 路由 — 默认仅 publish bus event */
@@ -131,6 +142,19 @@ interface WaitingEntry {
   failTimer: ReturnType<typeof setTimeout>;
 }
 
+/**
+ * 批次 7-H:默认工具装配 = SDK sandbox 桥接 6 + sansheng 原生 3。
+ *
+ * 两组工具的数据源不同,所以是两个模块:`toolBridge`(ToolRegistry + Sandbox /
+ * NetSandbox)与 `nativeTools`(Blackboard / 记忆 storage)。任一组失败都只丢那一组,
+ * 不影响另一组 —— 工具面变小好过整个 executor 起不来。
+ */
+async function buildOrchestratorTools(storage: Storage): Promise<LoopTool[]> {
+  const bridged = await createBridgedLoopTools();
+  const native = buildNativeLoopTools(storage);
+  return [...bridged, ...native];
+}
+
 export class Orchestrator {
   private readonly storage: Storage;
   private readonly dataDir: string;
@@ -141,6 +165,8 @@ export class Orchestrator {
   private readonly plannerLlmCall: PlannerLlmCall | undefined;
   private readonly executorLlmCall: ExecutorLlmCall | undefined;
   private readonly plannerSystemPrompt: string | undefined;
+  /** 批次 7-H:工具全集(SDK sandbox 桥接 6 + sansheng 原生 3),构造时组装一次。 */
+  private readonly toolsPromise: Promise<LoopTool[]>;
   private readonly executorSystemPrompt: string | undefined;
   private readonly routeCallback: CallbackRouter;
   private readonly escalationMs: number;
@@ -173,8 +199,17 @@ export class Orchestrator {
   private runReject: ((e: Error) => void) | null = null;
   private runTimer: ReturnType<typeof setTimeout> | null = null;
 
+  /**
+   * 批次 7-H:`opts.tools` 显式注入优先(测试与特例);不给则**异步**组装 ——
+   * 桥接层的 `createBridgedTools()` 要读 `~/.sansheng/sandbox.json` 与
+   * `net.json`,不能放在同步构造器里。于是构造器拿一个 promise,首次需要工具的
+   * 时候 await 它(懒加载)。
+   */
   constructor(opts: OrchestratorOptions) {
     this.storage = opts.storage;
+    this.toolsPromise = opts.tools
+      ? Promise.resolve(opts.tools)
+      : (opts.loadTools ? opts.loadTools() : buildOrchestratorTools(this.storage));
     this.dataDir = opts.dataDir;
     this.agentDir = opts.agentDir;
     this.bus = opts.bus ?? artifactBus;
@@ -377,6 +412,19 @@ export class Orchestrator {
    * (DEFAULT_PLANNER_PROMPT / DEFAULT_EXECUTOR_PROMPT)。读盘失败一律吞掉:
    * prompt 缺失不该让整个 plan 起不来。
    */
+  /**
+   * 批次 7-H:某角色被授权的工具名(harness `tools/{role}.json` 的 `allowed` 解析结果)。
+   * 读盘失败 → 空名单(不给工具),与 tools.ts 的 fail-closed 同向。
+   */
+  private allowedFor(role: "planner" | "executor"): string[] {
+    try {
+      return loadHarness(this.dataDir).toolSets[role].allowed;
+    } catch (err) {
+      log.warn(`orchestrator: 读 ${role} 的工具集合失败,本轮不给工具:`, err);
+      return [];
+    }
+  }
+
   private loadHarnessPrompt(role: "planner" | "executor"): string | undefined {
     try {
       const text = loadHarness(this.dataDir).systemPrompts[role];
@@ -592,7 +640,12 @@ export class Orchestrator {
   private async spawnPlanner(intent: BlackboardArtifact): Promise<void> {
     // C2:abort 之后不再唤起任何新工作。
     if (this.aborted) return;
-    const planner = this.plannerFactory({ storage: this.storage });
+    const planner = this.plannerFactory({
+      storage: this.storage,
+      ...(this.toolsPromise
+        ? { tools: await this.toolsPromise, allowedTools: this.allowedFor("planner") }
+        : {}),
+    });
     try {
       const result = await planner.plan(intent);
       // C2:planner 跑的这段时间里可能被 abort(用户在 LLM 回合中途按停)。
@@ -728,7 +781,13 @@ export class Orchestrator {
     if (this.activeExecutors.has(todo.id)) return;
     // A4:resume 重跑时把 decision 传给 Executor → buildUserPrompt 输出
     // 「# Decision(来自用户/Communicator)」段落(用户回答全文在 body,逐字注入)
-    const executor = this.executorFactory({ storage: this.storage, pendingDecision });
+    const executor = this.executorFactory({
+      storage: this.storage,
+      pendingDecision,
+      ...(this.toolsPromise
+        ? { tools: await this.toolsPromise, allowedTools: this.allowedFor("executor") }
+        : {}),
+    });
     this.activeExecutors.set(todo.id, executor);
     this.todoByExecutorSession.set(executor.sessionId, todo.id);
     this.sink?.({ type: "todo_started", todo });

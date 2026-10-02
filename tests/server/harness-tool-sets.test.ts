@@ -67,7 +67,7 @@ describe("harness 工具集合 · 生成与读取(批次 7-E)", () => {
     expect(loadHarness(dataDir).toolSets.communicator.source).toBe("factory");
   });
 
-  it("出厂:communicator 拿满只读上界;其余角色 allow 为空(enforced=false 如实标注)", () => {
+  it("出厂:各角色拿到**贴合职责**的集合(7-H 起不再是「非空只有 communicator」)", () => {
     ensureToolSets(dataDir);
     const sets = loadToolSets(dataDir);
 
@@ -77,8 +77,8 @@ describe("harness 工具集合 · 生成与读取(批次 7-E)", () => {
     expect(sets.communicator.allowed).toContain("canvas_read");
     expect(sets.communicator.enforced).toBe(true);
 
-    // 没工具循环的角色**不能**拿到一份非空名单 —— 那是换个姿势继续撒谎
-    for (const role of ["planner", "executor", "harness_manager", "critic", "memory", "reflection"] as const) {
+    // 仍无工具循环的四个角色**不能**拿到非空名单 —— 那是换个姿势继续撒谎
+    for (const role of ["harness_manager", "critic", "memory", "reflection"] as const) {
       expect(sets[role].allowed, `${role} 无工具循环,出厂集合必须为空`).toEqual([]);
       expect(sets[role].enforced, `${role} 不得谎报已生效`).toBe(false);
       expect(sets[role].enforceBasis.length).toBeGreaterThan(0); // 必须说清为什么没接线
@@ -120,15 +120,17 @@ describe("harness 工具集合 · ceiling 突破不了(架构护栏)", () => {
     expect(set.warnings.join("\n")).toContain("架构上界");
   });
 
-  it("allow ⊄ ceiling 对全部 7 个角色都成立(没有一个角色能自己获得写/执行能力)", () => {
-    // 写**全部**工具(SDK 8 + 7-F 桥接的 6)→ 结果必须恰好等于该角色的上界
+  it("allow ⊄ ceiling 对全部 7 个角色都成立(集合文件永远突破不了架构上界)", () => {
+    // 写**全部**工具(SDK 8 + 桥接 6 + 原生 3 = 17)→ 结果必须恰好等于该角色的上界。
+    // 排序后比较:allowed 的顺序跟着集合文件写,ceiling 的顺序跟着角色定义,
+    // 两者都是**集合**语义,顺序不该成为断言的一部分(7-H executor 首次暴露这点)。
     const all = [...TOOL_NAMES];
     ensureToolSets(dataDir);
     for (const role of TOOL_ROLES) {
       writeSet(role, JSON.stringify({ allow: all, deny: [] }));
       const set = loadToolSets(dataDir)[role];
-      expect(set.allowed, `${role} 的 allowed 越界`).toEqual([...roleToolCeiling(role)]);
-      expect(set.blockedByCeiling.length).toBeGreaterThan(0);
+      expect([...set.allowed].sort(), `${role} 的 allowed 越界`).toEqual([...roleToolCeiling(role)].sort());
+      expect(set.blockedByCeiling.length, `${role} 应有被上界拒绝的条目`).toBeGreaterThan(0);
     }
   });
 
@@ -219,19 +221,47 @@ describe("harness 工具集合 · fail-closed(读不懂配置 ≠ 放行一切)"
     const sets = loadToolSets(dataDir);
     expect(sets.communicator.source).toBe("factory");
     expect(sets.executor.source).toBe("factory");
-    expect(sets.executor.allowed).toEqual([]);
+    // 7-H:executor 有工具循环且拿到上界全集(communicator 坏成回退出厂,
+    // 两者此时应当一致 —— 这正是「损坏退回出厂」而不是「退回空」的意义)
+    expect([...sets.executor.allowed].sort()).toEqual([...roleToolCeiling("executor")].sort());
   });
 });
 
 describe("harness 工具集合 · ceiling 本身(工具目录自洽性)", () => {
-  it("每个角色的 ceiling 都 ⊆ 完整工具目录,且全部是 readonly 风险", () => {
+  it("每个角色的 ceiling 都 ⊆ 完整工具目录(17 个:SDK 8 + 桥接 6 + 原生 3)", () => {
     ensureToolSets(dataDir);
+    expect(TOOL_NAMES).toHaveLength(17);
     for (const role of TOOL_ROLES) {
       for (const tool of roleToolCeiling(role)) {
-        // 目录是 SDK 8 + sansheng 6(7-F 起);用 TOOL_NAMES 派生,不再写死名字
         expect([...TOOL_NAMES], `${role} 的 ceiling 含目录外工具 ${tool}`).toContain(tool);
-        expect(TOOL_CATALOG[tool].risk, `${role} 的 ceiling 含非只读工具 ${tool}`).toBe("readonly");
       }
     }
+  });
+
+  it("只有 executor 的上界含写与执行(7-H:它是链路上唯一该动手的角色)", () => {
+    const withMutation = TOOL_ROLES.filter((r) =>
+      roleToolCeiling(r).some((t) => TOOL_CATALOG[t].risk !== "readonly"),
+    );
+    expect(withMutation, "写/执行上界只能属于 executor").toEqual(["executor"]);
+    // 网络出口对**所有**角色都不可得(与既有红线「禁止外发邮件」一致)
+    for (const role of TOOL_ROLES) {
+      const c = roleToolCeiling(role);
+      expect(c).not.toContain("net_fetch");
+      expect(c).not.toContain("net_post");
+      expect(c).not.toContain("canvas_write");
+    }
+  });
+
+  it("沟通员的上界仍然全只读(5b-1 P3 不可被 7-H 稀释)", () => {
+    for (const tool of roleToolCeiling("communicator")) {
+      expect(TOOL_CATALOG[tool].risk, `沟通员上界含 ${tool}`).toBe("readonly");
+    }
+    for (const t of ["edit", "write", "bash", "canvas_write", "net_post"]) {
+      expect(roleToolCeiling("communicator")).not.toContain(t);
+    }
+  });
+
+  it("planner 的上界只有 Blackboard 读面(不给文件读:它不读代码,给了只会浪费 token)", () => {
+    expect(roleToolCeiling("planner")).toEqual(["board_list", "board_read"]);
   });
 });

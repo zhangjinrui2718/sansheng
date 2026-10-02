@@ -26,6 +26,7 @@ import type { BusMessage as BusMessageFromTypes, CommunicatorDecision } from "@s
 import type { RunnerSettings } from "../agents/runner.js";
 import { loadHarness } from "../harness/loader.js";
 import { createBridgedTools } from "../harness/toolBridge.js";
+import { buildNativeTools } from "../harness/nativeTools.js";
 import { appendBusMessage, loadBusMessages } from "../agents/busPersister.js";
 
 /** 本文件用到 BusMessage 类型 */
@@ -968,13 +969,17 @@ export class AgentKernel {
     // env 里塞一份,而且切 provider 之后旧 key 永不删除。
     // 现在收敛成「建 session 前一次性同步 active provider + 清掉上一次的」。
     syncActiveProviderApiKeyEnv(active.provider, active.apiKey);
-    // 批次 7-F:把 sansheng 自有的 6 个 sandbox 工具(canvas_*/net_*)包成 SDK
-    // ToolDefinition 搬进 session。**这里不按 allowlist 过滤** —— SDK 的
-    // isAllowedTool 会对 customTools 与 builtin 统一过滤(与 tools allowlist
-    // 同一套机制),所以下面的 `tools:` 一行就是唯一的授权裁决点。
+    // 把 sansheng 自有工具搬进 session,两组数据源不同所以两个模块:
+    //   7-F toolBridge  → 6 个 sandbox 工具(canvas_*/net_*),背后是
+    //                     ToolRegistry + Sandbox / NetSandbox
+    //   7-H nativeTools → 3 个 Blackboard / 记忆工具(board_*/memory_search),
+    //                     背后是 Storage —— **任何 SDK 工具都够不着它们**
+    // **这里不按 allowlist 过滤** —— SDK 的 isAllowedTool 会对 customTools 与
+    // builtin 统一过滤(与 tools allowlist 同一套机制),所以下面的 `tools:`
+    // 一行就是唯一的授权裁决点。
     // 桥接失败(policy 文件损坏)→ 返回空数组 + warn,只暴露 SDK 内置工具,
     // 绝不静默放宽授权面。
-    const bridgedTools = await createBridgedTools();
+    const bridgedTools = [...(await createBridgedTools()), ...buildNativeTools(this.storage)];
     const createPromise = (async () => {
       let resourceLoader: DefaultResourceLoader | undefined;
       if (harnessPrompt.trim()) {

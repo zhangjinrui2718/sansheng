@@ -46,11 +46,34 @@
  * - **只有内置那 8 个 + 这 6 个**。SDK 还支持 extension 侧注册工具,本模块不涉及。
  */
 import { Type, type TSchema } from "typebox";
-import { defineTool, type ToolDefinition } from "@earendil-works/pi-coding-agent";
+import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import type { ToolRegistry } from "../tools/registry.js";
 import type { ListEntry, ReadResult, StatResult, WriteResult } from "../tools/fs.js";
 import type { HttpResult } from "../tools/http.js";
 import { log } from "../../shared/log.js";
+import type { LoopTool } from "../agents/toolLoop.js";
+
+/**
+ * 构造 SDK `ToolDefinition` 的**结构化字面量**。
+ *
+ * 刻意不用 SDK 导出的 `defineTool()`。查过 0.87.1 的实现:
+ * `customTools` 在 `agent-session.js` 的 `_refreshToolRegistry` 里只被**结构化**
+ * 消费(`definition.name` + definition 本身),`defineTool` 只是一个类型层的
+ * 同一性标记(`AnyToolDefinition` 就是 `ToolDefinition` 的别名),运行时零校验。
+ *
+ * 换来的是**工具定义不再依赖 SDK 的具体导出**。本仓有 11 个测试文件对 SDK 做了
+ * 窄 mock(只桩 `createAgentSession`),工具模块一旦 import 一个它们没覆盖的导出,
+ * 这些测试会在**加载期**整体炸掉 —— 7-H 已经踩过一次(缺 `defineTool` → 33 个
+ * 失败,其中一个测试文件甚至没能加载)。
+ *
+ * 「字面量到底能不能用」由端到端测试证明,不由类型证明:
+ * `tests/server/communicator-readonly-tools.test.ts` 走**真** `createAgentSession`,
+ * 断言 native 工具真的出现在 `getActiveToolNames()` 里。
+ */
+function sdkTool<T extends ToolDefinition>(t: T): T {
+  return t;
+}
+
 
 /**
  * 工具名的 provider 合规正则。OpenAI / Anthropic / DeepSeek 的 function-name
@@ -73,16 +96,6 @@ function errMessage(e: unknown): string {
 interface Rendered {
   text: string;
   details: unknown;
-}
-
-/**
- * 工具自身失败 → 统一失败结果。**只有 registry 抛出的错走这里**;
- * 取消(signal.aborted)在 execute 里显式 reject,不进本函数 ——
- * 两者语义不同,混起来会把「用户打断」伪装成「工具报错」。
- */
-function failResult(tool: string, e: unknown) {
-  const f = failure(tool, e);
-  return { content: [{ type: "text" as const, text: f.text }], details: f.details };
 }
 
 /**
@@ -175,10 +188,6 @@ export const BRIDGED_TOOLS: ReadonlyArray<{
  * 校验;桥到 LLM 侧反而要把约束前置到 schema —— 让模型在生成参数时就被 schema
  * 挡住,比在 execute 里抛 TypeError 更省一轮往返。 */
 
-const pathProp = Type.String({ description: "路径(相对 ~/.sansheng/workspace 或 canvas 根,或绝对路径);越出允许根会被 SandboxError 拒绝" });
-const headersProp = Type.Optional(
-  Type.Record(Type.String(), Type.String(), { description: "请求头" }),
-);
 
 /**
  * 把 registry 的 6 个注册项包成 SDK ToolDefinition。
@@ -187,129 +196,222 @@ const headersProp = Type.Optional(
  * 过滤 —— SDK 的 `isAllowedTool` 会用 harness 的 `allowed` 名单统一过滤,
  * 在此重复实现一遍策略只会产生两个真相源。
  */
+/* ── 纯实现(SDK ToolDefinition 与 LoopTool 共用)─────────────────────────
+ * 与 nativeTools 同款理由:循环路径(planner / executor 的 completeSimple)拿不到
+ * Pi session 的 schema 校验层与 ExtensionContext,把 SDK ToolDefinition 适配成
+ * LoopTool 就得上 \`as never\` —— 而项目纪律只允许 registry.ts 用它。
+ * 所以实现抽成纯函数,两条路径各包一层薄壳。顺带:实现直接返回渲染好的文本,
+ * 不用再跟 AgentToolResult 的 details 类型较劲(那个坑 7-H 已经踩过一次)。 */
+
+function aborted(tool: string, signal: AbortSignal | undefined): void {
+  if (signal?.aborted) throw new Error(`${tool} aborted`);
+}
+
+async function implCanvasRead(
+  registry: ToolRegistry,
+  args: Record<string, unknown>,
+  signal: AbortSignal | undefined,
+): Promise<string> {
+  // 取消检查**必须在 try 之外**(7-F 定的语义,7-H 重构时一度被无声改回 try 内 ——
+  // 那样会把用户主动打断渲染成 [工具失败],等于把一次取消伪装成工具报错)
+  const path = typeof args["path"] === "string" ? (args["path"] as string) : "";
+  aborted("canvas_read", signal);
+  let r: ReadResult;
+  try {
+    const encoding = args["encoding"];
+    r = (await registry.invoke("fs.readFile", {
+      path,
+      ...(encoding !== undefined ? { encoding } : {}),
+    })) as ReadResult;
+  } catch (e) {
+    return failure("canvas_read", e).text;
+  }
+  aborted("canvas_read", signal);
+  return renderRead(r, path).text;
+}
+
+async function implCanvasList(
+  registry: ToolRegistry,
+  args: Record<string, unknown>,
+  signal: AbortSignal | undefined,
+): Promise<string> {
+  const path = typeof args["path"] === "string" ? (args["path"] as string) : "";
+  aborted("canvas_list", signal);
+  let entries: ListEntry[];
+  try {
+    entries = (await registry.invoke("fs.listDir", {
+      path,
+      ...(args["includeHidden"] !== undefined ? { includeHidden: args["includeHidden"] } : {}),
+      ...(args["maxEntries"] !== undefined ? { maxEntries: args["maxEntries"] } : {}),
+    })) as ListEntry[];
+  } catch (e) {
+    return failure("canvas_list", e).text;
+  }
+  aborted("canvas_list", signal);
+  return renderList(entries, path).text;
+}
+
+async function implCanvasStat(
+  registry: ToolRegistry,
+  args: Record<string, unknown>,
+  signal: AbortSignal | undefined,
+): Promise<string> {
+  const path = typeof args["path"] === "string" ? (args["path"] as string) : "";
+  aborted("canvas_stat", signal);
+  let st: StatResult;
+  try {
+    st = (await registry.invoke("fs.stat", { path })) as StatResult;
+  } catch (e) {
+    return failure("canvas_stat", e).text;
+  }
+  aborted("canvas_stat", signal);
+  return renderStat(st, path).text;
+}
+
+async function implCanvasWrite(
+  registry: ToolRegistry,
+  args: Record<string, unknown>,
+  signal: AbortSignal | undefined,
+): Promise<string> {
+  const path = typeof args["path"] === "string" ? (args["path"] as string) : "";
+  const content = typeof args["content"] === "string" ? (args["content"] as string) : "";
+  aborted("canvas_write", signal);
+  let wr: WriteResult;
+  try {
+    wr = (await registry.invoke("fs.writeFile", {
+      path,
+      content,
+      ...(args["createDirs"] !== undefined ? { createDirs: args["createDirs"] } : {}),
+    })) as WriteResult;
+  } catch (e) {
+    return failure("canvas_write", e).text;
+  }
+  aborted("canvas_write", signal);
+  return renderWrite(wr, path).text;
+}
+
+async function implNetFetch(
+  registry: ToolRegistry,
+  args: Record<string, unknown>,
+  signal: AbortSignal | undefined,
+): Promise<string> {
+  const url = typeof args["url"] === "string" ? (args["url"] as string) : "";
+  aborted("net_fetch", signal);
+  let res: HttpResult;
+  try {
+    res = (await registry.invoke("http.fetch", {
+      url,
+      ...(args["method"] !== undefined ? { method: args["method"] } : {}),
+      ...(args["headers"] !== undefined ? { headers: args["headers"] } : {}),
+      ...(args["maxBytes"] !== undefined ? { maxBytes: args["maxBytes"] } : {}),
+      ...(args["timeoutMs"] !== undefined ? { timeoutMs: args["timeoutMs"] } : {}),
+    })) as HttpResult;
+  } catch (e) {
+    return failure("net_fetch", e).text;
+  }
+  aborted("net_fetch", signal);
+  return renderHttp(res).text;
+}
+
+async function implNetPost(
+  registry: ToolRegistry,
+  args: Record<string, unknown>,
+  signal: AbortSignal | undefined,
+): Promise<string> {
+  const url = typeof args["url"] === "string" ? (args["url"] as string) : "";
+  aborted("net_post", signal);
+  let res: HttpResult;
+  try {
+    res = (await registry.invoke("http.postJson", {
+      url,
+      body: args["body"],
+      ...(args["headers"] !== undefined ? { headers: args["headers"] } : {}),
+      ...(args["maxBytes"] !== undefined ? { maxBytes: args["maxBytes"] } : {}),
+      ...(args["timeoutMs"] !== undefined ? { timeoutMs: args["timeoutMs"] } : {}),
+    })) as HttpResult;
+  } catch (e) {
+    return failure("net_post", e).text;
+  }
+  aborted("net_post", signal);
+  return renderHttp(res).text;
+}
+
+/** 工具元数据(两条路径共用,描述文案不在两处漂移)。 */
+const META = {
+  canvas_read: {
+    label: "读 canvas 文件",
+    description:
+      "读 ~/.sansheng/ 下 sandbox 允许根(workspace / canvas)内的文件内容。与内置 read 不同:内置 read 沿会话工作目录(cwd)走,本工具只碰 sansheng 自己的允许根。单文件上限 30 KiB。不跟随 symlink。",
+    snippet: "canvas_read(path, encoding?) — 读 sansheng sandbox 允许根内的文件",
+  },
+  canvas_list: { label: "列 canvas 目录", description: "列出 sansheng sandbox 允许根内的目录条目。默认隐藏 .dotfile。", snippet: "canvas_list(path, includeHidden?, maxEntries?) — 列 sandbox 允许根内的目录" },
+  canvas_stat: { label: "看 canvas 文件属性", description: "取 sandbox 允许根内某路径的 kind(file/dir/symlink/other)、size、mtimeMs。", snippet: "canvas_stat(path) — 取 sandbox 允许根内的文件属性" },
+  canvas_write: {
+    label: "写 canvas 文件",
+    description:
+      "写 ~/.sansheng/ sandbox 允许根内的文件(原子写)。**默认不在任何角色的架构上界内** —— 启用它是一次显式的架构决策(改 tools.ts 的 ROLE_CEILING),不是改集合文件。",
+    snippet: "canvas_write(path, content, createDirs?) — 写 sandbox 允许根内的文件(需架构上界放行)",
+  },
+  net_fetch: {
+    label: "HTTP GET",
+    description: "对 allowlist 内公网 URL 发 GET/HEAD。默认 allowlist 为空(全部拒绝);端口限 80/443/8080/8443,private IP 全拒。**不在任何角色的架构上界内**。",
+    snippet: "net_fetch(url, method?, headers?, maxBytes?, timeoutMs?) — allowlist 内公网 GET/HEAD(需架构上界放行)",
+  },
+  net_post: {
+    label: "HTTP POST JSON",
+    description:
+      "向 allowlist 内公网 URL POST JSON。**默认不在任何角色的架构上界内** —— 与 harness 的既有红线「禁止外发邮件」直接冲突,启用需要显式的架构决策。",
+    snippet: "net_post(url, body, headers?, maxBytes?, timeoutMs?) — allowlist 内公网 POST(需架构上界放行,且与既有红线冲突)",
+  },
+} as const;
+
+const pathProp = Type.String({ description: "路径(相对 ~/.sansheng/workspace 或 canvas 根,或绝对路径);越出允许根会被 SandboxError 拒绝" });
+const headersProp = Type.Optional(Type.Record(Type.String(), Type.String(), { description: "请求头" }));
+
+async function textResult(p: Promise<string>): Promise<{ content: { type: "text"; text: string }[]; details: null }> {
+  return { content: [{ type: "text", text: await p }], details: null };
+}
+
 export function buildBridgedTools(registry: ToolRegistry): ToolDefinition[] {
   return [
-    defineTool({
-      name: "canvas_read",
-      label: "读 canvas 文件",
-      description:
-        "读 ~/.sansheng/ 下 sandbox 允许根(workspace / canvas)内的文件内容。与内置 read 不同:内置 read 沿会话工作目录(cwd)走,本工具只碰 sansheng 自己的允许根。单文件上限 30 KiB。不跟随 symlink。",
-      promptSnippet: "canvas_read(path, encoding?) — 读 sansheng sandbox 允许根内的文件",
+    sdkTool({
+      name: "canvas_read", label: META.canvas_read.label, description: META.canvas_read.description,
+      promptSnippet: META.canvas_read.snippet, executionMode: "parallel",
       parameters: Type.Object({
         path: pathProp,
-        encoding: Type.Optional(
-          Type.Union([Type.Literal("utf8"), Type.Literal("base64")], {
-            description: "默认 utf8;二进制内容用 base64",
-          }),
-        ),
+        encoding: Type.Optional(Type.Union([Type.Literal("utf8"), Type.Literal("base64")], { description: "默认 utf8;二进制内容用 base64" })),
       }),
-      executionMode: "parallel",
-      async execute(_id, { path, encoding }, signal) {
-        // 取消检查**必须在 try 之外**:取消是控制流,不是失败反馈 ——
-        // 放进 try 会被下面的 catch 吞掉,渲染成 [工具失败],等于把一次
-        // 用户主动打断伪装成工具报错(与 SDK 内置 read 的 reject 语义相悖)。
-        assertNotAborted(signal, "canvas_read");
-        let r: ReadResult;
-        try {
-          r = (await registry.invoke("fs.readFile", {
-            path,
-            ...(encoding !== undefined ? { encoding } : {}),
-          })) as ReadResult;
-        } catch (e) {
-          return failResult("canvas_read", e);
-        }
-        assertNotAborted(signal, "canvas_read");
-        const out = renderRead(r, path);
-        return { content: [{ type: "text" as const, text: out.text }], details: out.details };
-      },
+      execute: async (_id, a: Record<string, unknown>, signal) => textResult(implCanvasRead(registry, a, signal)),
     }),
-
-    defineTool({
-      name: "canvas_list",
-      label: "列 canvas 目录",
-      description: "列出 sansheng sandbox 允许根内的目录条目。默认隐藏 .dotfile。",
-      promptSnippet: "canvas_list(path, includeHidden?, maxEntries?) — 列 sandbox 允许根内的目录",
+    sdkTool({
+      name: "canvas_list", label: META.canvas_list.label, description: META.canvas_list.description,
+      promptSnippet: META.canvas_list.snippet, executionMode: "parallel",
       parameters: Type.Object({
         path: pathProp,
         includeHidden: Type.Optional(Type.Boolean({ description: "默认 false(隐藏 .dotfile)" })),
         maxEntries: Type.Optional(Type.Number({ description: "最多返回条目数" })),
       }),
-      executionMode: "parallel",
-      async execute(_id, { path, includeHidden, maxEntries }, signal) {
-        assertNotAborted(signal, "canvas_list");
-        let entries: ListEntry[];
-        try {
-          entries = (await registry.invoke("fs.listDir", {
-            path,
-            ...(includeHidden !== undefined ? { includeHidden } : {}),
-            ...(maxEntries !== undefined ? { maxEntries } : {}),
-          })) as ListEntry[];
-        } catch (e) {
-          return failResult("canvas_list", e);
-        }
-        assertNotAborted(signal, "canvas_list");
-        const r = renderList(entries, path);
-        return { content: [{ type: "text" as const, text: r.text }], details: r.details };
-      },
+      execute: async (_id, a: Record<string, unknown>, signal) => textResult(implCanvasList(registry, a, signal)),
     }),
-
-    defineTool({
-      name: "canvas_stat",
-      label: "看 canvas 文件属性",
-      description: "取 sandbox 允许根内某路径的 kind(file/dir/symlink/other)、size、mtimeMs。",
-      promptSnippet: "canvas_stat(path) — 取 sandbox 允许根内的文件属性",
+    sdkTool({
+      name: "canvas_stat", label: META.canvas_stat.label, description: META.canvas_stat.description,
+      promptSnippet: META.canvas_stat.snippet, executionMode: "parallel",
       parameters: Type.Object({ path: pathProp }),
-      executionMode: "parallel",
-      async execute(_id, { path }, signal) {
-        assertNotAborted(signal, "canvas_stat");
-        let st: StatResult;
-        try {
-          st = (await registry.invoke("fs.stat", { path })) as StatResult;
-        } catch (e) {
-          return failResult("canvas_stat", e);
-        }
-        assertNotAborted(signal, "canvas_stat");
-        const r = renderStat(st, path);
-        return { content: [{ type: "text" as const, text: r.text }], details: r.details };
-      },
+      execute: async (_id, a: Record<string, unknown>, signal) => textResult(implCanvasStat(registry, a, signal)),
     }),
-
-    defineTool({
-      name: "canvas_write",
-      label: "写 canvas 文件",
-      description:
-        "写 ~/.sansheng/ sandbox 允许根内的文件(原子写)。**默认不在任何角色的架构上界内** —— 启用它是一次显式的架构决策(改 tools.ts 的 ROLE_CEILING),不是改集合文件。",
-      promptSnippet: "canvas_write(path, content, createDirs?) — 写 sandbox 允许根内的文件(需架构上界放行)",
+    sdkTool({
+      name: "canvas_write", label: META.canvas_write.label, description: META.canvas_write.description,
+      promptSnippet: META.canvas_write.snippet, executionMode: "sequential",
       parameters: Type.Object({
         path: pathProp,
         content: Type.String({ description: "文件内容(utf-8)" }),
         createDirs: Type.Optional(Type.Boolean({ description: "父目录不存在时递归创建;默认 false" })),
       }),
-      executionMode: "sequential",
-      async execute(_id, { path, content, createDirs }, signal) {
-        assertNotAborted(signal, "canvas_write");
-        let wr: WriteResult;
-        try {
-          wr = (await registry.invoke("fs.writeFile", {
-            path,
-            content,
-            ...(createDirs !== undefined ? { createDirs } : {}),
-          })) as WriteResult;
-        } catch (e) {
-          return failResult("canvas_write", e);
-        }
-        assertNotAborted(signal, "canvas_write");
-        const r = renderWrite(wr, path);
-        return { content: [{ type: "text" as const, text: r.text }], details: r.details };
-      },
+      execute: async (_id, a: Record<string, unknown>, signal) => textResult(implCanvasWrite(registry, a, signal)),
     }),
-
-    defineTool({
-      name: "net_fetch",
-      label: "HTTP GET",
-      description:
-        "对 allowlist 内公网 URL 发 GET/HEAD。默认 allowlist 为空(全部拒绝);端口限 80/443/8080/8443,private IP 全拒。**不在任何角色的架构上界内**。",
-      promptSnippet: "net_fetch(url, method?, headers?, maxBytes?, timeoutMs?) — allowlist 内公网 GET/HEAD(需架构上界放行)",
+    sdkTool({
+      name: "net_fetch", label: META.net_fetch.label, description: META.net_fetch.description,
+      promptSnippet: META.net_fetch.snippet, executionMode: "parallel",
       parameters: Type.Object({
         url: Type.String({ description: "目标 URL(必须命中 ~/.sansheng/net.json 的 allowlist)" }),
         method: Type.Optional(Type.Union([Type.Literal("GET"), Type.Literal("HEAD")])),
@@ -317,33 +419,11 @@ export function buildBridgedTools(registry: ToolRegistry): ToolDefinition[] {
         maxBytes: Type.Optional(Type.Number({ description: "响应体上限;默认 sandbox 5 MiB" })),
         timeoutMs: Type.Optional(Type.Number({ description: "超时;默认 30s" })),
       }),
-      executionMode: "parallel",
-      async execute(_id, { url, method, headers, maxBytes, timeoutMs }, signal) {
-        assertNotAborted(signal, "net_fetch");
-        let res: HttpResult;
-        try {
-          res = (await registry.invoke("http.fetch", {
-            url,
-            ...(method !== undefined ? { method } : {}),
-            ...(headers !== undefined ? { headers } : {}),
-            ...(maxBytes !== undefined ? { maxBytes } : {}),
-            ...(timeoutMs !== undefined ? { timeoutMs } : {}),
-          })) as HttpResult;
-        } catch (e) {
-          return failResult("net_fetch", e);
-        }
-        assertNotAborted(signal, "net_fetch");
-        const r = renderHttp(res);
-        return { content: [{ type: "text" as const, text: r.text }], details: r.details };
-      },
+      execute: async (_id, a: Record<string, unknown>, signal) => textResult(implNetFetch(registry, a, signal)),
     }),
-
-    defineTool({
-      name: "net_post",
-      label: "HTTP POST JSON",
-      description:
-        "向 allowlist 内公网 URL POST JSON。**默认不在任何角色的架构上界内** —— 与 harness 的既有红线「禁止外发邮件」直接冲突,启用需要显式的架构决策。",
-      promptSnippet: "net_post(url, body, headers?, maxBytes?, timeoutMs?) — allowlist 内公网 POST(需架构上界放行,且与既有红线冲突)",
+    sdkTool({
+      name: "net_post", label: META.net_post.label, description: META.net_post.description,
+      promptSnippet: META.net_post.snippet, executionMode: "sequential",
       parameters: Type.Object({
         url: Type.String({ description: "目标 URL(必须命中 ~/.sansheng/net.json 的 allowlist)" }),
         body: Type.Unknown({ description: "JSON 序列化后的请求体" }),
@@ -351,26 +431,26 @@ export function buildBridgedTools(registry: ToolRegistry): ToolDefinition[] {
         maxBytes: Type.Optional(Type.Number({ description: "响应体上限;默认 sandbox 5 MiB" })),
         timeoutMs: Type.Optional(Type.Number({ description: "超时;默认 30s" })),
       }),
-      executionMode: "sequential",
-      async execute(_id, { url, body, headers, maxBytes, timeoutMs }, signal) {
-        assertNotAborted(signal, "net_post");
-        let res: HttpResult;
-        try {
-          res = (await registry.invoke("http.postJson", {
-            url,
-            body,
-            ...(headers !== undefined ? { headers } : {}),
-            ...(maxBytes !== undefined ? { maxBytes } : {}),
-            ...(timeoutMs !== undefined ? { timeoutMs } : {}),
-          })) as HttpResult;
-        } catch (e) {
-          return failResult("net_post", e);
-        }
-        assertNotAborted(signal, "net_post");
-        const r = renderHttp(res);
-        return { content: [{ type: "text" as const, text: r.text }], details: r.details };
-      },
+      execute: async (_id, a: Record<string, unknown>, signal) => textResult(implNetPost(registry, a, signal)),
     }),
+  ];
+}
+
+/**
+ * 循环路径(planner / executor 的 completeSimple)。**不 import SDK 类型** ——
+ * 循环不跑 Pi session,既没有 schema 校验层也没有 ExtensionContext。
+ *
+ * `registry` 由调用方持有且在循环期间不变(createBridgedTools 的产物)。
+ */
+export function buildBridgedLoopTools(registry: ToolRegistry | undefined): LoopTool[] {
+  if (!registry) return [];
+  return [
+    { name: "canvas_read", description: META.canvas_read.snippet, run: (a) => implCanvasRead(registry, a, undefined) },
+    { name: "canvas_list", description: META.canvas_list.snippet, run: (a) => implCanvasList(registry, a, undefined) },
+    { name: "canvas_stat", description: META.canvas_stat.snippet, run: (a) => implCanvasStat(registry, a, undefined) },
+    { name: "canvas_write", description: META.canvas_write.snippet, run: (a) => implCanvasWrite(registry, a, undefined) },
+    { name: "net_fetch", description: META.net_fetch.snippet, run: (a) => implNetFetch(registry, a, undefined) },
+    { name: "net_post", description: META.net_post.snippet, run: (a) => implNetPost(registry, a, undefined) },
   ];
 }
 
@@ -391,6 +471,25 @@ export async function createBridgedTools(): Promise<ToolDefinition[]> {
   } catch (err) {
     log.warn(
       `harness: 工具桥接失败(policy 文件或 registry 构造出错),本轮只暴露 SDK 内置工具: ${errMessage(err)}`,
+    );
+    return [];
+  }
+}
+
+/**
+ * 桥接工厂(循环路径):建 registry + 一次性包出全部 6 个 LoopTool。
+ *
+ * 与 `createBridgedTools` 同款降级策略:失败 → 空数组 + warn,不影响另一组工具。
+ * 两者各自建一份 registry 也没问题(Sandbox 只是 policy 对象 + 路径解析,无状态)。
+ */
+export async function createBridgedLoopTools(): Promise<LoopTool[]> {
+  try {
+    const { createToolRegistry } = await import("../tools/integration.js");
+    const registry = await createToolRegistry();
+    return buildBridgedLoopTools(registry);
+  } catch (err) {
+    log.warn(
+      `harness: 工具桥接(循环路径)失败(policy 文件或 registry 构造出错): ${errMessage(err)}`,
     );
     return [];
   }

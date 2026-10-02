@@ -150,7 +150,10 @@ describe("批次 7-B · harness prompt 真的到达 Planner / Executor", () => {
     await orch.run("conv-7b-override", intent.title);
     orch.shutdown();
 
-    expect(seen[0]).toBe("EXPLICIT-OVERRIDE");
+    // 批次 7-H:有工具时 runWithTools 会在角色提示词**后面追加**工具协议段。
+    // 7-B 守的是「显式传入优先于 harness 文件」,所以断言基提示词没被换掉、
+    // 也没混入 harness 文件的内容 —— 追加的工具段是另一回事。
+    expect(seen[0]?.startsWith("EXPLICIT-OVERRIDE")).toBe(true);
     expect(seen[0]).not.toContain(PLANNER_MARKER);
   });
 

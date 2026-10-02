@@ -47,6 +47,7 @@ import {
   loadToolSets,
   roleToolCeiling,
 } from "../../src/server/harness/tools.js";
+import { NATIVE_TOOL_NAMES } from "../../src/server/harness/nativeTools.js";
 import { ToolRegistry } from "../../src/server/tools/registry.js";
 import { Sandbox } from "../../src/server/tools/sandbox.js";
 import { resolveNetPolicy } from "../../src/server/tools/netSandbox.js";
@@ -121,10 +122,11 @@ describe("7-F 工具桥接 · 形状与命名合规", () => {
     );
   });
 
-  it("SDK 内置 8 个 + 桥接 6 个 = catalog 的 14 个,无遗漏无多余", () => {
+  it("SDK 内置 8 + 桥接 6 + 原生 3 = catalog 的 17 个,无遗漏无多余", () => {
     expect(SDK_TOOL_NAMES).toHaveLength(8);
     expect(BRIDGED_TOOL_NAMES).toHaveLength(6);
-    expect(TOOL_NAMES).toHaveLength(14);
+    expect(NATIVE_TOOL_NAMES).toHaveLength(3);
+    expect(TOOL_NAMES).toHaveLength(17);
     expect(Object.keys(TOOL_CATALOG).sort()).toEqual([...TOOL_NAMES].sort());
   });
 
@@ -145,28 +147,48 @@ describe("7-F 工具桥接 · 授权面不被放宽(最需要守住的不变量)
     }
   });
 
-  it("只读 canvas 三件套在每个角色的 ceiling 内", () => {
-    for (const role of TOOL_ROLES) {
-      const ceiling = roleToolCeiling(role);
+  it("只读 canvas 三件套在「只读面」角色与 executor 的 ceiling 内", () => {
+    // planner 的 ceiling 被有意收窄成只有 Blackboard 读面(它不读代码),
+    // 所以这里不再断言「每个角色」—— 见 tools.ts ROLE_CEILING 的注释。
+    for (const role of ["communicator", "harness_manager", "critic", "memory", "reflection", "executor"] as const) {
       for (const tool of ["canvas_read", "canvas_list", "canvas_stat"] as const) {
-        expect(ceiling, `${role} 的 ceiling 应含 ${tool}`).toContain(tool);
+        expect(roleToolCeiling(role), `${role} 的 ceiling 应含 ${tool}`).toContain(tool);
       }
     }
+    expect(roleToolCeiling("planner")).not.toContain("canvas_read");
   });
 
-  it("上界里没有写 / 执行 / 网络出口工具(v1 原则:只读面不含任何副作用路径)", () => {
+  it("7-H:写/执行上界只属于 executor;网络出口对所有角色都不可得", () => {
+    // jev A2(needsUser 0.67 < 闸门 0.70,conf 0.56/margin 0.52):执行者是链路上
+    // 唯一该动手的角色。其余角色上界必须全只读。
     for (const role of TOOL_ROLES) {
+      if (role === "executor") continue;
       for (const tool of roleToolCeiling(role)) {
         expect(TOOL_CATALOG[tool].risk, `${role} 上界含 ${tool}(${TOOL_CATALOG[tool].risk})`).toBe("readonly");
       }
     }
+    const execCeiling = roleToolCeiling("executor");
+    for (const t of ["edit", "write", "bash"] as const) expect(execCeiling).toContain(t);
+    // 但网络出口与 canvas 写入口对**所有人**都不可得
+    for (const role of TOOL_ROLES) {
+      expect(roleToolCeiling(role)).not.toContain("net_fetch");
+      expect(roleToolCeiling(role)).not.toContain("net_post");
+      expect(roleToolCeiling(role)).not.toContain("canvas_write");
+    }
   });
 
-  it("出厂 communicator 集合 = 上界全集;其余角色仍为空集合 + enforced:false", () => {
+  it("出厂:各角色拿满自己的上界;planner / executor 已接循环故 enforced=true", () => {
     const sets = loadToolSets(makeDataDir());
-    expect(sets.communicator.allowed).toEqual([...roleToolCeiling("communicator")]);
+    expect([...sets.communicator.allowed].sort()).toEqual([...roleToolCeiling("communicator")].sort());
     expect(sets.communicator.allowed).toContain("canvas_read");
-    for (const role of ["planner", "executor", "harness_manager", "critic", "memory", "reflection"] as const) {
+    for (const role of ["planner", "executor"] as const) {
+      expect([...sets[role].allowed].sort(), `${role} 应拿满上界`).toEqual(
+        [...roleToolCeiling(role)].sort(),
+      );
+      expect(sets[role].enforced, `${role} 已接 toolLoop`).toBe(true);
+    }
+    expect(sets.executor.allowed).toContain("write");
+    for (const role of ["harness_manager", "critic", "memory", "reflection"] as const) {
       expect(sets[role].allowed, `${role} 仍无工具循环,不得给非空出厂名单`).toEqual([]);
       expect(sets[role].enforced).toBe(false);
     }
@@ -193,7 +215,9 @@ describe("7-F 工具桥接 · 确实代理到 ToolRegistry", () => {
 
     expect(calls).toEqual([{ name: "fs.readFile", args: { path: "notes.md" } }]);
     expect(r.text).toBe("hello canvas");
-    expect(r.details).toMatchObject({ path: "notes.md", mtimeMs: 42 });
+    // 7-H:实现抽成纯函数后只回文本,details 恒 null —— 调用方是模型,
+    // 工具没有 renderCall,结构化 details 从来没被渲染过,故不是回归。
+    expect(r.details).toBeNull();
   });
 
   it("canvas_list → fs.listDir,渲染成 kind/size/name 行", async () => {
@@ -274,7 +298,6 @@ describe("7-F 工具桥接 · 错误可辨 + 沙箱真挡得住", () => {
     );
     const r = await callTool(findTool(tools, "canvas_write"), { path: "x", content: "y" });
     expect(r.text).toContain("(denied_root)");
-    expect(r.details).toMatchObject({ code: "denied_root" });
   });
 
   it("【真沙箱】越过允许根的读写都被 SandboxError 挡住,并以 [工具失败] 回到模型", async () => {
@@ -301,7 +324,7 @@ describe("7-F 工具桥接 · 错误可辨 + 沙箱真挡得住", () => {
     // 越界读:拒绝,且明确可辨
     const denied = await callTool(findTool(tools, "canvas_read"), { path: join(home, "outside.txt") });
     expect(denied.text.startsWith("[工具失败]")).toBe(true);
-    expect(denied.details).toMatchObject({ code: expect.stringMatching(/denied|not_allowed|outside/) });
+    expect(denied.text).toMatch(/\((denied_[a-z_]+|not_allowed|outside_[a-z]+)\)/);
 
     // 越界写:拒绝 —— 写侧上界没开,沙箱是第二道防线
     const deniedWrite = await callTool(findTool(tools, "canvas_write"), {
