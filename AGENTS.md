@@ -18,7 +18,7 @@
 - **不要改 tsconfig 的 rootDir/include**(会破坏 `dist/src/cli` bin 路径);server 端**禁 value import `@shared/*`**(批次 4b C12 更正措辞:旧写法「不要 import @shared/*」自相矛盾 —— `import type { ... } from "@shared/types/agents"` 遍地都是,tsconfig.server.json 的 include 本就含 `shared/**/*`,`dist/shared/**` 确实会 emit,**type-only import 是允许且推荐的**)。被禁的是会**产生运行时依赖**的 value import(`import { X } from "@shared/..."` 会把 shared 拉进 server 的运行时依赖图)。需要在 server 侧重复定义的**协议类型**(如 ClientCommand)在 `src/server/ws.ts` 镜像一份并注释同步来源。
 - DB migration 编号跟随已有文件顺延(v002 已被 vec.sql 占用,agent_states 是 v003),不要照抄 spec 里的数字。
 - `FragmentRow.kind` 是闭合 union(`fact|preference|project|context|summary`),**不要扩展**;reflection fragment 用 `kind:"context"` + `[reflection]` 前缀。
-- SettingsStore 全局单例(createApp 注入,不要内部 new);kernel cwd = settings.cwd(默认 $HOME),不是 sansheng 启动目录。
+- SettingsStore 全局单例(createApp 注入,不要内部 new);kernel cwd = settings.cwd(**默认 `~/sansheng-workspace`**,批次 6 起不再是 `$HOME`),不是 sansheng 启动目录。默认值是**惰性**的(`defaultWorkspaceDir()` = `join(os.homedir(), "sansheng-workspace")`,不要在模块加载期算死 —— daemon/CLI 启动时 env 可能被改写);存量 `cwd === os.homedir()` 在 load 期自动迁到新默认(严格相等判定,**不覆盖**用户自定义值),且**只对出厂默认**自动建目录(自定义路径不代建)。sandbox 允许根与此无关(走 `~/.sansheng/sandbox.json`)。
 - 引用 API 字段前先查证(grep 源码 / 读类型定义),不要凭记忆假设字段存在。
 - **subagent 活性协议(2026-10-02 血泪写入)**:DSH 的 `[running]` 状态**不代表在干活**——出现过 subagent 首轮 LLM 永不返回、状态永久 running、磁盘零落盘零进程的情况(2026-10-02 早上一次,机器无睡眠事件)。因此:①**git 是唯一进度真相**;②派工后**每 ≤30 分钟**查一次 `git log <baseline>..HEAD` + `git status` + `find -mmin`,连续 2 次(≥35-40 分钟)零落盘即判定僵死 → `interrupt_agent` 后**原样重派**(self-contained prompt,禁止子 worker);③长任务拆批,单批控制在 1-2 小时内,缩小单次僵死的损失面;④模型切换/会话中断会让在跑 agent 立即死掉(正常现象,同样以 git 为准重派)。
 

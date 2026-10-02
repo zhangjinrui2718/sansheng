@@ -10,7 +10,7 @@
 import { createAgentSession, DefaultResourceLoader, type AgentSession } from "@earendil-works/pi-coding-agent";
 import type { Model } from "@earendil-works/pi-ai";
 import { nanoid } from "nanoid";
-import { SettingsStore, type Settings, type ProviderConfig } from "../settings/store.js";
+import { SettingsStore, isLegacyDefaultCwd, type Settings, type ProviderConfig } from "../settings/store.js";
 import { estimateCost } from "../providers/cost.js";
 import { log } from "../../shared/log.js";
 import { MessageBus } from "../agents/messageBus.js";
@@ -746,6 +746,27 @@ export class AgentKernel {
     return this.enqueueOp(() => this.resumeInner(conversationId));
   }
 
+  /**
+   * 批次 6 P3:会话级 cwd 的 legacy 映射。
+   *
+   * `conversations.cwd` 是**会话级覆盖**,在旧出厂默认($HOME)期间被写成 `"/Users/fuyao"`。
+   * 批次 6 只迁了 settings 侧(存量迁移在 load 期),已经落库的会话行里的 $HOME 还在 ——
+   * 继续 `conv.cwd ?? this.cwd` 就会让 resume 老会话把 agent 拖回整个家目录,等于迁移
+   * 白做。所以:空值 **或 恰好等于旧默认** → 继承 this.cwd(= createApp 注入的 settings.cwd)。
+   *
+   * 判据复用 store 的 isLegacyDefaultCwd(严格相等;唯一真相,不在此硬编码 "$HOME"),
+   * 用户显式设过的其它目录原样保留。
+   *
+   * **不加写**:映射只在读侧发生,不额外 UPDATE 数据库。历史 $HOME 行由 resume 末尾
+   * 两条既有 upsert 顺带治愈(写进去的已是映射后的 cwd),没有必要在热路径上再打一次
+   * 写 —— 一次 resume 多一次 DB 写,收益只是把「下次读也正确」提前到「本次读也正确」,
+   * 而读侧映射已经把本次读修好了。
+   */
+  private effectiveConvCwd(convCwd: string | null): string {
+    if (!convCwd) return this.cwd;
+    return isLegacyDefaultCwd(convCwd) ? this.cwd : convCwd;
+  }
+
   private async resumeInner(conversationId: string): Promise<void> {
     log.muted(`kernel resume: ${conversationId}`);
     // C8:无条件释放旧 session —— 旧实现仅在**换会话**时 dispose,同 id 重复
@@ -787,18 +808,21 @@ export class AgentKernel {
 
     // M3a:写 agent_states metadata(用于 inspector / 调试 / 后续 reload)
     try {
+      // 批次 6 P3:legacy $HOME 会话行不能继续当工作根(见 effectiveConvCwd)
+      const convCwd = this.effectiveConvCwd(conv.cwd);
       upsertAgentState(this.storage.db, {
         conversationId,
-        cwd: conv.cwd ?? this.cwd,
+        cwd: convCwd,
         modelId: conv.modelId ?? active.modelId,
         provider: conv.provider ?? active.provider,
         stateJson: JSON.stringify({ historyCount: history.length, resumedAt: Date.now() }),
         lastActiveAt: Date.now(),
       });
       // 同步 conversations 行的 last_active_at / message_count
+      // (cwd 非 null → COALESCE 取新值,历史 $HOME 行在这里被顺带治愈)
       upsertConversation(this.storage.db, {
         id: conversationId,
-        cwd: conv.cwd ?? this.cwd,
+        cwd: convCwd,
         modelId: conv.modelId ?? active.modelId,
         provider: conv.provider ?? active.provider,
       });

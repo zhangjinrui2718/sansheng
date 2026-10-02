@@ -1,8 +1,19 @@
 # Sansheng 项目交接包
 
-**生成时间**:2026-10-02 15:10 CST · **v6.8**(批次 5b-1/5b-2/4a/4b/UI:沟通员 plan-mode 结构化 + 回合后智能沉淀 + 数据完整性 + 进程卫生 + 三 tab 启用)
+**生成时间**:2026-10-02 18:00 CST · **v6.9**(批次 6:固定工作目录默认值 + 存量迁移)
 **适用**:下一会话(主对话 / worker)开盒即读
 **配套阅读**:`/root/projects/sansheng/PLAN.md`(v5 集成版),`/root/projects/sansheng/ARCHITECTURE.md`(12 层模块图,v6.4 新增),`/root/.pi/agent/memory/MEMORY.md`(长期偏好 + 教训)
+
+> **v6.9 · 批次 6(2026-10-02 傍晚,DSH 会话,jev 闸门)**:
+> - **用户报障**:「/Users/fuyao 这个默认的文件夹不对,应该给一个固定的文件目录」—— 出厂 `cwd = $HOME` 让 agent 的工作根是**整个家目录**。jev 裁决路径 = **`~/sansheng-workspace`**(conf 1.00:可见、与应用数据 `~/.sansheng` 物理分离、ASCII、避开源码仓库名 `~/projects/sansheng`)。
+> - **本轮起点**:v6.8 基线 `d93f392` / 428+1(61 files);**终点 = `d93f392..HEAD` 共 3 commits(RED `7c6187c` → P1+P2 `451014d` → P3+P4)**,每 commit 立即 push。**新基线 445 passed / 1 skipped(63 files)**(+17 测试,typecheck 0,build OK,`as any` src/+web/=0)。
+> - **P1 默认值固定化**(`src/server/settings/store.ts`):`const DEFAULTS` → **惰性** `defaultSettings()`,`cwd = join(os.homedir(), "sansheng-workspace")`。弃用 `process.env.HOME ?? "/root"`(env 可被 daemon/CLI 启动改写;`os.homedir()` 每次调用取当下真值,且测试可指临时 HOME)。导出 `DEFAULT_WORKSPACE_DIR_NAME` / `defaultWorkspaceDir()` / `legacyDefaultCwd()` / `isLegacyDefaultCwd()` 供测试与 kernel 复用,零处硬编码字符串。**自动创建**:load 期「生效 cwd == 出厂默认且目录不存在」→ `mkdirSync(recursive)`;失败降级 `log.warn` **不崩**;**只**为出厂默认建目录 —— 用户自定义路径绝不代建(防手滑路径被静默创建)。
+> - **P2 存量迁移**(同一文件 load 期):持久化 `cwd` **严格等于**旧默认(`os.homedir()`,即历史 `process.env.HOME ?? "/root"` 的实际取值)→ 改写为新默认 + `log.info` 明示「migrated from the legacy default $HOME → …」。**相等判定,绝不做前缀/包含判定**(`$HOME/projects/x`、`$HOME-old` 是用户显式设置,不动);走既有 `save()`(批次 4b C5 原子写),**幂等** = 二次加载判据不再成立 → 不重复日志、不重复写盘(测试用 inode 不变作证)。损坏文件降级路径同样吃新默认。
+> - **P3 会话级 legacy 映射**(`src/server/kernel/agentKernel.ts` 新增 `effectiveConvCwd()`):原 `conv.cwd ?? this.cwd` 两处 resume 写库点改为「空 **或** == 旧默认」→ 继承 `this.cwd`(= settings.cwd)。**不加写**:读侧映射即够,历史 $HOME 行由 resume 末尾**既有**的两条 upsert 顺带治愈(写进去的已是映射后 cwd)。**实测前提修正**:全仓唯一 `new AgentKernel` 在 `src/server/index.ts:54`,cwd 恒取 `settings.cwd` —— `conv.cwd` 从不进入 `createAgentSession`,它只是**被重复落库的记录**;修复前真实损害是 $HOME 被 resume 一轮轮写回 DB/UI,而不是把会话拽回旧根。
+> - **P4 前端 + 文档**:`SettingsPanel.tsx` cwd 字段下新增一行 muted 提示(默认 `~/sansheng-workspace`、首次启动自动创建、可改任意绝对路径);`AGENTS.md` §编码纪律该行更正为新默认 + 惰性/迁移/只建默认/sandbox 无关四句要点;本 v6.9 块。
+> - **主会话/worker 独立验证**:`typecheck` 0 · `npm test` **445 passed | 1 skipped(63 files)** · `build` OK · `grep -rn "as any" src/ web/src/` = 0 · smoke(临时 `HOME=/tmp/b6-home-*` + `SANSHENG_DATA=/tmp/b6-data-*` + 端口 **27197**):`/api/health` 200、`/api/settings` 的 `cwd = "/tmp/b6-home-MQFJSX/sansheng-workspace"`、`ls` 证实该目录被自动创建、WS `{type:"send"}` 回归 `offline_no_session` **恰 1**、kill 后 `lsof -iTCP:27197` 无监听 + curl connection refused。**2718 全程未碰;真实 `~/.sansheng` 零读写**(核对:测试后真实库 `messages` 无 17:48 后新增、`agent_states` 最新 17:37,均为用户 17:37-17:47 自己那次会话)。
+> - **USER-side 生效条件**:**重启 2718**(批次收尾时该端口本就无监听进程,PID 32779 已不在;启动即自动建 `~/sansheng-workspace` 并把 settings.json 的 `"/Users/fuyao"` 迁成新值,启动日志有 `cwd migrated from the legacy default $HOME` 一行)。**注意:真实库里 `conversations.cwd` / `agent_states.cwd` 现存 `/Users/fuyao`**(迁移只改 settings,历史行靠 P3 读侧映射 + resume 治愈,不需要手工 SQL)。
+> - **遗留**:①**sandbox 允许根未动**(本批次明确只改工作根,`tools/sandbox.ts` 仍走 `~/.sansheng/sandbox.json` policy + 默认 homedir+tmpdir 允许根 —— 「收窄写沙箱到工作根」是独立批次,未做);②`npm test` 会用真实 homedir 建出**空的** `~/sansheng-workspace`(既有测试的 SettingsStore 用真 HOME + 无 settings.json,首次 load 触发自动创建;幂等、生产启动本来也要建,故未加测试专用开关,如需彻底隔离再议);③`/api/config` 不含 `cwd`(只有 `/api/settings` 有),且 `port` 字段硬编码 2718 不跟随 `--port`,均为既有小瑕疵,未在本批次动;④PG 式 DB migration 编号未动(非 schema 变更)。
 
 > **v6.8 · 批次 5b-1 / 5b-2 / 4a / 4b / UI(2026-10-02 上午→下午,DSH 会话,jev 闸门全程)**:
 > - **本轮起点**:v6.7 基线 `602a718` / 263+1(33 files);**终点 HEAD = `ec5fb61`,新基线 428 passed / 1 skipped(61 files)**(+165 测试,typecheck 0,build OK,`as any` src/+web/=0)。5 个批次 25 commits 全部 push,每 commit 立即推。

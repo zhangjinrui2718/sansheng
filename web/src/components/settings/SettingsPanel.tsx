@@ -293,6 +293,11 @@ export function SettingsPanel() {
           <p className="sansheng-text-mute" style={{ fontSize: 11 }}>
             工作目录 = 三生跑命令 / 读写文件的根。Pi 工具相对它解析路径。
           </p>
+          {/* 批次 6:出厂默认已从 $HOME 固定为 ~/sansheng-workspace(见 store.ts defaultWorkspaceDir) */}
+          <p className="sansheng-text-mute" style={{ fontSize: 11 }}>
+            默认工作目录是 <code>~/sansheng-workspace</code>(首次启动自动创建):agent 的相对路径都落在这里,
+            不再是整个家目录。可改成任意绝对路径(需自行创建,系统不会代建)。
+          </p>
         </div>
       </section>
 

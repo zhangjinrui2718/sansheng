@@ -15,7 +15,7 @@
  *  ⑤ conv.cwd = 自定义目录 → 原样保留(不被误伤)
  */
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -107,6 +107,8 @@ beforeEach(() => {
 
 interface Stack {
   dataDir: string;
+  /** 临时 HOME(= 本次测试里的「旧默认 $HOME」) */
+  home: string;
   /** 冒充 settings.cwd 的工作根(放临时目录里,绝不碰真实家目录) */
   workspace: string;
   storage: Storage;
@@ -114,7 +116,11 @@ interface Stack {
   kernel: AgentKernel;
 }
 
-function makeStack(convs: Array<{ id: string; cwd: string | null }>): Stack {
+/**
+ * cwd 用**回调**给出:cwd 的取值必须基于 makeStack 刚设好的临时 HOME,
+ * 参数求值早于函数体(homedir() 直接写在实参里会拿到上一个测试残留的 HOME)。
+ */
+function makeStack(convs: Array<{ id: string; cwd: (home: string) => string | null }>): Stack {
   const dataDir = mkdtempSync(join(tmpdir(), "sansheng-b6-kernel-"));
   tmpDirs.push(dataDir);
   // 临时 HOME:homedir() 必须指向它,否则「旧默认 = $HOME」会撞上真实家目录
@@ -145,32 +151,30 @@ function makeStack(convs: Array<{ id: string; cwd: string | null }>): Stack {
   });
 
   for (const c of convs) {
-    upsertConversation(storage.db, { id: c.id, cwd: c.cwd, modelId: "gpt-4o-mini", provider: "openai" });
+    upsertConversation(storage.db, { id: c.id, cwd: c.cwd(home), modelId: "gpt-4o-mini", provider: "openai" });
   }
 
   // 生产同形态:cwd 来自 settings.cwd(createApp 注入),不是启动目录
   const kernel = new AgentKernel(settingsStore, join(dataDir, "pi"), settingsStore.load().cwd, storage);
   liveKernels.push(kernel);
-  return { dataDir, workspace, storage, settingsStore, kernel };
+  return { dataDir, home, workspace, storage, settingsStore, kernel };
 }
 
 describe("批次 6 P3 · conv.cwd === 旧默认($HOME)→ 继承 settings.cwd", () => {
   it("⑤ resume 老会话:createAgentSession 收到 settings.cwd,不是 $HOME", async () => {
-    const legacyHome = homedir(); // 临时 HOME(由 makeStack 设置)
-    expect(existsSync(join(legacyHome, "sansheng-workspace"))).toBe(false); // 前置:没被自动建
-
-    const { workspace, kernel } = makeStack([{ id: "conv-legacy", cwd: legacyHome }]);
+    const { home, workspace, kernel } = makeStack([{ id: "conv-legacy", cwd: (h) => h }]);
+    expect(homedir()).toBe(home); // 前置:临时 HOME 已生效(旧默认就是它)
 
     await kernel.resume("conv-legacy");
 
     expect(__t.createOpts).toHaveLength(1);
     // RED(修复前):这里拿到的是 $HOME —— 老会话把 agent 拖回整个家目录
     expect(__t.createOpts[0]!.cwd).toBe(workspace);
-    expect(__t.createOpts[0]!.cwd).not.toBe(legacyHome);
+    expect(__t.createOpts[0]!.cwd).not.toBe(home);
   });
 
   it("⑤ 落库的 agent_states.cwd 也是 settings.cwd(不把 $HOME 继续写下去)", async () => {
-    const { storage, workspace, kernel } = makeStack([{ id: "conv-legacy2", cwd: homedir() }]);
+    const { storage, workspace, kernel } = makeStack([{ id: "conv-legacy2", cwd: (h) => h }]);
 
     await kernel.resume("conv-legacy2");
 
@@ -180,42 +184,20 @@ describe("批次 6 P3 · conv.cwd === 旧默认($HOME)→ 继承 settings.cwd", 
   });
 
   it("⑤ conv.cwd === null → 继承 settings.cwd(既有语义,守护不回归)", async () => {
-    const { workspace, kernel } = makeStack([{ id: "conv-null", cwd: null }]);
+    const { workspace, kernel } = makeStack([{ id: "conv-null", cwd: () => null }]);
 
     await kernel.resume("conv-null");
 
     expect(__t.createOpts[0]!.cwd).toBe(workspace);
   });
 
-  it("⑤ conv.cwd = 用户自定义目录 → 原样保留(不被 legacy 判定误伤)", async () => {
-    const dataDir = mkdtempSync(join(tmpdir(), "sansheng-b6-kernel-custom-"));
-    tmpDirs.push(dataDir);
-    const home = join(dataDir, "home");
-    mkdirSync(home, { recursive: true });
-    process.env.HOME = home;
-    process.env.SANSHENG_DATA = dataDir;
-    const custom = join(dataDir, "my-project");
+  it("⑤ conv.cwd = $HOME 的子目录 / 自定义目录 → 原样保留(不被 legacy 判定误伤)", async () => {
+    const { home, storage, kernel } = makeStack([{ id: "conv-child", cwd: (h) => join(h, "projects", "mine") }]);
+    const child = join(home, "projects", "mine");
 
-    const keyring = new Keyring(join(dataDir, ".keyring"));
-    const storage = new Storage(join(dataDir, "sansheng.db"));
-    openStorages.push(storage);
-    const settingsStore = new SettingsStore(join(dataDir, "settings.json"), keyring);
-    const workspace = join(dataDir, "workspace");
-    settingsStore.save({
-      providers: [
-        { id: "p-b6c", label: "b6c", provider: "openai", modelId: "gpt-4o-mini", apiKey: "sk-b6c", thinkingLevel: "off" },
-      ],
-      activeProviderId: "p-b6c",
-      cwd: workspace,
-      personaName: "三生-b6c",
-    });
-    upsertConversation(storage.db, { id: "conv-custom", cwd: custom, modelId: "gpt-4o-mini", provider: "openai" });
-    const kernel = new AgentKernel(settingsStore, join(dataDir, "pi"), workspace, storage);
-    liveKernels.push(kernel);
+    await kernel.resume("conv-child");
 
-    await kernel.resume("conv-custom");
-
-    expect(getAgentState(storage.db, "conv-custom")?.cwd).toBe(custom);
-    expect(getConversation(storage.db, "conv-custom")?.cwd).toBe(custom);
+    expect(getAgentState(storage.db, "conv-child")?.cwd).toBe(child);
+    expect(getConversation(storage.db, "conv-child")?.cwd).toBe(child);
   });
 });
