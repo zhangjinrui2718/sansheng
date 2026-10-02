@@ -42,6 +42,77 @@ function isWs(ch: string | undefined): boolean {
  * 无法定位可用前缀时返回 null。
  */
 export function repairTruncatedJson(text: string): string | null {
+  const repaired = repairStructure(text);
+  if (repaired === null) return null;
+  return escapeControlCharsInStrings(repaired);
+}
+
+/**
+ * 把 JSON 字符串字面量内部的**裸控制字符**转义成合法 JSON 转义序列。
+ *
+ * 2026-10-02 真实事故(conv_muqwgghs_4q0u / todo-6,note `exec-err-uBDq-rMU`):
+ * MiniMax-M3 交一份长 markdown 表格,结构体的换行是转义过的 `\n`,但**正文里
+ * 至少有一处写成了真实换行符**。于是:
+ *   - 严格 `JSON.parse` 失败("Bad control character in string literal");
+ *   - `repairTruncatedJson` 把括号补齐了,字符串也补了闭引号 —— 但真实换行
+ *     仍然是字符串里的裸控制字符,`JSON.parse` 第二次**照样失败**;
+ *   - `parseJsonLenient` 遂放弃 → `parseOutcome` 返回 null → todo failed →
+ *     cascade 带走下游 todo-7 → 整份报告作废。
+ *
+ * 前 500 字符逐字检查过是合法的,全量截断点扫描(303 + 2266 个)也证明截断
+ * 本身 100% 能救 —— 唯一剩下的失败面就是「JSON 结构合法但字符串里有裸控制
+ * 字符」。模型写长 markdown 时极常见(表格换行、代码块),所以在这一层兜住。
+ *
+ * 安全性:只在**修复后**的文本上跑(严格 parse 成功的路径根本不会到这里),
+ * 且只改字符串字面量内部的控制字符 —— 已写出的正文内容一个字节都不丢,
+ * 只是把裸换行还原成它在合法 JSON 里本来的样子。
+ */
+function escapeControlCharsInStrings(text: string): string {
+  // 快速路径:没有控制字符就不用扫(绝大多数输出走这里,零开销)
+  // eslint-disable-next-line no-control-regex
+  if (!/[\x00-\x1f]/.test(text)) return text;
+
+  let out = "";
+  let inString = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i]!;
+    if (!inString) {
+      if (c === '"') inString = true;
+      out += c;
+      continue;
+    }
+    if (c === "\\") {
+      // 转义序列:下一个字符原样带过(\" \n \\ …),它本身已是合法写法
+      out += c;
+      const next = text[i + 1];
+      if (next !== undefined) {
+        out += next;
+        i++;
+      }
+      continue;
+    }
+    if (c === '"') {
+      inString = false;
+      out += c;
+      continue;
+    }
+    const code = c.charCodeAt(0);
+    if (code < 0x20) {
+      if (c === "\n") out += "\\n";
+      else if (c === "\r") out += "\\r";
+      else if (c === "\t") out += "\\t";
+      else if (c === "\b") out += "\\b";
+      else if (c === "\f") out += "\\f";
+      else out += "\\u" + code.toString(16).padStart(4, "0");
+      continue;
+    }
+    out += c;
+  }
+  return out;
+}
+
+/** repairTruncatedJson 的内部实现(未做控制字符转义)。 */
+function repairStructure(text: string): string | null {
   // 跳过 ```json 围栏 / 前置噪音,定位第一个 { 或 [
   const start = text.search(/[[{]/);
   if (start < 0) return null;

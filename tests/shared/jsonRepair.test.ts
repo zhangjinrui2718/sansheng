@@ -148,3 +148,88 @@ describe("shared/jsonRepair · 截断位置矩阵", () => {
     expect(r.value.a.b.c.d).toBe("x");
   });
 });
+
+/**
+ * 2026-10-02 真实事故(conv_muqwgghs_4q0u / todo-6,note `exec-err-uBDq-rMU`):
+ * MiniMax-M3 交一份长 markdown 表格,结构体的换行是转义过的 `\n`,但正文里
+ * 至少有一处写成了**真实换行符**。旧实现里 `repairTruncatedJson` 能把括号补齐、
+ * 字符串也能补闭引号,但裸换行仍是字符串里的控制字符,`JSON.parse` 第二次照样
+ * 抛 "Bad control character in string literal" → 救回被整体丢弃 → todo failed →
+ * cascade 带走下游 todo-7。
+ *
+ * 已排除的其它可能:前 500 字符逐字合法;全量截断点扫描(303 + 2266 个截断位置)
+ * 证明截断本身 100% 能救。唯一剩下的失败面就是本文件这组 case。
+ */
+describe("shared/jsonRepair · 字符串里的裸控制字符(conv_muqwgghs_4q0u / todo-6)", () => {
+  // 现场形状:pretty-print 的结构换行 + 正文里的 markdown 表格**真实换行**。
+  // 正文里的引号是合法转义的 \"(只把换行写成裸的),否则就成了另一种坏 JSON。
+  // 用模板字面量是为了让「哪几个换行是真的」一眼可见。
+  const RAW_NEWLINE_IN_BODY = `{
+  "evidence":{
+    "title":"主流催收/外呼厂商方案对照与 TCO 估算",
+    "body":"## 1. 结论摘要
+- 腾讯云 TCCC 与阿里云智能外呼走\\"大厂基础设施型\\"
+| 厂商 | ASR | LLM |
+| --- | --- | --- |
+| 科大讯飞 | 自研 | 星火 |"
+  }
+}`;
+
+  it("正文含裸换行 → 救回(裸换行转义回 \\n,正文不丢)", () => {
+    const r = parseJsonLenient<{ evidence: { title: string; body: string } }>(RAW_NEWLINE_IN_BODY);
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const ev = r.value.evidence;
+    // title 是 Executor.parseOutcome 的硬校验项,必须完整救回
+    expect(ev.title).toBe("主流催收/外呼厂商方案对照与 TCO 估算");
+    // 裸换行被还原成它在合法 JSON 里本来的样子 —— 正文内容一字不丢
+    expect(ev.body).toContain("## 1. 结论摘要");
+    expect(ev.body).toContain('走"大厂基础设施型"');
+    expect(ev.body).toContain("| 厂商 | ASR | LLM |");
+    expect(ev.body).toContain("| 科大讯飞 | 自研 | 星火 |");
+    expect(ev.body.split("\n").length).toBeGreaterThan(3);
+  });
+
+  it("裸换行 + 被 maxTokens 截断 → 仍然救回", () => {
+    const r = parseJsonLenient<{ evidence: { title: string; body: string } }>(
+      RAW_NEWLINE_IN_BODY.slice(0, RAW_NEWLINE_IN_BODY.length - 40),
+    );
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.evidence.title).toBe("主流催收/外呼厂商方案对照与 TCO 估算");
+  });
+
+  it("裸制表符 / 回车同样被转义,不吞正文", () => {
+    const r = parseJsonLenient<{ a: { b: string } }>('{"a":{"b":"列1\t列2\r行尾"');
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.a.b).toBe("列1\t列2\r行尾");
+  });
+
+  it("不回归:本来就合规的转义写法不被二次转义", () => {
+    // JSON 源码里的 \n / \t / \\ 都是**两字符**的合法转义,不是裸控制字符。
+    // 严格 parse 直接成功(repaired=false),修复层根本不参与,值原样解出。
+    const r = parseJsonLenient<{ a: string }>('{"a":"已有\\n转义\\t与\\\\反斜杠"}');
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.repaired).toBe(false);
+    // 解出的是「真换行 + 真制表符 + 单个反斜杠」,没有被二次转义成 \\n
+    expect(r.value.a).toBe("已有\n转义\t与\\反斜杠");
+    expect(r.value.a.includes("\\n")).toBe(false);
+  });
+
+  it("不回归:结构体里的真实换行(字符串之外)原样保留,仍是合法 JSON", () => {
+    const r = parseJsonLenient<{ a: { b: string } }>(
+      '{\n  "a": {\n    "b": "x"\n  }\n}',
+    );
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.repaired).toBe(false);
+    expect(r.value.a.b).toBe("x");
+  });
+
+  it("不回归:纯自然语言仍必须失败 —— 不凭空造产物", () => {
+    const r = parseJsonLenient("没有任何 JSON 的自然语言输出");
+    expect(r.ok).toBe(false);
+  });
+});

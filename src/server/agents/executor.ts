@@ -384,8 +384,16 @@ export class Executor {
     if (explicit === "evidence" || explicit === "hypothesis" || explicit === "failed") {
       return explicit;
     }
-    if (explicit !== undefined && explicit !== null) {
-      // 非法取值 → 不猜,让 parse 失败(静默纠正非法值会掩盖提示词问题)
+    // 空字符串 = 模型声明了这个键但没填值,语义上**等同没写**,继续走形状推断。
+    //
+    // 2026-10-02 真实事故(conv_muqwgghs_4q0u / todo-5,note `exec-err-boBJpM8r`):
+    // MiniMax-M3 交出 `{"outcome":"","status":"in_progress","evidence":{...}}` ——
+    // evidence 完整(title + 长正文都在),但 outcome 留了空串。下面这条「非法取值 →
+    // 不猜」的规则把空串判成非法,直接 return null,批次 7-D 辛苦加的形状推断
+    // **根本没机会跑**。实测同一份 payload 删掉 outcome 字段就能正常救回。
+    // 真正该拒绝的是 `outcome:"gossip"` 这种**携带错误信息**的取值;`""` 不携带
+    // 任何信息,拿它否决一份完好的产物,等于因为信封没贴邮票就把信烧了。
+    if (explicit !== undefined && explicit !== null && explicit !== "") {
       return null;
     }
     if (obj.evidence && typeof obj.evidence === "object") return "evidence";

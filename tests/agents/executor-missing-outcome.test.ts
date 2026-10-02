@@ -164,6 +164,63 @@ describe("批次 7-D · 缺 outcome 时按 payload 形状反推", () => {
     expect(getArtifact(db, todo.id)?.status).toBe("failed");
   });
 
+  // ── 2026-10-02 真实事故 conv_muqwgghs_4q0u / todo-5(note `exec-err-boBJpM8r`)──
+  // 模型交出 `{"outcome":"","status":"in_progress","evidence":{…}}`:evidence 完整,
+  // outcome **留了空串**。旧规则把空串当「非法取值」→ 直接 return null,
+  // 批次 7-D 的形状推断根本没机会跑,一份完好的产物被烧掉。
+  // 语义:`""` 不携带任何信息,等同「没写」;真正该拒绝的是 "success" 这种**说错话**的取值。
+  it("outcome 是空串(模型声明了键但没填)→ 按形状推断救回,不判非法", async () => {
+    const todo = makeTodo("conv-empty-outcome");
+    upsertArtifact(db, todo);
+
+    const raw =
+      '{"outcome":"","status":"in_progress","evidence":{"title":"催收外呼语音机器人智能化能力:自研 vs 厂商对照",' +
+      '"body":"# 智能化能力对照(自研 vs 厂商)\\n\\n## 结论先行\\n自研方案的核心差异化在于 **LLM-native 的对话引擎**。"}}';
+    const exec = new Executor({
+      storage,
+      bus: artifactBus,
+      llmCall: (async () => raw) as ExecutorLlmCall,
+      now: () => 5000,
+    });
+
+    const result = await exec.execute(todo);
+    expect(result.outcome).toBe("evidence");
+    expect(getArtifact(db, todo.id)?.status).toBe("resolved");
+    const ev = listArtifacts(db, {
+      scope: "conversation",
+      conversationId: todo.conversationId,
+    }).find((a) => a.kind === "evidence");
+    expect(ev?.title).toBe("催收外呼语音机器人智能化能力:自研 vs 厂商对照");
+    expect(ev?.body).toContain("结论先行");
+  });
+
+  it("outcome 空串 + 只有 hypothesis 载荷 → 同样走形状推断", async () => {
+    const todo = makeTodo("conv-empty-outcome-hyp");
+    upsertArtifact(db, todo);
+    const exec = new Executor({
+      storage,
+      bus: artifactBus,
+      llmCall: (async () => '{"outcome":"","hypothesis":{"title":"需要用户拍板","body":"…","callbackReason":"judgment"}}') as ExecutorLlmCall,
+      now: () => 5000,
+    });
+    const result = await exec.execute(todo);
+    expect(result.outcome).toBe("hypothesis");
+    expect(getArtifact(db, todo.id)?.status).toBe("waiting_for_decision");
+  });
+
+  it("outcome 空串且三个 payload 键都没有 → 仍 parse 失败(不凭空造产物)", async () => {
+    const todo = makeTodo("conv-empty-outcome-nothing");
+    upsertArtifact(db, todo);
+    const exec = new Executor({
+      storage,
+      bus: artifactBus,
+      llmCall: (async () => '{"outcome":"","status":"in_progress"}') as ExecutorLlmCall,
+      now: () => 5000,
+    });
+    const result = await exec.execute(todo);
+    expect(result.outcome).toBe("failed");
+  });
+
   it("三个 payload 键都没有 → parse 失败(不凭空造产物)", async () => {
     const todo = makeTodo("conv-7d-empty");
     upsertArtifact(db, todo);
