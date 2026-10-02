@@ -434,7 +434,15 @@ export class AgentKernel {
     try {
       upsertArtifact(this.storage.db, decision);
     } catch (err) {
-      log.warn(`handleUserAnswer: upsertArtifact failed: ${(err as Error).message ?? err}`);
+      // 批次 UI U4(审查 §B8 遗留,4b 备案未做):落库失败即 fail-closed。
+      // 旧实现只 warn 就继续 publish —— decision 没进库却广播
+      // artifact_created + executor_resume,Orchestrator 按 decisionArtifactId
+      // 回查拿不到用户刚做的决定(§A4 修的正是这条路),审计面还在撒谎
+      // 「这个 decision 存在」。宁可 executor 继续等 watchdog,也不发悬空 id。
+      log.warn(
+        `handleUserAnswer: upsertArtifact failed, not publishing executor_resume: ${(err as Error).message ?? err}`,
+      );
+      return { replied };
     }
     artifactBus.publish({ type: "artifact_created", artifact: decision });
     artifactBus.publish({
