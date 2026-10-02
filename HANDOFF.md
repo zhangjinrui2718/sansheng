@@ -106,8 +106,35 @@
 
 > **接新会话先读这一节,再往下读旧的 TL;DR(旧的已过时)。**
 
-**HEAD = `79ac7eb`,已 push origin/master。验证:typecheck 0 error · 全量
-`npm test` **495 passed / 0 failed / 1 skipped(69 files)** · `npm run build` 成功 · 规则范围内 `as any` = 0。**
+**HEAD = `aa5b113`,已 push origin/master。验证:typecheck 0 error · 全量
+`npm test` **504 passed / 0 failed / 1 skipped(69 files)** · `npm run build` 成功 · 规则范围内 `as any` = 0。**
+
+### 🔧 真实事故已修(2026-10-02 20:15 · commit `aa5b113`):conv_muqwgghs_4q0u 调研任务整轮报废
+
+**现场**:用户 `sansheng start` 后在 web 上发起「百万级催收外呼语音机器人技术调研报告」,
+planner 拆出 7 个 todo,todo-1~4 成功,**todo-5 / todo-6 `Executor · parse failed`,
+todo-7 被级联带走 → 整份报告没交出来**。现场原样存在 note `exec-err-boBJpM8r` / `exec-err-uBDq-rMU`
+的 body 里(各存前 500 字符)。
+
+**根因是两个独立 bug,叠加后表现为「模型明明交了完整产物,系统说 parse 失败」**:
+
+| # | 位置 | 现场形状 | 为什么炸 |
+|---|---|---|---|
+| ① | `executor.ts` `inferOutcome` | `{"outcome":"","status":"in_progress","evidence":{…}}` | 把 `outcome:""` 判成「非法取值」→ 直接 `return null`,**批次 7-D 的形状推断根本没机会跑**。evidence 是完整的。实测同一份 payload **删掉** outcome 字段就正常救回。 |
+| ② | `shared/jsonRepair.ts` | `{"evidence":{…长 markdown 表格…}}` | 长表格里混进了**未转义的真实换行**。旧 `repairTruncatedJson` 把括号和闭引号都补对了,但裸换行仍是字符串里的控制字符,`JSON.parse` 第二次照样抛 `Bad control character in string literal` → **救回被整体丢弃**。 |
+
+**修法**:① 空串语义等同「没写」,只在取值**非空且**非法时才判失败(`"success"` 这类说错话的原样拒绝,测试仍在);
+② 修复后过一道 `escapeControlCharsInStrings`,只转义字符串字面量**内部**的控制字符,正文一个字节不丢;
+严格 parse 成功的路径根本不进这一层。
+
+**排查手法(可复用)**:`npm run diagnose` 定位到 note → 从 `blackboards.artifacts_json` 捞出
+**逐字**现场 raw → 用真实 `parseJsonLenient` + 逐字复刻的 `inferOutcome` 离线复现 →
+**穷举扫描**排除「截断」等显眼嫌疑(本例 303 + 2266 个截断点 100% 能救)→ 剩下的失败面就是真凶。
+只存 500 字符这点很吃亏,现场分析**必须**先捞 DB 原文。
+
+⚠️ **待办**:`handleParseFailure` 只存前 500 字符(`executor.ts:527`),现场取证不够用,
+建议改成存全量(压缩/截断上限提到 4k)+ 记录 `stopReason`,否则下次同类事故仍要靠猜。
+
 
 ✅ **此前记为「既有的 1 个失败」的 `tests/cli/daemon-start.test.ts:70` 已定性 —— 不是代码缺陷,
 是 DSH 沙箱的假象(2026-10-02 20:06 更正)。** 本节早前版本归因为「`isAlive` 依赖 `readPidComm`,
