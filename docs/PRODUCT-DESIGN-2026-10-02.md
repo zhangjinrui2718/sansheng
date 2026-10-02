@@ -220,6 +220,16 @@ artifact 的 10 个 kind(`shared/types/blackboard.ts:21-31`)不是聊天记录,�
 | 沉淀 | `note` / `reflection` | 长期记忆 |
 | (移走) | `harness_proposal` / `implementation_preview` | 属 Harness 页,不属于这里 |
 
+> **实施补充(P0-B,commit `ee80ca0`)**:上表只列了 5 组,实施时发现 `intent` / `todo` **必须单列一组**。
+> 实测那批工件里 6 个 todo + 2 个 evidence 是真实数据,旧页面也一直在显示它们 ——
+> 不给它们建组等于**把真实数据静默藏起来**,违反反造假。故增设「意图与待办」组
+> (kinds = `intent` + `todo`),组描述里注明这是 §4 表未列、为不藏数据而增设。
+> 另保留一个兜底「其它」组:将来 `ARTIFACT_KINDS` 加新成员时不会被静默丢弃,
+> 标题里写明它是兜底而非正常分组。
+> 移走的两类 `harness_proposal` / `implementation_preview` 在**所有 filter 之前**剔除,
+> 保证它们进不了任何分组、也进不了兜底组;真拉到了(scope 默认 conversation,通常不会)
+> 就在页首如实说明「另有 N 个在 Harness 页」。
+
 **② 展示每个工件的生命周期** —— 工件是一条**带着状态机的消息**,不是一行文本:
 `open → in_progress → waiting_for_decision → resolved / superseded / failed`
 (`shared/types/blackboard.ts:54-58`)。页面应该读起来像「agent 之间一组开着口的对话,每条写着现在轮到谁」。
@@ -304,7 +314,18 @@ planner/executor 之间的大部分协作是**通过工件**完成的,不经过�
 
 > ⚪「未接线」这一档**在 2026-10-02 之后不再需要出现在用户可见的界面上** ——
 > critic/memory/reflection 决定不实现(§1),所以它们根本不出现在手册里,
-> 不存在「需要标注」的场景。徽章体系因此缩到三档。
+> 不存在「标注」的场景。徽章体系因此缩到三档。
+
+> **实施补充(P0-C,commit `a70f464`)—— 三档的判定必须是数据推导,不能写死。**
+> 实施时补齐了两条本设计没查到的判定依据:
+> ① **`state === "empty"` 的真实后果不是「没有提示词」,而是回退到模块内默认常量** ——
+> `Orchestrator.loadHarnessPrompt` 对空文件返回 `undefined`,于是 `planner.ts:176` /
+> `executor.ts:124` 落回 `DEFAULT_PLANNER_PROMPT` / `DEFAULT_EXECUTOR_PROMPT`;
+> communicator 侧则是「不传 resourceLoader,走 SDK 默认」。**所以 `empty` 属于 🔵 硬编码兜底,不是 🟢。**
+> ② `harnessManagerPrompt.source === "builtin_fallback" || editable === false` 是 harness_manager
+> 判为 🔵 的数据依据(不写死角色名,跟着 API 走)。
+> 好处:用户哪天把 `planner.md` 清空,🟢 会**自动**降级成 🔵;API 哪天返回真实文件,也会自动转 🟢。
+> API 少返回某角色摘要时**不给档位**,显示「摘要缺失」,不用「看起来像兜底」糊过去。
 
 **光是这一层徽章,就把「太空」页变成了全 app 信息量最高的一页** —— 它如实告诉用户:
 「planner 有一份 3766 字节的手册在生效;executor 有一份 1424 字节的;
