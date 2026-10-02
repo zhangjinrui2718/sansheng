@@ -25,6 +25,7 @@
  * communicator/planner/executor/critic/memory/reflection),但它是真实 class
  * (harnessManager.ts:145)且是合法 `ArtifactAuthor`(shared/types/blackboard.ts:83)
  * —— 故本页用本地 `RealAgent` 联合,不为了 UI 去动共享类型(设计文档 §8 明确「保留不动」)。
+ * 称呼按 §1.1 术语规则:角色表里是配置键/文件名 → 英文 id;工件上的「谁产出的」→ 中文读法。
  *
  * ── §3 四区:每区用哪些字段,为什么不用别的方式 ─────────────────────
  * ① 意图头 —— `intent.title/status/author/createdAt` + 名下 todo 的 status 聚合。
@@ -124,6 +125,24 @@ const AGENT_PROMPT_SOURCE: Record<RealAgent, string> = {
   planner: "读盘",
   executor: "读盘",
   harness_manager: "内置兜底",
+};
+
+/**
+ * 角色**叙事读法**(设计文档 §1.1 术语规则:角色作为「谁产出的」主语 → 中文读法;
+ * 角色作为配置键/文件名 → 英文 id,见下面的 Agent 角色表)。
+ * 它是「任意 author 值的翻译表」不是「角色名册」—— critic/memory/reflection 虽
+ * 不进角色表(§1:暂不实现),但历史数据里可能有这些 author,原样显示才是信息。
+ * 与 Artifacts.tsx 的同名表是两份本地副本(不抽公共模块,避免与并行改动冲突)。
+ */
+const AUTHOR_LABEL: Record<string, string> = {
+  user: "用户",
+  communicator: "沟通员",
+  planner: "规划员",
+  executor: "执行员",
+  critic: "评审员",
+  memory: "记忆员",
+  reflection: "反思员",
+  harness_manager: "Harness 管理员",
 };
 
 const KIND_LABEL: Record<string, string> = {
@@ -533,7 +552,7 @@ function OutputRow({ artifact }: { artifact: Artifact }) {
           tone={STATUS_TONE[artifact.status] ?? "var(--bone-mute)"}
         />
         <span className="sansheng-text-mute font-mono ml-auto" style={{ fontSize: 10 }}>
-          {artifact.author} · {fmtTime(artifact.createdAt)}
+          {AUTHOR_LABEL[artifact.author] ?? artifact.author} · {fmtTime(artifact.createdAt)}
         </span>
       </div>
       <div style={{ fontSize: 12, color: "var(--bone)", lineHeight: 1.5 }}>{artifact.title}</div>
@@ -742,7 +761,9 @@ export function AgentsPage({ conversationId }: Props) {
                       <SectionTitle
                         right={
                           board.intent
-                            ? `提出者 ${board.intent.author} · ${fmtTime(board.intent.createdAt)}`
+                            ? `提出者 ${AUTHOR_LABEL[board.intent.author] ?? board.intent.author} · ${fmtTime(
+                                board.intent.createdAt,
+                              )}`
                             : "无 intent 工件"
                         }
                       >
@@ -974,12 +995,18 @@ export function AgentsPage({ conversationId }: Props) {
             </div>
             {otherAuthors.length > 0 && (
               <div className="sansheng-text-mute mt-1" style={{ fontSize: 11, lineHeight: 1.7 }}>
-                本会话还出现过的其它工件作者:{otherAuthors.join(" · ")}
+                本会话还出现过的其它工件作者:
+                {otherAuthors.map((k) => AUTHOR_LABEL[k] ?? k).join(" · ")}
               </div>
             )}
             <div className="sansheng-text-mute mt-1" style={{ fontSize: 11, lineHeight: 1.7 }}>
               只列这 4 个:critic / memory / reflection 没有实现,也没有任何代码读它们的
               harness 提示词,决定暂不实现,故界面不列出(不摆点不亮的灰行)。
+            </div>
+            <div className="sansheng-text-mute mt-1" style={{ fontSize: 11, lineHeight: 1.7 }}>
+              称呼按设计文档 §1.1:角色名在本表用英文 id(它是配置键 / harness 文件名,
+              旁边就是「提示词来源」);工件上的「谁产出的」用中文读法(沟通员 / 规划员 /
+              执行员)。未知 author 值原样透出,不猜。
             </div>
           </section>
         </div>
