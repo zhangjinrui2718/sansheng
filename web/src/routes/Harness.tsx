@@ -19,18 +19,27 @@
  *   harnessManagerPrompt : { source:"builtin_fallback", lines, editable:false, note }
  *              —— harness_manager **没有自己的 md 文件**,用的是编译进代码的
  *              FALLBACK_HARNESS_PROMPT(agents/harnessManager.ts:127)。
- *   config   : { enabledTools[], redLines[], budget{maxIterations,perStepTimeoutMs,maxCostUsd} }
- *              —— 三个字段都是 harness/loader.ts:40-42 的**硬编码字面量**:无磁盘来源、
+ *   toolSets  : Array<{ role, allow[], deny[], allowed[], blockedByCeiling[],
+ *                      enforced, enforceBasis, source:"factory"|"user", warnings[] }>
+ *              —— **批次 7-C 新增,真配置**:per-agent 工具集合,来自
+ *              ~/.sansheng/harness/tools/{role}.json(src/server/harness/tools.ts)。
+ *              `allowed` 是真正交给 SDK 的名单;`blockedByCeiling` 是集合里写了
+ *              但被架构上界拒绝的;`enforced:false` = 该角色没有工具执行点,
+ *              集合「已就位、未接线」。取代了已删除的 config.enabledTools。
+ *   config   : { redLines[], budget{maxIterations,perStepTimeoutMs,maxCostUsd} }
+ *              —— 两个字段仍是 harness/loader.ts 的**硬编码字面量**:无磁盘来源、
  *              无消费者、从不强制执行。页面上统一标 🟡「仅声明未强制」。
  *   proposals / previews : BlackboardArtifact[] —— 真实读 blackboard storage(scope=global)。
  *   notes    : string[] —— server 如实交代语义边界,原样展示。
  *
- * ── 反造假纪律(本项目最强的一条,本页尤其重要)────────────────────────────
+ * ── 反造假纪律(本项目最强的一条,本项目尤其重要)────────────────────────────
  *   1. **不造示例条目**:proposals / previews 没有就是空态,并写清「为什么结构上永远不会来」
  *      (manager 只认 kind==="harness_proposal",executor 恒发 kind==="hypothesis")。
- *   2. **不假装配置在生效**:enabledTools / redLines / budget 一律标 🟡,并把「真实的
- *      执行点在别处(makeLlmCall 的 PLANNER_EXECUTOR_MAX_TOKENS / communicator 的只读
- *      工具白名单)」摆在旁边对照,不让用户以为改这三个数有用。
+ *   2. **不假装配置在生效**:工具集合一栏只展示 API 返回的 `allowed` 并标明
+ *      `enforced`(7-C 起 communicator 是 🟢 生效中,planner / executor 是 🟡
+ *      「已就位、未接线」—— 它们走 completeSimple 单轮补全,没有工具循环);
+ *      redLines / budget 仍一律标 🟡。集合被上界拒绝的条目要显式画出来,
+ *      不让用户以为「我写进去就生效了」。
  *   3. **不承诺本页没有的功能**:"生效时机"表描述的是「如果文件被改,系统什么时候读到」
  *      这个**系统事实**,本页只读、不提供编辑,仓库当前也没有任何 harness 写接口。
  *   4. **徽章由数据推导,不是写死**:state==="empty" → 实际回退的是模块内置 stub
@@ -69,6 +78,25 @@ interface HarnessArtifact {
   createdAt: number;
 }
 
+/**
+ * 批次 7-C:per-agent 工具集合(GET /api/harness 的 toolSets 字段)。
+ * 字段语义以 src/server/harness/tools.ts 为准,这里只镜像前端要用的部分。
+ */
+interface HarnessToolSetInfo {
+  role: string;
+  allow: string[];
+  deny: string[];
+  /** 真正交给 SDK 的名单 = allow − deny − 架构上界之外 */
+  allowed: string[];
+  /** allow 里被架构上界拒绝的 —— 提权失败必须画出来,不能静默 */
+  blockedByCeiling: string[];
+  /** 该角色当前有没有工具执行点;false = 集合已就位但没人应用 */
+  enforced: boolean;
+  enforceBasis: string;
+  source: "factory" | "user";
+  warnings: string[];
+}
+
 interface HarnessResponse {
   manager: {
     running: boolean;
@@ -77,9 +105,9 @@ interface HarnessResponse {
     startedAt: number | null;
   };
   prompts: HarnessPromptInfo[];
+  toolSets: HarnessToolSetInfo[];
   harnessManagerPrompt: { source: string; lines: number; editable: boolean; note: string };
   config: {
-    enabledTools: string[];
     redLines: string[];
     budget: { maxIterations: number; perStepTimeoutMs: number; maxCostUsd: number };
   };
@@ -206,6 +234,61 @@ function Em({ children }: { children: string }) {
   );
 }
 
+/**
+ * 批次 7-C:工具名单的渲染件。**名单不写死在前端** —— 全部来自 API 的 toolSets。
+ * 三种视觉状态,对应解析器的三条分支:
+ *   绿(allowed)          = 真正交给 SDK 的工具
+ *   琥珀虚线(blocked)     = 用户在集合文件里写了、被架构上界拒绝的 —— 必须画出来
+ *   空(allowed 为空)      = 该角色无工具面
+ */
+function ToolChips({ set }: { set: HarnessToolSetInfo | undefined }) {
+  if (!set) {
+    return (
+      <span className="sansheng-text-mute" style={{ fontSize: 11 }}>
+        API 未返回该角色的工具集合
+      </span>
+    );
+  }
+  if (set.allowed.length === 0 && set.blockedByCeiling.length === 0) {
+    return (
+      <span className="sansheng-text-mute" style={{ fontSize: 11 }}>
+        无(集合 allow 为空)
+      </span>
+    );
+  }
+  return (
+    <>
+      {set.allowed.map((t) => (
+        <span
+          key={`ok-${t}`}
+          className="font-mono rounded"
+          style={{ fontSize: 10, padding: "2px 7px", background: "var(--jade-soft)", color: "var(--jade)" }}
+          title="已生效:写进 createAgentSession({ tools })"
+        >
+          {t}
+        </span>
+      ))}
+      {set.blockedByCeiling.map((t) => (
+        <span
+          key={`blocked-${t}`}
+          className="font-mono rounded"
+          style={{
+            fontSize: 10,
+            padding: "2px 7px",
+            background: "transparent",
+            color: "var(--amber)",
+            border: "1px dashed var(--amber)",
+            textDecoration: "line-through",
+          }}
+          title="被架构上界拒绝:集合文件突破不了 ROLE_CEILING,放开它要改代码"
+        >
+          {t}
+        </span>
+      ))}
+    </>
+  );
+}
+
 /* ── 每个 agent 的档案 ───────────────────────────────────────────────────── */
 
 interface ManualMeta {
@@ -215,8 +298,7 @@ interface ManualMeta {
   duty: string;
   /** 它的 system prompt 在哪里被读取并注入(徽章判定的依据) */
   injectBasis: string;
-  /** 真实工具面(不是 config.enabledTools —— 那个不生效) */
-  tools: string[];
+  /** 工具面的补充说明。**工具名单本身不写在这里** —— 7-C 起由 API 的 toolSets 驱动 */
   toolsNote: string;
   /** 文件被改动后,系统什么时候读到 */
   apply: string;
@@ -229,36 +311,33 @@ const MANUAL_META: readonly ManualMeta[] = [
     title: "沟通员",
     duty:
       "用户唯一的对话入口。接住消息后 decide 成 chat / task / clarify / feedback;把对话沉淀成 intent 等结构化工件;worker 升级上来的求助与总线提问也经它转述给用户。由 Pi SDK session 驱动,自己不直接调 LLM。",
-    injectBasis: "kernel/agentKernel.ts:940 每次重建 session 时读盘注入",
-    tools: ["read", "grep", "find", "ls"],
+    injectBasis: "kernel/agentKernel.ts 每次重建 session 时读盘注入",
     toolsNote:
-      "只读白名单硬编码在 kernel/agentKernel.ts:965,bash / edit / write / powershell 被剥掉 —— 这是代码里真实生效的限权,和下面的 config.enabledTools 不是一回事。",
+      "工具集合文件 ~/.sansheng/harness/tools/communicator.json,是全系统唯一真被 enforce 的工具面(kernel → createAgentSession({ tools }))。写与执行类工具被 tools.ts 的架构上界挡住,集合文件突破不了。",
     apply: "下一次 start / resume / reset",
-    applyBasis: "agentKernel.ts:933-940 每次建 session 重新 loadHarness",
+    applyBasis: "agentKernel.ts:createPiSession 每次建 session 重新 loadHarness",
   },
   {
     role: "planner",
     title: "规划者",
     duty:
       "把一个 intent 拆成 todo DAG(带 dependsOn / parentIntent),planner 产出的每个 todo 就是执行者的一份工单。",
-    injectBasis: "agents/orchestrator.ts:186 构造时读一次盘",
-    tools: [],
+    injectBasis: "agents/orchestrator.ts 构造时读一次盘",
     toolsNote:
-      "无工具面:走 ws.ts:179-226 的 makeLlmCall → completeSimple,只送 systemPrompt + messages。",
+      "工具集合文件已就位(tools/planner.json),但 enforced=false:走 ws.ts 的 makeLlmCall → completeSimple 单轮补全,没有工具循环,集合写了也无处应用。",
     apply: "下一次 plan 运行时 —— 不用重启",
-    applyBasis: "orchestrator.ts:183-188 构造时读一次;每次 run_plan 新建实例(ws.ts:327-339)",
+    applyBasis: "orchestrator.ts 构造时读一次;每次 run_plan 新建实例(ws.ts)",
   },
   {
     role: "executor",
     title: "执行者",
     duty:
       "领 todo 干活,产出 evidence / decision;干不动时升级成 hypothesis(status=waiting_for_decision)等人拍板;失败沿 dependsOn 向下级联。它的 system prompt 明确建立在「没有工具能力」之上。",
-    injectBasis: "agents/orchestrator.ts:188 构造时读一次盘",
-    tools: [],
+    injectBasis: "agents/orchestrator.ts 构造时读一次盘",
     toolsNote:
-      "无工具面:同 planner(makeLlmCall 不挂工具),产出靠模型领域知识 + JSON 协议,不是工具调用。",
+      "同 planner:集合文件已就位(tools/executor.json)但 enforced=false,产出靠模型领域知识 + JSON 协议,不是工具调用。",
     apply: "下一次 plan 运行时 —— 不用重启",
-    applyBasis: "orchestrator.ts:183-188 构造时读一次;每次 run_plan 新建实例(ws.ts:327-339)",
+    applyBasis: "orchestrator.ts 构造时读一次;每次 run_plan 新建实例(ws.ts)",
   },
 ];
 
@@ -267,11 +346,10 @@ const MANAGER_META = {
   title: "工装顾问",
   duty:
     "订阅 artifact_created,对 kind=harness_proposal 且 status=open 的工件生成只读的实现预览(绝不写文件;v0 无 apply 语义,D15)。",
-  tools: [] as string[],
   toolsNote:
-    "无工具面,也不允许写盘。页眉右侧的 decideSource 说明它的判断来自 production-llm 还是注入。",
+    "工具集合文件 tools/harness_manager.json 已就位但 enforced=false(decideFn 走 completeSimple 单轮补全),也不允许写盘。页眉右侧的 decideSource 说明它的判断来自 production-llm 还是注入。",
   apply: "需要改代码 —— 它没有 md 文件",
-  applyBasis: "agents/harnessManager.ts:127 FALLBACK_HARNESS_PROMPT 编译进代码",
+  applyBasis: "agents/harnessManager.ts 的 FALLBACK_HARNESS_PROMPT 编译进代码",
 } as const;
 
 const STAT_LABEL: Array<{ key: keyof HarnessStats; label: string }> = [
@@ -361,13 +439,19 @@ export function HarnessPage() {
     );
   }
 
-  const { manager, prompts, config, proposals, previews, notes, harnessManagerPrompt } = data;
+  const { manager, prompts, toolSets, config, proposals, previews, notes, harnessManagerPrompt } =
+    data;
 
   // 只保留手册覆盖的 3 个文件型角色;另外 3 个角色是死文件,不进本页。
   const promptByRole = new Map<string, HarnessPromptInfo>();
   for (const p of prompts) {
     if (isManualRole(p.role)) promptByRole.set(p.role, p);
   }
+
+  // 批次 7-C:工具集合同样只按 role 取,**不写死任何工具名**。
+  // 名单、被上界拒绝的条目、生效状态全部来自 API 的 toolSets 字段。
+  const toolSetByRole = new Map<string, HarnessToolSetInfo>();
+  for (const t of toolSets) toolSetByRole.set(t.role, t);
 
   // 徽章由数据推导:state==="empty" 时真正被注入的是模块内置 stub / SDK 默认,
   // 不是磁盘文件 → 那一档必须如实降级成「硬编码兜底」,不能一律标绿。
@@ -380,6 +464,8 @@ export function HarnessPage() {
       : "live";
 
   const emptyPromptHint = "无文件 / 空文件 · 不注入 harness prompt,回退内置 stub 或 SDK 默认";
+
+  const managerToolSet = toolSetByRole.get("harness_manager");
 
   return (
     <main className="px-4 pb-4">
@@ -421,6 +507,7 @@ export function HarnessPage() {
             {MANUAL_META.map((meta) => {
               const info = promptByRole.get(meta.role);
               const tier = tierOf(info);
+              const toolSet = toolSetByRole.get(meta.role);
               return (
                 <article key={meta.role} className="sansheng-card-elevated p-3">
                   <div className="flex items-center justify-between gap-2 mb-1">
@@ -470,34 +557,24 @@ export function HarnessPage() {
 
                   <div className="sansheng-divider my-2" />
 
-                  <div className="font-mono" style={{ fontSize: 10, color: "var(--bone-mute)" }}>
-                    真实工具面
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="font-mono" style={{ fontSize: 10, color: "var(--bone-mute)" }}>
+                      工具集合
+                    </div>
+                    {/* 徽章只反映 enforced —— 集合文件在盘上但没有执行点 = 🟡,不是 🟢 */}
+                    {toolSet ? <EffectBadge tier={toolSet.enforced ? "live" : "declared"} /> : null}
                   </div>
                   <div className="flex flex-wrap gap-1.5 mt-1">
-                    {meta.tools.length > 0 ? (
-                      meta.tools.map((t) => (
-                        <span
-                          key={t}
-                          className="font-mono rounded"
-                          style={{
-                            fontSize: 10,
-                            padding: "2px 7px",
-                            background: "var(--jade-soft)",
-                            color: "var(--jade)",
-                          }}
-                        >
-                          {t}
-                        </span>
-                      ))
-                    ) : (
-                      <span className="sansheng-text-mute" style={{ fontSize: 11 }}>
-                        无
-                      </span>
-                    )}
+                    <ToolChips set={toolSet} />
                   </div>
                   <div className="sansheng-text-mute mt-1" style={{ fontSize: 10, lineHeight: 1.6 }}>
                     {meta.toolsNote}
                   </div>
+                  {toolSet && !toolSet.enforced && (
+                    <div className="sansheng-text-mute mt-1" style={{ fontSize: 10, lineHeight: 1.6 }}>
+                      未接线的原因:{toolSet.enforceBasis}
+                    </div>
+                  )}
 
                   <div className="sansheng-divider my-2" />
 
@@ -550,11 +627,16 @@ export function HarnessPage() {
 
               <div className="sansheng-divider my-2" />
 
-              <div className="font-mono" style={{ fontSize: 10, color: "var(--bone-mute)" }}>
-                真实工具面
+              <div className="flex items-center justify-between gap-2">
+                <div className="font-mono" style={{ fontSize: 10, color: "var(--bone-mute)" }}>
+                  工具集合
+                </div>
+                {managerToolSet ? (
+                  <EffectBadge tier={managerToolSet.enforced ? "live" : "declared"} />
+                ) : null}
               </div>
-              <div className="sansheng-text-mute mt-1" style={{ fontSize: 11 }}>
-                无
+              <div className="flex flex-wrap gap-1.5 mt-1">
+                <ToolChips set={managerToolSet} />
               </div>
               <div className="sansheng-text-mute mt-1" style={{ fontSize: 10, lineHeight: 1.6 }}>
                 {MANAGER_META.toolsNote}
@@ -609,37 +691,68 @@ export function HarnessPage() {
           </table>
         </section>
 
-        {/* ── ③ 配置:三件套全部标 🟡(产品设计 §6 ① / §6.1)── */}
+        {/* ── ③ 工具集合(批次 7-C):真配置,🟢/🟡 逐角色如实标 ── */}
+        <section className="sansheng-card p-4">
+          <div className="flex items-center justify-between gap-2 mb-1">
+            <h3 className="font-medium">工具集合</h3>
+            <div className="flex items-center gap-1.5">
+              <EffectBadge tier="live" title="集合已生效:真正交给 SDK" />
+              <EffectBadge tier="declared" title="集合已就位,但该角色没有工具执行点" />
+            </div>
+          </div>
+          <p className="sansheng-text-mute mb-3" style={{ fontSize: 11, lineHeight: 1.7 }}>
+            每个 agent 一份 <Em>~/.sansheng/harness/tools/&#123;role&#125;.json</Em>,由
+            src/server/harness/tools.ts 解析。<b style={{ color: "var(--bone)" }}>绿 = 真正交给 SDK 的名单</b>;
+            <b style={{ color: "var(--amber)" }}>琥珀划线 = 集合里写了但被架构上界拒绝</b>(上界写在代码里,
+            集合文件突破不了 —— 放开它是改代码的架构决策,不是改 JSON)。
+          </p>
+
+          <div className="grid gap-2">
+            {toolSets.map((t) => (
+              <div
+                key={t.role}
+                className="sansheng-card-elevated p-2"
+                style={{ borderLeft: `2px solid ${t.enforced ? "var(--jade)" : "var(--ink-4)"}` }}
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <span className="font-mono" style={{ fontSize: 11, color: "var(--bone-dim)" }}>
+                    {t.role}
+                    <span className="sansheng-text-mute ml-1.5" style={{ fontSize: 10 }}>
+                      {t.source === "factory" ? "出厂默认" : "用户手笔"}
+                    </span>
+                  </span>
+                  <EffectBadge tier={t.enforced ? "live" : "declared"} />
+                </div>
+                <div className="flex flex-wrap gap-1.5 mt-1.5">
+                  <ToolChips set={t} />
+                </div>
+                <div className="sansheng-text-mute mt-1" style={{ fontSize: 10, lineHeight: 1.6 }}>
+                  {t.enforced ? `执行点:${t.enforceBasis}` : `未接线:${t.enforceBasis}`}
+                </div>
+                {t.warnings.map((w) => (
+                  <div
+                    key={w}
+                    style={{ fontSize: 10, lineHeight: 1.6, color: "var(--amber)", marginTop: 4 }}
+                  >
+                    ⚠ {w}
+                  </div>
+                ))}
+              </div>
+            ))}
+          </div>
+        </section>
+
+        {/* ── ④ 配置:剩下的两项仍是硬编码字面量(产品设计 §6 ① / §6.1)── */}
         <section className="sansheng-card p-4">
           <div className="flex items-center justify-between gap-2 mb-1">
             <h3 className="font-medium">配置</h3>
             <EffectBadge tier="declared" />
           </div>
           <p className="sansheng-text-mute mb-3" style={{ fontSize: 11, lineHeight: 1.7 }}>
-            enabledTools / redLines / budget 三者都是 harness/loader.ts:40-42 的<Em>硬编码字面量</Em>:
+            redLines / budget 两项仍是 harness/loader.ts 的<Em>硬编码字面量</Em>:
             没有磁盘来源、没有消费者、从不强制执行。budget 的三个字段在 loader.ts 之外全项目零引用。
+            (<Em>enabledTools 已删除</Em> —— 7-C 起由上一节的工具集合取代。)
           </p>
-
-          <div className="font-mono" style={{ fontSize: 10, color: "var(--bone-mute)" }}>
-            enabledTools
-          </div>
-          <div className="flex flex-wrap gap-1.5 mt-1 mb-3">
-            {config.enabledTools.length > 0 ? (
-              config.enabledTools.map((t) => (
-                <span
-                  key={t}
-                  className="font-mono rounded"
-                  style={{ fontSize: 10, padding: "2px 7px", background: "var(--ink-2)", color: "var(--bone-dim)" }}
-                >
-                  {t}
-                </span>
-              ))
-            ) : (
-              <span className="sansheng-text-mute" style={{ fontSize: 11 }}>
-                无
-              </span>
-            )}
-          </div>
 
           <div className="font-mono" style={{ fontSize: 10, color: "var(--bone-mute)" }}>
             redLines
@@ -664,22 +777,21 @@ export function HarnessPage() {
 
           <div className="grid gap-2" style={{ fontSize: 11, lineHeight: 1.75, color: "var(--bone-dim)" }}>
             <div>
-              <span style={{ color: "var(--bone)" }}>系统里真实存在的约束在别处:</span>
-              <br />· 沟通员直答 session 的只读工具白名单 —— 硬编码在 kernel/agentKernel.ts:965
+              <span style={{ color: "var(--bone)" }}>系统里真实存在、但与上面两项无关的约束:</span>
               <br />· 规划者 / 执行者的输出上限 —— 硬编码常量 PLANNER_EXECUTOR_MAX_TOKENS = 8192
-              (ws.ts:76/204,批次 7-A)
+              (ws.ts,批次 7-A)
               <br />
-              两处都与上面的 config 无关,改这三个数字不会影响任何行为。
+              改上面这两个数字不会影响任何行为。
             </div>
             <div className="sansheng-text-mute">
               这不是页面的欠债,而是 harness 自身的设计未完成(产品设计 §6.1 已确认)。
-              等 harness 有磁盘格式 + 按 agent 化 + budget 至少落一个执行点,它们才会变成真配置;
-              在那之前,如实标「仅声明未强制」,不假装即将生效。
+              工具集合这一项已在批次 7-C 变成真配置(per-agent + 落执行点);
+              redLines / budget 要等同样的磁盘格式 + 至少一个执行点才成立。
             </div>
           </div>
         </section>
 
-        {/* ── ④ Proposals / Previews:空就是空,并写清为什么 ── */}
+        {/* ── ⑤ Proposals / Previews:空就是空,并写清为什么 ── */}
         <section className="sansheng-card p-4">
           <h3 className="font-medium mb-1">自我改进提案 · 实现预览</h3>
           {proposals.length === 0 && previews.length === 0 ? (
@@ -718,7 +830,7 @@ export function HarnessPage() {
           )}
         </section>
 
-        {/* ── ⑤ Manager 运行态 ── */}
+        {/* ── ⑥ Manager 运行态 ── */}
         <section className="sansheng-card p-4">
           <h3 className="font-medium mb-2">
             harness_manager 运行态
@@ -752,7 +864,7 @@ export function HarnessPage() {
           )}
         </section>
 
-        {/* ── ⑥ Notes —— server 如实交代的语义边界 ── */}
+        {/* ── ⑦ Notes —— server 如实交代的语义边界 ── */}
         <section className="sansheng-card p-4">
           <h3 className="font-medium mb-2">Notes</h3>
           {notes.length > 0 ? (

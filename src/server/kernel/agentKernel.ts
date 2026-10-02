@@ -937,7 +937,24 @@ export class AgentKernel {
   private async createPiSession(m: Model<any>, active: ProviderConfig): Promise<AgentSession> {
     // dataDir 派生与 ensureCommunicator()/replayBus() 同一表达式
     const dataDir = process.env.SANSHENG_DATA ?? this.agentDir.replace(/\/pi$/, "");
-    const harnessPrompt = loadHarness(dataDir).systemPrompts.communicator;
+    // 一次读盘拿两样:prompt + 工具集合(同源同生命周期,见 harness/tools.ts)
+    const harness = loadHarness(dataDir);
+    const harnessPrompt = harness.systemPrompts.communicator;
+    // 批次 7-C:白名单从硬编码字面量换成 harness 工具集合。
+    // 批次 5b-1 P3(沟通员限权,机制层)仍然成立 —— 它现在由 tools.ts 的
+    // ROLE_CEILING.communicator = 只读面承载,集合文件**突破不了**:
+    // 用户往 harness/tools/communicator.json 里写 "bash" 会被解析器拒绝并
+    // 记进 blockedByCeiling,而不是放行。放开写/执行是改 ROLE_CEILING 的
+    // 代码动作(架构决策),不是改 JSON。
+    // SDK 语义(CreateAgentSessionOptions.tools allowlist):提供时 builtin/
+    // extension/custom 工具统一按名单过滤,且只有名单内工具被激活
+    // (agent-session.js _refreshToolRegistry isAllowedTool)→ 机制级硬约束,
+    // 不依赖 prompt 自觉。只限沟通员直答 session;Executor(plan 链路)
+    // 走 llmCall 单轮补全,不经 Pi session,工具面零影响(enforced:false)。
+    const communicatorTools = harness.toolSets.communicator;
+    for (const w of communicatorTools.warnings) {
+      log.warn(`kernel: harness/tools/communicator.json — ${w}`);
+    }
     // B6(审查 §B6「明文 key 进 process.env」):这是全仓**唯一**需要把 active
     // provider 的 key 写进 process.env 的地方 —— Pi SDK 的 ModelRuntime 在
     // Sansheng 的配置形态下(不写 agentDir/auth.json)从 env 取凭据,而且
@@ -963,15 +980,7 @@ export class AgentKernel {
         cwd: this.cwd,
         agentDir: this.agentDir,
         thinkingLevel: active.thinkingLevel,
-        // 批次 5b-1 P3(沟通员限权,机制层):直答 session 只保留**只读**工具面
-        // (read/grep/find/ls = SDK createReadOnlyTools 同款名单),剥掉 bash/edit/
-        // write/powershell —— 沟通员不直接干活,一切改动类请求经 decide=task 走
-        // 规划执行链路。SDK 语义(CreateAgentSessionOptions.tools allowlist):
-        // 提供时 builtin/extension/custom 工具统一按名单过滤,且只有名单内工具
-        // 被激活(agent-session.js _refreshToolRegistry isAllowedTool)→ 机制级
-        // 硬约束,不依赖 prompt 自觉。只限沟通员直答 session;Executor(plan 链路)
-        // 走 llmCall 单轮补全,不经 Pi session,工具面零影响。
-        tools: ["read", "grep", "find", "ls"],
+        tools: communicatorTools.allowed,
         ...(resourceLoader ? { resourceLoader } : {}),
       });
     })();

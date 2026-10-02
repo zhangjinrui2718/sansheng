@@ -126,8 +126,15 @@ describe("batch5b-2 T2 · GET /api/harness(真实 createApp 接线)", () => {
     const body = (await res.json()) as Record<string, never> & {
       manager: { running: boolean; stats: unknown; decideSource: unknown; startedAt: unknown };
       prompts: Array<{ role: string; lines: number; chars: number; state: string }>;
+      toolSets: Array<{
+        role: string;
+        allowed: string[];
+        blockedByCeiling: string[];
+        enforced: boolean;
+        source: string;
+      }>;
       harnessManagerPrompt: { source: string; lines: number };
-      config: { enabledTools: string[]; redLines: string[]; budget: Record<string, number> };
+      config: { redLines: string[]; budget: Record<string, number> };
       proposals: unknown[];
       previews: unknown[];
       notes: string[];
@@ -142,7 +149,14 @@ describe("batch5b-2 T2 · GET /api/harness(真实 createApp 接线)", () => {
     }
     expect(body.harnessManagerPrompt.source).toBeTruthy();
     expect(body.harnessManagerPrompt.lines).toBeGreaterThan(0);
-    expect(body.config.enabledTools.length).toBeGreaterThan(0);
+    // 批次 7-C:toolSets 取代已删除的 config.enabledTools。
+    // 断言的是**真实生效的那一个**(communicator),不是"字段存在"。
+    expect(body.toolSets.length).toBe(7); // RoleKind 6 + harness_manager
+    const comm = body.toolSets.find((t) => t.role === "communicator");
+    expect(comm?.allowed).toEqual(["read", "grep", "find", "ls"]);
+    expect(comm?.enforced).toBe(true);
+    expect(comm?.blockedByCeiling).toEqual([]);
+    for (const t of body.toolSets) expect(t.source).toBe("factory");
     expect(Array.isArray(body.config.redLines)).toBe(true);
     expect(body.config.budget.maxIterations).toBeGreaterThan(0);
     expect(body.proposals).toEqual([]);

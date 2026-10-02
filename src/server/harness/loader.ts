@@ -3,7 +3,7 @@
  *
  * Harness = 用户/开发者可改的"运行规约":
  *   system_prompts/{role}.md    每个 agent 角色的 system prompt
- *   enabled_tools.json          工具白名单(M3c)
+ *   tools/{role}.json           每个 agent 各自的工具集合(见 ./tools.ts)
  *   policies/...json             routing / retry / budget / red lines (M3c/M6)
  *
  * M3b 只实现:
@@ -15,20 +15,37 @@
  *     身份/原则/语气/边界浓缩版(不含 D7 结构化 JSON 输出协议 —— 那是管道模式,
  *     批次 5b 才接线;直答模式下加载会让用户收到裸 JSON)。
  *   - ensureHarness() 增加三分支升级逻辑(见函数注释),绝不静默覆盖用户编辑。
+ *
+ * 批次 7-C(tool 这部分从装饰变成真配置):
+ *   - 删除 `enabledTools: ["fs_read","fs_write","shell","http"]`。它是 M3c 的扁平
+ *     占位:① 四个名字在 SDK 工具闭合联合(read|bash|powershell|edit|write|grep|
+ *     find|ls)里**根本不存在**;② 零执行点读它,唯一消费点是 http.ts 回显给
+ *     /api/harness。前端自己都标着「不假装配置在生效」(web/src/routes/Harness.tsx:31)。
+ *     —— 换 per-agent 的真集合 `toolSets`(实现与 ceiling 语义见 ./tools.ts)。
+ *   - 唯一被 enforce 的执行点:agentKernel.ts:createPiSession 把 communicator 的
+ *     `allowed` 交给 createAgentSession({ tools })。其余角色走 completeSimple 单轮
+ *     补全,没有工具循环 → enforced:false,如实标注「已就位、未接线」。
  */
 import { mkdirSync, writeFileSync, existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { RoleKind } from "@shared/types/agents";
 import { log } from "../../shared/log.js";
+import { loadToolSets, ensureToolSets, type ToolRole, type ToolSet } from "./tools.js";
 
 export interface HarnessConfig {
   systemPrompts: Record<RoleKind, string>;
-  enabledTools: string[];
+  /** per-agent 工具集合(真配置,带架构上界;见 ./tools.ts) */
+  toolSets: Record<ToolRole, ToolSet>;
   redLines: string[];
   budget: { maxIterations: number; perStepTimeoutMs: number; maxCostUsd: number };
 }
 
-const DEFAULT_CONFIG: HarnessConfig = {
+/**
+ * DEFAULT_CONFIG 只放**与 dataDir 无关**的字面量。`toolSets` 不在这里 ——
+ * 它是 per-dataDir 的读盘结果,放进模块级常量会在 import 期做 7 次 existsSync
+ * (默认值惰性化:与 SettingsStore / defaultWorkspaceDir 同一条纪律)。
+ */
+const DEFAULT_CONFIG: Omit<HarnessConfig, "toolSets"> = {
   systemPrompts: {
     communicator: "",
     planner: "",
@@ -37,7 +54,6 @@ const DEFAULT_CONFIG: HarnessConfig = {
     memory: "",
     reflection: "",
   },
-  enabledTools: ["fs_read", "fs_write", "shell", "http"],
   redLines: ["禁止修改 .ssh/", "禁止外发邮件"],
   budget: { maxIterations: 5, perStepTimeoutMs: 60000, maxCostUsd: 0.5 },
 };
@@ -374,15 +390,23 @@ export function ensureHarness(dataDir: string): void {
       );
     }
   }
+  // 批次 7-C:工具集合与 prompt 同为 harness 规约面,同一入口一起生成。
+  // 两者的三分支语义(缺失/出厂默认/用户手笔)完全一致,见 tools.ts ensureToolSets。
+  ensureToolSets(dataDir);
 }
 
 /**
- * 加载 harness 配置:始终以 DEFAULT_CONFIG 为底,prompt md 文件覆盖默认空串。
- * 用户编辑 md 文件 → 下次 loadHarness 拿到新 prompt(不需重启, server 可在每个 Orchestrator 创建时重新 load)。
+ * 加载 harness 配置:始终以 DEFAULT_CONFIG 为底,prompt md 文件覆盖默认空串,
+ * 工具集合走 ./tools.ts 的 loadToolSets(同一份 dataDir,同样每次调用重新读盘)。
+ * 用户编辑 md / json → 下次 loadHarness 拿到新值(不需重启, server 可在每个
+ * Orchestrator 创建时、每次 Pi session 重建时重新 load)。
  */
 export function loadHarness(dataDir: string): HarnessConfig {
   const harnessDir = join(dataDir, "harness");
-  const config = structuredClone(DEFAULT_CONFIG);
+  const config: HarnessConfig = {
+    ...structuredClone(DEFAULT_CONFIG),
+    toolSets: loadToolSets(dataDir),
+  };
   for (const role of Object.keys(config.systemPrompts) as RoleKind[]) {
     const p = join(harnessDir, "system_prompts", `${role}.md`);
     if (existsSync(p)) {
@@ -435,3 +459,18 @@ export function describePrompts(dataDir: string): HarnessPromptInfo[] {
     };
   });
 }
+
+/**
+ * 批次 7-C:harness 只有一个对外入口。工具集合的实现与 ceiling 语义在 ./tools.ts,
+ * 这里只做转出 —— 调用方(agentKernel / http / 测试)统一从 loader.js 取。
+ */
+export {
+  ensureToolSets,
+  describeToolSets,
+  loadToolSets,
+  roleToolCeiling,
+  TOOL_CATALOG,
+  TOOL_NAMES,
+  TOOL_ROLES,
+} from "./tools.js";
+export type { ToolName, ToolRisk, ToolRole, ToolSet, ToolSetInfo, ToolSetFile } from "./tools.js";
