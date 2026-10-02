@@ -106,6 +106,36 @@
   .sansheng-text-ochre { color: var(--ochre); }
   .sansheng-text-cinnabar { color: var(--cinnabar); }
 
+  /*
+   * .sansheng-input —— 批次 8 补录(2026-10-02)。
+   *
+   * 此前这是个**空 class**:被 9 处引用(SettingsPanel 的 8 个设置项 + Timeline 的
+   * 「回答 worker」输入框),但 `web/src/styles/` 里从未定义过 —— 输入框完全靠
+   * tailwind preflight 撑着,在深色 ink 底上表现为无边框、无底色的裸输入框。
+   * 其中 Timeline 那处是**回复 worker 升级提问的唯一入口**,坏了影响真实交互。
+   *
+   * 样式不新造:完全对齐同层的 .sansheng-button(圆角 6px / ink-3 描边 /
+   * hover 提亮一档 / focus-visible 用 jade 光晕 / 160ms ease-out 过渡),
+   * 只把底色设为 ink-1(比按钮的 transparent 略实,因为输入区需要可读面)。
+   */
+  .sansheng-input {
+    padding: 6px 10px;
+    border-radius: 6px;
+    background: var(--ink-1);
+    color: var(--bone);
+    border: 1px solid var(--ink-3);
+    font-size: 13px;
+    line-height: 16px;
+    transition: all var(--duration-160) var(--ease-out);
+  }
+  .sansheng-input:hover { border-color: var(--ink-4); }
+  .sansheng-input:focus-visible {
+    outline: none;
+    border-color: var(--ink-4);
+    box-shadow: var(--shadow-jade-glow);
+  }
+  .sansheng-input::placeholder { color: var(--bone-mute); }
+
   .sansheng-h2 {
     font-family: theme('fontFamily.serif');
     font-size: 16px;
