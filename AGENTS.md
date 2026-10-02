@@ -20,6 +20,7 @@
 - `FragmentRow.kind` 是闭合 union(`fact|preference|project|context|summary`),**不要扩展**;reflection fragment 用 `kind:"context"` + `[reflection]` 前缀。
 - SettingsStore 全局单例(createApp 注入,不要内部 new);kernel cwd = settings.cwd(默认 $HOME),不是 sansheng 启动目录。
 - 引用 API 字段前先查证(grep 源码 / 读类型定义),不要凭记忆假设字段存在。
+- **subagent 活性协议(2026-10-02 血泪写入)**:DSH 的 `[running]` 状态**不代表在干活**——出现过 subagent 首轮 LLM 永不返回、状态永久 running、磁盘零落盘零进程的情况(2026-10-02 早上一次,机器无睡眠事件)。因此:①**git 是唯一进度真相**;②派工后**每 ≤30 分钟**查一次 `git log <baseline>..HEAD` + `git status` + `find -mmin`,连续 2 次(≥35-40 分钟)零落盘即判定僵死 → `interrupt_agent` 后**原样重派**(self-contained prompt,禁止子 worker);③长任务拆批,单批控制在 1-2 小时内,缩小单次僵死的损失面;④模型切换/会话中断会让在跑 agent 立即死掉(正常现象,同样以 git 为准重派)。
 
 ## 工作方式(用户偏好,必须遵守)
 
