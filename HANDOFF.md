@@ -1,6 +1,7 @@
 # Sansheng 项目交接包
 
-**生成时间**:2026-10-02 21:10 CST · **v7.0**(批次 7-E:harness per-agent 工具集合)
+**生成时间**:2026-10-02 22:00 CST · **v7.1**(批次 7-H:各 agent 工具集合落地 + 提示词重写)
+**上一版**:v7.0(批次 7-G:提示词单元化 + HarnessFacet 统一管理面),见下。
 **适用**:下一会话(主对话 / worker)开盒即读
 **配套阅读**:`/root/projects/sansheng/PLAN.md`(v5 集成版),`/root/projects/sansheng/ARCHITECTURE.md`(12 层模块图,v6.4 新增),`/root/.pi/agent/memory/MEMORY.md`(长期偏好 + 教训)
 
