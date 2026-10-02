@@ -1,11 +1,16 @@
 # Sansheng · Communicator 系统提示词 (M3+ Rebalance)
 
-> **两个 prompt 源的关系(批次 5a 注)**:本文件是 D7 管道的完整设计协议。
+> **两个 prompt 源的关系(批次 5a 注,5b-2 更新)**:本文件是 D7 管道的完整设计协议。
 > 生产直答模式实际加载的是 `~/.sansheng/harness/system_prompts/communicator.md`
 > (由 `src/server/harness/loader.ts` 的 `DEFAULT_PROMPTS.communicator` 生成),
 > 那是本文件「身份 / 原则 / 语气 / 边界」的浓缩子集,**刻意不含**下文
 > 「结构化输出协议」(JSON)段 —— 直答模式加载它会让用户收到裸 JSON。
-> 完整 D7 协议(respond()/parseStructuredOutput 接线)待批次 5b 落地。
+> **5b-2 落地形态(jev 裁决 A 方案)**:D7 结构化输出不做「字面 JSON 直答」,
+> 而是「回合后异步沉淀」—— `src/server/agents/sedimentation.ts` 在 chat 回合
+> message_end 后跑独立小 LLM 调用,按本文件 artifact schema(沉淀四形态
+> intent/hypothesis/note/decision)产 artifacts 落 blackboard;JSON 解析复用
+> `communicator.ts parseStructuredOutput`。Communicator.respond() 字面直答管道
+> 无生产调用方(5b-2 T3 标注,留 5b-3 评估)。
 
 ## 你是谁
 

@@ -321,6 +321,8 @@ export interface CommunicatorOptions {
 /**
  * M3+ respond 函数 — 把 input 转换成 `{userReply?, artifacts[]}`。
  * 默认实现跑 LLM;offline / test 注入 fake。
+ * 批次 5b-2 T3:随 respond() 管道同判 —— 无生产调用方(沉淀职责已由
+ * agents/sedimentation.ts 取代),保留供测试与 5b-3 评估。
  */
 export interface CommunicatorRespondFn {
   (input: ReactiveInput): Promise<CommunicatorResponse>;
@@ -520,6 +522,12 @@ export class Communicator {
   /**
    * 启动 communicator 的 Pi session(用于流式 chat 回复 / decide)。
    * 测试通常用 disableLlm=true 不走这里。
+   *
+   * 批次 5b-2 T3 处置标注:**无生产调用方**(5a 关键发现,审查 §B1 实锤)——
+   * 生产直答 session 由 kernel.createPiSession 建立并经 DefaultResourceLoader
+   * .appendSystemPromptOverride 注入 harness prompt(5a.5 T2);本方法自建的
+   * session(含旧路径 ~/.sansheng/system_prompts/communicator.md 读取)不在
+   * 任何生产链路上。保留原因:既有测试引用 + respond 管道同判(5b-3 评估)。
    */
   async ensureSession(): Promise<AgentSession | null> {
     if (this.disableLlm) return null;
@@ -604,6 +612,11 @@ export function fallbackToNote(
  *   - 提取 ```json ... ``` 或首个 {...}
  *   - parse 失败 → { parseError, artifacts: [note 降级], userReply: undefined }
  *   - parse 成功 → Intent 验证(无 imperative verb 且无 refs → 降级 hypothesis)
+ *
+ * 批次 5b-2 T1 起**脱离死代码**:生产消费方 = agents/sedimentation.ts(回合后
+ * 沉淀服务,拆用本函数的 JSON 提取 + artifact 构建 + intent 降级,避免重复实现)。
+ * 注意沉淀路径对 parseError 的处置与本文件的 respond 管道不同:沉淀检查
+ * parseError 即整轮跳过(宁缺毋滥),**不采用** fallbackToNote 降级产物。
  */
 export function parseStructuredOutput(raw: string): ParsedCommunicatorResponse {
   const trimmed = raw.trim();
@@ -788,6 +801,13 @@ declare module "./communicator.js" {
 /**
  * Identity 1+2: Reactive Input + Plan Producer
  * 接受 user_message 或 executor_callback → 产出 JSON 响应 → 写 BlackboardArtifact。
+ *
+ * 批次 5b-2 T3 处置标注(死代码盘点,不删类 —— 有既有测试与 5b-3 评估价值):
+ * **无生产调用方**。D7 字面 JSON 直答管道被 jev 裁决 A 方案否决(保流式):
+ * 直答 session 由 kernel 拥有(createPiSession,批次 5a.5 T2 经 resourceLoader
+ * 注入 harness prompt);「Plan Producer(沉淀)」职责由 sedimentation 服务取代
+ * (5b-2 T1:回合后异步提取 D7 artifacts → blackboard,agents/sedimentation.ts)。
+ * 本 respond/emitResponse 管道仅测试引用;若 5b-3 评估后仍无消费方,可整段移除。
  */
 (Communicator.prototype as unknown as {
   respond: (input: ReactiveInput) => Promise<ParsedCommunicatorResponse>;
@@ -827,7 +847,11 @@ declare module "./communicator.js" {
   }
 };
 
-/** emit response 到 sink */
+/**
+ * emit response 到 sink。
+ * 批次 5b-2 T3:随 respond() 管道同判 —— 无生产调用方(仅测试引用);
+ * 沉淀产物走 sedimentation 服务的 artifactBus 广播,不经本 sink 管道。
+ */
 (Communicator.prototype as unknown as {
   emitResponse: (
     parsed: ParsedCommunicatorResponse,
