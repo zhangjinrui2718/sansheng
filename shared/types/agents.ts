@@ -119,11 +119,19 @@ export interface BusMessage {
   resumeState?: unknown;
 }
 
-/** Communicator / kernel 之间的 transform 决策。 */
+/**
+ * Communicator / kernel 之间的 transform 决策。
+ *
+ * 批次 5b-1:decide 升级为 LLM 分类(正则启发式降级兜底)。LLM 输出严格 JSON
+ * `{kind, taskGoal, ack}`;`ack` 是给用户的一句交接/收录确认(task=「已转入规划
+ * 执行链路」而非回答;feedback=「已记下」),由 kernel 落为唯一一条 assistant
+ * 消息(§B2 双执行根治后 task/feedback 不再走 Pi 直答)。降级路径无 ack → 用
+ * 固定默认文案。`goal`=给 Planner 的提炼目标(taskGoal,缺省回退用户 raw)。
+ */
 export type CommunicatorDecision =
   | { kind: "chat"; reply: string }
-  | { kind: "task"; goal: string; toPlanner?: string }
-  | { kind: "feedback"; profileDelta: Record<string, string> };
+  | { kind: "task"; goal: string; toPlanner?: string; ack?: string }
+  | { kind: "feedback"; profileDelta: Record<string, string>; ack?: string };
 
 /** M3c: 前端 Timeline 页看到的 pending question 提示。 */
 export interface PendingQuestion {

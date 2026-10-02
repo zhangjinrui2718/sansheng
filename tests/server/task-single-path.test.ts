@@ -350,9 +350,17 @@ describe("batch5b-1 P2 · task 只走 runPlan(§B2 双执行根治)", () => {
         (e) => e.type === "error" && e.error.code === "no_api_key",
       );
       expect(ackIdx).toBeLessThan(errIdx);
-      // raw 仍落库(离线也不丢用户消息)
-      const msgs = dbMessages(stack, stack.kernel.getConversationId());
-      expect(msgs.some((m) => m.role === "user" && m.content.includes("TSP-MARK-C"))).toBe(true);
+      // raw 仍落库(离线也不丢用户消息)。kernel.prompt 是 ws 侧 fire-and-forget,
+      // persistHandoff 在 routeUserMessage resolve 后的微任务里落库 → 轮询等待。
+      await vi.waitFor(
+        () =>
+          expect(
+            dbMessages(stack, stack.kernel.getConversationId()).some(
+              (m) => m.role === "user" && m.content.includes("TSP-MARK-C"),
+            ),
+          ).toBe(true),
+        { timeout: 4_000 },
+      );
     } finally {
       await c.close();
     }

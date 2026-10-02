@@ -25,6 +25,7 @@ import {
   DefaultResourceLoader,
   type AgentSession,
 } from "@earendil-works/pi-coding-agent";
+import { completeSimple } from "@earendil-works/pi-ai/compat";
 import type { Model } from "@earendil-works/pi-ai";
 import { resolveModel } from "../providers/registry.js";
 import type { RunnerSettings } from "./runner.js";
@@ -71,14 +72,14 @@ export interface CommunicatorDecideFn {
 }
 
 /**
- * 默认 decide:用 Communicator 自身的 Pi session 跑一次轻量判断。
- * PI_OFFLINE=1 / 没模型时降级为启发式(闲聊 = chat,含动作关键词 = task)。
+ * 降级兜底 decide(正则启发式):闲聊 = chat,含动作关键词 = task,自我披露 = feedback。
  *
  * 批次 5a(B2 修复,docs/CODE-REVIEW-2026-10-01.md §B2):chat 分支不再产
- * canned「已收到:…」占位回复 —— kernel.prompt 在 routeUserMessage 之后总会
- * 走 Pi session 直答,占位回复会造成用户看到两条回复(chat 双回复)。
- * 现在 chat reply 为空串 → routeUserMessage 不 sink,唯一回复来自 Pi session。
- * decide 本体仍是正则启发式;升级为真 LLM 判断属批次 5b(§B2),此处不动。
+ * canned「已收到:…」占位回复 —— chat 的唯一回复来自 Pi session 直答。
+ *
+ * 批次 5b-1(P1):本函数**保留为降级兜底**(正则启发式),生产 decide 由
+ * makeLlmCommunicatorDecide 包装 —— 有模型时先跑一次微型 LLM 分类,失败/
+ * 超时/离线/无模型/显式关闭(SANSHENG_DECIDE_LLM=0)时降级回这里。
  */
 export async function defaultCommunicatorDecide(
   input: { userText: string; conversationId: string },
@@ -97,6 +98,205 @@ export async function defaultCommunicatorDecide(
   }
   // B2:空 reply = 「chat 交由 Pi session 直答」;不再 sink 占位文本
   return { kind: "chat", reply: "" };
+}
+
+/* ─────────────────────────────────────────────────────────
+ * 批次 5b-1 · P1 — decide 升级 LLM(正则启发式降级兜底)
+ * ───────────────────────────────────────────────────────── */
+
+/** 微型分类 prompt(system)。极简、限制输出长度 → 控制 decide 主路径延迟。 */
+const DECIDE_SYSTEM_PROMPT = `你是三生系统的消息分类器。把用户消息分成三类之一,只输出一个 JSON 对象,不要任何解释或代码块围栏:
+- chat:闲聊 / 提问 / 讨论,可由对话助手直接回答,无需改动系统或执行多步动作。
+- task:需要多步执行 / 修改文件 / 运行命令 / 部署 / 调研并产出结果的明确动作请求。
+- feedback:用户自我披露或要求记住的偏好 / 事实(我叫… / 我是… / 我喜欢… / 我讨厌… / 记住…)。
+输出格式(严格 JSON):
+{"kind":"chat"|"task"|"feedback","taskGoal":"kind=task 时给规划器的一句话目标;否则空串","ack":"kind=task/feedback 时给用户的一句交接/收录确认(≤40字);chat 时空串"}
+判别要点:含明显动作词(重构/修复/实现/添加/删除/迁移/部署/写代码/测试/跑一下/安装/配置/查一下/分析/总结)通常是 task;拿不准的寒暄 / 讨论归 chat。`;
+
+/** decide LLM 分类调用超时(ms)。主路径,超时即降级正则。 */
+const DECIDE_LLM_TIMEOUT_MS = 3500;
+/** 分类输出上限(token)。JSON 很短,限制它避免模型跑飞拉长延迟。 */
+const DECIDE_LLM_MAX_TOKENS = 120;
+/** 最近上下文:条数 / 单条截断长度。消歧「继续 / 再跑一次」类省略句,代价可忽略。 */
+const DECIDE_HISTORY_MAX = 3;
+const DECIDE_HISTORY_CHARS = 80;
+
+export interface LlmDecideDeps {
+  /** 返回当前 resolved Model;null → 无模型 → 降级正则(不触网)。 */
+  getModel: () => Model<any> | null;
+  /**
+   * DI seam(测试注入):替换默认的 completeSimple 调用。注入时绕过模型/开关闸门
+   * (显式注入 = 显式测试意图)。生产不传 → 走 completeSimple(getModel())。
+   */
+  llmCall?: (input: { systemPrompt: string; userPrompt: string }) => Promise<string>;
+  /** 覆盖超时(ms);默认 3500。 */
+  timeoutMs?: number;
+  /** 降级函数;默认 defaultCommunicatorDecide(正则启发式,保留不删)。 */
+  fallback?: CommunicatorDecideFn;
+  /**
+   * 可选:返回最近少量对话上下文(user/assistant + content)。
+   * 工厂内部再截断到 DECIDE_HISTORY_MAX 条 / DECIDE_HISTORY_CHARS 字符。
+   */
+  recentHistory?: (conversationId: string) => Array<{ role: "user" | "assistant"; content: string }>;
+}
+
+/** 从 raw LLM 输出宽容提取首个 JSON 对象(容忍 ```json fence / 前后噪音)。 */
+function extractJson(raw: string): unknown | null {
+  const trimmed = (raw ?? "").trim();
+  if (!trimmed) return null;
+  let jsonText = trimmed;
+  const fence = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/);
+  if (fence && fence[1]) {
+    jsonText = fence[1].trim();
+  } else {
+    const start = jsonText.indexOf("{");
+    const end = jsonText.lastIndexOf("}");
+    if (start < 0 || end <= start) return null;
+    jsonText = jsonText.slice(start, end + 1);
+  }
+  try {
+    return JSON.parse(jsonText);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 把 LLM 分类 JSON 解析成 CommunicatorDecision;非法 → null(调用方降级正则)。
+ * - task:goal=taskGoal(空则回退用户 raw);ack 透传(空则 undefined)
+ * - chat:reply="" (直答仍由 Pi session 负责,不产 canned 文本)
+ * - feedback:profileDelta={preference:raw}(占位,实际入库走 P4 kernel 侧);ack 透传
+ */
+function parseDecide(
+  raw: string,
+  userText: string,
+): CommunicatorDecision | null {
+  const obj = extractJson(raw);
+  if (!obj || typeof obj !== "object") return null;
+  const o = obj as Record<string, unknown>;
+  const kind = o.kind;
+  const str = (v: unknown): string => (typeof v === "string" ? v.trim() : "");
+  const ack = str(o.ack) || undefined;
+  if (kind === "task") {
+    return { kind: "task", goal: str(o.taskGoal) || userText.trim(), ...(ack ? { ack } : {}) };
+  }
+  if (kind === "chat") {
+    return { kind: "chat", reply: "" };
+  }
+  if (kind === "feedback") {
+    return {
+      kind: "feedback",
+      profileDelta: { preference: userText.trim() },
+      ...(ack ? { ack } : {}),
+    };
+  }
+  return null;
+}
+
+/** 组装分类 userPrompt:[最近对话](可选,截断)+ [当前消息]。 */
+function buildDecideUserPrompt(
+  userText: string,
+  history: Array<{ role: "user" | "assistant"; content: string }> | undefined,
+): string {
+  const parts: string[] = [];
+  const hist = (history ?? []).slice(-DECIDE_HISTORY_MAX);
+  if (hist.length > 0) {
+    parts.push("[最近对话]");
+    for (const h of hist) {
+      const body = (h.content ?? "").replace(/\s+/g, " ").trim().slice(0, DECIDE_HISTORY_CHARS);
+      parts.push(`${h.role}: ${body}`);
+    }
+    parts.push("");
+  }
+  parts.push("[当前消息]");
+  parts.push(userText);
+  return parts.join("\n");
+}
+
+/**
+ * 批次 5b-1 · P1:decide 升级 LLM 分类的工厂。返回一个 CommunicatorDecideFn,
+ * 语义与 defaultCommunicatorDecide 完全兼容(降级时就是它),但优先用一次微型
+ * LLM 分类调用产出 {kind, taskGoal, ack}。
+ *
+ * 降级(返回正则启发式结果)触发条件——全部落到 `fallback`,绝不抛错:
+ *   - 显式关闭:SANSHENG_DECIDE_LLM=0(测试 / 离线卫生闸门;注入 llmCall 时绕过)
+ *   - 无模型:getModel() → null(未配置 provider / 未 start)
+ *   - LLM 调用抛错 / stopReason=error(离线、网络、鉴权失败)
+ *   - 超时(timeoutMs,默认 3500ms)
+ *   - 输出解析失败 / kind 非法
+ *
+ * 延迟控制:system prompt 极简 + maxTokens=120 + 硬超时;decide 在 routeUserMessage
+ * 主路径上,超时即降级,不阻塞 WS 其它命令(整体在既有 async 结构内)。
+ */
+export function makeLlmCommunicatorDecide(deps: LlmDecideDeps): CommunicatorDecideFn {
+  const fallback = deps.fallback ?? defaultCommunicatorDecide;
+  const timeoutMs = deps.timeoutMs ?? DECIDE_LLM_TIMEOUT_MS;
+
+  // 生产 LLM 出口:completeSimple(ws.ts makeLlmCall 同款模式)。
+  const productionCall = async (input: {
+    systemPrompt: string;
+    userPrompt: string;
+  }): Promise<string> => {
+    const model = deps.getModel();
+    if (!model) throw new Error("decide: no resolved model");
+    const result = await completeSimple(model as Parameters<typeof completeSimple>[0], {
+      systemPrompt: input.systemPrompt,
+      messages: [{ role: "user", content: input.userPrompt, timestamp: Date.now() }],
+    }, { maxTokens: DECIDE_LLM_MAX_TOKENS });
+    if (result.stopReason === "error" || result.errorMessage) {
+      throw new Error(result.errorMessage ?? "completeSimple error");
+    }
+    const out: string[] = [];
+    for (const c of result.content) {
+      if (c.type === "text") out.push(c.text);
+    }
+    return out.join("");
+  };
+
+  return async (input: { userText: string; conversationId: string }): Promise<CommunicatorDecision> => {
+    const t = input.userText.trim();
+    if (!t) return { kind: "chat", reply: "（空消息）" };
+
+    const injected = deps.llmCall;
+    // 闸门:未注入 llmCall 时,显式关闭 / 无模型 → 直接降级(不触网)。
+    if (!injected) {
+      if (process.env.SANSHENG_DECIDE_LLM === "0") return fallback(input);
+      if (!deps.getModel()) return fallback(input);
+    }
+
+    let history: Array<{ role: "user" | "assistant"; content: string }> | undefined;
+    if (deps.recentHistory) {
+      try {
+        history = deps.recentHistory(input.conversationId);
+      } catch {
+        history = undefined;
+      }
+    }
+    const userPrompt = buildDecideUserPrompt(input.userText, history);
+    const call = injected ?? productionCall;
+
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const raw = await Promise.race([
+        call({ systemPrompt: DECIDE_SYSTEM_PROMPT, userPrompt }),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(new Error("decide timeout")), timeoutMs);
+        }),
+      ]);
+      const decision = parseDecide(raw, input.userText);
+      if (!decision) {
+        log.muted(`decide: LLM 输出解析失败,降级正则(raw 前 80: ${String(raw).slice(0, 80)})`);
+        return fallback(input);
+      }
+      return decision;
+    } catch (err) {
+      log.muted(`decide: LLM 分类失败(${(err as Error).message ?? err}),降级正则`);
+      return fallback(input);
+    } finally {
+      // 正常路径也要清 timer,避免悬挂 handle 拖住事件循环(测试/常驻进程)
+      if (timer) clearTimeout(timer);
+    }
+  };
 }
 
 export interface CommunicatorOptions {
@@ -175,12 +375,11 @@ export class Communicator {
         // 旧代码无条件 sink decide 的 canned「已收到:…」占位回复(delta/done +
         // broadcast),而 kernel.prompt 随后总会 await session.prompt(text) 产生
         // Pi 真回复 → 用户看到两条(chat 双回复)。
-        // 现在:reply 为空(defaultCommunicatorDecide 的 chat 路径)→ 不 sink、
-        // 不 broadcast,chat 回复只来自 Pi session;仅当注入了自定义 decideFn
-        // 且返回非空 reply(测试 / 未来 5b 的 LLM decide)时保留原 sink 行为。
-        // 注意:task 分支的双执行(onTask→runPlan 与 session.prompt 并行)本批次
-        // 刻意不动,留待批次 5b decide 升级为 LLM 判断时一并根治(§B2)——现在
-        // 改成 return 会让正则误判 task 时用户连 Pi 直答都失去,反而更糟。
+        // 现在:reply 为空(defaultCommunicatorDecide / LLM decide 的 chat 路径)
+        // → 不 sink、不 broadcast,chat 回复只来自 Pi session;仅当注入了自定义
+        // decideFn 且返回非空 reply(测试)时保留原 sink 行为。
+        // 批次 5b-1(P2):task 分支双执行已根治(kernel 对 task/feedback 不再走
+        // session.prompt);chat 直答语义不变。
         if (decision.reply) {
           const messageId = nanoid();
           sink({ type: "delta", messageId, text: decision.reply });
@@ -206,9 +405,16 @@ export class Communicator {
           context: { source: "decide_task" },
         });
         sink({ type: "bus_event", message: msg });
-        // 给用户一个简短确认
+        // 批次 5b-1 P2(§B2 双执行根治):给用户 sink 一条**交接确认**——语义是
+        // 交接不是回答,且只此一条(kernel 不再对本消息走 session.prompt 直答;
+        // 后续进展走 plan 事件 / plan_done broadcast,批次 3 已保证跨连接可见)。
+        // 文案:decide LLM 的 ack 字段优先;降级正则路径用固定简短确认。
         const messageId = nanoid();
-        sink({ type: "delta", messageId, text: `收到任务:${decision.goal.slice(0, 60)}` });
+        const ackText =
+          decision.ack && decision.ack.trim()
+            ? decision.ack.trim()
+            : "收到任务,已转入规划执行链路。";
+        sink({ type: "delta", messageId, text: ackText });
         sink({ type: "done", messageId });
         // M3+ B4:触发 Orchestrator(由 ws 层注入的 onTask callback)。
         // 若未注入则保持 v3 行为(只 emit broadcast)。

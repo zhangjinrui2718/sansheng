@@ -14,8 +14,12 @@ import { SettingsStore, type Settings, type ProviderConfig } from "../settings/s
 import { estimateCost } from "../providers/cost.js";
 import { log } from "../../shared/log.js";
 import { MessageBus } from "../agents/messageBus.js";
-import { Communicator, type CommunicatorSink } from "../agents/communicator.js";
-import type { BusMessage as BusMessageFromTypes } from "@shared/types/agents";
+import {
+  Communicator,
+  makeLlmCommunicatorDecide,
+  type CommunicatorSink,
+} from "../agents/communicator.js";
+import type { BusMessage as BusMessageFromTypes, CommunicatorDecision } from "@shared/types/agents";
 import type { RunnerSettings } from "../agents/runner.js";
 import { loadHarness } from "../harness/loader.js";
 import { appendBusMessage, loadBusMessages } from "../agents/busPersister.js";
@@ -127,6 +131,15 @@ export type ServerEvent =
 
 export type EventSink = (e: ServerEvent) => void;
 
+/**
+ * 批次 5b-1(P1):AgentKernel 可选构造参数。
+ * `decideLlmCall` 是沟通员分类 LLM 的测试注入 seam(参照 ws.ts AttachOptions
+ * .llmCallFactory 的 DI 模式)—— 生产不传,decide 走 completeSimple(getModel())。
+ */
+export interface AgentKernelOptions {
+  decideLlmCall?: (input: { systemPrompt: string; userPrompt: string }) => Promise<string>;
+}
+
 export class AgentKernel {
   private session: AgentSession | null = null;
   /** S1(A7):start()/resume() 里 session.subscribe 的退订函数。
@@ -182,6 +195,7 @@ export class AgentKernel {
     private readonly agentDir: string,
     private readonly cwd: string,
     private readonly storage: Storage,
+    private readonly opts: AgentKernelOptions = {},
   ) {
     this.settings = settingsStore.load();
   }
@@ -298,6 +312,26 @@ export class AgentKernel {
       systemPrompt: harness.systemPrompts.communicator, // undefined 让 DefaultResourceLoader 走 AGENTS.md 默认
       // kernel 层拿不到模型时(无 API key)降级为 disableLlm
       disableLlm: !active?.apiKey,
+      // 批次 5b-1 P1:decide 升级 LLM 分类(微型 JSON prompt,completeSimple 同款
+      // makeLlmCall 模式)。无模型 / SANSHENG_DECIDE_LLM=0 / 超时 / 解析失败 →
+      // 自动降级 defaultCommunicatorDecide 正则启发式(保留为 fallback,不删)。
+      // recentHistory:最近 ≤3 条消息(每条截断 80 字符,工厂内再截)——
+      // 消歧「继续/再跑一次」类省略句;延迟代价可忽略。
+      decideFn: makeLlmCommunicatorDecide({
+        getModel: () => this.getModel(),
+        ...(this.opts.decideLlmCall ? { llmCall: this.opts.decideLlmCall } : {}),
+        recentHistory: (conversationId) => {
+          try {
+            return listMessagesByConversation(this.storage.db, conversationId)
+              .filter((m): m is typeof m & { role: "user" | "assistant" } =>
+                m.role === "user" || m.role === "assistant")
+              .slice(-3)
+              .map((m) => ({ role: m.role, content: m.content ?? "" }));
+          } catch {
+            return [];
+          }
+        },
+      }),
     });
     // M3+ B4: 若 ws 层先调 setOnTask(此时 Communicator 尚未构造),
     // pending 引用在这里应用;否则保持 undefined。
@@ -796,9 +830,35 @@ export class AgentKernel {
       log.warn("kernel: ensureCommunicator failed:", err);
     }
     const comm = this.communicator;
+    // 批次 5b-1 P2:task/feedback 的交接/收录确认 = 合成 assistant turn。
+    // Communicator 的 delta/done 旧代码在本层被丢弃(确认对 WS 用户不可见);
+    // 现在翻译成完整 turn 事件序列(agent_start→turn_start→message_start→delta→
+    // message_end→agent_end),是用户可见的**唯一一条**确认,且在 onTask→runPlan
+    // 之前发出 —— plan 链路的失败错误(no_api_key 等)最后到达,前端 error
+    // banner 不会被后到的 turn_start 清掉。
+    let ackTurn: { messageId: string; texts: string[] } | null = null;
+    let ackFinal: { messageId: string; text: string } | null = null;
+    const closeAckTurn = (): void => {
+      if (!ackTurn) return;
+      this.emit({
+        type: "message_end",
+        conversationId: this.conversationId,
+        messageId: ackTurn.messageId,
+        usage: { input: 0, output: 0 },
+      });
+      this.emit({
+        type: "agent_end",
+        conversationId: this.conversationId,
+        ts: Date.now(),
+        usage: { input: 0, output: 0, costUsd: 0 },
+      });
+      ackFinal = { messageId: ackTurn.messageId, text: ackTurn.texts.join("") };
+      ackTurn = null;
+    };
+    let decision: CommunicatorDecision | null = null;
     if (comm) {
       try {
-        const decision = await comm.routeUserMessage(text, this.conversationId, (e) => {
+        decision = await comm.routeUserMessage(text, this.conversationId, (e) => {
           // Communicator → ServerEvent 翻译(经 this.emit 多播到活连接)
           switch (e.type) {
             case "thinking":
@@ -808,29 +868,51 @@ export class AgentKernel {
                 status: e.status,
               });
               break;
-            case "delta":
-            case "done":
-            case "bus_event":
-            case "error":
-            case "pending_question":
-            case "user_reply":
-              // done/delta:不直接喂给 session.prompt(),只 log 或 bus_event
-              // pending_question:升级用户
-              // user_reply: Communicator 的内部标记(delta/done 已经发了)
-              if (e.type === "bus_event") {
-                this.emit({ type: "bus_event", message: e.message });
-              } else if (e.type === "pending_question") {
-                this.pendingQuestions.set(e.questionId, this.conversationId);
+            case "delta": {
+              // 批次 5b-1 P2:确认文本 → 合成 turn(前端渲染依赖 turn_start 建 turn)
+              if (!ackTurn) {
+                const turnIndex = this.currentTurnIndex + 1;
+                this.currentTurnIndex = turnIndex;
+                this.emit({ type: "agent_start", conversationId: this.conversationId, ts: Date.now() });
+                this.emit({ type: "turn_start", conversationId: this.conversationId, turnIndex, ts: Date.now() });
                 this.emit({
-                  type: "pending_question",
+                  type: "message_start",
                   conversationId: this.conversationId,
-                  questionId: e.questionId,
-                  payload: e.payload,
-                  fromRole: e.fromRole,
+                  message: { role: "assistant", id: e.messageId },
                 });
-              } else if (e.type === "error") {
-                log.warn(`communicator ${e.code}: ${e.message}`);
+                ackTurn = { messageId: e.messageId, texts: [] };
               }
+              ackTurn.texts.push(e.text);
+              this.emit({
+                type: "delta",
+                conversationId: this.conversationId,
+                messageId: e.messageId,
+                text: e.text,
+              });
+              break;
+            }
+            case "done":
+              if (ackTurn && ackTurn.messageId === e.messageId) closeAckTurn();
+              break;
+            case "bus_event":
+              this.emit({ type: "bus_event", message: e.message });
+              break;
+            case "pending_question":
+              // 升级用户
+              this.pendingQuestions.set(e.questionId, this.conversationId);
+              this.emit({
+                type: "pending_question",
+                conversationId: this.conversationId,
+                questionId: e.questionId,
+                payload: e.payload,
+                fromRole: e.fromRole,
+              });
+              break;
+            case "error":
+              log.warn(`communicator ${e.code}: ${e.message}`);
+              break;
+            case "user_reply":
+              // Communicator 的内部标记(delta/done 已经发了)
               break;
             case "artifact_created":
               this.emit({ type: "artifact_created", artifact: e.artifact });
@@ -841,15 +923,29 @@ export class AgentKernel {
             }
           }
         });
-        // 如果 Communicator 决定 task,降级让 kernel Pi session 负责答(产品化:转 M3b Orchestrator)
-        // M3c 简化实现:task 也走 Pi session 直答 — 完整 Orchestrator 在 M3b 由 /plan 显式触发
         log.muted(
           `communicator decide: kind=${decision.kind} conv=${this.conversationId}`,
         );
       } catch (err) {
         log.warn("communicator routeUserMessage failed; falling back to direct Pi:", err);
+      } finally {
+        // 极端情况(decide 中途抛错、done 不到达):闭合合成 turn,防 UI 卡 streaming
+        closeAckTurn();
       }
     }
+
+    // 批次 5b-1 P2(§B2 双执行根治):task/feedback 不再落到 Pi session 直答。
+    // - task:onTask→runPlan 已在 routeUserMessage 内触发(goal=LLM 提炼的
+    //   taskGoal,降级=raw);用户可见回复只有上方交接确认一条,后续进展走
+    //   plan 事件 / plan_done broadcast(批次 3 已保证跨连接可见)。
+    // - feedback:收录确认即回复(P4 记忆入库在 persistHandoff 内)。
+    // 无 session / 离线时本分支先于 offline_no_session return → task 不再与
+    // plan 链路自己的 no_api_key 并列重复(5a.5 open#2 收编)。
+    if (decision && (decision.kind === "task" || decision.kind === "feedback")) {
+      this.persistHandoff(text, ackFinal, decision);
+      return;
+    }
+
     // 保险:再 poll 一次 session.isIdle,避免极端情况(刚启动有隐式后台 prompt)
     if (this.session) {
       for (let i = 0; i < 100 && !this.session.isIdle; i++) {
@@ -861,9 +957,8 @@ export class AgentKernel {
     // M3c: 只有 session 存在时才回退 Pi session(PI_OFFLINE 场景下 kernel 无 session)。
     // B2(批次 5a,docs/CODE-REVIEW-2026-10-01.md §B2):chat 路径的 canned「已收到」
     // 占位 sink 已在 Communicator 侧移除 → 这里的 Pi 直答是 chat 的唯一回复(双回复已治)。
-    // 已知边界:task 路径 onTask→runPlan 与本行 session.prompt 仍并行(双执行),
-    // 本批次刻意不动 —— 留待批次 5b decide 升级为 LLM 判断时一并根治(§B2);
-    // 现在提前 return 会让正则误判 task 时用户连 Pi 直答都失去,反而更糟。
+    // 批次 5b-1:task 双执行已在上方根治(decision.kind 分支提前 return),
+    // 本段现在只服务 chat(或 decide 失败兜底)—— §B2 两个形态都已闭环。
     if (this.session) {
       // 批次 5a.5 T1:Pi session 收 enriched(记忆能力保留);messages 表已在
       // pendingUserText 处固定为 raw text(上方),两条路径彻底分离。
@@ -879,6 +974,8 @@ export class AgentKernel {
       // + banner)直接消费的最小方案,前端零改动;code=offline_no_session 与
       // start() 的内部诊断(no_provider/no_api_key)区分 —— 这是面向用户的
       // 「本条消息没有得到直答」结论。
+      // 批次 5b-1:只对 chat 生效 —— task/feedback 已在上方 return(确认 +
+      // plan 链路自己的错误),不再重复 emit(5a.5 open#2)。
       this.emit({
         type: "error",
         conversationId: this.conversationId,
@@ -887,6 +984,86 @@ export class AgentKernel {
           message: "当前离线(无可用 Pi session),沟通员无法直答本条消息;请到「设置」配置 provider / API Key 后重发",
         },
       });
+    }
+  }
+
+  /**
+   * 批次 5b-1 P2:task/feedback 交接路径落库 —— raw 用户消息 + assistant 交接确认。
+   * Pi turn 不会发生(直答已被短路),messages 表由本方法直接写:刷新 / 历史 API
+   * 读回后会话完整(用户 raw 原文一条 + 确认一条,顺序 = user 先 ack 后)。
+   * 会话标题推导与 chat 路径 message_start(user) handler 同语义。
+   */
+  private persistHandoff(
+    userText: string,
+    ack: { messageId: string; text: string } | null,
+    _decision: CommunicatorDecision,
+  ): void {
+    const turnIndex = this.currentTurnIndex;
+    const userMsgId = `m_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
+    // messages 表有 FK → conversations。chat 路径由 Pi message_start handler 建会话行,
+    // 但 task/feedback 路径不走 Pi turn(且离线时 start() 在建行前就 throw),
+    // 所以这里先确保会话行存在(幂等 upsert),否则 insertMessage 触发 FK 失败。
+    try {
+      const active = this.settingsStore.activeProvider();
+      upsertConversation(this.storage.db, {
+        id: this.conversationId,
+        cwd: this.cwd,
+        modelId: this.model?.id ?? active?.modelId ?? null,
+        provider: this.model?.provider ?? active?.provider ?? null,
+      });
+    } catch (err) {
+      log.warn("storage: upsertConversation(handoff) failed:", err);
+    }
+    try {
+      insertMessage(this.storage.db, {
+        id: userMsgId,
+        conversationId: this.conversationId,
+        turnIndex,
+        role: "user",
+        content: userText, // raw 原文(5a.5 raw/enriched 分离语义与 chat 路径一致)
+        toolCalls: null,
+        thinking: null,
+        usageInput: 0,
+        usageOutput: 0,
+        costUsd: 0,
+        createdAt: Date.now(),
+      });
+      recordMessageUsage(this.storage.db, this.conversationId, 0, 0, 0);
+      // 首条消息 → 会话标题(与 chat 路径一致)
+      try {
+        const conv = getConversation(this.storage.db, this.conversationId);
+        if (conv && !conv.title && userText.trim()) {
+          const t = deriveTitle(userText);
+          if (t) {
+            setConversationTitle(this.storage.db, this.conversationId, t);
+            this.emit({ type: "title_changed", conversationId: this.conversationId, title: t });
+          }
+        }
+      } catch (err) {
+        log.warn("title: derive failed:", err);
+      }
+    } catch (err) {
+      log.warn("storage: insertMessage(user/handoff) failed:", err);
+    }
+    if (ack && ack.text) {
+      try {
+        insertMessage(this.storage.db, {
+          id: ack.messageId,
+          conversationId: this.conversationId,
+          turnIndex,
+          role: "assistant",
+          content: ack.text, // 与已发出的 delta 文本一致(刷新后历史 = 当时所见)
+          toolCalls: null,
+          thinking: null,
+          usageInput: 0,
+          usageOutput: 0,
+          costUsd: 0,
+          createdAt: Date.now(),
+        });
+        recordMessageUsage(this.storage.db, this.conversationId, 0, 0, 0);
+      } catch (err) {
+        log.warn("storage: insertMessage(assistant/handoff-ack) failed:", err);
+      }
     }
   }
 
@@ -929,8 +1106,12 @@ export class AgentKernel {
             sink({ type: "turn_start", conversationId: this.conversationId, turnIndex: event.turnIndex, ts: Date.now() });
             this.inputTokens = 0;
             this.outputTokens = 0;
-            // M2:追踪 turn_index 用于消息落库
-            this.currentTurnIndex = event.turnIndex ?? this.currentTurnIndex;
+            // M2:追踪 turn_index 用于消息落库。
+            // 批次 5b-1:DB turn_index 必须 kernel 内单调 —— 合成 turn(交接确认)
+            // 直接推进 currentTurnIndex 后,Pi 自己的计数(session 重建 / resume 会
+            // 回到 1)可能落后;取 max 保证 messages 历史 ORDER BY turn_index,
+            // created_at 不乱序。事件 payload 不变(仍转发 Pi 原值 = 前端 turn id 种子)。
+            this.currentTurnIndex = Math.max(event.turnIndex ?? 0, this.currentTurnIndex + 1);
             break;
           case "turn_end":
             break;
