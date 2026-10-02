@@ -68,6 +68,8 @@ export interface ChatState {
   sendAnswerQuestion(questionId: string, payload: string): void;
   /** M3c: 用户取消 worker 的 pending question */
   sendCancelQuestion(questionId: string): void;
+  /** 批次 UI U2(C10-1):Esc 中断 —— 发 { type: "interrupt" } 给 server 的 kernel.abort() */
+  sendInterrupt(): void;
   /** M3c: 设置 Timeline 输入框对某 question 的草稿 */
   setAnswerDraft(questionId: string, text: string): void;
   /** 新建对话:调后端 + 清本地状态 */
@@ -170,6 +172,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
       };
     });
     socket?.send({ type: "cancel_question", questionId, conversationId });
+  },
+  sendInterrupt() {
+    // 批次 UI U2(C10-1「Esc 中断」空头承诺):server 侧能力**一直存在**
+    // (ws.ts:542 → kernel.abort() → 回发 interrupt 事件),只是前端从没有调用方。
+    // 这里补上唯一的命令出口,ChatComposer 的 Escape 键经它下发。
+    const socket = get().socket as { send(cmd: unknown): void } | null;
+    socket?.send({ type: "interrupt" });
   },
   setAnswerDraft(questionId: string, text: string) {
     set((s) => {
@@ -397,8 +406,23 @@ export const useChatStore = create<ChatState>((set, get) => ({
       case "message_end": {
         const cur = get().currentTurn;
         if (!cur) return;
+        // 批次 UI U2(C10-2「TopBar currentUsage 恒 0」):旧实现只把 usage 挂到
+        // turn 上,**从不**累加进 currentUsage —— TopBar 的「本轮 idle」因此永远
+        // 显示,是一句没有任何数据支撑的常量文案。这里把每条 message_end 的真实
+        // usage 累加进 currentUsage,agent_end 再清零(costUsd 只在 agent_end 有,
+        // 故中途恒 0 —— TopBar 侧对 costUsd=0 不渲染金额,避免显示假的 $0.0000)。
+        const prev = get().currentUsage;
         set({
-          currentTurn: { ...cur, usage: e.usage, isStreaming: false },
+          currentTurn: {
+            ...cur,
+            usage: e.usage,
+            isStreaming: false,
+          },
+          currentUsage: {
+            input: prev.input + (e.usage?.input ?? 0),
+            output: prev.output + (e.usage?.output ?? 0),
+            costUsd: prev.costUsd,
+          },
         });
         return;
       }

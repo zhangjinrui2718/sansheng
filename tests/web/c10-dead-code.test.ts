@@ -36,13 +36,18 @@ function read(rel: string): string {
   return readFileSync(join(WEB_SRC, rel), "utf8");
 }
 
+/** 去掉注释 —— 断言针对**代码**,注释里讨论被修的 bug 不该被判为违规。 */
+function stripComments(src: string): string {
+  return src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+}
+
 const WEB_FILES = walk(WEB_SRC).map((p) => relative(REPO, p));
 
 describe("C10 · web 侧 AGENTS.md 硬规则:as any = 0", () => {
   it("web/src 无 `as any` 断言", () => {
     const hits: string[] = [];
     for (const f of WEB_FILES) {
-      const src = readFileSync(f, "utf8");
+      const src = stripComments(readFileSync(f, "utf8"));
       src.split("\n").forEach((line, i) => {
         if (/as any\b/.test(line)) hits.push(`${f}:${i + 1}: ${line.trim()}`);
       });
@@ -53,25 +58,25 @@ describe("C10 · web 侧 AGENTS.md 硬规则:as any = 0", () => {
 
 describe("C10 · Agents 页 / AgentPanel 不再轮询恒 null 的 legacy blackboard 端点", () => {
   it("routes/Agents.tsx 不引用 `/api/blackboard/${...}` 单数端点", () => {
-    const src = read("routes/Agents.tsx");
+    const src = stripComments(read("routes/Agents.tsx"));
     expect(src).not.toMatch(/\/api\/blackboard\/\$\{/);
   });
 
   it("components/shell/AgentPanel.tsx 不引用 `/api/blackboard/${...}` 单数端点", () => {
-    const src = read("components/shell/AgentPanel.tsx");
+    const src = stripComments(read("components/shell/AgentPanel.tsx"));
     expect(src).not.toMatch(/\/api\/blackboard\/\$\{/);
   });
 });
 
 describe("C10 · TopBar 不再渲染恒 0 的 currentUsage 承诺", () => {
   it("TopBar 不含硬编码「本轮 idle」", () => {
-    expect(read("components/shell/TopBar.tsx")).not.toContain("本轮 idle");
+    expect(stripComments(read("components/shell/TopBar.tsx"))).not.toContain("本轮 idle");
   });
 });
 
 describe("C10 · ChatComposer 的「Esc 中断」要么接线要么不承诺", () => {
   it("出现「Esc 中断」文案时必须同时有 Escape keydown 接线", () => {
-    const src = read("components/chat/ChatComposer.tsx");
+    const src = stripComments(read("components/chat/ChatComposer.tsx"));
     const promisesEsc = src.includes("Esc 中断");
     const wired = /Escape/.test(src);
     expect(promisesEsc && !wired).toBe(false);

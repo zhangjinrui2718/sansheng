@@ -15,6 +15,32 @@ const KIND_GLYPH: Record<string, string> = {
   ls: "≣",
 };
 
+/**
+ * 批次 UI U2(C10-3):web 侧唯一的那处类型逃逸就在本文件(AGENTS.md 硬规则要求全仓 0)。
+ * 用 module-level type guard 替代(与 server 侧 hasBaseUrl / hasCost 同款约定)。
+ */
+function hasContentArray(value: unknown): value is { content: unknown[] } {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    Array.isArray((value as { content?: unknown }).content)
+  );
+}
+
+/** content 数组里的元素:要么是裸字符串,要么是带 text 字段的块。 */
+function contentPartText(part: unknown): string {
+  if (typeof part === "string") return part;
+  if (part !== null && typeof part === "object") {
+    const text = (part as { text?: unknown }).text;
+    if (typeof text === "string") return text;
+  }
+  try {
+    return JSON.stringify(part) ?? String(part);
+  } catch {
+    return String(part);
+  }
+}
+
 export function ToolCallCard({ block }: Props) {
   const [open, setOpen] = useState(false);
   const { tool } = block;
@@ -55,7 +81,10 @@ export function ToolCallCard({ block }: Props) {
             {isError ? "✗" : "✓"}
           </span>
         )}
-        {!tool.result && (
+        {/* C10-3 第二个实锤:旧实现在这里写 `!tool.result` —— 空串结果("")既是
+            falsy 又 !== undefined,于是同一张卡上 ✓ 和 ⏳ 同时出现。空串是**合法
+            结果**(命令成功但无输出),必须归到「已完成」一侧。判据只认 undefined。 */}
+        {tool.result === undefined && (
           <span
             className="font-mono animate-pulse-soft"
             style={{ fontSize: 10, color: "var(--bone-mute)", marginLeft: 6 }}
@@ -117,11 +146,8 @@ function formatArgs(args: unknown): string {
 function formatResult(result: unknown): string {
   if (result == null) return "(no result)";
   if (typeof result === "string") return result;
-  const r = result as any;
-  if (Array.isArray(r.content)) {
-    return r.content
-      .map((c: any) => (typeof c === "string" ? c : c?.text ?? JSON.stringify(c)))
-      .join("\n");
+  if (hasContentArray(result)) {
+    return result.content.map(contentPartText).join("\n");
   }
   try { return JSON.stringify(result, null, 2); } catch { return String(result); }
 }

@@ -138,6 +138,7 @@ export function ChatSurface() {
         value={input}
         onChange={setInput}
         onSubmit={send}
+        onInterrupt={useChatStore.getState().sendInterrupt}
         disabled={status === "streaming" || !hasKey}
         reason={status === "streaming"
           ? "streaming"

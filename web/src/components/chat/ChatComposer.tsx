@@ -1,16 +1,40 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 interface Props {
   value: string;
   onChange: (v: string) => void;
   onSubmit: (text: string) => void;
+  onInterrupt?: () => void;
   disabled?: boolean;
   reason?: "streaming" | "noKernel" | "noKey";
   placeholder?: string;
 }
 
-export function ChatComposer({ value, onChange, onSubmit, disabled, reason }: Props) {
+export function ChatComposer({
+  value,
+  onChange,
+  onSubmit,
+  onInterrupt,
+  disabled,
+  reason,
+}: Props) {
   const [focused, setFocused] = useState(false);
+
+  // 批次 UI U2(C10-1):「Esc 中断」此前**没有任何 keydown 接线** —— 一句纯文案承诺。
+  // server 侧能力一直存在(ws.ts:542 → kernel.abort()),这里把 Escape 接上。
+  // 为什么挂在 window 而不是 textarea 的 onKeyDown:推演中 textarea 是 disabled,
+  // disabled 元素既不派发键盘事件也不持有焦点,绑在它上面永远收不到 Esc。
+  const canInterrupt = !!disabled && reason === "streaming" && !!onInterrupt;
+  useEffect(() => {
+    if (!canInterrupt) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      e.preventDefault();
+      onInterrupt?.();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [canInterrupt, onInterrupt]);
 
   function send() {
     if (disabled) return;
@@ -92,7 +116,9 @@ export function ChatComposer({ value, onChange, onSubmit, disabled, reason }: Pr
         </span>
         <span>·</span>
         <span>思考 / 行动 / 反思 都会落到 timeline</span>
-        <span className="ml-auto">⏎ 发送 · ⇧⏎ 换行 · Esc 中断</span>
+        <span className="ml-auto">
+          ⏎ 发送 · ⇧⏎ 换行{canInterrupt && " · Esc 中断"}
+        </span>
       </div>
     </div>
   );

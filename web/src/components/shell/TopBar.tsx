@@ -110,22 +110,25 @@ function CostDisplay({
   total: { input: number; output: number; costUsd: number };
 }) {
   const live = current.input + current.output;
+  const hasTotal = total.input + total.output > 0;
   return (
     <div className="flex items-center gap-2" style={{ fontSize: 11 }}>
-      {live > 0 ? (
+      {/* 批次 UI U2(C10-2「currentUsage 恒 0,那句本轮空闲提示永现」):
+          currentUsage 现在由 message_end 的真实 usage 累加而来(见 stores/chat.ts),
+          推演中会有真数字。本轮真的没产生任何 token 时**什么都不渲染** ——
+          旧实现在这里硬编码一句与数据无关的常量文案,是在对用户撒谎。
+          costUsd 只在 agent_end 才拿得到,中途为 0,故 > 0 才渲染金额。 */}
+      {live > 0 && (
         <span className="font-mono sansheng-text-jade">
-          ▸ in {current.input}/out {current.output} · ${current.costUsd.toFixed(4)}
+          ▸ in {current.input}/out {current.output}
+          {current.costUsd > 0 && ` · $${current.costUsd.toFixed(4)}`}
         </span>
-      ) : (
-        <span className="font-mono sansheng-text-mute">本轮 idle</span>
       )}
-      {total.input + total.output > 0 && (
-        <>
-          <span className="sansheng-text-mute">·</span>
-          <span className="font-mono sansheng-text-mute">
-            Σ {total.input + total.output} tok · ${total.costUsd.toFixed(4)}
-          </span>
-        </>
+      {live > 0 && hasTotal && <span className="sansheng-text-mute">·</span>}
+      {hasTotal && (
+        <span className="font-mono sansheng-text-mute">
+          Σ {total.input + total.output} tok · ${total.costUsd.toFixed(4)}
+        </span>
       )}
     </div>
   );
