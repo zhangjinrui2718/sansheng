@@ -21,6 +21,7 @@ import { nanoid } from "nanoid";
 import type { BlackboardArtifact, ArtifactStatus } from "../../../shared/types/blackboard.js";
 import { artifactBus, makeArtifact } from "../bus/index.js";
 import { log } from "../../shared/log.js";
+import { parseJsonLenient } from "../../shared/jsonRepair.js";
 import {
   upsertArtifact,
   updateArtifactStatus,
@@ -289,24 +290,16 @@ export class Planner {
   }
 
   private parseTodoArray(raw: string): PlannedTodo[] | null {
-    const trimmed = raw.trim();
-    if (!trimmed) return null;
-    let jsonText = trimmed;
-    const fence = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/);
-    if (fence && fence[1]) {
-      jsonText = fence[1].trim();
-    } else {
-      const brace = jsonText.indexOf("[");
-      if (brace >= 0) jsonText = jsonText.slice(brace);
+    const r = parseJsonLenient<PlannedTodo[]>(raw);
+    if (!r.ok || !Array.isArray(r.value)) return null;
+    if (r.repaired) {
+      // 截断的 todo 数组同样救回:已写出的 todo 是有效产物,补齐尾括号即可
+      // (半截的那个 todo 会在 validateAndNormalize 里因字段缺失被丢弃)。
+      log.warn(
+        `planner: LLM output was truncated mid-JSON, salvaged partial todo array (raw ${raw.length} chars)`,
+      );
     }
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(jsonText);
-    } catch {
-      return null;
-    }
-    if (!Array.isArray(parsed)) return null;
-    return parsed as PlannedTodo[];
+    return r.value;
   }
 
   private validateAndNormalize(

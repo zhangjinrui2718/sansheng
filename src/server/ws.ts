@@ -60,6 +60,21 @@ import { isAllowedOriginHeader } from "./http/security.js";
 /** 批次 4b C6:默认心跳间隔 30s(两拍无 pong = 60s 判死,远小于任何中间设备的空闲超时)。 */
 export const WS_HEARTBEAT_INTERVAL_MS = 30_000;
 
+/**
+ * Planner / Executor 单次补全的输出预算(token)。
+ *
+ * 2026-10-02 真实事故:Executor 被要求交一份覆盖 ASR/LLM/TTS/VAD/端侧五个技术栈
+ * 的调研报告,输出撞上限被截断在半截 JSON 里 → todo failed → cascade 带走 3 个
+ * 下游 todo,整轮 plan 报废(conv_muqsidb0_wgru)。
+ *
+ * 取 8192 的理由:够写一份结构完整的 evidence/markdown 报告(≈ 6-8k token 中文
+ * 绰绰有余),又远小于主流模型自报的 maxTokens(常在 32k+),让「单步写太长」
+ * 尽早以可预期的截断暴露,而不是把半截 JSON 递到解析器。
+ * 真正的解药是 Planner 侧把 todo 拆小(见 planner system prompt)+ 截断兜底
+ * 救回(shared/jsonRepair),本常量只是把失败变成确定性的。
+ */
+const PLANNER_EXECUTOR_MAX_TOKENS = 8192;
+
 /** 心跳只需要 socket 的这两个能力(结构化类型,便于用假 client 单测)。 */
 export interface HeartbeatSocket {
   ping(): void;
@@ -179,10 +194,28 @@ function makeLlmCall(kernel: AgentKernel): PlannerLlmCall & ExecutorLlmCall {
         systemPrompt: input.systemPrompt,
         messages: [{ role: "user", content: input.userPrompt, timestamp: Date.now() }],
       },
-      apiKey ? { apiKey } : undefined,
+      {
+        ...(apiKey ? { apiKey } : {}),
+        // 显式预算:不传则回落到 Model.maxTokens(模型自报的上限,通常很大)。
+        // 2026-10-02 真实事故(conv_muqsidb0_wgru/todo-2):Executor 要交一份
+        // 覆盖 ASR/LLM/TTS/VAD/端侧的研究报告,撞上输出上限被截断在半截
+        // markdown 正文中间。这里给一个有界预算,让「写太长」变成可预期的失败,
+        // 而不是随机截断 —— 配合 shared/jsonRepair 救回已写部分。
+        maxTokens: PLANNER_EXECUTOR_MAX_TOKENS,
+      },
     );
     if (result.stopReason === "error" || result.errorMessage) {
       throw new Error(`makeLlmCall: ${result.errorMessage ?? "unknown error"}`);
+    }
+    // stopReason === "length" = 模型被 maxTokens 截断(pi-ai StopReason 联合类型
+    // 的 7 个成员之一)。旧代码只判 error,于是半截 JSON 被当成**成功**返回,
+    // 下游 parseOutcome 失败 → todo failed → cascadeFailDependents 把整条链
+    // 带走(实测 6 个 todo 里 2 个已产出 evidence,用户最后什么都没拿到)。
+    // 现在显式识别,交给调用方的宽容解析器处理并在产物上打 truncated 标记。
+    if (result.stopReason === "length") {
+      log.warn(
+        `makeLlmCall: output truncated at maxTokens=${PLANNER_EXECUTOR_MAX_TOKENS} (model ${model.id}); returning partial text for salvage`,
+      );
     }
     const out: string[] = [];
     for (const c of result.content) {

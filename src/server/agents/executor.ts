@@ -21,6 +21,7 @@ import { nanoid } from "nanoid";
 import type { BlackboardArtifact, ArtifactStatus, CallbackReason } from "../../../shared/types/blackboard.js";
 import { artifactBus, makeArtifact } from "../bus/index.js";
 import { log } from "../../shared/log.js";
+import { parseJsonLenient } from "../../shared/jsonRepair.js";
 import {
   upsertArtifact,
   updateArtifactStatus,
@@ -84,6 +85,20 @@ export interface ExecutorResult {
   executorSessionId: string;
   outcome: ExecutorOutcome["outcome"];
   artifactIds: string[]; // ids of artifacts produced (evidence/hypothesis/note)
+}
+
+/**
+ * 截断标记:LLM 输出被 maxTokens 截断、经 repairTruncatedJson 救回时,
+ * 在产物 metadata 上打 `truncated: true`。下游 synthesis 步骤与用户据此知道
+ * 「这份内容写了一半」,而不是把残缺产物当完整结论用。
+ */
+function markTruncated(
+  meta: unknown,
+  truncated: boolean,
+): BlackboardArtifact["metadata"] | undefined {
+  const base = (meta as BlackboardArtifact["metadata"]) ?? undefined;
+  if (!truncated) return base;
+  return { ...(base ?? {}), truncated: true };
 }
 
 /* ────────────────────────────────────────────────────────── *
@@ -278,23 +293,19 @@ export class Executor {
   }
 
   private parseOutcome(raw: string): ExecutorOutcome | null {
-    const trimmed = raw.trim();
-    if (!trimmed) return null;
-    let jsonText = trimmed;
-    const fence = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/);
-    if (fence && fence[1]) jsonText = fence[1].trim();
-    else {
-      const brace = jsonText.indexOf("{");
-      if (brace >= 0) jsonText = jsonText.slice(brace);
+    const parsedRaw = parseJsonLenient<Record<string, unknown>>(raw);
+    if (!parsedRaw.ok) return null;
+    if (parsedRaw.repaired) {
+      // 输出被 maxTokens 截断(2026-10-02 真实事故:conv_muqsidb0_wgru/todo-2,
+      // 撞上限后半截 JSON 曾被当成成功 → todo failed → cascade 带走 3 个下游)。
+      // 现在救回已写出的部分,但必须留痕 —— 产物是「不完整」而非「完整」。
+      log.warn(
+        `executor: LLM output was truncated mid-JSON, salvaged partial outcome (raw ${raw.length} chars)`,
+      );
     }
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(jsonText);
-    } catch {
-      return null;
-    }
-    if (!parsed || typeof parsed !== "object") return null;
-    const obj = parsed as Record<string, unknown>;
+    const obj = parsedRaw.value;
+    if (!obj || typeof obj !== "object") return null;
+    const truncated = parsedRaw.repaired;
 
     if (obj.outcome === "evidence") {
       const ev = obj.evidence as Record<string, unknown> | undefined;
@@ -305,7 +316,9 @@ export class Executor {
         evidence: {
           title: ev.title.slice(0, 200),
           body: typeof ev.body === "string" ? ev.body : "",
-          metadata: (ev.metadata as BlackboardArtifact["metadata"]) ?? undefined,
+          // truncated=true 时 body 是「写到一半」的部分内容 —— 显式留痕,
+          // 让下游 synthesis 步骤和用户都知道这份 evidence 不完整。
+          metadata: markTruncated(ev.metadata, truncated),
         },
       };
     }
@@ -322,7 +335,7 @@ export class Executor {
           title: hyp.title.slice(0, 200),
           body: typeof hyp.body === "string" ? hyp.body : "",
           callbackReason: reason,
-          metadata: { ...meta, callbackReason: reason },
+          metadata: { ...markTruncated(meta, truncated), callbackReason: reason },
         },
       };
     }
@@ -336,7 +349,7 @@ export class Executor {
         note: {
           title: note.title.slice(0, 200),
           body: typeof note.body === "string" ? note.body : "",
-          metadata: (note.metadata as BlackboardArtifact["metadata"]) ?? undefined,
+          metadata: markTruncated(note.metadata, truncated),
         },
       };
     }
