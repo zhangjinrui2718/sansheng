@@ -13,6 +13,9 @@ import { AgentKernel } from "./kernel/agentKernel.js";
 import { attachWebSocket } from "./ws.js";
 import { Keyring, Storage } from "./storage/index.js";
 import { ensureHarness } from "./harness/loader.js";
+// 批次 5b-2 T2(审查 §B1):HarnessManager boot 启动 + 只读状态 API 数据源
+import { bootHarnessManager } from "./agents/harnessBoot.js";
+import { getHarnessManager } from "./agents/harnessManager.js";
 import { join } from "node:path";
 import type { Server } from "node:http";
 
@@ -46,6 +49,18 @@ export async function startServer(opts: ServerOptions): Promise<void> {
   const agentDir = join(opts.dataDir, "pi");
   const kernel = new AgentKernel(settingsStore, agentDir, settings.cwd, storage);
 
+  // 批次 5b-2 T2(审查 §B1:harnessManager.ts 562 行生产从不启动 = 死代码):
+  // boot 即订阅 artifactBus artifact_created,等 harness_proposal → 产只读
+  // implementation_preview(v0 不写文件)。生产 decideFn = completeSimple
+  // (kernel.getModel());无模型时 decideFn throw → manager 写失败 note(可见失败)。
+  // proposals 生产发射点当前不存在(executor D13 待 5c)→ 启动即待命,
+  // GET /api/harness 如实暴露运行态,不造假数据。
+  try {
+    bootHarnessManager({ storage, kernel });
+  } catch (err) {
+    log.warn("harness manager boot failed:", err);
+  }
+
   // 先建一个 placeholder app 占 fetch,只是为了 listen
   const placeholder = await createApp({ dataDir: opts.dataDir, kernel, httpServer: createServer(), settingsStore, storage });
   const httpServer = serve(
@@ -74,6 +89,7 @@ export async function startServer(opts: ServerOptions): Promise<void> {
   process.on("SIGTERM", () => {
     log.muted("SIGTERM received, closing server");
     try {
+      getHarnessManager()?.stop(); // 5b-2:退订 artifactBus
       httpServer.close();
       storage.close();
     } catch (err) {
@@ -86,6 +102,9 @@ export async function startServer(opts: ServerOptions): Promise<void> {
   // SIGINT/SIGTERM/崩溃退出都会触发 exit 事件 → 不再残留 stale pid;
   // clearOwnPidFile 只在 pid 文件指向本进程时删除(防误删新实例的 pid)。
   const closeStorage = () => {
+    try {
+      getHarnessManager()?.stop(); // 5b-2:退订 artifactBus
+    } catch {}
     try {
       storage.close();
     } catch {}

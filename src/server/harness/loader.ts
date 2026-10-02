@@ -273,3 +273,43 @@ export function loadHarness(dataDir: string): HarnessConfig {
   }
   return config;
 }
+
+/**
+ * 批次 5b-2 T2:每个角色 prompt 的只读摘要(GET /api/harness · UI Harness tab 数据源)。
+ *
+ * state 语义(与 ensureHarness 三分支同源,不改动其行为):
+ *   - `default`        文件内容 === 当前出厂默认(DEFAULT_PROMPTS)
+ *   - `legacy_factory` 内容 ∈ LEGACY_DEFAULTS 版本链(出厂旧版、用户未编辑,
+ *                      ensureHarness 下次启动会自动升级)
+ *   - `user_edited`    用户手笔(既非当前默认也不在版本链上)—— 永不覆盖
+ *   - `empty`          无文件 / 空文件(生产 prompt 注入回退 SDK 默认)
+ */
+export interface HarnessPromptInfo {
+  role: RoleKind;
+  lines: number;
+  chars: number;
+  state: "default" | "legacy_factory" | "user_edited" | "empty";
+}
+
+export function describePrompts(dataDir: string): HarnessPromptInfo[] {
+  const config = loadHarness(dataDir);
+  return (Object.keys(DEFAULT_PROMPTS) as RoleKind[]).map((role) => {
+    const text = config.systemPrompts[role] ?? "";
+    let state: HarnessPromptInfo["state"];
+    if (!text.trim()) {
+      state = "empty";
+    } else if (text === DEFAULT_PROMPTS[role]) {
+      state = "default";
+    } else if (LEGACY_DEFAULTS[role]?.includes(text)) {
+      state = "legacy_factory";
+    } else {
+      state = "user_edited";
+    }
+    return {
+      role,
+      lines: text ? text.split("\n").length : 0,
+      chars: text.length,
+      state,
+    };
+  });
+}

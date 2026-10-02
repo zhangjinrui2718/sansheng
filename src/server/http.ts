@@ -27,6 +27,7 @@ import {
   listBlackboards,
   listFragmentsByKind,
   listFragmentsAll,
+  listArtifacts,
 } from "./storage/index.js";
 import {
   createToolRegistry,
@@ -34,6 +35,10 @@ import {
 } from "./tools/integration.js";
 import { registerBlackboardArtifactRoutes } from "./http/blackboardRoutes.js";
 import { createSecurityMiddleware } from "./http/security.js";
+// 批次 5b-2 T2:Harness 状态 API(manager 运行态 + prompts 摘要 + proposals/previews)
+import { loadHarness, describePrompts } from "./harness/loader.js";
+import { FALLBACK_HARNESS_PROMPT, getHarnessManager } from "./agents/harnessManager.js";
+import { getHarnessBootMeta } from "./agents/harnessBoot.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = import.meta.dirname ?? join(__filename, "..");
@@ -223,6 +228,71 @@ export async function createApp(opts: AppOptions): Promise<Hono> {
 
   // —— M3+ B1: BlackboardArtifact v3 路由(extracted to blackboardRoutes.ts) ——
   registerBlackboardArtifactRoutes(app, opts.storage);
+
+  // —— 批次 5b-2 T2:Harness 状态(只读;UI Harness tab 数据源)——
+  // 自动落在 B4 安全中间件之后:createApp 顶部 app.use("*", createSecurityMiddleware())
+  // 最先注册(Hono 按注册顺序执行)→ 本路由先过 Host 校验(evil Host → 421);
+  // GET 豁免 Origin 校验(§B4 既有语义,与其它 /api/* GET 一致)。
+  // 本批**只读**:无 POST /api/harness —— manager v0 无 apply 语义(D15:v0=只读
+  // preview 生成器),无可安全暴露的 mutation;preview 生成由 bus 事件驱动
+  // (artifact_created),不是 HTTP 面。apply/mutation 留给后续批次论证。
+  app.get("/api/harness", (c) => {
+    try {
+      const mgr = getHarnessManager();
+      const boot = getHarnessBootMeta();
+      const cfg = loadHarness(opts.dataDir);
+      // manager 自身无持久化(seen/inFlight/计数器 = 内存态,重启清零)→
+      // proposals/previews 从 blackboard storage 读真实数据(scope=global),
+      // notes 说明字段如实交代两套语义,不造假数据。
+      const proposals = listArtifacts(opts.storage.db, {
+        scope: "global",
+        kind: "harness_proposal",
+        limit: 100,
+      });
+      const previews = listArtifacts(opts.storage.db, {
+        scope: "global",
+        kind: "implementation_preview",
+        limit: 100,
+      });
+      const notes = [
+        "manager received/processed 等计数器为内存态(重启清零);proposals/previews 持久化于 blackboard storage(scope=global)",
+        "本端点只读:无 apply/mutation(HarnessManager v0 = 只读 preview 生成器,D15;真 apply 属后续批次)",
+      ];
+      if (proposals.length === 0) {
+        notes.push(
+          "当前无 harness_proposal 生产发射点(executor D13 发射路径待 5c 修复;沉淀服务 kind 白名单刻意不含 harness_proposal)— manager 已订阅 artifact_created 待命",
+        );
+      }
+      return c.json({
+        manager: {
+          running: mgr ? mgr.isRunning() : false,
+          stats: mgr ? mgr.getStats() : null,
+          decideSource: mgr && boot ? boot.decideSource : null,
+          startedAt: mgr && boot ? boot.startedAt : null,
+        },
+        // 6 角色 prompt 摘要(行数/字符数/default|legacy_factory|user_edited|empty,
+        // loader 版本链信息;state=user_edited 即「用户编辑过,ensureHarness 永不覆盖」)
+        prompts: describePrompts(opts.dataDir),
+        harnessManagerPrompt: {
+          source: "builtin_fallback",
+          lines: FALLBACK_HARNESS_PROMPT.split("\n").length,
+          editable: false,
+          note: "内置 FALLBACK_HARNESS_PROMPT(shared/prompts/harness_manager.md 精简版);manager prompt 尚未纳入 dataDir harness 版本链(5c)",
+        },
+        config: {
+          enabledTools: cfg.enabledTools,
+          redLines: cfg.redLines,
+          budget: cfg.budget,
+        },
+        proposals,
+        previews,
+        notes,
+      });
+    } catch (err) {
+      log.warn("/api/harness failed:", err);
+      return c.json({ error: "storage_error", message: errMsg(err) }, 500);
+    }
+  });
 
   app.get("/api/memory/fragments", (c) => {
     const kind = c.req.query("kind");

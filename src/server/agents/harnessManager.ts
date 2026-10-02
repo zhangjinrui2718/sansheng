@@ -121,8 +121,10 @@ export interface HarnessManagerOptions {
 /**
  * 默认 harness 系统 prompt(若 harness loader 没读到对应文件)。
  * 同步嵌入的简短版 — 完整版在 `shared/prompts/harness_manager.md`。
+ * 批次 5b-2 T2:导出 — harnessBoot.ts 生产 decideFn 用它做 systemPrompt;
+ * GET /api/harness 用它做摘要(来源/行数)。
  */
-const FALLBACK_HARNESS_PROMPT = `# Harness Manager v0
+export const FALLBACK_HARNESS_PROMPT = `# Harness Manager v0
 
 你是 Harness Manager — 三生系统的工装升级顾问。
 绝不写文件,只生成只读的 implementation preview。
@@ -201,6 +203,14 @@ export class HarnessManager {
   /** 测试用:看某 proposal 是否已生成 preview(内存或 storage)。 */
   hasSeen(proposalId: string): boolean {
     return this.seen.has(proposalId);
+  }
+
+  /**
+   * 批次 5b-2 T2:订阅是否存活 — GET /api/harness「manager 运行态」字段与
+   * boot 幂等判断用(start() 后 true,stop() 后 false)。
+   */
+  isRunning(): boolean {
+    return this.started;
   }
 
   /** 返回当前运行期计数器的快照(对外只读)。 */
