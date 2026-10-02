@@ -7,6 +7,7 @@
  *        启动时检测到明文残留会一次性升级为加密格式。
  */
 import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { randomBytes } from "node:crypto";
 import { log } from "../../shared/log.js";
@@ -80,12 +81,52 @@ export function genProviderId(): string {
   return `prov_${randomBytes(4).toString("hex")}`;
 }
 
-const DEFAULTS: Settings = {
-  providers: [],
-  activeProviderId: "",
-  cwd: process.env.HOME ?? "/root",
-  personaName: "三生",
-};
+/* ──────────────────────────────────────────────────────────────── *
+ * 批次 6:默认工作根从 $HOME 固定为 ~/sansheng-workspace
+ *
+ * 用户报障(2026-10-02):出厂 cwd = $HOME 让 agent 的工作根是**整个家目录** ——
+ * 「跑命令 / 读写文件」的根无处不在。裁决(jev conf 1.00)= `~/sansheng-workspace`:
+ * 可见、与应用数据目录 `~/.sansheng` 物理分离(清数据不动工作区)、ASCII、
+ * 且避开源码仓库名 `~/projects/sansheng`。
+ *
+ * 惰性求值(而不是模块加载期算死):CLI/daemon 启动时 process.env 可能被改写
+ * (旧实现 `process.env.HOME ?? "/root"` 正是被 env 污染的写法,daemon 模式下
+ * 拿到的可能不是用户家目录),os.homedir() 在 POSIX 上优先读 env HOME、
+ * 退回 passwd 查询,每次调用都拿当下真值。
+ * ──────────────────────────────────────────────────────────────── */
+
+/** 固定工作目录名(测试与 kernel 共用的唯一字面量真相) */
+export const DEFAULT_WORKSPACE_DIR_NAME = "sansheng-workspace";
+
+/** 出厂默认 cwd = <homedir>/sansheng-workspace */
+export function defaultWorkspaceDir(): string {
+  return join(homedir(), DEFAULT_WORKSPACE_DIR_NAME);
+}
+
+/** 旧出厂默认(≤ 批次 6):`process.env.HOME ?? "/root"` 的实际取值 = os.homedir() */
+export function legacyDefaultCwd(): string {
+  return homedir();
+}
+
+/**
+ * 存量判定:**严格相等**,绝不做前缀 / 包含判定。
+ *
+ * 理由:用户完全可能有意把工作根设成 `$HOME/projects/x` 或 `$HOME-old`;
+ * 任何"以 $HOME 开头"的启发式都会把这些显式设置覆盖成出厂默认 —— 那是
+ * 静默改写用户配置,比报障本身更糟。
+ */
+export function isLegacyDefaultCwd(cwd: string | null | undefined): boolean {
+  return typeof cwd === "string" && cwd.length > 0 && cwd === legacyDefaultCwd();
+}
+
+function defaultSettings(): Settings {
+  return {
+    providers: [],
+    activeProviderId: "",
+    cwd: defaultWorkspaceDir(),
+    personaName: "三生",
+  };
+}
 
 export class SettingsStore {
   private cache: Settings | null = null;
@@ -97,7 +138,8 @@ export class SettingsStore {
   load(): Settings {
     if (this.cache) return this.cache;
     if (!existsSync(this.file)) {
-      this.cache = { ...DEFAULTS, providers: [] };
+      this.cache = { ...defaultSettings(), providers: [] };
+      this.ensureDefaultWorkspaceDir(this.cache.cwd);
       return this.cache;
     }
     let parsed: Settings;
@@ -118,8 +160,9 @@ export class SettingsStore {
         })`,
       );
       this.backupCorruptFile();
-      parsed = { ...DEFAULTS, providers: [] };
+      parsed = { ...defaultSettings(), providers: [] };
       this.cache = parsed;
+      this.ensureDefaultWorkspaceDir(parsed.cwd);
       return this.cache;
     }
 
@@ -154,13 +197,30 @@ export class SettingsStore {
       log.warn("settings: no Keyring configured — apiKey will be stored in plaintext");
     }
 
-    this.cache = parsed;
+    // 批次 6 P2:存量迁移。已持久化值优先(`raw.cwd ?? 默认`),所以只改默认值对
+    // 已有 settings.json(用户那份 cwd = "/Users/fuyao")完全无效 —— 必须在 load
+    // 期把「恰好等于旧默认」的那一个值改写掉,否则迁移永远不发生。
+    // 判据是严格相等(见 isLegacyDefaultCwd),用户显式设过的其它值一律不动。
+    let cwdMigrated = false;
+    if (isLegacyDefaultCwd(parsed.cwd)) {
+      const next = defaultWorkspaceDir();
+      log.info(
+        `settings: cwd migrated from the legacy default $HOME (${legacyDefaultCwd()}) → ${next} (batch 6; set any absolute path in 「设置 → 工作目录」 to override)`,
+      );
+      parsed = { ...parsed, cwd: next };
+      cwdMigrated = true;
+    }
 
-    // 升级:legacy 格式 OR 明文残留 → 重新写盘(这次会走加密)
-    if (wasLegacy || anyWasPlain) {
+    this.cache = parsed;
+    this.ensureDefaultWorkspaceDir(parsed.cwd);
+
+    // 升级:legacy 格式 OR 明文残留 OR cwd 迁移 → 重新写盘(走既有原子 save)
+    if (wasLegacy || anyWasPlain || cwdMigrated) {
       try {
         this.save(parsed);
-        log.info(`persisted settings.json (legacy=${wasLegacy}, upgradedPlaintext=${anyWasPlain})`);
+        log.info(
+          `persisted settings.json (legacy=${wasLegacy}, upgradedPlaintext=${anyWasPlain}, migratedCwd=${cwdMigrated})`,
+        );
       } catch (err) {
         log.warn("failed to persist upgraded settings:", err);
       }
@@ -169,10 +229,34 @@ export class SettingsStore {
     return this.cache;
   }
 
+  /**
+   * 批次 6 P1:固定工作目录**自动创建** —— 仅限「生效 cwd 恰好等于出厂默认目录」。
+   *
+   * 为什么不建用户自定义路径:用户在设置里敲 `/Users/fuyao/project` 少了个字符,
+   * 无声 mkdir 会把打错的路径变成真实空目录(而且是在他的家目录里),制造
+   * 「这目录哪来的」噪音。自定义路径建不建由用户自己负责。
+   *
+   * 失败不崩:家目录只读 / 磁盘满 / 路径被文件占位(ENOTDIR)都不该让服务起不来
+   * —— 降级 log.warn,cwd 值照常生效(agent 之后按需自己 mkdir,或用户手改)。
+   */
+  private ensureDefaultWorkspaceDir(cwd: string): void {
+    if (cwd !== defaultWorkspaceDir()) return;
+    if (existsSync(cwd)) return;
+    try {
+      mkdirSync(cwd, { recursive: true });
+      log.info(`settings: created default workspace directory ${cwd}`);
+    } catch (err) {
+      log.warn(
+        `settings: failed to create the default workspace directory ${cwd} — cwd stays set to it, but file operations may fail until it exists:`,
+        err,
+      );
+    }
+  }
+
   /** 把磁盘上的 JSON(可能是旧单-provider 格式)规整成新格式 */
   private migrate(raw: Record<string, unknown>): Settings {
-    const cwd = (raw.cwd as string) ?? DEFAULTS.cwd;
-    const personaName = (raw.personaName as string) ?? DEFAULTS.personaName;
+    const cwd = (raw.cwd as string) ?? defaultSettings().cwd;
+    const personaName = (raw.personaName as string) ?? defaultSettings().personaName;
     const agentDir = raw.agentDir as string | undefined;
 
     // 新格式:已有 providers 数组
@@ -295,7 +379,7 @@ export class SettingsStore {
   }
 
   reset(): void {
-    this.save({ ...DEFAULTS, providers: [] });
+    this.save({ ...defaultSettings(), providers: [] });
   }
 }
 
