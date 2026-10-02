@@ -21,7 +21,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ensureHarness, loadHarness } from "../../src/server/harness/loader.js";
+import { ensureHarness, loadHarness, roleToolCeiling } from "../../src/server/harness/loader.js";
 
 /**
  * 批次 5a 之前的旧内嵌 communicator 默认(9 行版,无尾换行)。
@@ -157,7 +157,8 @@ describe("harness/loader · ensureHarness 升级逻辑(批次 5a T1)", () => {
     // loadHarness 其它字段不受影响
     // 批次 7-E:enabledTools 已删除(它是不存在的工具名的死装饰),改为断言
     // 新的 per-agent 工具集合随 loadHarness 一并读出。
-    expect(harness.toolSets.communicator.allowed).toEqual(["read", "grep", "find", "ls"]);
+    // 名单从 roleToolCeiling 派生(7-F 起上界含 canvas_* 三件),不在测试里写死
+    expect(harness.toolSets.communicator.allowed).toEqual([...roleToolCeiling("communicator")]);
     expect(harness.budget.maxIterations).toBe(5);
   });
 });

@@ -27,6 +27,8 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  TOOL_CATALOG,
+  TOOL_NAMES,
   TOOL_ROLES,
   ensureToolSets,
   loadToolSets,
@@ -65,11 +67,14 @@ describe("harness 工具集合 · 生成与读取(批次 7-E)", () => {
     expect(loadHarness(dataDir).toolSets.communicator.source).toBe("factory");
   });
 
-  it("出厂:communicator 拿只读四件套;其余角色 allow 为空(enforced=false 如实标注)", () => {
+  it("出厂:communicator 拿满只读上界;其余角色 allow 为空(enforced=false 如实标注)", () => {
     ensureToolSets(dataDir);
     const sets = loadToolSets(dataDir);
 
-    expect(sets.communicator.allowed).toEqual(["read", "grep", "find", "ls"]);
+    // 名单从 roleToolCeiling 派生,不在测试里复写一份(7-F 起上界含 canvas_* 三件)
+    expect(sets.communicator.allowed).toEqual([...roleToolCeiling("communicator")]);
+    expect(sets.communicator.allowed).toContain("read");
+    expect(sets.communicator.allowed).toContain("canvas_read");
     expect(sets.communicator.enforced).toBe(true);
 
     // 没工具循环的角色**不能**拿到一份非空名单 —— 那是换个姿势继续撒谎
@@ -94,7 +99,7 @@ describe("harness 工具集合 · 生成与读取(批次 7-E)", () => {
 
   it("缺文件时退回出厂集合(source=factory),不报错", () => {
     const sets = loadToolSets(dataDir); // 从未 ensure 过
-    expect(sets.communicator.allowed).toEqual(["read", "grep", "find", "ls"]);
+    expect(sets.communicator.allowed).toEqual([...roleToolCeiling("communicator")]);
     expect(sets.communicator.source).toBe("factory");
   });
 });
@@ -116,7 +121,8 @@ describe("harness 工具集合 · ceiling 突破不了(架构护栏)", () => {
   });
 
   it("allow ⊄ ceiling 对全部 7 个角色都成立(没有一个角色能自己获得写/执行能力)", () => {
-    const all = ["read", "grep", "find", "ls", "edit", "write", "bash", "powershell"];
+    // 写**全部**工具(SDK 8 + 7-F 桥接的 6)→ 结果必须恰好等于该角色的上界
+    const all = [...TOOL_NAMES];
     ensureToolSets(dataDir);
     for (const role of TOOL_ROLES) {
       writeSet(role, JSON.stringify({ allow: all, deny: [] }));
@@ -151,7 +157,7 @@ describe("harness 工具集合 · fail-closed(读不懂配置 ≠ 放行一切)"
     writeSet("communicator", "{ this is not json");
     const set = loadToolSets(dataDir).communicator;
     expect(set.source).toBe("factory");
-    expect(set.allowed).toEqual(["read", "grep", "find", "ls"]);
+    expect(set.allowed).toEqual([...roleToolCeiling("communicator")]);
     expect(set.warnings.join("\n")).toContain("解析失败");
   });
 
@@ -218,13 +224,13 @@ describe("harness 工具集合 · fail-closed(读不懂配置 ≠ 放行一切)"
 });
 
 describe("harness 工具集合 · ceiling 本身(工具目录自洽性)", () => {
-  it("每个角色的 ceiling 都 ⊆ SDK 闭合联合,且不含写/执行类工具", () => {
+  it("每个角色的 ceiling 都 ⊆ 完整工具目录,且全部是 readonly 风险", () => {
     ensureToolSets(dataDir);
     for (const role of TOOL_ROLES) {
-      const ceiling = roleToolCeiling(role);
-      for (const tool of ceiling) {
-        expect(["read", "grep", "find", "ls", "edit", "write", "bash", "powershell"]).toContain(tool);
-        expect(["edit", "write", "bash", "powershell"], `${role} 的 ceiling 含写/执行类工具`).not.toContain(tool);
+      for (const tool of roleToolCeiling(role)) {
+        // 目录是 SDK 8 + sansheng 6(7-F 起);用 TOOL_NAMES 派生,不再写死名字
+        expect([...TOOL_NAMES], `${role} 的 ceiling 含目录外工具 ${tool}`).toContain(tool);
+        expect(TOOL_CATALOG[tool].risk, `${role} 的 ceiling 含非只读工具 ${tool}`).toBe("readonly");
       }
     }
   });

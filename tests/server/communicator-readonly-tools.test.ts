@@ -22,6 +22,17 @@
  * (PI_OFFLINE=1 不触网 + fake apiKey)+ AgentSession.getActiveToolNames()/
  * getAllTools()(SDK 公开 API)。RED(基线):默认 active tools = read/bash/edit/
  * write(可写可执行)→ 白名单断言红。
+ *
+ * ── 与既有测试的分工 ──
+ *   - 本文件是**端到端**那一条(真 createAgentSession,断言 session 上真的激活了
+ *     哪些工具);harness-tool-bridge.test.ts 守桥接层自身的语义(命名合规 /
+ *     代理正确 / 错误可辨 / 沙箱真挡)。
+ *
+ * ⚠️ 批次 7-F 行为变更:直答 session 的 active tools 从 SDK 只读四件套扩到
+ * **七件**(多 canvas_read / canvas_list / canvas_stat —— 7-F 桥接进来的
+ * sansheng sandbox 只读工具)。**写与执行侧不变**:`bash` / `edit` / `write` /
+ * `powershell` / `canvas_write` / `net_fetch` / `net_post` 一个都不许出现。
+ * 扩的是「能看什么」,不是「能改什么」。
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -30,11 +41,20 @@ import { join } from "node:path";
 import { AgentKernel } from "../../src/server/kernel/agentKernel.js";
 import { SettingsStore } from "../../src/server/settings/store.js";
 import { Keyring, Storage } from "../../src/server/storage/index.js";
+import { roleToolCeiling } from "../../src/server/harness/tools.js";
 
-/** SDK 只读工具面(createReadOnlyTools 同款);白名单必须恰好 ⊆ 它 */
-const READ_ONLY = ["read", "grep", "find", "ls"];
-/** 写/执行类工具(ToolName 闭合联合中的其余成员)——直答 session 一个都不能有 */
-const MUTATING = ["bash", "powershell", "edit", "write"];
+/** 期望的只读面 = 该角色的架构上界全集(不在测试里复写一份名单 —— 单一事实源) */
+const EXPECTED_READ_ONLY = [...roleToolCeiling("communicator")];
+/** 写 / 执行 / 网络出口类工具 —— 直答 session 一个都不能有 */
+const MUTATING = [
+  "bash",
+  "powershell",
+  "edit",
+  "write",
+  "canvas_write",
+  "net_fetch",
+  "net_post",
+];
 
 let savedPiOffline: string | undefined;
 let savedSanshengData: string | undefined;
@@ -80,8 +100,8 @@ afterAll(() => {
   else process.env.SANSHENG_DATA = savedSanshengData;
 });
 
-describe("沟通员直答 session 只读工具白名单(批次 5b-1 P3)", () => {
-  it("start() 后 active tools ⊆ {read,grep,find,ls},bash/edit/write/powershell 全部不在(注册面也没有)", async () => {
+describe("沟通员直答 session 只读工具白名单(批次 5b-1 P3 + 7-F 桥接)", () => {
+  it("start() 后 active tools 恰好是上界全集;写/执行/网络出口全部不在(注册面也没有)", async () => {
     await kernel.start();
     const session = kernel.getSession();
     expect(session).toBeTruthy();
@@ -93,10 +113,17 @@ describe("沟通员直答 session 只读工具白名单(批次 5b-1 P3)", () => 
     }
     // 只读工具应当在(read 是沟通员自查的最低能力面)
     expect(active).toContain("read");
-    // 白名单封闭:active ⊆ READ_ONLY
-    for (const t of active) {
-      expect(READ_ONLY, `active tool ${t} 必须在只读白名单内`).toContain(t);
+    // 7-F:桥接进来的 canvas 只读三件套**真的激活了** —— 这是「桥接 + allowlist
+    // 联合生效」的证明。customTools 必须同时过 isAllowedTool 过滤才会出现在这里。
+    for (const t of ["canvas_read", "canvas_list", "canvas_stat"]) {
+      expect(active, `7-F 桥接的 ${t} 未被激活 —— customTools 没能进 session`).toContain(t);
     }
+    // 白名单封闭:active ⊆ 上界
+    for (const t of active) {
+      expect(EXPECTED_READ_ONLY, `active tool ${t} 必须在只读上界内`).toContain(t);
+    }
+    // 恰好等于上界(不多不少):多一个就是授权放宽,少一个就是桥接没生效
+    expect([...active].sort()).toEqual([...EXPECTED_READ_ONLY].sort());
 
     // 注册面(getAllTools)同样过滤 —— allowlist 是机制级硬约束,不只是「未激活」
     const registered = session!.getAllTools().map((t) => t.name);
@@ -113,5 +140,6 @@ describe("沟通员直答 session 只读工具白名单(批次 5b-1 P3)", () => 
     const active = session!.getActiveToolNames();
     for (const t of MUTATING) expect(active).not.toContain(t);
     expect(active).toContain("read");
+    expect(active).toContain("canvas_read");
   }, 90_000);
 });

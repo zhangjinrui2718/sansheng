@@ -25,6 +25,7 @@ import { sedimentTurn } from "../agents/sedimentation.js";
 import type { BusMessage as BusMessageFromTypes, CommunicatorDecision } from "@shared/types/agents";
 import type { RunnerSettings } from "../agents/runner.js";
 import { loadHarness } from "../harness/loader.js";
+import { createBridgedTools } from "../harness/toolBridge.js";
 import { appendBusMessage, loadBusMessages } from "../agents/busPersister.js";
 
 /** 本文件用到 BusMessage 类型 */
@@ -963,6 +964,13 @@ export class AgentKernel {
     // env 里塞一份,而且切 provider 之后旧 key 永不删除。
     // 现在收敛成「建 session 前一次性同步 active provider + 清掉上一次的」。
     syncActiveProviderApiKeyEnv(active.provider, active.apiKey);
+    // 批次 7-F:把 sansheng 自有的 6 个 sandbox 工具(canvas_*/net_*)包成 SDK
+    // ToolDefinition 搬进 session。**这里不按 allowlist 过滤** —— SDK 的
+    // isAllowedTool 会对 customTools 与 builtin 统一过滤(与 tools allowlist
+    // 同一套机制),所以下面的 `tools:` 一行就是唯一的授权裁决点。
+    // 桥接失败(policy 文件损坏)→ 返回空数组 + warn,只暴露 SDK 内置工具,
+    // 绝不静默放宽授权面。
+    const bridgedTools = await createBridgedTools();
     const createPromise = (async () => {
       let resourceLoader: DefaultResourceLoader | undefined;
       if (harnessPrompt.trim()) {
@@ -981,6 +989,7 @@ export class AgentKernel {
         agentDir: this.agentDir,
         thinkingLevel: active.thinkingLevel,
         tools: communicatorTools.allowed,
+        ...(bridgedTools.length > 0 ? { customTools: bridgedTools } : {}),
         ...(resourceLoader ? { resourceLoader } : {}),
       });
     })();

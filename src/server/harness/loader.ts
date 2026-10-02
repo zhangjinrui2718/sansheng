@@ -462,7 +462,8 @@ export function describePrompts(dataDir: string): HarnessPromptInfo[] {
 
 /**
  * 批次 7-E:harness 只有一个对外入口。工具集合的实现与 ceiling 语义在 ./tools.ts,
- * 这里只做转出 —— 调用方(agentKernel / http / 测试)统一从 loader.js 取。
+ * 工具桥接在 ./toolBridge.ts,这里只做转出 —— 调用方(agentKernel / http / 测试)
+ * 统一从 loader.js 取。
  */
 export {
   ensureToolSets,
@@ -472,5 +473,25 @@ export {
   TOOL_CATALOG,
   TOOL_NAMES,
   TOOL_ROLES,
+  SDK_TOOL_NAMES,
 } from "./tools.js";
-export type { ToolName, ToolRisk, ToolRole, ToolSet, ToolSetInfo, ToolSetFile } from "./tools.js";
+export type {
+  ToolName,
+  ToolRisk,
+  ToolRole,
+  ToolSet,
+  ToolSetInfo,
+  ToolSetFile,
+  ToolOrigin,
+  SdkToolName,
+} from "./tools.js";
+
+// 批次 7-F:工具桥接(把 src/server/tools/ 的 6 个 sandbox 工具搬进 SDK session)。
+export {
+  buildBridgedTools,
+  createBridgedTools,
+  BRIDGED_TOOLS,
+  BRIDGED_TOOL_NAMES,
+  TOOL_NAME_PATTERN,
+} from "./toolBridge.js";
+export type { BridgedToolName } from "./toolBridge.js";

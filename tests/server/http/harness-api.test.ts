@@ -28,6 +28,7 @@ import type { Hono } from "hono";
 
 import { createApp } from "../../../src/server/http.js";
 import { AgentKernel } from "../../../src/server/kernel/agentKernel.js";
+import { roleToolCeiling } from "../../../src/server/harness/tools.js";
 import { SettingsStore } from "../../../src/server/settings/store.js";
 import { Keyring, Storage } from "../../../src/server/storage/index.js";
 import { ensureHarness } from "../../../src/server/harness/loader.js";
@@ -153,7 +154,9 @@ describe("batch5b-2 T2 · GET /api/harness(真实 createApp 接线)", () => {
     // 断言的是**真实生效的那一个**(communicator),不是"字段存在"。
     expect(body.toolSets.length).toBe(7); // RoleKind 6 + harness_manager
     const comm = body.toolSets.find((t) => t.role === "communicator");
-    expect(comm?.allowed).toEqual(["read", "grep", "find", "ls"]);
+    // 名单从 roleToolCeiling 派生(7-F 起含 canvas_*),不在测试里写死
+    expect(comm?.allowed).toEqual([...roleToolCeiling("communicator")]);
+    expect(comm?.allowed).toContain("canvas_read");
     expect(comm?.enforced).toBe(true);
     expect(comm?.blockedByCeiling).toEqual([]);
     for (const t of body.toolSets) expect(t.source).toBe("factory");

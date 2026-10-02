@@ -61,10 +61,18 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { RoleKind } from "@shared/types/agents";
 import { log } from "../../shared/log.js";
+import { BRIDGED_TOOL_NAMES, type BridgedToolName } from "./toolBridge.js";
 
-/** SDK 工具闭合联合(core/tools/index.d.ts `ToolName`)。新增名字必须先在 SDK 侧存在。 */
-export const TOOL_NAMES = ["read", "grep", "find", "ls", "edit", "write", "bash", "powershell"] as const;
-export type ToolName = (typeof TOOL_NAMES)[number];
+/** Pi SDK 内置的 8 个工具(闭合联合,core/tools/index.d.ts `ToolName`)。 */
+export const SDK_TOOL_NAMES = ["read", "grep", "find", "ls", "edit", "write", "bash", "powershell"] as const;
+export type SdkToolName = (typeof SDK_TOOL_NAMES)[number];
+
+/**
+ * 工具闭合联合 = SDK 内置 8 个 + 批次 7-F 桥接进来的 sansheng sandbox 6 个。
+ * 加新工具必须先在 SDK 侧存在、或先在 toolBridge.ts 里桥接 —— 不能凭空扩。
+ */
+export const TOOL_NAMES = [...SDK_TOOL_NAMES, ...BRIDGED_TOOL_NAMES] as const;
+export type ToolName = SdkToolName | BridgedToolName;
 
 /**
  * 风险分级。**只用于展示与将来做策略,不参与 allow/deny 判定** ——
@@ -72,15 +80,49 @@ export type ToolName = (typeof TOOL_NAMES)[number];
  */
 export type ToolRisk = "readonly" | "mutating" | "exec";
 
-export const TOOL_CATALOG: Readonly<Record<ToolName, { risk: ToolRisk; summary: string }>> = {
-  read: { risk: "readonly", summary: "读文件内容(支持 offset/limit 分段读)" },
-  grep: { risk: "readonly", summary: "按正则搜文件内容" },
-  find: { risk: "readonly", summary: "按 glob 找文件路径" },
-  ls: { risk: "readonly", summary: "列目录" },
-  edit: { risk: "mutating", summary: "对已有文件做精确字符串替换" },
-  write: { risk: "mutating", summary: "新建 / 覆写文件" },
-  bash: { risk: "exec", summary: "执行 shell 命令(可读可写可联网)" },
-  powershell: { risk: "exec", summary: "执行 PowerShell 命令(Windows 侧等价物)" },
+/** 工具来源。UI 要能区分「Pi SDK 自带」与「sansheng 自己的 sandbox 工具」。 */
+export type ToolOrigin = "sdk" | "sansheng";
+
+export const TOOL_CATALOG: Readonly<Record<ToolName, { risk: ToolRisk; origin: ToolOrigin; summary: string }>> = {
+  read: { risk: "readonly", origin: "sdk", summary: "读文件内容(沿会话 cwd,支持 offset/limit 分段读)" },
+  grep: { risk: "readonly", origin: "sdk", summary: "按正则搜文件内容(沿会话 cwd)" },
+  find: { risk: "readonly", origin: "sdk", summary: "按 glob 找文件路径(沿会话 cwd)" },
+  ls: { risk: "readonly", origin: "sdk", summary: "列目录(沿会话 cwd)" },
+  edit: { risk: "mutating", origin: "sdk", summary: "对已有文件做精确字符串替换" },
+  write: { risk: "mutating", origin: "sdk", summary: "新建 / 覆写文件" },
+  bash: { risk: "exec", origin: "sdk", summary: "执行 shell 命令(可读可写可联网)" },
+  powershell: { risk: "exec", origin: "sdk", summary: "执行 PowerShell 命令(Windows 侧等价物)" },
+  // ── 批次 7-F:sansheng 自有 sandbox 工具(LLM 侧 snake_case 名,理由见 toolBridge.ts)──
+  canvas_read: {
+    risk: "readonly",
+    origin: "sansheng",
+    summary: "读 ~/.sansheng/ sandbox 允许根(workspace / canvas)内的文件,30 KiB 上限,不跟随 symlink",
+  },
+  canvas_list: {
+    risk: "readonly",
+    origin: "sansheng",
+    summary: "列 sandbox 允许根内的目录条目(默认隐藏 .dotfile)",
+  },
+  canvas_stat: {
+    risk: "readonly",
+    origin: "sansheng",
+    summary: "取 sandbox 允许根内路径的 kind / size / mtimeMs",
+  },
+  canvas_write: {
+    risk: "mutating",
+    origin: "sansheng",
+    summary: "原子写 sandbox 允许根内的文件 —— 不在任何角色的上界内,启用需显式改 ROLE_CEILING",
+  },
+  net_fetch: {
+    risk: "exec",
+    origin: "sansheng",
+    summary: "对 net.json allowlist 内公网 URL 发 GET/HEAD —— 不在任何角色的上界内",
+  },
+  net_post: {
+    risk: "exec",
+    origin: "sansheng",
+    summary: "向 allowlist 内公网 URL POST JSON —— 不在任何角色的上界内,且与既有红线「禁止外发邮件」冲突",
+  },
 };
 
 /**
@@ -101,15 +143,36 @@ export const TOOL_ROLES: readonly ToolRole[] = [
   "reflection",
 ];
 
-/** 只读上界(SDK createReadOnlyTools 同款)。 */
-const READ_ONLY_CEILING: readonly ToolName[] = ["read", "grep", "find", "ls"];
+/**
+ * 只读上界。= SDK createReadOnlyTools 的 4 个 + 批次 7-F 桥接进来的 3 个
+ * canvas 只读工具。
+ *
+ * **为什么 canvas_* 只读侧进上界、而 canvas_write / net_* 不进**:
+ * - 进的三個(`canvas_read/canvas_list/canvas_stat`)经 `Sandbox` 强制,根被
+ *   钉死在 `~/.sansheng/workspace` 与 `~/.sansheng/canvas`,30 KiB 上限、不跟随
+ *   symlink —— 与内置只读工具同性质(只读),只是换了一个根,给沟通员/执行者
+ *   一双看 sansheng 自己的眼睛。
+ * - 不进的三个:`canvas_write` 是唯一的写入口;`net_fetch` / `net_post` 是**网络
+ *   出口**。v1 原则是「上界里不含任何能改变状态或对外发包的路径」—— 保持
+ *   5b-1 P3(沟通员只读不写)与 redLines(禁止外发邮件)的原有强度。
+ *   三个工具都已桥接、已测试、可被点名;放开只需改本表,不是改集合文件。
+ */
+const READ_ONLY_CEILING: readonly ToolName[] = [
+  "read",
+  "grep",
+  "find",
+  "ls",
+  "canvas_read",
+  "canvas_list",
+  "canvas_stat",
+];
 
 /**
  * 每角色的架构上界 —— **集合文件突破不了**。放开某角色 = 改本表(显式代码评审),
  * 不是往 tools/{role}.json 里加一行。
  *
- * v1 全部取只读:v0 没有任何角色被允许在用户磁盘上写入 / 执行。Executor 的默认
- * prompt 里那句「工具调用前先确认 sandbox 范围」目前是悬空的(它没有工具),
+ * v1 全部取只读:v0 没有任何角色被允许在用户磁盘上写入 / 执行 / 联网。Executor
+ * 的默认 prompt 里那句「工具调用前先确认 sandbox 范围」目前是悬空的(它没有工具),
  * 保持只读上界意味着即便接线,写与执行仍然需要一次显式的架构决策。
  */
 const ROLE_CEILING: Readonly<Record<ToolRole, readonly ToolName[]>> = {
@@ -134,9 +197,16 @@ export interface ToolSetFile {
  * 非空名单 = 换个姿势继续撒谎。空集合 + enforced:false 才是当前事实。
  */
 const FACTORY_SETS: Readonly<Record<ToolRole, ToolSetFile>> = {
-  // 沟通员:只读面全部保留(自查能力 —— worker 升级前先自己读 README / 查文件),
-  // 写与执行被 ceiling 挡下。这与 5b-1 P3 上线时的硬编码名单逐字一致。
-  communicator: { allow: ["read", "grep", "find", "ls"], deny: [] },
+  // 沟通员:只读面全部保留 —— SDK 四个(自查能力:worker 升级前先自己读 README /
+  // 查文件)+ 7-F 桥接的 canvas 三个(看 sansheng 自己的允许根)。写与执行被
+  // ceiling 挡下。
+  //
+  // ⚠️ 7-F 起这是**行为变更**:出厂集合比 5b-1 P3 的硬编码名单多了 3 个工具。
+  // 三者都是只读 + sandbox 钉根,没有权限放宽;但存量用户的
+  // harness/tools/communicator.json 仍是 7-E 写下的四工具版本 —— 按
+  // LEGACY_TOOL_SETS 的版本链语义,那个文件已被标记为「出厂旧默认」,下次
+  // 启动会自动升级为含 canvas_* 的新默认(用户手笔则永不覆盖)。
+  communicator: { allow: [...READ_ONLY_CEILING], deny: [] },
   planner: { allow: [], deny: [] },
   executor: { allow: [], deny: [] },
   harness_manager: { allow: [], deny: [] },
@@ -146,13 +216,19 @@ const FACTORY_SETS: Readonly<Record<ToolRole, ToolSetFile>> = {
 };
 
 /**
- * 出厂旧默认链(字节级 JSON 序列化串),仅用于 ensureToolSets 的「用户是否编辑过」判定。
- * 与 loader.ts 的 LEGACY_DEFAULTS 同一个模式:文件内容命中链上任一历史出厂版本
- * → 用户没编辑过 → 覆盖升级到当前默认。v1 无前代(本模块首次落地),故为空。
- * **改动 FACTORY_SETS 时必须把旧值追加进来**,否则存量用户的文件会被永久
- * 误判为「用户手笔」。
+ * 出厂旧默认链(字节级 JSON 序列化串,与 serializeToolSetFile 同格式),仅用于
+ * ensureToolSets 的「用户是否编辑过」判定。与 loader.ts 的 LEGACY_DEFAULTS 同一个
+ * 模式:文件内容命中链上任一历史出厂版本 → 用户没编辑过 → 覆盖升级到当前默认。
+ *
+ * **改动 FACTORY_SETS 时必须把旧值追加进来**,否则存量用户的文件会被永久误判为
+ * 「用户手笔」(prompt 侧 5a / 5b-1 / 7-B 已踩过三次,这里第一次真正用上)。
  */
-const LEGACY_TOOL_SETS: Partial<Record<ToolRole, string[]>> = {};
+const LEGACY_TOOL_SETS: Partial<Record<ToolRole, string[]>> = {
+  // 7-E 出厂默认 = SDK 只读四件套(与 5b-1 P3 的硬编码名单逐字一致)。
+  // 7-F 起 communicator 的出厂集合多了 canvas_read / canvas_list / canvas_stat,
+  // 存量用户的这份四工具文件因此被标记为「出厂旧默认」→ 下次启动自动升级。
+  communicator: ['{\n  "allow": [\n    "read",\n    "grep",\n    "find",\n    "ls"\n  ],\n  "deny": []\n}\n'],
+};
 
 /** 该角色当前有没有工具执行点。enforced:false 时集合是「已就位、未接线」。 */
 interface Enforcement {
