@@ -16,6 +16,15 @@
   --cinnabar: #E5484D;
   --bamboo: #7BA876;
   --amber: #D49A3A;
+  --amber-soft: rgba(212, 154, 58, 0.18);
+  --cinnabar-soft: rgba(229, 72, 77, 0.12);
+  /*
+   * --cyan 此前**没有被定义过**:页面里写的一律是 `var(--cyan, #4cc9c0)`,
+   * 即永远走 fallback。每次写都带 fallback 是个容易漏的坑(Timeline / Agents /
+   * AgentPanel 三处各写一遍),故正式入 token,调用点改成裸 var(--cyan)。
+   */
+  --cyan: #4cc9c0;
+  --cyan-soft: rgba(76, 201, 192, 0.18);
 
   --ease-out: cubic-bezier(0.2, 0.7, 0.2, 1);
   --duration-120: 120ms;

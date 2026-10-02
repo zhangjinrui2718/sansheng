@@ -143,6 +143,149 @@
     letter-spacing: 0.04em;
     margin-bottom: 12px;
   }
+
+  /*
+   * ═══════════════════════════════════════════════════════════════════════
+   * 展示层构件(批次 UI U4:「字太多、view 不好读」的收敛层)
+   * ═══════════════════════════════════════════════════════════════════════
+   *
+   * 改这一层之前,每个页面自己写着 `style={{ fontSize: 10 }}` 之类的行内样式,
+   * 同一个字号在 7 个页面里被手抄了 200 多次 —— 结果是**字号层级不统一**,
+   * 读者分不清「这是标题还是脚注」。本层把「字号 = 语义」固化成 class:
+   *
+   *   .ss-title   页面标题(serif,唯一)
+   *   .ss-section 分区标题
+   *   .ss-body    正文
+   *   .ss-meta    元信息(时间 / 作者 / 计数)
+   *   .ss-note    一句话注解(可折叠说明的摘要形态)
+   *
+   * 配套的两个小习惯:
+   *  1. **注解不长在屏幕上** —— 凡是要解释「为什么这么算」的句子,默认进
+   *     `<Disclosure>` 或 `title=`,屏幕上只留结论。反造假纪律没变,只是把
+   *     「诚实」从段落搬到了「点开就能看到」。
+   *  2. **正文默认截断** —— `.ss-clamp-2/3/4` 配合 `<Disclosure>`,
+   *     长正文折叠,首屏不再被一整段 body 推走。
+   */
+
+  .ss-page {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    padding: 16px 16px 20px;
+    max-width: 1160px;
+  }
+
+  .ss-title {
+    font-family: theme('fontFamily.serif');
+    font-size: 17px;
+    line-height: 24px;
+    color: var(--bone);
+    letter-spacing: 0.05em;
+  }
+
+  .ss-section {
+    font-size: 13px;
+    font-weight: 500;
+    line-height: 20px;
+    color: var(--bone);
+  }
+
+  .ss-body {
+    font-size: 13px;
+    line-height: 1.65;
+    color: var(--bone-dim);
+    overflow-wrap: anywhere;
+  }
+
+  .ss-meta {
+    font-family: theme('fontFamily.mono');
+    font-size: 10px;
+    line-height: 16px;
+    color: var(--bone-mute);
+  }
+
+  .ss-note {
+    font-size: 11px;
+    line-height: 1.6;
+    color: var(--bone-mute);
+  }
+
+  /* 元信息 pill:语气用 data-tone 选,不用行内样式(见 primitives.tsx 的 Pill) */
+  .ss-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-family: theme('fontFamily.mono');
+    font-size: 10px;
+    line-height: 16px;
+    padding: 0 6px;
+    border-radius: 4px;
+    background: var(--ink-3);
+    color: var(--bone-dim);
+    white-space: nowrap;
+    flex: 0 0 auto;
+  }
+  .ss-pill[data-tone="jade"] { background: var(--jade-soft); color: var(--jade); }
+  .ss-pill[data-tone="amber"] { background: var(--amber-soft); color: var(--amber); }
+  .ss-pill[data-tone="cinnabar"] { background: var(--cinnabar-soft); color: var(--cinnabar); }
+  .ss-pill[data-tone="cyan"] { background: var(--cyan-soft); color: var(--cyan); }
+  .ss-pill[data-tone="bamboo"] { background: rgba(123, 168, 118, 0.16); color: var(--bamboo); }
+  .ss-pill[data-tone="mute"] { background: var(--ink-3); color: var(--bone-mute); }
+  .ss-pill[data-tone="ochre"] { background: rgba(199, 107, 74, 0.16); color: var(--ochre); }
+  .ss-pill[data-tone="bone"] { background: var(--ink-3); color: var(--bone-dim); }
+
+  /* 多行截断 —— 配合 <Disclosure> 的「展开」,首屏不再被长正文推走 */
+  .ss-clamp-2,
+  .ss-clamp-3,
+  .ss-clamp-4 {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+  .ss-clamp-2 { -webkit-line-clamp: 2; }
+  .ss-clamp-3 { -webkit-line-clamp: 3; }
+  .ss-clamp-4 { -webkit-line-clamp: 4; }
+
+  /* 原生 <details>:比自建 useState 少一份状态,展开/收起行为浏览器原生保证 */
+  .ss-disclosure > summary {
+    cursor: pointer;
+    list-style: none;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 11px;
+    line-height: 18px;
+    color: var(--bone-mute);
+    user-select: none;
+  }
+  .ss-disclosure > summary::-webkit-details-marker { display: none; }
+  .ss-disclosure > summary::before {
+    content: "›";
+    display: inline-block;
+    transition: transform var(--duration-160) var(--ease-out);
+  }
+  .ss-disclosure[open] > summary::before { transform: rotate(90deg); }
+  .ss-disclosure > summary:hover { color: var(--bone-dim); }
+
+  /* 空态:一句话 + 可选的下一步动作。不再塞三段「这是真实空态,不是没接上」 */
+  .ss-empty {
+    font-size: 12px;
+    line-height: 1.7;
+    color: var(--bone-mute);
+    padding: 14px 16px;
+    background: var(--ink-1);
+    border: 1px dashed var(--ink-3);
+    border-radius: 8px;
+  }
+
+  /* 左侧色条:一处表达「这条要人管」(等决策 / 失败) */
+  .ss-flag {
+    border-left: 2px solid var(--ink-4);
+    padding-left: 8px;
+  }
+  .ss-flag[data-tone="amber"] { border-left-color: var(--amber); }
+  .ss-flag[data-tone="cinnabar"] { border-left-color: var(--cinnabar); }
+  .ss-flag[data-tone="jade"] { border-left-color: var(--jade); }
 }
 
 @layer utilities {
