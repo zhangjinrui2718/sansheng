@@ -3,6 +3,7 @@ import Database from "better-sqlite3";
 // 生产启动 002_vec.sql 永远被 skip,向量检索全链路死代码。
 import { load as loadSqliteVec } from "sqlite-vec";
 import { runMigrations } from "./migrations.js";
+import { reconcileOrphanedRunArtifacts, BOOT_RECONCILE_REASON } from "./repo/blackboards.js";
 import { log } from "../../shared/log.js";
 import { existsSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
@@ -50,6 +51,23 @@ export class Storage {
       // B1 additive safety: idempotently ensure blackboards.artifacts_json exists
       // (handles cases where migration 005 didn't run — e.g., legacy DBs upgraded in place).
       ensureBlackboardArtifactsColumn(this.db);
+
+      // B8(审查 §B8「重启/失败无对账:非终态 todo 永久悬挂」):boot 对账。
+      // 接线点论证:Storage 构造是生产 boot 唯一的存储初始化点(index.ts:45),
+      // 执行时刻在 HTTP listen / WS accept / kernel 接线之前 → 此刻进程内
+      // 必然零 active run(协调层状态纯内存,重启全丢)→ 库中所有非终态
+      // todo/intent 都是已死进程的孤儿,一次性终态化,零误杀(详见
+      // reconcileOrphanedRunArtifacts 注释)。对账失败不阻塞 boot(warn 兜底)。
+      try {
+        const reconciled = reconcileOrphanedRunArtifacts(this.db);
+        if (reconciled.failedTodos > 0 || reconciled.failedIntents > 0) {
+          log.warn(
+            `storage: boot reconcile — failed ${reconciled.failedTodos} orphaned todo(s) + ${reconciled.failedIntents} non-terminal intent(s) left by a previous process (errorReason="${BOOT_RECONCILE_REASON}")`,
+          );
+        }
+      } catch (err) {
+        log.warn("storage: boot reconcile failed (continuing):", err);
+      }
     } else {
       // Adopt a caller-owned Database instance (test convenience for in-memory DBs).
       // The caller is responsible for running migrations and pragmas.

@@ -529,3 +529,114 @@ export function applyLegacyMigration(db: Database.Database, blackboardId: number
   txn();
   return migrated.length;
 }
+
+/* ───────────────────────────── B8: boot 对账(批次 4a) ───────────────────────────── */
+
+/**
+ * B8(docs/CODE-REVIEW-2026-10-01.md §B8):boot 对账的 errorReason 文案。
+ * 与批次 1 cascadeFailDependents 的「cascade from <id>: upstream dependency failed」
+ * 同形态(`<原因前缀>: <说明>`)—— ws sink 的 todo_failed reason、plan summary、
+ * 前端展示读的都是 metadata.errorReason 同一字段,形态一致即零改动兼容。
+ */
+export const BOOT_RECONCILE_REASON = "reconciled on boot: orphaned by server restart";
+
+/** todo 的非终态集合(与 orchestrator cascade/tryUnblockDependents 的口径一致)。 */
+const NON_TERMINAL_TODO_STATUSES: ReadonlyArray<ArtifactStatus> = [
+  "open",
+  "in_progress",
+  "waiting_for_decision",
+];
+
+/** intent 的非终态集合(run() 建 open;防御性含 in_progress)。 */
+const NON_TERMINAL_INTENT_STATUSES: ReadonlyArray<ArtifactStatus> = ["open", "in_progress"];
+
+export interface BootReconcileResult {
+  failedTodos: number;
+  failedIntents: number;
+  todoIds: string[];
+  intentIds: string[];
+}
+
+/**
+ * B8(审查 §B8「重启/失败无对账:非终态 todo 永久悬挂」):
+ * 把所有**无主**的非终态 todo(open/in_progress/waiting_for_decision)与
+ * 非终态 intent 终态化为 failed,metadata.errorReason = BOOT_RECONCILE_REASON。
+ *
+ * 「无主」判据(防误杀论证):
+ *  - Orchestrator 的运行态(activeExecutors/waiting/todoByExecutorSession/
+ *    run promise)纯内存,进程重启全丢 → **新进程启动瞬间必然零 active run**;
+ *  - 生产调用点 = Storage 构造器(文件路径分支,migrations 之后),早于
+ *    HTTP listen / WS accept / kernel 接线(index.ts boot 顺序)→ 执行时刻
+ *    库中任何非终态 todo/intent 的属主 run 只可能来自已死进程 → 全部无主;
+ *  - 一次性、同步执行,无定时器/轮询 → boot 之后同进程新建 run 的 todo
+ *    永远不会被触碰(「活 run 不误杀」,tests/storage/boot-reconcile.test.ts);
+ *  - 不需要时间窗:时间窗(只杀 N 分钟前的)反而漏掉重启前一刻刚创建的真孤儿;
+ *    「进程边界」本身就是精确的归属判据,零参数零误杀。
+ *  - 已知边界:第二个进程对同一 DB 文件再构造 Storage 会终态化第一个进程活 run
+ *    的 todo —— 生产由 pid 文件 + 端口占用约束单实例(daemon 健康检查/
+ *    EADDRINUSE),该形态属误用(B5 /api/reset 重构时同理受保护:reset 发生在
+ *    服务进程内部,不会重新构造 Storage——4b 范围)。
+ *
+ * 幂等:已终态(resolved/failed/superseded)一律不动;既有 failed 的 errorReason
+ * (如批次 1 cascade 文案)不被覆盖。整体单事务:要么全部对账,要么(异常)
+ * 保持原状,由调用方 try/catch 兜底(对账失败不阻塞 boot)。
+ */
+export function reconcileOrphanedRunArtifacts(db: Database.Database): BootReconcileResult {
+  const result: BootReconcileResult = { failedTodos: 0, failedIntents: 0, todoIds: [], intentIds: [] };
+
+  // 防御:表/列缺失(极旧库或迁移半途)→ 无可对账,返回零结果不 throw
+  const hasTable = (
+    db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='blackboards'`).all() as Array<{
+      name: string;
+    }>
+  ).length > 0;
+  if (!hasTable) return result;
+  const hasColumn = (
+    db.prepare(`PRAGMA table_info(blackboards)`).all() as Array<{ name: string }>
+  ).some((c) => c.name === "artifacts_json");
+  if (!hasColumn) return result;
+
+  const rows = db
+    .prepare(
+      `SELECT id, artifacts_json FROM blackboards
+        WHERE artifacts_json IS NOT NULL AND artifacts_json != '[]'`,
+    )
+    .all() as Array<{ id: number; artifacts_json: string }>;
+
+  const now = Date.now();
+  const txn = db.transaction(() => {
+    for (const row of rows) {
+      let arr: BlackboardArtifact[];
+      try {
+        const parsed: unknown = JSON.parse(row.artifacts_json);
+        if (!Array.isArray(parsed)) continue;
+        arr = parsed as BlackboardArtifact[];
+      } catch {
+        continue; // 坏行跳过(best-effort,与 readBlackboardShape 同语义)
+      }
+      let changed = false;
+      for (const a of arr) {
+        if (!a || typeof a !== "object") continue;
+        if (a.kind === "todo" && NON_TERMINAL_TODO_STATUSES.includes(a.status)) {
+          a.status = "failed";
+          a.metadata = { ...(a.metadata ?? {}), errorReason: BOOT_RECONCILE_REASON };
+          a.updatedAt = now;
+          changed = true;
+          result.failedTodos++;
+          result.todoIds.push(a.id);
+        } else if (a.kind === "intent" && NON_TERMINAL_INTENT_STATUSES.includes(a.status)) {
+          // intent 同步终态化:属主 run 已死,maybeResolveIntent 永不会再触发
+          a.status = "failed";
+          a.metadata = { ...(a.metadata ?? {}), errorReason: BOOT_RECONCILE_REASON };
+          a.updatedAt = now;
+          changed = true;
+          result.failedIntents++;
+          result.intentIds.push(a.id);
+        }
+      }
+      if (changed) writeArtifactsJson(db, row.id, arr);
+    }
+  });
+  txn();
+  return result;
+}

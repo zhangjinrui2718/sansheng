@@ -45,7 +45,9 @@ export {
   migrateBlackboardArtifacts,
   applyLegacyMigration,
   validateArtifact,
+  reconcileOrphanedRunArtifacts,
+  BOOT_RECONCILE_REASON,
   GLOBAL_BLACKBOARD_ID,
 } from "./repo/blackboards.js";
-export type { ListArtifactsOptions } from "./repo/blackboards.js";
+export type { ListArtifactsOptions, BootReconcileResult } from "./repo/blackboards.js";
 export { piMessagesToBlocks } from "./util/blocks.js";
