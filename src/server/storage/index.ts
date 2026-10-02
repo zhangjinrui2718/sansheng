@@ -1,6 +1,6 @@
 export { Storage } from "./db.js";
 export { Keyring, isEncrypted, isMaskedApiKey } from "./keyring.js";
-export { embedText } from "./embeddings.js";
+export { embedText, EMBEDDING_CACHE_MAX_ENTRIES } from "./embeddings.js";
 export type { EmbeddingProvider } from "./embeddings.js";
 export { extractFragments } from "./extractor.js";
 export type { ExtractedFragment } from "./extractor.js";

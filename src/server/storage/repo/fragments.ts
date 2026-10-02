@@ -75,11 +75,19 @@ export function insertFragment(db: Database.Database, f: FragmentRow): void {
 
 export function upsertFragmentEmbedding(db: Database.Database, fragmentId: string, embedding: number[]): void {
   if (!isVecAvailable(db)) return;
-  // vec0 是 KNN-distance 表;先删后插(没有真正的 upsert)
-  db.prepare(`DELETE FROM fragments_vec WHERE fragment_id = ?`).run(fragmentId);
-  // FLOAT[1536] 是固定维度,所以拼成 [a,b,c,...] 字符串
+  // vec0 是 KNN-distance 表;先删后插(没有真正的 upsert)。
+  // C4(审查 §C4):DELETE+INSERT 必须在同一事务内 —— 旧实现裸跑两条语句,
+  // INSERT 失败(典型:embedding 维度 ≠ FLOAT[1536],sqlite-vec 直接 throw)时
+  // DELETE 已提交 → 旧向量永久丢失,该 fragment 从向量检索里静默消失
+  // (调用方只 warn,无人重建)。transaction 化后 INSERT 抛错 → 整体回滚 →
+  // 旧向量仍在、仍可检索。better-sqlite3 transaction 支持嵌套(savepoint),
+  // 调用方已在事务里也安全。
   const vecStr = `[${embedding.join(",")}]`;
-  db.prepare(`INSERT INTO fragments_vec (fragment_id, embedding) VALUES (?, ?)`).run(fragmentId, vecStr);
+  const upsert = db.transaction(() => {
+    db.prepare(`DELETE FROM fragments_vec WHERE fragment_id = ?`).run(fragmentId);
+    db.prepare(`INSERT INTO fragments_vec (fragment_id, embedding) VALUES (?, ?)`).run(fragmentId, vecStr);
+  });
+  upsert();
 }
 
 export function getFragment(db: Database.Database, id: string): FragmentRow | null {

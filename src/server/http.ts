@@ -61,6 +61,23 @@ function errMsg(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
+/**
+ * C9-4(审查 §C9):统一 ?limit= 解析 —— /api/memory/fragments 与
+ * /api/conversations 两端点同一契约。
+ * 旧行为不一致:fragments 把 Number("abc")=NaN 直传 SQL LIMIT → better-sqlite3
+ * datatype mismatch → 500(客户端参数错报成服务端故障);conversations
+ * parseInt+isFinite 静默回退 50 → 200(错误被吞)。
+ * 新契约:缺省/空 → fallback;非法(非有限数值)→ null,调用方回
+ * 400 invalid_limit;合法 → trunc + clamp 到 [1, max]。
+ * 注:blackboardRoutes.ts 自带静默回退防御(不会 500),独立文件本批次不动。
+ */
+function parseLimitQuery(raw: string | undefined, fallback: number, max: number): number | null {
+  if (raw === undefined || raw === "") return fallback;
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return null;
+  return Math.min(Math.max(Math.trunc(n), 1), max);
+}
+
 /** 把内部 Settings 转成对外(掩码 apiKey)的 SettingsPublic */
 function toPublic(s: ReturnType<SettingsStore["load"]>) {
   return {
@@ -296,7 +313,11 @@ export async function createApp(opts: AppOptions): Promise<Hono> {
 
   app.get("/api/memory/fragments", (c) => {
     const kind = c.req.query("kind");
-    const limit = Math.min(Number(c.req.query("limit") ?? "100"), 500);
+    // C9-4:非法 limit → 400(旧实现 NaN 直达 SQL → better-sqlite3 throw → 500)
+    const limit = parseLimitQuery(c.req.query("limit"), 100, 500);
+    if (limit === null) {
+      return c.json({ error: "invalid_limit", message: "limit must be a finite number" }, 400);
+    }
     try {
       // listFragmentsByKind validates internally; passing the raw query string
       // (no `as never` cast) is safe — invalid kinds yield an empty array.
@@ -314,8 +335,11 @@ export async function createApp(opts: AppOptions): Promise<Hono> {
 
   // 列出最近会话(供 HistoryRail 用)
   app.get("/api/conversations", (c) => {
-    const limit = parseInt(c.req.query("limit") ?? "50", 10);
-    const safeLimit = Number.isFinite(limit) ? Math.min(Math.max(limit, 1), 200) : 50;
+    // C9-4:与 fragments 统一 —— 非法 limit → 400(旧实现静默回退 50 → 200)
+    const safeLimit = parseLimitQuery(c.req.query("limit"), 50, 200);
+    if (safeLimit === null) {
+      return c.json({ error: "invalid_limit", message: "limit must be a finite number" }, 400);
+    }
     try {
       const conversations = listConversations(opts.storage.db, safeLimit);
       return c.json({ conversations });

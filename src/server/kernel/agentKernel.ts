@@ -148,6 +148,12 @@ export interface AgentKernelOptions {
    * 注入时绕过闸门(显式注入 = 显式测试意图)。
    */
   sedimentLlmCall?: (input: { systemPrompt: string; userPrompt: string }) => Promise<string>;
+  /**
+   * 批次 4a C8 测试 seam / 调优项:createAgentSession 硬超时(ms)。
+   * 生产不传 → 8000(Pi SDK 在离线/网络慢时 ModelRuntime.refresh 可能长挂,
+   * 无超时会拖死 ensureStarted 链)。
+   */
+  createSessionTimeoutMs?: number;
 }
 
 export class AgentKernel {
@@ -440,6 +446,41 @@ export class AgentKernel {
   private _pendingOnTask: ((input: { goal: string; conversationId: string }) => void) | undefined = undefined;
 
   /**
+   * 批次 4a C8(审查 §C8「resume/prompt 并发无互斥 → 孤儿 Pi session」):
+   * session 生命周期 FIFO 串行链。
+   *
+   * 互斥方案论证(选「串行队列」而非「in-flight promise 复用」):
+   *  1. 受损面不止 resume∥resume:ws.ts 的 load_conversation 与 send 两条链
+   *     (ensureStarted→start / resume / prompt)加 reset/newConversation/restart
+   *     共 6 个入口都会覆写 this.session,in-flight 复用需要按操作种类做去重键,
+   *     复杂且「复用哪个 promise」语义含糊(resume(c1) 与 resume(c2) 不可复用);
+   *  2. Pi session 本身单回合并发(concurrent prompt → "Agent is already
+   *     processing"),旧代码 isIdle 50ms×100 轮询等 idle 正是串行化的脆弱版;
+   *     FIFO 把「等 idle」升级为「等上一操作完整结束」,语义完备:prompt 排在
+   *     resume 之后 → 消息不再打进正在 dispose 的 session,也不丢;
+   *  3. 顺序即到达序:同 tick 并发的多条链按调用序执行,末次 resume 生效
+   *     (与旧「最后覆写者赢」的可见结果一致,但不再有中间态孤儿);
+   *  4. abort()/invalidate() 保持同步直调**不入队** —— 中断语义必须即时,
+   *     且 abort 会让排队的长 prompt 尽快 settle,队列不阻塞「解卡」路径
+   *     (reset 排在长回合后会等待该回合结束;真卡死用 interrupt 先 abort);
+   *  5. 无自死锁:队列内互调一律走 *Inner(promptInner→startInner、
+   *     resetInner→startInner、restartInner→startInner),不重复入队。
+   *
+   * 链延续:opChain 恒为「已吞错」的 promise(每个操作的 rejection 由调用方
+   * 的返回值承接),前序失败不阻断后续操作。
+   */
+  private opChain: Promise<unknown> = Promise.resolve();
+
+  private enqueueOp<T>(op: () => Promise<T>): Promise<T> {
+    const run = this.opChain.then(op, op);
+    this.opChain = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    return run;
+  }
+
+  /**
    * M3+ B3/B5: 由 Orchestrator.routeCallback 注入调入。
    * 1. 合成 BusMessage(kind="question")—— Executor 暂无 bus.ask 路径。
    * 2. 存 questionId → executorSessionId。
@@ -519,8 +560,13 @@ export class AgentKernel {
   }
 
   /** 用当前 Settings 的 active provider 创建或重建 Session;Settings 变更后调用。
-   *  S1(A7):不再接受 sink —— 事件经 this.emit 多播到 attachSink 的所有活连接。 */
+   *  S1(A7):不再接受 sink —— 事件经 this.emit 多播到 attachSink 的所有活连接。
+   *  C8:入 FIFO 串行链(并发 start 由 `if (this.session) return` 天然去重)。 */
   async start(): Promise<void> {
+    return this.enqueueOp(() => this.startInner());
+  }
+
+  private async startInner(): Promise<void> {
     if (this.session) return; // already started
     this.settings = this.settingsStore.load();
     const active = this.settingsStore.activeProvider();
@@ -582,12 +628,20 @@ export class AgentKernel {
    *
    * Sansheng 这边不在 Pi session 里重放 messages(那是 SDK 内部 session file 的事)。
    * UI 侧 loadConversation() 已经负责把历史 messages 渲染;新 turn 用新会话上下文开始。
+   *
+   * C8:入 FIFO 串行链(与 start/prompt/reset 互斥,杜绝并发覆写 this.session)。
    */
   async resume(conversationId: string): Promise<void> {
+    return this.enqueueOp(() => this.resumeInner(conversationId));
+  }
+
+  private async resumeInner(conversationId: string): Promise<void> {
     log.muted(`kernel resume: ${conversationId}`);
-    if (this.conversationId !== conversationId) {
-      this.disposeSession();
-    }
+    // C8:无条件释放旧 session —— 旧实现仅在**换会话**时 dispose,同 id 重复
+    // resume(ws send/load_conversation 竞态下会发生)会直接覆写 this.session,
+    // 旧 session 仍持监听器却再无人引用 = 孤儿。resume 语义本就是「重建」,
+    // 无论目标会话是否相同,旧 session 都必须先退场。
+    this.disposeSession();
     this.conversationId = conversationId;
     this.buf = null;
     this.pendingUserText = null;
@@ -751,11 +805,39 @@ export class AgentKernel {
         ...(resourceLoader ? { resourceLoader } : {}),
       });
     })();
-    const timeoutPromise = new Promise<never>((_, reject) =>
-      setTimeout(() => reject(new Error("createAgentSession timeout (8s) — ModelRuntime refresh hung?")), 8000),
-    );
-    const { session } = await Promise.race([createPromise, timeoutPromise]);
-    return session;
+    // C8(审查 §C8):超时路径三修 ——
+    //  1) 阈值可配(this.opts.createSessionTimeoutMs,生产缺省 8000):旧硬编码
+    //     8s 让超时分支不可测(测试要么等 8s 要么根本不覆盖);
+    //  2) 成功/失败都 clearTimeout:旧实现 start 成功后 8s 定时器仍白挂,
+    //     反复 start/restart 会累积挂住 event loop 的空定时器;
+    //  3) 迟到成功者孤儿处置:超时 reject 后 createPromise 仍在后台跑,
+    //     完成即产出一个无人接收的 session(持文件句柄/监听器永不释放)。
+    //     给它挂尾巴处理器:一产出立即 dispose。
+    const timeoutMs = this.opts.createSessionTimeoutMs ?? 8000;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeoutPromise = new Promise<never>((_, reject) => {
+      timer = setTimeout(
+        () => reject(new Error(`createAgentSession timeout (${timeoutMs}ms) — ModelRuntime refresh hung?`)),
+        timeoutMs,
+      );
+    });
+    try {
+      const { session } = await Promise.race([createPromise, timeoutPromise]);
+      return session;
+    } catch (err) {
+      void createPromise.then(
+        (late) => {
+          log.warn("kernel: createAgentSession resolved after timeout — disposing orphan session");
+          try {
+            late.session.dispose?.();
+          } catch { /* noop */ }
+        },
+        () => { /* 迟到失败:race 已把首个错误上抛,此处静默 */ },
+      );
+      throw err;
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
   }
 
   /** 等 Pi session 真正 idle(最多 5s) */
@@ -769,8 +851,13 @@ export class AgentKernel {
   /**
    * 新建会话:丢弃当前 session,生成新 conversationId,重置计数。
    * 下一次 prompt 会重新 start()。M2 持久化后这里会先归档旧会话。
+   * C8:入 FIFO 串行链(与 resume/prompt 互斥)。
    */
   async newConversation(): Promise<string> {
+    return this.enqueueOp(() => this.newConversationInner());
+  }
+
+  private async newConversationInner(): Promise<string> {
     if (this.session) {
       try { this.sessionUnsubscribe?.(); } catch { /* noop */ }
       this.sessionUnsubscribe = null;
@@ -803,8 +890,15 @@ export class AgentKernel {
    * - 如果 session 还在 streaming,先 abort
    * - dispose 旧 session,清掉内部状态
    * - 下次 prompt 会重新 start()
+   * C8:入 FIFO 串行链。语义变化:reset 排在进行中的长回合之后执行(旧实现
+   * 与 prompt 链并发 dispose);真「卡死」场景先 interrupt(abort 同步直调不入队)
+   * 让当前回合 settle,reset 随即执行。
    */
   async reset(): Promise<void> {
+    return this.enqueueOp(() => this.resetInner());
+  }
+
+  private async resetInner(): Promise<void> {
     log.warn("kernel reset requested");
     if (this.session) {
       try { this.sessionUnsubscribe?.(); } catch { /* noop */ }
@@ -824,7 +918,7 @@ export class AgentKernel {
       this.toolStartAt.clear();
     }
     this.emit({ type: "interrupt", conversationId: this.conversationId });
-    await this.start();
+    await this.startInner(); // C8:直调 Inner(已在串行链内)
   }
 
   /**
@@ -838,14 +932,21 @@ export class AgentKernel {
    * 其它调用方不带 contextBlock 即可,行为与旧签名一致。
    */
   async prompt(text: string, opts?: { contextBlock?: string }): Promise<void> {
+    return this.enqueueOp(() => this.promptInner(text, opts));
+  }
+
+  private async promptInner(text: string, opts?: { contextBlock?: string }): Promise<void> {
     // S1(A7):不再接受 sink 覆盖 —— 事件统一走 this.emit 多播到 attachSink 的活连接。
     // sink 为空时假设 kernel 已 start(常规路径:ws.ts 先 ensureStarted)。
+    // C8:本方法体运行于 FIFO 串行链内(与 start/resume/reset 互斥)——
+    // ws send 排在 load_conversation 的 resume 之后执行,消息不再打进
+    // 正在被 dispose 的 session;链内互调一律走 *Inner 防自死锁。
     if (!this.session) {
       // 还没 start 过(用户改了 settings 后第一次发,或 ensureStarted 失败后的 fallback):
       // 触发一次 lazy start。start 可能 fail(如没 provider),它会 emit 错误再 throw。
       // 这里吞掉 throw,让后续 Communicator / fallback 路径仍能尝试(M3c + PI_OFFLINE 场景)。
       try {
-        await this.start();
+        await this.startInner(); // C8:直调 Inner(已在串行链内,再入队会自死锁)
       } catch (err) {
         log.warn("kernel: lazy start failed (continuing to communicator):", (err as Error).message ?? err);
       }
@@ -1126,8 +1227,12 @@ export class AgentKernel {
     }
   }
 
-  /** 重新生成 session(M2+ 用于切模型时) */
+  /** 重新生成 session(M2+ 用于切模型时)。C8:入 FIFO 串行链。 */
   async restart(): Promise<void> {
+    return this.enqueueOp(() => this.restartInner());
+  }
+
+  private async restartInner(): Promise<void> {
     if (this.session) {
       try { this.sessionUnsubscribe?.(); } catch { /* noop */ }
       this.sessionUnsubscribe = null;
@@ -1138,7 +1243,7 @@ export class AgentKernel {
       this.inputTokens = 0;
       this.outputTokens = 0;
     }
-    await this.start();
+    await this.startInner(); // C8:直调 Inner(已在串行链内)
   }
 
   private makeHandler(): (event: any) => void {
