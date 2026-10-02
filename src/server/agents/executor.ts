@@ -307,7 +307,21 @@ export class Executor {
     if (!obj || typeof obj !== "object") return null;
     const truncated = parsedRaw.repaired;
 
-    if (obj.outcome === "evidence") {
+    // 批次 7-D:`outcome` 判别式**可缺省**,由 payload 形状反推。
+    //
+    // 真实事故(conv_muqsidb0_wgru 第二次跑,todo-1,note `exec-err-e2hIDyhy`):
+    // 模型输出 `{"evidence":{"title":"百万级外呼…","body":"## 结论先行…}}` ——
+    // JSON 合法、title 完整、正文写得很充实,**唯独没写 `outcome` 字段**。
+    // 旧实现只认 `obj.outcome === "evidence"`,于是把一份完全可用的 evidence
+    // 当成 parse 失败丢掉 → todo failed → 级联带走其余 5 个 todo。
+    //
+    // 为什么会漏:模型「知道」自己交的是 evidence,就把外层包装省了。这是
+    // LLM 最常见也最无害的 schema 偏差 —— 用「解析不出来」惩罚它,等于
+    // 因为信封没贴邮票就把信烧了。`outcome` 只在**与 payload 形状矛盾**时
+    // 才作为覆盖(例如 `{"outcome":"failed","note":{...}}` 明确说失败)。
+    const outcome = this.inferOutcome(obj);
+
+    if (outcome === "evidence") {
       const ev = obj.evidence as Record<string, unknown> | undefined;
       if (!ev || typeof ev.title !== "string") return null;
       return {
@@ -323,7 +337,7 @@ export class Executor {
       };
     }
 
-    if (obj.outcome === "hypothesis") {
+    if (outcome === "hypothesis") {
       const hyp = obj.hypothesis as Record<string, unknown> | undefined;
       if (!hyp || typeof hyp.title !== "string") return null;
       const reason = hyp.callbackReason === "harness_proposal" ? "harness_proposal" : "judgment";
@@ -340,7 +354,7 @@ export class Executor {
       };
     }
 
-    if (obj.outcome === "failed") {
+    if (outcome === "failed") {
       const note = obj.note as Record<string, unknown> | undefined;
       if (!note || typeof note.title !== "string") return null;
       return {
@@ -353,6 +367,30 @@ export class Executor {
         },
       };
     }
+    return null;
+  }
+
+  /**
+   * 判定 outcome:显式 `outcome` 优先,缺省时按 payload 键反推。
+   *
+   * - `{"evidence":{...}}`  → evidence(批次 7-D,真实事故 `exec-err-e2hIDyhy`)
+   * - `{"hypothesis":{...}}`→ hypothesis
+   * - `{"note":{...}}`     → failed(note 是失败时才产出的东西)
+   * - 显式 `outcome` 与形状矛盾时**以显式值为准**(模型明确说了 failed 就别硬救)。
+   * - 什么都没有 → null(交由调用方走 parse 失败路径)。
+   */
+  private inferOutcome(obj: Record<string, unknown>): ExecutorOutcome["outcome"] | null {
+    const explicit = obj.outcome;
+    if (explicit === "evidence" || explicit === "hypothesis" || explicit === "failed") {
+      return explicit;
+    }
+    if (explicit !== undefined && explicit !== null) {
+      // 非法取值 → 不猜,让 parse 失败(静默纠正非法值会掩盖提示词问题)
+      return null;
+    }
+    if (obj.evidence && typeof obj.evidence === "object") return "evidence";
+    if (obj.hypothesis && typeof obj.hypothesis === "object") return "hypothesis";
+    if (obj.note && typeof obj.note === "object") return "failed";
     return null;
   }
 

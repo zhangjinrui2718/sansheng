@@ -17,6 +17,7 @@ import { MessageBus } from "../agents/messageBus.js";
 import {
   Communicator,
   makeLlmCommunicatorDecide,
+  makeAlignmentCheck,
   type CommunicatorSink,
 } from "../agents/communicator.js";
 // 批次 5b-2 T1:回合后异步智能沉淀(chat 回合 message_end → D7 artifacts 落 blackboard)
@@ -148,6 +149,12 @@ export interface AgentKernelOptions {
    * 注入时绕过闸门(显式注入 = 显式测试意图)。
    */
   sedimentLlmCall?: (input: { systemPrompt: string; userPrompt: string }) => Promise<string>;
+  /**
+   * 批次 7-E:对齐闸门(ALIGN_SYSTEM_PROMPT)的测试注入 seam —— 与上面两个同款
+   * DI 模式。生产不传 → 走 completeSimple(getModel());返回 `{"question":"NONE"}`
+   * 即放行开工。测试里用它精确控制「这次要不要拦下来问用户」。
+   */
+  alignLlmCall?: (input: { systemPrompt: string; userPrompt: string }) => Promise<string>;
   /**
    * 批次 4a C8 测试 seam / 调优项:createAgentSession 硬超时(ms)。
    * 生产不传 → 8000(Pi SDK 在离线/网络慢时 ModelRuntime.refresh 可能长挂,
@@ -335,8 +342,25 @@ export class AgentKernel {
    * M3c: 初始化 Communicator + Bus(在 start() 末尾调用)。
    * Communicator 永远在线 → kernel 一启动就建好。
    */
-  private ensureCommunicator(): Communicator {
-    if (this.communicator) return this.communicator;
+  /**
+   * 最近 3 条 user/assistant 消息(供 decide 与对齐闸门消歧省略句)。
+   * 读库失败返回空数组 —— 消歧只是锦上添花,不能因此让 decide/闸门失效。
+   */
+  private recentTurns(
+    conversationId: string,
+  ): Array<{ role: "user" | "assistant"; content: string }> {
+    try {
+      return listMessagesByConversation(this.storage.db, conversationId)
+        .filter((m): m is typeof m & { role: "user" | "assistant" } =>
+          m.role === "user" || m.role === "assistant")
+        .slice(-3)
+        .map((m) => ({ role: m.role, content: m.content ?? "" }));
+    } catch {
+      return [];
+    }
+  }
+
+  private ensureCommunicator(): Communicator {    if (this.communicator) return this.communicator;
     const dataDir = process.env.SANSHENG_DATA ?? this.agentDir.replace(/\/pi$/, "");
     const harness = loadHarness(dataDir);
     const active = this.settingsStore.activeProvider();
@@ -364,17 +388,20 @@ export class AgentKernel {
         // B6:显式传 apiKey 给 completeSimple,不再依赖 process.env 回落。
         getApiKey: () => this.getModelApiKey(),
         ...(this.opts.decideLlmCall ? { llmCall: this.opts.decideLlmCall } : {}),
-        recentHistory: (conversationId) => {
-          try {
-            return listMessagesByConversation(this.storage.db, conversationId)
-              .filter((m): m is typeof m & { role: "user" | "assistant" } =>
-                m.role === "user" || m.role === "assistant")
-              .slice(-3)
-              .map((m) => ({ role: m.role, content: m.content ?? "" }));
-          } catch {
-            return [];
-          }
-        },
+        recentHistory: (conversationId) => this.recentTurns(conversationId),
+      }),
+      // 批次 7-E:对齐闸门 —— decide 判 task 后、onTask 开工前再问一次
+      // 「有没有你猜错就会返工的关键信息」。与 decide 分开成独立调用,
+      // 因为 decide 在四选一 + 3.5s 硬超时下稳定偏向 task(实测从不 clarify)。
+      // 闸门自身失败一律放行(见 makeAlignmentCheck),不会卡住用户任务。
+      // 测试可注入 alignLlmCall;不注入走生产 completeSimple。
+      alignmentCheck: makeAlignmentCheck({
+        getModel: () => this.getModel(),
+        getApiKey: () => this.getModelApiKey(),
+        ...(this.opts.alignLlmCall ? { llmCall: this.opts.alignLlmCall } : {}),
+        // 闸门也要看最近对话 —— 否则它会把自己上一轮问过、用户已答的问题
+        // 再问一遍,陷入无限澄清循环(7-E 集成测试实测抓到)。
+        recentHistory: (conversationId) => this.recentTurns(conversationId),
       }),
     });
     // M3+ B4: 若 ws 层先调 setOnTask(此时 Communicator 尚未构造),

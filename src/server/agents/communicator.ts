@@ -36,6 +36,7 @@ import type {
 } from "@shared/types/agents";
 import type { MessageBus } from "./messageBus.js";
 import { log } from "../../shared/log.js";
+import { parseJsonLenient } from "../../shared/jsonRepair.js";
 import {
   IMPERATIVE_VERBS,
   type BlackboardArtifact,
@@ -342,6 +343,173 @@ export function makeLlmCommunicatorDecide(deps: LlmDecideDeps): CommunicatorDeci
   };
 }
 
+/* ─────────────────────────────────────────────────────────
+ * 批次 7-E · 对齐闸门(开工前先确认「这是不是他想要的」)
+ * ───────────────────────────────────────────────────────── */
+
+/**
+ * 对齐提问 prompt。**刻意与 decide 分开成一次独立调用**,而不是给 decide 再加一类:
+ *
+ * - decide 已经是四选一 + 3.5s 硬超时,再塞一个「要不要问」的判断进去,它会
+ *   倾向于选省事的那条(实测 7-C 之后仍稳定判 task,从不 clarify);
+ * - 单一职责的提示词可靠得多 —— 只问「开工前最该确认的一件事是什么」;
+ * - 有明确的 `NONE` 出口,「别烦用户」这件事可以被显式表达;
+ * - 只在 task 分支跑,chat 路径延迟不受影响。
+ */
+const ALIGN_SYSTEM_PROMPT = `你在开工前做一次对齐检查。用户提了一个要执行的任务,你的唯一职责是:判断**有没有一件你猜错就会整份返工的关键信息**,用户没给。
+
+有的话,问**一个**问题(用户一次只想回答一件事),带上你的猜测让他点头或否定。
+没有的话,只输出 NONE,一个字都不要多。
+
+只在下面这些情况才提问:
+- 目标或范围有歧义(用了一个你不敢确定的说法、缩写、圈内黑话)
+- 交付形态没讲(要文档?代码?数据?还是就要个结论)
+- 评判标准没有(怎么算做好了)
+- 这个任务跑起来很贵 / 很不可逆,而需求边界又不清楚
+
+**不要**问这些(它们不值得打断用户):
+- 措辞、风格、颜色这类偏好 —— 你自己定就行
+- 你可以从上下文合理推断的东西
+- 一次问三个问题(那等于没问)
+- 已经说清楚的任务(用户把「做什么、做成什么样」都讲了)
+- **已经问过并且用户已经回答过的**(见「最近对话」)—— 换个说法再问一遍就是骚扰,
+  用户会陷入无限澄清循环。已回答就输出 NONE,直接开工。
+
+输出格式(严格 JSON,不要代码块围栏):
+{"question":"要问的那一个问题,或字符串 NONE"}`;
+
+const ALIGN_MAX_TOKENS = 256;
+const ALIGN_TIMEOUT_MS = 6000;
+
+export interface AlignCheckDeps {
+  getModel: () => Model<any> | null;
+  getApiKey?: () => string | undefined;
+  /** DI seam(测试注入):替换 completeSimple。注入时绕过模型/开关闸门。 */
+  llmCall?: (input: { systemPrompt: string; userPrompt: string }) => Promise<string>;
+  /**
+   * 开工前检查会把问题**重复问一遍** —— 因为它看不到自己上一轮问了什么、
+   * 用户答了什么,于是对着同一个 goal 重新发现「百外」不确定,再问一次。
+   * 无限澄清循环就是这么来的。
+   *
+   * 这里提供最近对话(同 decide 的 recentHistory 语义:≤3 条、每条截断)让闸门
+   * 知道自己问过什么;ALIGN_SYSTEM_PROMPT 里也有对应约束。
+   */
+  recentHistory?: (conversationId: string) => Array<{
+    role: "user" | "assistant";
+    content: string;
+  }>;
+  /** 覆盖超时(ms);默认 6000。 */
+  timeoutMs?: number;
+}
+
+/**
+ * 对齐检查:返回**要问的问题**,或 null(不用问,直接开工)。
+ * 任何失败(无模型 / 超时 / 解析失败 / 抛错)都返回 null —— 宁可开工,
+ * 也不能因为闸门本身出错把用户的任务卡死。
+ */
+export function makeAlignmentCheck(deps: AlignCheckDeps): AlignmentCheckFn {
+  const timeoutMs = deps.timeoutMs ?? ALIGN_TIMEOUT_MS;
+  return async (input: { goal: string; userText: string; conversationId: string }) => {
+    // 卫生闸门(与 SANSHENG_DECIDE_LLM / SANSHENG_SEDIMENT 同款):显式关闭,
+    // 或测试环境全局置 0,避免集成测试每条 task 消息都发起一次真实 HTTP 对齐请求。
+    // 注入 llmCall 时绕过(显式注入 = 显式测试意图)。
+    if (!deps.llmCall) {
+      if (process.env.SANSHENG_ALIGN === "0") return null;
+      if (!deps.getModel()) return null;
+    }
+
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let raw: string;
+    try {
+      const buildPrompt = () =>
+        buildAlignUserPrompt(input.goal, input.userText, readRecent(deps, input.conversationId));
+      const call = async (): Promise<string> => {
+        if (deps.llmCall) {
+          return deps.llmCall({ systemPrompt: ALIGN_SYSTEM_PROMPT, userPrompt: buildPrompt() });
+        }
+        const model = deps.getModel();
+        if (!model) return "";
+        const apiKey = deps.getApiKey?.();
+        const result = await completeSimple(
+          model as Parameters<typeof completeSimple>[0],
+          {
+            systemPrompt: ALIGN_SYSTEM_PROMPT,
+            messages: [
+              { role: "user", content: buildPrompt(), timestamp: Date.now() },
+            ],
+          },
+          { maxTokens: ALIGN_MAX_TOKENS, ...(apiKey ? { apiKey } : {}) },
+        );
+        if (result.stopReason === "error" || result.errorMessage) return "";
+        const parts: string[] = [];
+        for (const c of result.content) if (c.type === "text") parts.push(c.text);
+        return parts.join("");
+      };
+
+      // 硬超时:llmCall 不可中断(签名里没有 AbortSignal),不设上限的话
+      // provider 挂住会连带把用户的 task 一起卡死 —— 闸门绝不能比它守的门更慢。
+      raw = await Promise.race([
+        call(),
+        new Promise<string>((resolve) => {
+          timer = setTimeout(() => resolve(""), timeoutMs);
+        }),
+      ]);
+    } catch (err) {
+      log.muted(`align: 调用失败(${(err as Error).message ?? err}),不拦,直接开工`);
+      return null;
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+
+    if (!raw) return null;
+    const parsed = parseJsonLenient<{ question?: unknown }>(raw);
+    if (!parsed.ok) return null;
+    const q = (parsed.value?.question ?? "").toString().trim();
+    // NONE / 空 / 「无」等占位 → 不用问
+    if (!q || /^(none|n\/a|null|无|不需要|不用)$/i.test(q)) return null;
+    return q;
+  };
+}
+
+function buildAlignUserPrompt(
+  goal: string,
+  userText: string,
+  history: Array<{ role: "user" | "assistant"; content: string }> | undefined,
+): string {
+  const parts: string[] = [];
+  if (history && history.length > 0) {
+    parts.push("[最近对话]");
+    for (const h of history.slice(-DECIDE_HISTORY_MAX)) {
+      const body = (h.content ?? "").replace(/\s+/g, " ").trim().slice(0, DECIDE_HISTORY_CHARS);
+      parts.push(`${h.role}: ${body}`);
+    }
+    parts.push("");
+  }
+  parts.push("[任务目标]");
+  parts.push(goal);
+  parts.push("");
+  parts.push("[用户原话]");
+  parts.push(userText);
+  parts.push("");
+  parts.push(
+    "开工前,有没有一件你猜错就会整份返工的关键信息,用户没给?有就问一个,没有就输出 NONE。",
+  );
+  return parts.join("\n");
+}
+
+/** 读最近对话;读取失败视作没有历史(闸门不能因为取历史失败就失效)。 */
+function readRecent(
+  deps: AlignCheckDeps,
+  conversationId: string,
+): Array<{ role: "user" | "assistant"; content: string }> | undefined {
+  if (!deps.recentHistory) return undefined;
+  try {
+    return deps.recentHistory(conversationId);
+  } catch {
+    return undefined;
+  }
+}
+
 export interface CommunicatorOptions {
   bus: MessageBus;
   settings: RunnerSettings;
@@ -359,7 +527,19 @@ export interface CommunicatorOptions {
    * 若未提供,Communicator 仅 emit bus broadcast + 给用户确认,不主动触发 plan。
    */
   onTask?: (input: { goal: string; conversationId: string }) => void;
+  /**
+   * 批次 7-E:对齐闸门 —— decide 判 task 后、真正开工**之前**问一次
+   * 「有没有你猜错就会返工的关键信息」。返回问题字符串 = 先问用户;
+   * 返回 null = 不用问,直接开工。不提供则完全跳过该闸门(旧行为)。
+   */
+  alignmentCheck?: AlignmentCheckFn;
 }
+
+export type AlignmentCheckFn = (input: {
+  goal: string;
+  userText: string;
+  conversationId: string;
+}) => Promise<string | null>;
 
 /**
  * M3+ respond 函数 — 把 input 转换成 `{userReply?, artifacts[]}`。
@@ -396,6 +576,18 @@ export class Communicator {
   private model: Model<string> | null = null;
   private readonly decideFn: CommunicatorDecideFn;
   private readonly disableLlm: boolean;
+  /**
+   * 批次 7-E:已提问但用户还没回答的任务。
+   *
+   * 为什么必须存:用户在 clarify 里回的那句话(「是,面向百万级外呼,交付文档」)
+   * **单独看不像一个 task** —— decide 拿到它多半会判 chat,任务就丢了。
+   * 存住原 goal,下一轮把它和用户补充拼起来再 decide,任务才接得上。
+   *
+   * 带 conversationId 是防御:Communicator 实例虽然按 kernel(=按会话)创建,
+   * 但 kernel 切会话时未必重建 Communicator,不校验就可能把 A 会话的任务
+   * 接到 B 会话上。
+   */
+  private pendingTask: { goal: string; question: string; conversationId: string } | null = null;
 
   constructor(private readonly opts: CommunicatorOptions) {
     this.decideFn = opts.decideFn ?? defaultCommunicatorDecide;
@@ -413,7 +605,16 @@ export class Communicator {
   ): Promise<CommunicatorDecision> {
     sink({ type: "thinking", status: "thinking" });
     try {
-      const decision = await this.decideFn({ userText, conversationId });
+      // 批次 7-E:若上一轮刚问过对齐问题而用户在回答,把原 goal 和这句补充
+      // 拼起来再 decide —— 否则「是,面向百万级外呼」这种回答会被判成 chat,
+      // 任务凭空消失。落库/回显仍用 userText 原文,拼接过的东西不污染消息。
+      const carried =
+        this.pendingTask && this.pendingTask.conversationId === conversationId
+          ? this.pendingTask.goal
+          : null;
+      const decideText = carried ? `${carried}\n\n【用户补充】${userText}` : userText;
+
+      const decision = await this.decideFn({ userText: decideText, conversationId });
 
       if (decision.kind === "chat") {
         // B2 修复(批次 5a,docs/CODE-REVIEW-2026-10-01.md §B2):
@@ -465,6 +666,51 @@ export class Communicator {
         sink({ type: "bus_event", message: msg });
         log.muted(`decide: clarify asked, awaiting user answer (conv=${conversationId})`);
       } else if (decision.kind === "task") {
+        // 批次 7-E:对齐闸门 —— 开工**之前**先确认「这是不是他想要的」。
+        //
+        // 用户 2026-10-02 原话:「在 plan 模式下我觉得他需要和我对齐我想要什么」。
+        // decide 已经在四选一 + 3.5s 硬超时下稳定偏向 task(7-C 之后仍从不
+        // clarify),所以对齐不能继续压在 decide 上 —— 单独问一次。
+        //
+        // 闸门自身任何失败都放行(见 makeAlignmentCheck),不能因为闸门出错
+        // 把用户的任务卡死;这里再兜一层 catch 防御注入方抛错。
+        let question: string | null = null;
+        if (this.opts.alignmentCheck) {
+          try {
+            question = await this.opts.alignmentCheck({
+              goal: decision.goal,
+              userText,
+              conversationId,
+            });
+          } catch (err) {
+            log.warn(
+              `align: threw(${(err as Error).message ?? err}),放行直接开工`,
+            );
+            question = null;
+          }
+        }
+        if (question) {
+          // 存住原 goal:用户回答的那句本身不像 task,要带着 goal 再 decide
+          this.pendingTask = { goal: decision.goal, question, conversationId };
+          const qid = nanoid();
+          const qtext = `开工前先跟你对一下:${question}`;
+          sink({ type: "delta", messageId: qid, text: qtext });
+          sink({ type: "done", messageId: qid });
+          const qmsg = this.opts.bus.broadcast({
+            fromRole: "communicator",
+            toRole: "user",
+            conversationId,
+            payload: qtext,
+            context: { source: "align_check" },
+          });
+          sink({ type: "bus_event", message: qmsg });
+          log.muted(`align: 拦下开工,已向用户提问 (conv=${conversationId})`);
+          // 语义上返回 clarify:kernel 会 persistHandoff(落库 raw + 这条提问)
+          // 并**不**走 Pi 直答,也不会触发 onTask。
+          return { kind: "clarify", question: qtext, context: decision.goal };
+        }
+        this.pendingTask = null;
+
         // task:转发给 planner(走 M3b 的 Orchestrator 由 ws 层负责 trigger)
         // 这里只 emit 一条 broadcast 表示「已接收任务」
         const msg = this.opts.bus.broadcast({
