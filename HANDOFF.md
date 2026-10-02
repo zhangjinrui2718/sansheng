@@ -102,15 +102,32 @@
 
 ---
 
-## ⚡ 当前状态速览(2026-10-02 · 批次 8 进行中)
+## ⚡ 当前状态速览(2026-10-02 · 批次 8 · P0 已完成)
 
 > **接新会话先读这一节,再往下读旧的 TL;DR(旧的已过时)。**
 
-**HEAD = `15f5ebc`,基线 481 passed / 1 skipped(67 files)· typecheck 0 error。**
+**HEAD = `47541d6`,已 push origin/master。验证:typecheck 0 error · 全量
+`npm test` 494 passed / 1 failed / 1 skipped(69 files)· `npm run build` 成功 · 规则范围内 `as any` = 0。**
 
-**批次 8 = 产品侧 UI 重做(P0)**,设计定稿在 **`docs/PRODUCT-DESIGN-2026-10-02.md`**(先读它,里面有全部 file:line 证据)。
+⚠️ **那 1 个失败是既有问题,不是本批引入**:`tests/cli/daemon-start.test.ts:70` `isAlive(process.pid)`。
+已用 worktree 检出 P0 之前的 `15f5ebc` 单独跑同一测试**同样失败**。根因在 `src/cli/commands.ts:87-93`,
+`isAlive` 依赖 `readPidComm` 读进程命令名,平台相关(本机 macOS)。本批只动 `web/` + 文档,不碰 CLI。
+**修它需要单独处理,别再当成 P0 的账。**
 
-诊断(一句话):**产品不是太简单,是展示的系统模型和真实系统对不上** —— 三个错位:
+**P0 六项已全部落地**(4 个并行子任务 + 1 项集成补录,文件互不重叠):
+
+| 项 | 文件 | commit |
+|---|---|---|
+| §3 blackboard 四区 + §1 角色表 + 失败原因可见 | `web/src/routes/Agents.tsx` | `6b45d39` |
+| §4 工件按沟通语义分组 + 待转述视图 | `web/src/routes/Artifacts.tsx` | `ee80ca0` |
+| §6 harness 雇员手册 + 三档生效徽章 | `web/src/routes/Harness.tsx` | `a70f464` |
+| §5 总线线程化 + 方向分道 | `web/src/routes/Timeline.tsx` | `4ebe2bb` |
+| 集成补录:`.sansheng-input` 定义(此前是空 class) | `web/src/styles/globals.css` | `d739a27` |
+
+**设计定稿在 `docs/PRODUCT-DESIGN-2026-10-02.md`**(先读它,里面有全部 file:line 证据 + 4 条实施勘误)。
+
+**诊断(一句话)**:**产品不是太简单,是展示的系统模型和真实系统对不上** —— 三个错位:
+
 
 1. **角色表在撒谎**:UI 展示 6 个 agent,系统只跑 4 个。`critic`/`memory`/`reflection`
    无 class 实现、无 prompt 消费者。**用户已决定:暂不实现,界面改为不列出**(不等于从
