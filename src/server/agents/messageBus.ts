@@ -159,6 +159,31 @@ export class MessageBus {
     };
   }
 
+  /**
+   * 把一条**外部构造**的 BusMessage 记进 stream(不建 pending)。
+   *
+   * 批次 4b B9(审查 §B9「合成 question 不进 MessageBus」):kernel 的
+   * `handleExecutorCallback` 手工拼一条 `q-exec-*` 的 question 交给
+   * Communicator 升级给用户,旧实现**完全绕过 bus** —— 于是
+   * MessageBus.stream / snapshot / bus.jsonl / ws 的 bus_event 里都没有它:
+   *  - timeline 与 bus_replay 看不到 executor 提问(审计缺口,违背 PLAN.md
+   *    「bus 是审计流」的设计);
+   *  - `bus.reply(qId)` 必然 no pending → 用户点「取消」得到 false,
+   *    waiting / watchdog / pendingExecutorCallbacks 一个都不清,todo 挂到
+   *    1 小时 failTimer。
+   *
+   * 为什么**不**走 ask():ask() 会建一个 5 分钟超时的 pending + 一条 reject
+   * 路径,但 executor 提问的等待方不是 bus 而是 Orchestrator 的 watchdog
+   * (escalationMs / failMs,可配且与 bus 的 300s 无关)。硬塞进 pending 会
+   * 产生第二个、各自为政的超时源。所以这里只**记录**(进 stream + 通知
+   * listeners → ws bus_event + busPersister 落 jsonl),由 kernel 持有
+   * questionId → executorSessionId 映射负责生命周期。
+   */
+  recordExternal(msg: BusMessage): BusMessage {
+    this.append(msg);
+    return msg;
+  }
+
   /** 全部流式消息快照(供持久化)。 */
   snapshot(): BusMessage[] {
     return this.stream.slice();

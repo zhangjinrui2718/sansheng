@@ -37,7 +37,7 @@ let savedSanshengData: string | undefined;
 
 const EXEC_SESSION = "exec-b9-fixture";
 
-beforeAll(() => {
+beforeAll(async () => {
   savedPiOffline = process.env.PI_OFFLINE;
   savedSanshengData = process.env.SANSHENG_DATA;
   dataDir = mkdtempSync(join(tmpdir(), "sansheng-b9-cancel-"));
@@ -51,10 +51,10 @@ beforeAll(() => {
       {
         id: "prov-b9",
         label: "b9",
-        provider: "deepseek",
-        modelId: "deepseek-chat",
+        provider: "openai",
+        modelId: "gpt-4o-mini",
         apiKey: "sk-b9-0123456789abcdef",
-        thinkingLevel: "medium",
+        thinkingLevel: "off",
       },
     ],
     activeProviderId: "prov-b9",
@@ -62,9 +62,19 @@ beforeAll(() => {
     personaName: "三生-b9",
   });
   kernel = new AgentKernel(settingsStore, join(dataDir, "pi"), dataDir, storage);
+  // 真实 start()(PI_OFFLINE=1,不触网):ensureCommunicator 在这里建出 Communicator。
+  // B9 的取消路径依赖 communicator 存在 —— pendingExecutorCallbacks 的登记发生在
+  // handleWorkerAsk 之前,但 communicator 未就绪时整条升级链会被跳过
+  // (与 ws-plan-integration 场景④同款前置条件)。
+  await kernel.start();
 }, 60_000);
 
 afterAll(() => {
+  try {
+    kernel?.invalidate();
+  } catch {
+    /* ignore */
+  }
   try {
     storage?.close();
   } catch {

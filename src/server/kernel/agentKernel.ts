@@ -445,8 +445,33 @@ export class AgentKernel {
     return { replied, resumed: { executorSessionId, decisionArtifactId: decision.id } };
   }
 
-  /** M3c:ws 层调这个取消一个挂起的 question。 */
+  /**
+   * M3c:ws 层调这个取消一个挂起的 question。
+   *
+   * 批次 4b B9(审查 §B9「cancel_question 对 executor 回调问题完全无效」):
+   * 旧实现只有 `communicator.cancelPending(id)` 一条路,而 executor 升级出来的
+   * 提问(`q-exec-*`)根本不在 MessageBus.pending 里 —— `bus.reply` 走到
+   * 「no pending question」返回 false。用户点「取消」表面无报错,实际
+   * waiting / watchdog / pendingExecutorCallbacks 一个都不清,todo 挂满 1 小时
+   * failTimer。现在分三条路:
+   *  1) **executor 提问**(pendingExecutorCallbacks 里有):清两张表 + 向
+   *     artifactBus 发 `executor_cancel` → Orchestrator 收到后 clearWaiting +
+   *     failTodo(带 reason),run 立刻闭环;
+   *  2) 普通提问(Communicator 直接问用户):走原 bus.reply 路径,语义不变;
+   *  3) 谁都不是 → false,不伪造成功(可重复调用,第二次必 false)。
+   */
   cancelPendingQuestion(questionId: string): boolean {
+    const executorSessionId = this.pendingExecutorCallbacks.get(questionId);
+    if (executorSessionId) {
+      this.pendingExecutorCallbacks.delete(questionId);
+      this.pendingQuestions.delete(questionId);
+      artifactBus.publish({
+        type: "executor_cancel",
+        executorSessionId,
+        reason: "user cancelled the executor question (no decision was given)",
+      });
+      return true;
+    }
     if (!this.communicator) return false;
     return this.communicator.cancelPending(questionId);
   }
@@ -547,6 +572,9 @@ export class AgentKernel {
 
   /**
    * M3+ B3/B5: 由 Orchestrator.routeCallback 注入调入。
+   * 0. 批次 4b B9:先把合成 question 记进 MessageBus stream(**在 communicator
+   *    就绪检查之前** —— 审计流记的是「executor 提了这个问题」这个事实,
+   *    不该因为下游 UI 通道没就绪就丢记录)。
    * 1. 合成 BusMessage(kind="question")—— Executor 暂无 bus.ask 路径。
    * 2. 存 questionId → executorSessionId。
    * 3. Communicator.handleWorkerAsk(knowIt=false) → 发出 pending_question sink 事件
@@ -561,10 +589,6 @@ export class AgentKernel {
     },
     conversationId: string,
   ): Promise<void> {
-    if (!this.communicator) {
-      log.warn("handleExecutorCallback: communicator not ready, dropping");
-      return;
-    }
     const id = `q-exec-${nanoid(8)}`;
     const msg: BusMessage = {
       id,
@@ -582,6 +606,20 @@ export class AgentKernel {
         reason: arg.reason,
       },
     };
+    // B9(审查 §B9「合成 question 不进 MessageBus」):把合成 question 记进 bus
+    // stream —— 旧实现直接手搓 BusMessage 传给 handleWorkerAsk,绕过整个 bus,
+    // 于是 snapshot/bus.jsonl/ws 的 bus_event 全都没有它(timeline 与 bus_replay
+    // 看不到 executor 提问,审计缺口,违背 PLAN.md 的 bus 审计设计)。
+    // 走 recordExternal(而非 bus.ask):ask() 会建一个 300s 超时的 pending,但
+    // executor 提问真正的等待方是 Orchestrator 的 watchdog(escalationMs/failMs,
+    // 与 bus 的 300s 无关)—— 建第二个 pending 等于多一个各管各的超时源。
+    // recordExternal 只记流 + 通知 listeners(→ ws bus_event + busPersister 落盘)。
+    this.bus.recordExternal(msg);
+
+    if (!this.communicator) {
+      log.warn("handleExecutorCallback: communicator not ready, dropping escalation UI");
+      return;
+    }
     this.pendingExecutorCallbacks.set(id, arg.executorSessionId);
     // CommunicatorSink → EventSink 翻译(只为 pending_question 感兴趣)。
     // S1(A7):经 this.emit 多播到当前活连接,不再捕获调用方传入的单连接 sink。

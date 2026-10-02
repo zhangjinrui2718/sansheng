@@ -20,6 +20,7 @@
 import { nanoid } from "nanoid";
 import type { BlackboardArtifact, ArtifactStatus, CallbackReason } from "../../../shared/types/blackboard.js";
 import { artifactBus, makeArtifact } from "../bus/index.js";
+import { log } from "../../shared/log.js";
 import {
   upsertArtifact,
   updateArtifactStatus,
@@ -157,6 +158,7 @@ export class Executor {
 
     // 3. 收集 context(siblings artifacts)
     const context = await this.gatherContext(todo);
+    if (this.aborted) return this.abortedResult(todo);
 
     // 4. 调 LLM
     const userPrompt = this.buildUserPrompt(todo, context);
@@ -164,6 +166,9 @@ export class Executor {
     try {
       raw = await this.llmCall({ systemPrompt: this.systemPrompt, userPrompt });
     } catch (err) {
+      // C2(审查 §C2「abort 后 persist/事件发射加 aborted 守卫」):用户已经按停,
+      // 迟到的失败不该再被翻译成 note + todo_failed 事件。
+      if (this.aborted) return this.abortedResult(todo);
       // LLM 失败 → 写 failure note + mark todo failed
       await this.handleLlmFailure(todo, err);
       return {
@@ -174,9 +179,16 @@ export class Executor {
       };
     }
 
+    // C2:llmCall 不可中断(ExecutorLlmCall 签名里没有 AbortSignal),所以 abort
+    // 之后这个 await 仍会跑完。旧实现跑完就继续 parse + persist:落 evidence
+    // artifact、publish artifact_created、把 todo 标成 resolved —— 用户明明按了
+    // 停止,产物照样落库、UI 照样跳变。守卫点就落在 await 之后、任何副作用之前。
+    if (this.aborted) return this.abortedResult(todo);
+
     // 5. Parse JSON
     const parsed = this.parseOutcome(raw);
     if (parsed === null) {
+      if (this.aborted) return this.abortedResult(todo);
       await this.handleParseFailure(todo, raw);
       return {
         todoId: todo.id,
@@ -187,11 +199,35 @@ export class Executor {
     }
 
     // 6. 落 artifact + 更新 todo status
+    if (this.aborted) return this.abortedResult(todo);
     return await this.persistOutcome(todo, parsed);
   }
 
+  /**
+   * 批次 4b C2(审查 §C2「Executor.abort 只设 flag」):
+   * 设置中断标志。注意它**不**取消在飞的 llmCall —— ExecutorLlmCall 签名里没有
+   * AbortSignal,加一个要改所有注入方(kernel 的 makeLlmCall / 各测试 fake),
+   * 且 pi-ai 的 completeSimple 只在整轮结束时才检查中断。真正生效的是
+   * execute() 内在 await 之后、任何副作用之前的那几道 aborted 守卫。
+   */
   abort(): void {
     this.aborted = true;
+  }
+
+  /**
+   * C2:abort 后的统一返回。**不落库、不发事件、不改 todo 终态** ——
+   * todo 停在 in_progress 是刻意的:谁来收它由 Orchestrator 决定
+   * (abort → dispose 清 activeExecutors;run 以 "Orchestrator aborted" 收尾,
+   *  lib 层不再往下推进;若进程重启则由 B8 boot 对账兜底)。
+   */
+  private abortedResult(todo: BlackboardArtifact): ExecutorResult {
+    log.warn(`executor: aborted mid-flight, discarding outcome for todo ${todo.id}`);
+    return {
+      todoId: todo.id,
+      executorSessionId: this.sessionId,
+      outcome: "failed",
+      artifactIds: [],
+    };
   }
 
   /* ── private helpers ────────────────────────────────────── */

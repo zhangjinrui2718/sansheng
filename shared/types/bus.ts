@@ -121,12 +121,29 @@ export interface HarnessProposalCreatedEvent {
   artifact: import("./blackboard.js").BlackboardArtifact;
 }
 
-/** 5 个 Bus Event 总联合 */
+/**
+ * 批次 4b B9(审查 §B9):用户取消了 executor 升级出来的提问。
+ *
+ * 旧链路:ws `cancel_question` → kernel.cancelPendingQuestion → Communicator
+ * .cancelPending → `bus.reply(q-exec-*)` → executor 提问根本不在 bus.pending 里
+ * → 「no pending question」→ false。用户点「取消」表面无报错,实际 waiting /
+ * watchdog / pendingExecutorCallbacks 一个都不清,todo 挂满 1 小时 failTimer。
+ * 本事件让取消动作**同步到达** Orchestrator,由它 clearWaiting + failTodo。
+ */
+export interface ExecutorCancelEvent {
+  type: "executor_cancel";
+  executorSessionId: string;
+  /** 人类可读原因(进 todo 的 metadata.errorReason,形态与 cascade 失败同源)。 */
+  reason: string;
+}
+
+/** 6 个 Bus Event 总联合 */
 export type BusEvent =
   | ArtifactCreatedEvent
   | ArtifactStatusChangedEvent
   | ExecutorCallbackEvent
   | ExecutorResumeEvent
+  | ExecutorCancelEvent
   | HarnessProposalCreatedEvent;
 
 export type BusEventType = BusEvent["type"];
@@ -156,6 +173,7 @@ export const BUS_EVENT_TYPES = [
   "artifact_status_changed",
   "executor_callback",
   "executor_resume",
+  "executor_cancel",
   "harness_proposal_created",
 ] as const satisfies ReadonlyArray<BusEventType>;
 

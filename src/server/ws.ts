@@ -551,14 +551,25 @@ export function attachWebSocket(
             error: { code: "no_pending_question", message: `question ${cmd.questionId} 不在 pending` },
           });
         }
-        // resumed 在内部已经 publish executor_resume(artifactBus → kernel.handleUserAnswer)，
-        // artifactBus 订阅会把 executor_resume 推到 ws(本连接已订阅)。
+        // executor_resume 由 kernel.handleUserAnswer 直接 publish 到 artifactBus,
+        // Orchestrator(attach 级 activeOrchestrator)订阅后重启 executor;
+        // 该订阅也会经 kernel 的 bus sink 回到 ws(本连接已订阅)。
         return;
       }
 
       // M3c: 取消一个 pending question
+      // B9(审查 §B9):旧实现丢弃返回值 —— executor 提问取消失败(false)时用户
+      // 点了「取消」界面毫无反应,实际 todo 仍挂到 1 小时 failTimer。现在如实
+      // 回一个 error 事件,让前端(和用户)知道这次取消没生效。
       if (cmd.type === "cancel_question") {
-        kernel.cancelPendingQuestion(cmd.questionId);
+        const cancelled = kernel.cancelPendingQuestion(cmd.questionId);
+        if (!cancelled) {
+          send(ws, {
+            type: "error",
+            conversationId: cmd.conversationId,
+            error: { code: "no_pending_question", message: `question ${cmd.questionId} 不在 pending` },
+          });
+        }
         return;
       }
 

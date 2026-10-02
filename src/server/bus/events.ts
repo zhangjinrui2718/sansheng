@@ -1,11 +1,12 @@
 /**
  * Sansheng · BlackboardArtifact Bus Events (M3+)
  *
- * 5 event types from shared/types/bus.ts:
+ * 6 event types from shared/types/bus.ts:
  *   - artifact_created
  *   - artifact_status_changed
  *   - executor_callback
  *   - executor_resume
+ *   - executor_cancel          (批次 4b B9:用户取消 executor 提问 → Orchestrator 收尾)
  *   - harness_proposal_created
  *
  * 与 MessageBus(BusMessage 通信)分离:本 bus 处理 BlackboardArtifact 生命周期。
@@ -17,6 +18,7 @@ export type {
   ArtifactStatusChangedEvent,
   ExecutorCallbackEvent,
   ExecutorResumeEvent,
+  ExecutorCancelEvent,
   HarnessProposalCreatedEvent,
   ArtifactBusEvent,
   BusEvent,

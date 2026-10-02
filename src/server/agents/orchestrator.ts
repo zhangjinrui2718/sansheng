@@ -33,6 +33,7 @@ import type {
   ArtifactCreatedEvent,
   ArtifactStatusChangedEvent,
   ExecutorCallbackEvent,
+  ExecutorCancelEvent,
   ExecutorResumeEvent,
 } from "../../../shared/types/bus.js";
 import { artifactBus, makeArtifact } from "../bus/index.js";
@@ -141,6 +142,12 @@ export class Orchestrator {
   private depthByTodo = new Map<string, number>();
 
   private unsubs: Array<() => void> = [];
+  /**
+   * C2(审查 §C2「Orchestrator.abort 退订+守卫」):abort / shutdown 之后置 true。
+   * 退订只解决「不再收到**新**事件」,在飞异步(spawnExecutor 的 await 之后、
+   * 已 publish 的回调)仍会回来写库/发 sink 事件 —— 守卫负责这一段。
+   */
+  private aborted = false;
   private runPromise: Promise<BlackboardShape> | null = null;
   private runResolve: ((s: BlackboardShape) => void) | null = null;
   private runReject: ((e: Error) => void) | null = null;
@@ -177,21 +184,40 @@ export class Orchestrator {
 
   /**
    * 订阅 bus(Orchestrator 启动时调用一次)。幂等:重复调用不会重复订阅。
+   *
+   * C1(审查 §C1「bus 订阅 handler `void asyncFn()` 无 .catch」):
+   * 旧实现四个 handler 全是 `void this.onXxx(e)` 裸奔 —— handler 内任何异步
+   * 抛错都变成 unhandledRejection(Node ≥15 默认终止进程)。这里统一按
+   * sedimentation triggerSedimentation 同款形态补 `.catch` + 错误日志:
+   * 单个 handler 失败不该带走整个 server,但必须留痕。
    */
   init(): void {
     if (this.unsubs.length > 0) return;
     this.unsubs.push(
       this.bus.subscribe("artifact_created", (e) => {
-        void this.onArtifactCreated(e);
+        void this.onArtifactCreated(e).catch((err) => {
+          log.warn("orchestrator.onArtifactCreated failed:", err);
+        });
       }),
       this.bus.subscribe("artifact_status_changed", (e) => {
-        void this.onArtifactStatusChanged(e);
+        void this.onArtifactStatusChanged(e).catch((err) => {
+          log.warn("orchestrator.onArtifactStatusChanged failed:", err);
+        });
       }),
       this.bus.subscribe("executor_callback", (e) => {
-        void this.onExecutorCallback(e);
+        void this.onExecutorCallback(e).catch((err) => {
+          log.warn("orchestrator.onExecutorCallback failed:", err);
+        });
       }),
       this.bus.subscribe("executor_resume", (e) => {
-        void this.onExecutorResume(e);
+        void this.onExecutorResume(e).catch((err) => {
+          log.warn("orchestrator.onExecutorResume failed:", err);
+        });
+      }),
+      // B9(审查 §B9):用户取消了 executor 升级出来的提问 → 立刻收尾,
+      // 不再等 5min escalation / 1h failTimer。
+      this.bus.subscribe("executor_cancel", (e) => {
+        this.onExecutorCancel(e);
       }),
     );
   }
@@ -202,6 +228,8 @@ export class Orchestrator {
    * 关闭实例时绝不让 await 永久挂起。幂等,可重复调用。
    */
   shutdown(): void {
+    // C2:shutdown 与 abort 同为终态语义(实例不可复活)。
+    this.aborted = true;
     this.dispose();
     this.settlePendingRun(new Error("Orchestrator shutdown before run completed"));
   }
@@ -213,6 +241,12 @@ export class Orchestrator {
    * reject 语义保持:Error("Orchestrator aborted")。
    */
   abort(): void {
+    // C2(审查 §C2「Orchestrator.abort 不退订、无 aborted 守卫」):退订在批次 1
+    // 已经做了(共用 dispose),但缺「已终止」守卫 —— 旧实现 abort 之后同一个实例
+    // 还能再次 run():init() 因为 unsubs 已清空而重新订阅,实例「复活」并继续
+    // 消费后续 run 的事件。abort / shutdown 都是终态:置 flag 后 run() 直接 reject,
+    // 任何入口(spawnPlanner / spawnExecutor / todo 状态变化)都先看 flag。
+    this.aborted = true;
     this.dispose();
     this.settlePendingRun(new Error("Orchestrator aborted"));
   }
@@ -264,6 +298,12 @@ export class Orchestrator {
     goal: string,
     sink?: ProgressSink,
   ): Promise<BlackboardShape> {
+    // C2:终止态守卫 —— abort/shutdown 之后本实例不再消费任何事件。
+    if (this.aborted) {
+      throw new Error(
+        "Orchestrator aborted/shutdown — this instance is terminal and cannot run again",
+      );
+    }
     if (sink) this.sink = sink;
     this.init();
 
@@ -448,10 +488,41 @@ export class Orchestrator {
       //  - plan_done 在问题还挂起时发出(summary "完成 0/1")对用户是错误信号。
       //  - 挂起有界:escalation(5min)/fail(1hr)watchdog + maxRunMs(默认 30min)。
     } catch (err) {
-      // 路由失败不影响 Orchestrator 状态 — watchdog 会兜底
-      // 但取消 timers,避免悬挂
+      // C1(审查 §C1「routeCallback 失败 err 未用、零日志」):旧 catch 块把 err
+      // 读了不用,注释还写着「路由失败不影响 Orchestrator 状态」—— 实际后果是
+      // Communicator 侧的失败完全静默,用户看到 todo 永远挂在 waiting,日志里
+      // 一行线索都没有。现在:留痕 + 清 timers(避免悬挂,原行为不变)。
+      log.warn(
+        `orchestrator.routeCallback failed (todo=${todoId} executorSession=${e.executorSessionId}); waiting state cleared, watchdog cancelled:`,
+        err,
+      );
       this.clearWaiting(e.executorSessionId);
     }
+  }
+
+  /**
+   * B9(审查 §B9「cancel_question 对 executor 回调问题完全无效」):
+   * 用户点了「取消」→ kernel 清 pendingExecutorCallbacks 并 publish 本事件。
+   * 这里把 waiting 立刻收掉:clearWaiting 杀两个 watchdog,failTodo 让 todo
+   * 终态化(带 reason,形态与 cascade 失败同源)并级联下游。
+   *
+   * 为什么是 failTodo 而不是「原样放回 open」:用户已明确表示「别问了」,放回
+   * open 会让 DAG 继续推进到下一个 todo —— 那不是「取消这一问」的语义;
+   * 终态化 + errorReason 才是可解释的终态(前端与 timeline 都能看见原因)。
+   *
+   * 静默处理两种情况(都不该炸 bus handler):
+   *  - executorSessionId 未知(取消的是上一个已收尾 run 的提问);
+   *  - todo 已是终态(用户晚了一步)。
+   */
+  private onExecutorCancel(e: ExecutorCancelEvent): void {
+    if (this.aborted) return;
+    const todoId = this.todoByExecutorSession.get(e.executorSessionId);
+    this.clearWaiting(e.executorSessionId);
+    if (!todoId) return;
+    const todo = getArtifact(this.storage.db, todoId);
+    if (!todo) return;
+    if (todo.status === "resolved" || todo.status === "failed") return;
+    this.failTodo(todo, new Error(e.reason));
   }
 
   private async onExecutorResume(e: ExecutorResumeEvent): Promise<void> {
@@ -475,9 +546,13 @@ export class Orchestrator {
   /* ── Private orchestration logic ───────────────────────── */
 
   private async spawnPlanner(intent: BlackboardArtifact): Promise<void> {
+    // C2:abort 之后不再唤起任何新工作。
+    if (this.aborted) return;
     const planner = this.plannerFactory({ storage: this.storage });
     try {
       const result = await planner.plan(intent);
+      // C2:planner 跑的这段时间里可能被 abort(用户在 LLM 回合中途按停)。
+      if (this.aborted) return;
       // intent 在 plan() 期间可能已被标为 failed(parse-fail / 0 valid todos)。
       // 此时不应再发 todos_planned(也不应启动 executor)。
       const currentIntent = getArtifact(this.storage.db, intent.id);
@@ -490,12 +565,16 @@ export class Orchestrator {
         await this.spawnExecutorIfReady(todo);
       }
     } catch (err) {
+      // C2:abort 之后不再写库(failIntent 会 upsert + publish + 可能 resolve run)。
+      if (this.aborted) return;
       // Planner 整体失败 → mark intent failed
       this.failIntent(intent, err);
     }
   }
 
   private async spawnExecutorIfReady(todo: BlackboardArtifact): Promise<void> {
+    // C2:abort 之后不再唤起新 executor(旧实现只退订,已排队/在途的照跑)。
+    if (this.aborted) return;
     if (!this.areDepsResolved(todo)) return;
     if (this.activeExecutors.has(todo.id)) return;
     await this.spawnExecutor(todo);
@@ -600,6 +679,8 @@ export class Orchestrator {
     todo: BlackboardArtifact,
     pendingDecision?: { title: string; body: string },
   ): Promise<void> {
+    // C2:终止态守卫 —— abort 之后不再启动新 executor。
+    if (this.aborted) return;
     if (this.activeExecutors.has(todo.id)) return;
     // A4:resume 重跑时把 decision 传给 Executor → buildUserPrompt 输出
     // 「# Decision(来自用户/Communicator)」段落(用户回答全文在 body,逐字注入)
@@ -613,8 +694,9 @@ export class Orchestrator {
       // execute 完成时:executor 内部已 publish artifact + 更新 todo status
       // Orchestrator 不需要额外动作;bus event 会触发后续流程
     } catch (err) {
-      // Executor 抛错(罕见,大部分错误在内部处理)→ mark todo failed
-      this.failTodo(todo, err);
+      // C2:abort 之后不再写库 —— Executor.abort() 只是置 flag,在飞 llmCall
+      // 回来后的失败也不该再被翻译成 todo_failed 事件(用户已经按停了)。
+      if (!this.aborted) this.failTodo(todo, err);
     } finally {
       this.activeExecutors.delete(todo.id);
     }
@@ -628,6 +710,8 @@ export class Orchestrator {
     // A4:decision artifact 的 title+body 经 pendingDecision 注入重跑 userPrompt。
     // 注意:depth 在 onExecutorCallback 按 todoId 跨 session 累计,这里不重置
     // (深度限制针对整条 callback chain,不是单个 session)。
+    // C2:abort 之后不重跑 executor。
+    if (this.aborted) return;
     if (this.activeExecutors.has(todo.id)) return;
     if (this.areDepsResolved(todo)) {
       await this.spawnExecutor(
