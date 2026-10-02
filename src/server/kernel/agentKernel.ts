@@ -19,6 +19,8 @@ import {
   makeLlmCommunicatorDecide,
   type CommunicatorSink,
 } from "../agents/communicator.js";
+// 批次 5b-2 T1:回合后异步智能沉淀(chat 回合 message_end → D7 artifacts 落 blackboard)
+import { sedimentTurn } from "../agents/sedimentation.js";
 import type { BusMessage as BusMessageFromTypes, CommunicatorDecision } from "@shared/types/agents";
 import type { RunnerSettings } from "../agents/runner.js";
 import { loadHarness } from "../harness/loader.js";
@@ -139,6 +141,13 @@ export type EventSink = (e: ServerEvent) => void;
  */
 export interface AgentKernelOptions {
   decideLlmCall?: (input: { systemPrompt: string; userPrompt: string }) => Promise<string>;
+  /**
+   * 批次 5b-2(T1):回合后智能沉淀 LLM 的测试注入 seam —— 与 decideLlmCall 同款
+   * DI 模式。生产不传 → sedimentTurn 走 completeSimple(getModel());
+   * SANSHENG_SEDIMENT=0(tests/setup-env.ts 全局置,测试卫生)或无模型 → 静默跳过。
+   * 注入时绕过闸门(显式注入 = 显式测试意图)。
+   */
+  sedimentLlmCall?: (input: { systemPrompt: string; userPrompt: string }) => Promise<string>;
 }
 
 export class AgentKernel {
@@ -179,6 +188,13 @@ export class AgentKernel {
   private kernelStartedAt = Date.now();
   /** M2:当前正在发/等的 user 文本(prompt() 时 buffer 起来,message_start(user) 时消费) */
   private pendingUserText: string | null = null;
+  /**
+   * 批次 5b-2 T1:本回合 user raw 的沉淀副本。pendingUserText 在 message_start(user)
+   * 即被消费置空,而沉淀触发点在 message_end(assistant)—— 需要独立字段把 raw
+   * 原文带过去(与 pendingUserText 同源同值,仅生命周期不同;dispose/newConversation
+   * 一并清理)。
+   */
+  private lastUserRawText: string | null = null;
   /** M3c: MessageBus + Communicator(每会话 1 个,resume 时重建) */
   private bus: MessageBus = new MessageBus();
   private communicator: Communicator | null = null;
@@ -658,6 +674,7 @@ export class AgentKernel {
       this.toolStartAt.clear();
       this.buf = null;
       this.pendingUserText = null;
+      this.lastUserRawText = null;
       this.currentTurnIndex = 0;
       this.kernelStartedAt = Date.now();
     }
@@ -773,6 +790,7 @@ export class AgentKernel {
     // M2:清掉上一次的 buffer / pending user text
     this.buf = null;
     this.pendingUserText = null;
+    this.lastUserRawText = null;
     this.currentTurnIndex = 0;
     this.conversationId = `conv_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
     log.info(`new conversation: ${this.conversationId}`);
@@ -964,6 +982,8 @@ export class AgentKernel {
     }
     // M2:buffer 起来,handler 在 message_start(role=user) 时落库
     this.pendingUserText = text;
+    // 批次 5b-2 T1:沉淀副本(message_end 时与 assistant 回复一起喂沉淀服务)
+    this.lastUserRawText = text;
     // M3c: 只有 session 存在时才回退 Pi session(PI_OFFLINE 场景下 kernel 无 session)。
     // B2(批次 5a,docs/CODE-REVIEW-2026-10-01.md §B2):chat 路径的 canned「已收到」
     // 占位 sink 已在 Communicator 侧移除 → 这里的 Pi 直答是 chat 的唯一回复(双回复已治)。
@@ -1274,6 +1294,11 @@ export class AgentKernel {
               const bufRef = this.buf;
               this.buf = null;
               void this.extractAndStoreFragments(text, bufRef.messageId);
+              // 批次 5b-2 T1:回合后异步智能沉淀 —— 只对 Pi 真回复(chat 回合)触发:
+              // task/feedback 的合成 ack turn 走 prompt() 内 closeAckTurn(直接 emit,
+              // 不经本 handler),天然不触发。fire-and-forget + .catch(审查 C1 教训:
+              // unhandled rejection 崩进程);sedimentTurn 自身也永不 throw(双保险)。
+              this.triggerSedimentation(bufRef.messageId, text);
             }
 
             sink({
@@ -1363,6 +1388,48 @@ export class AgentKernel {
         log.warn("event handler error:", err);
       }
     };
+  }
+
+  /**
+   * 批次 5b-2 T1:回合后异步智能沉淀(jev 裁决 A 方案:保流式,不做 D7 字面 JSON 直答)。
+   *
+   * 触发点:Pi handler message_end(chat 回合 assistant 真回复完成;task/feedback 的
+   * 合成 ack turn 不经该 handler → 不触发)。fire-and-forget:不 await、不阻塞流式,
+   * `.catch` 守护(审查 C1 教训)—— 沉淀服务自身设计为永不 throw,这里是双保险。
+   *
+   * 输入:本回合 user raw(lastUserRawText,与落库 raw 同源)+ assistant 回复全文 +
+   * 少量前文(DB 最近消息,剔除本回合两条;读失败 → 空前文,不阻塞)。
+   * 闸门/DI:SANSHENG_SEDIMENT=0(测试卫生,tests/setup-env.ts)或无模型 → 服务内
+   * 静默跳过;opts.sedimentLlmCall 注入绕过闸门(测试 seam)。
+   */
+  private triggerSedimentation(assistantMessageId: string, assistantText: string): void {
+    if (!assistantText.trim()) return; // 空回复不沉淀
+    const conversationId = this.conversationId;
+    const userText = this.lastUserRawText ?? "";
+    let prior: Array<{ role: "user" | "assistant"; content: string }> = [];
+    try {
+      const msgs = listMessagesByConversation(this.storage.db, conversationId)
+        .filter((m): m is typeof m & { role: "user" | "assistant" } =>
+          m.role === "user" || m.role === "assistant")
+        .filter((m) => m.id !== assistantMessageId);
+      // 末条若正是本回合 user raw(下方已显式传递)→ 去掉,避免前文重复
+      const last = msgs[msgs.length - 1];
+      if (last && last.role === "user" && last.content === userText) msgs.pop();
+      prior = msgs.slice(-4).map((m) => ({ role: m.role, content: m.content ?? "" }));
+    } catch {
+      prior = []; // 沉淀是 best-effort,DB 读失败不阻塞
+    }
+    void sedimentTurn(
+      {
+        getModel: () => this.getModel(),
+        ...(this.opts.sedimentLlmCall ? { llmCall: this.opts.sedimentLlmCall } : {}),
+      },
+      this.storage,
+      { conversationId, userText, assistantText, assistantMessageId, recentTranscript: prior },
+    ).catch((err) => {
+      // 双保险:sedimentTurn 契约永不 throw;万一(编程错误)也只 muted,不影响主路径
+      log.muted(`sedimentation: skipped (${(err as Error)?.message ?? err})`);
+    });
   }
 
   /**
