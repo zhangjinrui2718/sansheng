@@ -215,6 +215,17 @@ export class SettingsStore {
     return s.providers.find((p) => p.id === s.activeProviderId) ?? s.providers[0];
   }
 
+  /**
+   * 批次 4b B5(审查 §B5):丢弃内存缓存,下次 load() 强制重新读盘。
+   *
+   * 用于 `/api/reset`:即便配置文件**没被删**,也让「内存里的副本」与磁盘重新
+   * 对齐 —— 万一 rm 波及到配置(partial failure),也不会拿内存里的旧副本继续
+   * 往磁盘写。幂等;不影响已经持有 Settings 引用的调用方(下次 load 才是新的)。
+   */
+  invalidate(): void {
+    this.cache = null;
+  }
+
   reset(): void {
     this.save({ ...DEFAULTS, providers: [] });
   }

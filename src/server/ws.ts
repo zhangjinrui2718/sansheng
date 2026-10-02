@@ -272,6 +272,21 @@ export function attachWebSocket(
     void runPlan(goalConvId, goal);
   });
 
+  // 批次 4b B5(审查 §B5):/api/reset 会删掉 sansheng.db —— 在删之前先 abort 掉
+  // 在跑的 plan(退订 bus + abort 在飞 executor + 清 watchdog),否则它会在数据
+  // 消失之后继续烧 token 并把产物写进刚重建的空库。activeOrchestrator 是
+  // attach 级状态,只有 ws.ts 拿得到,所以在这里注册给 kernel 的数据重置钩子。
+  kernel.setOnDataReset(() => {
+    if (!activeOrchestrator) return;
+    const running = activeOrchestrator;
+    activeOrchestrator = null;
+    try {
+      running.abort();
+    } catch (err) {
+      log.warn("data reset: activeOrchestrator.abort failed:", err);
+    }
+  });
+
   server.on("upgrade", (req: IncomingMessage, socket: Duplex, head: Buffer) => {
     const url = new URL(req.url ?? "/", "http://localhost");
     if (url.pathname !== "/ws") {

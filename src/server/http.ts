@@ -449,23 +449,50 @@ export async function createApp(opts: AppOptions): Promise<Hono> {
     return c.json({ ok: true, value });
   });
 
-  // 重置 Sansheng:删 db / keyring / settings / pi 目录(留 logs)
+  // 重置 Sansheng:**只清会话数据**,保留配置(.keyring / settings.json)
+  //
+  // 批次 4b B5(审查 §B5「/api/reset 后 server 变僵尸 + 密钥丢失链」)。旧实现两实锤:
+  //  1. `storage.close()` + rmSync 之后**无任何重开逻辑** → 除 health 外全部 API
+  //     500(use-after-close 被 try/catch 兜住),kernel 落库全失败,server 变僵尸,
+  //     必须手动重启。
+  //  2. targets 里连带 `.keyring` + `settings.json` —— 两者都不是会话数据而是
+  //     **配置**。删掉后 SettingsStore 内存 cache 与 Keyring 内存 masterKey 仍指向
+  //     已删文件;此后任何一次 save() 用旧 masterKey 把 settings.json 写回来,重启时
+  //     Keyring 生成**新随机 key** → 已存 apiKey 全部解密失败被静默清空
+  //     (store.ts 逐个 catch 后置 apiKey: "")。这比僵尸更隐蔽:用户只是清了个会话,
+  //     回来发现所有 provider 的 key 都没了。
+  //
+  // 新契约:
+  //  - 只删**会话数据**(sansheng.db/-wal/-shm、pi agentDir);`.keyring` 与
+  //    `settings.json` 显式列入 preserved(要彻底重置请手删整个 dataDir ——
+  //    那是用户明确的手工动作,不是这个 API 的语义);
+  //  - 删除**之前** prepareForDataReset():停掉在飞 plan / 在飞 chat 回合 /
+  //    挂起的 executor 提问,否则它们会在数据被删之后继续烧 token、写空库,
+  //    或者挂着 1 小时 watchdog;
+  //  - 删除之后 `storage.reopen()` 在**同一 Storage 实例**上换新连接并重跑
+  //    migrations —— 所有注入方(kernel/ws/orchestrator/harness)持有的是 Storage
+  //    实例,换连接对它们透明,server 立刻恢复可用,不需要重启;
+  //  - reopen 不跑 B8 boot 孤儿对账(同进程语义,论证见 Storage.reopen 注释)。
   app.post("/api/reset", async (c) => {
     const body = (await c.req.json().catch(() => null)) as { confirm?: string } | null;
     if (body?.confirm !== "reset") {
       return c.json({ error: "confirmation required (pass {confirm:\"reset\"})" }, 400);
     }
+    // 配置类文件:不删(删了就是上面的密钥丢失链)。
+    const preserved = [join(opts.dataDir, ".keyring"), join(opts.dataDir, "settings.json")];
     const targets = [
       join(opts.dataDir, "sansheng.db"),
       join(opts.dataDir, "sansheng.db-wal"),
       join(opts.dataDir, "sansheng.db-shm"),
-      join(opts.dataDir, ".keyring"),
-      join(opts.dataDir, "settings.json"),
       join(opts.dataDir, "pi"),
     ];
+
+    // 1. 先停进程内的活。
+    opts.kernel.prepareForDataReset();
+
+    // 2. 关连接再删文件(不关的话 WAL 句柄会让某些平台上的 rm 失败)。
     const removed: string[] = [];
     const failed: string[] = [];
-    // 先关 storage(SQLite) 释放文件句柄,不然 rm 会 win32/某些 fs 上失败
     try {
       opts.storage.close();
     } catch (err) {
@@ -482,8 +509,28 @@ export async function createApp(opts: AppOptions): Promise<Hono> {
         log.warn(`reset: failed to remove ${t}:`, err);
       }
     }
-    log.warn(`reset via /api/reset: removed=${removed.length} failed=${failed.length}`);
-    return c.json({ ok: true, removed, failed });
+
+    // 3. 同一实例重开 —— server 保持存活(B5 核心)。
+    let reopened = true;
+    try {
+      opts.storage.reopen();
+    } catch (err) {
+      reopened = false;
+      failed.push(join(opts.dataDir, "sansheng.db"));
+      log.error("reset: storage reopen failed — SQLite-backed APIs will 500 until restart:", err);
+    }
+    // 4. 配置缓存失效:强制下一次 load() 重新读盘(正常是 no-op;万一 rm 波及到
+    //    配置,也不会拿内存里的旧副本继续往磁盘写)。
+    try {
+      opts.settingsStore.invalidate();
+    } catch (err) {
+      log.warn("reset: settings invalidate failed:", err);
+    }
+
+    log.warn(
+      `reset via /api/reset: removed=${removed.length} failed=${failed.length} preserved=${preserved.length} reopened=${reopened}`,
+    );
+    return c.json({ ok: reopened, removed, failed, preserved });
   });
 
   // —— 静态文件:生产构建产物(dist/web) ——

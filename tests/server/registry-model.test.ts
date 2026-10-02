@@ -24,7 +24,7 @@ import type { BuiltinProvider } from "@earendil-works/pi-ai/providers/all";
 import { resolveModel, syncActiveProviderApiKeyEnv } from "../../src/server/providers/registry.js";
 
 const PROVIDER = "deepseek";
-const MODEL_ID = "deepseek-chat";
+const MODEL_ID = "deepseek-v4-pro"; // catalog 实有模型(实证:deepseek 只有 flash / v4-pro)
 const API_KEY = "sk-b6-test-0123456789abcdef";
 
 function catalogBaseUrl(): string {

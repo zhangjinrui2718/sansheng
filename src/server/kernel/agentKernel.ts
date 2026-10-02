@@ -446,6 +446,50 @@ export class AgentKernel {
   private _pendingOnTask: ((input: { goal: string; conversationId: string }) => void) | undefined = undefined;
 
   /**
+   * 批次 4b B5(审查 §B5「/api/reset 后 server 变僵尸 + 密钥丢失链」):
+   * 数据重置前置钩子。
+   *
+   * 为什么需要:reset 会删掉 sansheng.db / pi 目录,此刻**本进程内**仍可能有
+   *  - 在跑的 plan(ws.ts attach 级 activeOrchestrator;退订/abort 逻辑在 ws 层);
+   *  - 在飞的 chat 回合(Pi session + 模型句柄);
+   *  - 挂起的 executor 提问(pendingExecutorCallbacks / pendingQuestions)。
+   * 不先停掉它们,它们会在数据被删之后继续烧 token 并写库(写到刚重建的空库),
+   * 或者永远挂着(提问的 watchdog 要等 1 小时)。
+   *
+   * 设计:与 setOnTask 同款的 attach 级桥接 —— ws.ts 持有 activeOrchestrator,
+   * kernel 不知道它的存在,故由 ws.ts 注册一个回调,由 kernel 在数据重置时触发。
+   */
+  setOnDataReset(cb: (() => void) | undefined): void {
+    this._onDataReset = cb;
+  }
+  private _onDataReset: (() => void) | undefined = undefined;
+
+  /**
+   * B5:数据重置前的进程内收尾(不碰磁盘,由 /api/reset 调用)。
+   * 1. 触发 attach 级钩子(ws.ts → activeOrchestrator.abort():退订 bus + abort
+   *    在飞 executor + 清 watchdog,run() 以 "Orchestrator aborted" 收尾);
+   * 2. 清 kernel 自己的挂起态(pendingExecutorCallbacks / pendingQuestions)——
+   *    这些 question id 在新库/新会话里毫无意义,留着会让用户点「回答」时
+   *    触发一条指向已删除 todo 的 executor_resume;
+   * 3. invalidate() 丢弃 Pi session 与 model 句柄 —— 释放旧会话文件句柄,
+   *    也顺带丢掉内存里那份明文 apiKey;下一次 prompt 走惰性 start,
+   *    重新从(未被删除的)settings.json 解析。
+   *
+   * 幂等:重复调用安全。
+   */
+  prepareForDataReset(): void {
+    log.warn("kernel: preparing for data reset (stopping in-flight session + pending questions)");
+    try {
+      this._onDataReset?.();
+    } catch (err) {
+      log.warn("kernel: data-reset hook threw (continuing):", err);
+    }
+    this.pendingExecutorCallbacks.clear();
+    this.pendingQuestions.clear();
+    this.invalidate();
+  }
+
+  /**
    * 批次 4a C8(审查 §C8「resume/prompt 并发无互斥 → 孤儿 Pi session」):
    * session 生命周期 FIFO 串行链。
    *

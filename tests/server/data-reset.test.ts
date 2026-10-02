@@ -252,12 +252,17 @@ describe("B5 · reset 的原子性辅助证据(tmp+rename 不留残渣)", () => 
 });
 
 describe("B5 · 真实 ~/.sansheng 只读边界(本组测试只碰临时目录)", () => {
-  it("测试用的 dataDir 确实是临时目录,不含真实用户数据", () => {
-    expect(dataDir.startsWith(tmpdir())).toBe(true);
-    // 若实现误把 HOME/.sansheng 拉进来,这里会命中真实路径
+  it("reset 报告的所有路径都在临时 dataDir 之下(不碰真实 ~/.sansheng)", async () => {
+    const res = await postReset({ confirm: "reset" });
+    const body = (await res.json()) as { removed: string[]; preserved: string[]; failed: string[] };
     const real = join(process.env.HOME ?? "", ".sansheng");
+    for (const p of [...body.removed, ...body.preserved, ...body.failed]) {
+      // RED 防护:实现若把真实用户目录卷进 targets,这里立刻红
+      expect(p.startsWith(dataDir + "/")).toBe(true);
+      expect(p.startsWith(real)).toBe(false);
+    }
+    expect(dataDir.startsWith(tmpdir())).toBe(true);
     expect(readFileSync(join(dataDir, "settings.json"), "utf-8").length).toBeGreaterThan(0);
-    expect(existsSync(real)).toBe(dataDir === real);
   });
 
   it("reset 之后 settings.json 权限仍为 0600", async () => {
