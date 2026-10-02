@@ -1,3 +1,9 @@
+/**
+ * 思考块(批次 UI U4:状态行去掉重复的「推演中」)
+ *
+ * 「推演中」此前在本块与 MessageList 的轮次头**各出现一次**;轮次头已经有了,
+ * 这里删掉,只保留箭头随展开状态旋转(旧实现写死 ▾,展开后纹丝不动)。
+ */
 import { useState } from "react";
 
 interface Props {
@@ -21,15 +27,20 @@ export function ThinkingBlock({ text, streaming }: Props) {
         className="w-full flex items-center gap-2 px-3 py-1.5 text-left"
         style={{ color: "var(--bone-dim)", fontSize: 12 }}
       >
-        <span style={{ color: "var(--jade)" }}>▾</span>
+        {/* 箭头随展开状态旋转 —— 旧实现写死 ▾,展开后箭头纹丝不动,读不出当前状态。 */}
+        <span
+          style={{
+            color: "var(--jade)",
+            display: "inline-block",
+            transition: "transform var(--duration-160) var(--ease-out)",
+            transform: open ? "rotate(90deg)" : "none",
+          }}
+        >
+          ›
+        </span>
         <span className="font-mono" style={{ fontSize: 11 }}>
           思考
         </span>
-        {streaming && (
-          <span className="sansheng-text-jade animate-pulse-soft" style={{ fontSize: 10 }}>
-            · 推演中
-          </span>
-        )}
         {!open && (
           <span className="sansheng-text-mute truncate ml-2" style={{ fontSize: 11 }}>
             {preview || "…"}

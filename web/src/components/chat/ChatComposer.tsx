@@ -1,3 +1,22 @@
+/**
+ * 对话输入区(批次 UI U4:底部三段文字压成一行 + 接上**一直没被用的** placeholder)
+ *
+ * 改这一层之前有两个问题:
+ *
+ *  1. **`placeholder` prop 是死的。** ChatSurface 精心算出了三档 placeholder
+ *     (kernel 未就绪 / 没配 Key / 正常),逐层传给 ChatComposer,而 ChatComposer
+ *     **根本没有解构这个 prop**,textarea 里写的是一句写死的
+ *     `disabled ? "正在生成…" : "说点什么…"`。结果是「请先在「设置」配置 API Key」
+ *     这类最该被看见的引导从来没出现在输入框里。现在接线,三档提示真正生效。
+ *  2. **底部状态条有三段文字**:`状态说明 · 「思考 / 行动 / 反思 都会落到 timeline」
+ *     · 快捷键提示`。中间那句是产品介绍文案,而且声称「落到 timeline」——
+ *     思考/工具确实进对话流,规划产出落到工件页,不是 timeline,属于半个空头承诺
+ *     (与 tests/web/c10-dead-code.test.ts 守的同一类问题)。删掉,状态与快捷键
+ *     合并成一行。
+ *
+ * Esc 中断的接线保持原样(window keydown,因为推演中 textarea 是 disabled,
+ * 绑在它上面永远收不到按键)—— tests/web/c10-dead-code.test.ts 守着这一条。
+ */
 import { useEffect, useState } from "react";
 
 interface Props {
@@ -17,6 +36,7 @@ export function ChatComposer({
   onInterrupt,
   disabled,
   reason,
+  placeholder,
 }: Props) {
   const [focused, setFocused] = useState(false);
 
@@ -44,9 +64,14 @@ export function ChatComposer({
     onChange("");
   }
 
+  // 调用方没给 placeholder 时才退回默认文案(此前是无论传什么都不看)。
+  const ph =
+    placeholder ??
+    (disabled ? "正在生成…" : "说点什么 · Enter 发送 · Shift+Enter 换行");
+
   return (
     <div
-      className="px-4 py-3"
+      className="px-4 py-3 flex-none"
       style={{
         borderTop: "1px solid var(--ink-3)",
         background: "rgba(11,15,20,0.6)",
@@ -66,7 +91,7 @@ export function ChatComposer({
         <textarea
           className="flex-1 bg-transparent outline-none resize-none"
           rows={1}
-          placeholder={disabled ? "正在生成…" : "说点什么 · Enter 发送 · Shift+Enter 换行"}
+          placeholder={ph}
           value={value}
           onChange={(e) => onChange(e.target.value)}
           onFocus={() => setFocused(true)}
@@ -87,7 +112,7 @@ export function ChatComposer({
           }}
         />
         <button
-          className="sansheng-button-primary"
+          className="sansheng-button-primary flex-none"
           onClick={send}
           disabled={disabled || !value.trim()}
           style={{ padding: "6px 14px" }}
@@ -101,24 +126,18 @@ export function ChatComposer({
             : "发送 ⏎"}
         </button>
       </div>
-      <div
-        className="mt-2 flex items-center gap-3 text-xs sansheng-text-mute"
-        style={{ fontSize: 11 }}
-      >
+      {/* 状态与快捷键合并成一行;不再有第二行的产品介绍文案。 */}
+      <div className="mt-1.5 flex items-center gap-2 ss-meta">
         <span>
           {disabled
             ? reason === "noKernel"
               ? "kernel 未就绪 · 发一条会自动 start"
               : reason === "noKey"
-                ? "请先在 ⚙ 设置配置 API Key"
-                : "三生正在推演 · Esc 中断"
-            : "Sansheng 闲置"}
+                ? "请先在「设置」配置 API Key"
+                : "推演中 · Esc 中断"
+            : "就绪"}
         </span>
-        <span>·</span>
-        <span>思考 / 行动 / 反思 都会落到 timeline</span>
-        <span className="ml-auto">
-          ⏎ 发送 · ⇧⏎ 换行{canInterrupt && " · Esc 中断"}
-        </span>
+        <span className="ml-auto">⏎ 发送 · ⇧⏎ 换行</span>
       </div>
     </div>
   );

@@ -1,283 +1,160 @@
 /**
- * Agent 活动侧栏 · M3b 动态版
+ * Agent 活动侧栏 · M3b 动态版(批次 UI U4:三块合成一块)
  *
- * 批次 UI U2(审查 §C10)处置:
- *  - 轮询端点从 legacy `/api/blackboard/:id` + `/api/agents/:id` **换成**现行
- *    `GET /api/artifacts?conversationId=`。旧实现的两个端点都是死数据面:
- *    `getActiveBlackboard` 依赖 `upsertBlackboard`,而它**全仓无调用方** → 恒 null;
- *    `/api/agents/:id` 是硬编码 `{agents:[]}` 的 M3c 占位 → 恒空。
- *  - 角色徽章不再是「永远 idle」:改为按工件 `author` 聚合的真实产出状态。
- *  - 底部「Trace · 本轮」原是四条硬编码 `—` 占位行(纯假 UI),换成真实的工件构成。
+ * 改这一层之前,这个 284 行的侧栏有三处是**纯噪声**,还有一个和 Agent 页打架:
  *
- * 与 M3b /agents 路由页(Agents.tsx)的差异:
- *   - 本组件嵌在主布局右侧栏,只放摘要级信息,不做表格/分页。
- *   - 本组件读 useChatStore 里的 conversationId,不需要 prop 传递。
+ *  1. **`critic` / `memory` / `reflection` 三行永远是 `idle`。** 这三个角色没有 class
+ *     实现、全仓也没有任何代码读它们的 harness 提示词(产品设计 §1,用户 2026-10-02
+ *     决定暂不实现)。Agent 页早就按同一条决定把它们从角色表里整行删掉了(理由:
+ *     「永远点不亮的灰行是噪声」),侧栏却还留着 —— 同一个决定在两个视图里不一致。
+ *     现在侧栏也只列真实在跑的角色。
+ *  2. **「Blackboard」卡和「工件构成」卡说的是同一件事。** 前者写「工件 · 12」,
+ *     后者把同一个 12 拆成 6 行 kind 计数 —— 侧栏高度被两块卡吃掉了。合并成一块:
+ *     目标一行 + 一行 kind 计数。
+ *  3. **空态写了三行**「暂无会话 / intent · todo · evidence · critique / 会在 Plan
+ *     启动时填充」。一行就够。
+ *  4. 🎯 emoji 换成色点(项目规则:UI 标签不用 emoji)。
+ *
+ * 数据面没动:仍读 `GET /api/artifacts?conversationId=…`,仍以 store 的
+ * `artifactRevision` 打戳触发回查,仍保留 5s 慢速兜底轮询(WS 断流时侧栏要能收敛)
+ * —— 轮询间隔经 `useArtifacts({ pollMs })` 传入,不是新写的一套 fetch。
+ *
+ * 与 /agents 路由页(Agents.tsx)的分工:**本组件是摘要**,不做表格 / 分组 / DAG;
+ * 详情去 Agent 页。
  */
-import { useEffect, useState } from "react";
-import { useChatStore } from "@/stores/chat";
-import type { RoleKind } from "@shared/types/agents";
+import { useMemo } from "react";
+import { EmptyState, KV, Pill, StatStrip } from "@/components/ui/primitives";
+import type { Tone } from "@/components/ui/primitives";
+import { useArtifacts, kindLabel } from "@/lib/artifacts";
 
-interface Artifact {
-  id: string;
-  kind: string;
-  title: string;
-  author: string;
-  status: string;
-  createdAt: number;
-}
-
-const KIND_LABEL: Record<string, string> = {
-  intent: "意图",
-  todo: "待办",
-  decision: "决策",
-  hypothesis: "假设",
-  note: "笔记",
-  evidence: "证据",
-  critique: "批驳",
-  reflection: "反思",
-  harness_proposal: "提案",
-  implementation_preview: "预览",
-};
-
-// 仅展示 5 个核心角色(communicator 走 chat 主对话,不显示在这)
-const DISPLAY_ROLES: RoleKind[] = ["planner", "executor", "critic", "memory", "reflection"];
-
-const ROLE_META: Record<RoleKind, { label: string; glyph: string; desc: string }> = {
-  communicator: { label: "Communicator", glyph: "✺", desc: "对话桥" },
-  planner: { label: "Planner", glyph: "▢", desc: "制定方案" },
-  executor: { label: "Executor", glyph: "▷", desc: "执行动作" },
-  critic: { label: "Critic", glyph: "◇", desc: "评估质量" },
-  memory: { label: "Memory", glyph: "◯", desc: "管理记忆" },
-  reflection: { label: "Reflection", glyph: "✦", desc: "反思归纳" },
-};
+/**
+ * 只列真实在跑的角色。communicator 走「对话」主入口,不进这个侧栏 ——
+ * 它的每个动作都会在对话页留下痕迹,再列一行是重复。
+ * critic / memory / reflection 见文件头 ①:暂不实现,不列。
+ */
+const DISPLAY_ROLES = [
+  { id: "planner", label: "Planner", desc: "制定方案" },
+  { id: "executor", label: "Executor", desc: "执行动作" },
+  { id: "harness_manager", label: "Harness", desc: "自我改进" },
+] as const;
 
 /**
  * 角色状态(由工件 author 聚合而来,不再有 `/api/agents` 那种恒空来源):
- *   idle  = 本会话该角色没产出过任何工件
- *   done  = 有产出且全部落在终态
- *   work  = 有产出且仍有非终态工件(等价于「还在跑」)
+ *   idle = 本会话该角色没产出过任何工件
+ *   done = 有产出且全部落在终态
+ *   work = 有产出且仍有非终态工件(等价于「还在跑」)
  */
 type RoleState = "idle" | "done" | "work";
 
-const STATUS_LABEL: Record<RoleState, string> = {
-  idle: "idle",
-  done: "done",
-  work: "working",
-};
-
-const STATUS_STYLE: Record<RoleState, { bg: string; fg: string }> = {
-  idle: { bg: "var(--ink-3)", fg: "var(--bone-mute)" },
-  done: { bg: "var(--jade-soft)", fg: "var(--jade)" },
-  work: { bg: "rgba(212, 154, 58, 0.18)", fg: "var(--amber)" },
+const STATE_META: Record<RoleState, { label: string; tone: Tone }> = {
+  idle: { label: "idle", tone: "mute" },
+  done: { label: "done", tone: "jade" },
+  work: { label: "running", tone: "amber" },
 };
 
 const TERMINAL = new Set(["resolved", "superseded", "failed"]);
 
-/** 该角色在本会话的聚合状态。 */
-function aggregateRole(artifacts: Artifact[], role: string): RoleState {
-  const mine = artifacts.filter((a) => a.author === role);
+function aggregateRole(author: string, artifacts: { author: string; status: string }[]): RoleState {
+  const mine = artifacts.filter((a) => a.author === author);
   if (mine.length === 0) return "idle";
   return mine.every((a) => TERMINAL.has(a.status)) ? "done" : "work";
 }
 
 export function AgentPanel() {
-  const conversationId = useChatStore((s) => s.conversationId);
-  // 批次 U1:artifact 生命周期事件打戳 → 回查(替代 2s 轮询的实时性缺口)
-  const artifactRevision = useChatStore((s) => s.artifactRevision);
+  const { artifacts, error } = useArtifacts({ pollMs: 5000 });
 
-  const [artifacts, setArtifacts] = useState<Artifact[]>([]);
-  const [error, setError] = useState<string | null>(null);
+  const goal = useMemo(() => {
+    const intents = artifacts.filter((a) => a.kind === "intent");
+    return intents.length > 0 ? intents[intents.length - 1] : undefined;
+  }, [artifacts]);
 
-  useEffect(() => {
-    if (!conversationId) {
-      setArtifacts([]);
-      setError(null);
-      return;
-    }
-    const convId = conversationId;
-    let cancelled = false;
-    async function pull(): Promise<void> {
-      try {
-        const res = await fetch(
-          `/api/artifacts?conversationId=${encodeURIComponent(convId)}&limit=200`,
-        );
-        const data = (await res.json()) as {
-          artifacts?: Artifact[];
-          error?: string;
-          message?: string;
-        };
-        if (cancelled) return;
-        if (!res.ok || data.error) {
-          setError(data.message ?? data.error ?? `HTTP ${res.status}`);
-          setArtifacts([]);
-        } else {
-          setArtifacts(Array.isArray(data.artifacts) ? data.artifacts : []);
-          setError(null);
-        }
-      } catch (e) {
-        if (!cancelled) setError(e instanceof Error ? e.message : String(e));
-      }
-    }
-    void pull();
-    // 慢速兜底轮询(WS 断流时仍能收敛);实时性主路径是 artifactRevision 打戳
-    const interval = setInterval(() => {
-      void pull();
-    }, 5000);
-    return () => {
-      cancelled = true;
-      clearInterval(interval);
-    };
-  }, [conversationId, artifactRevision]);
+  const todos = useMemo(() => artifacts.filter((a) => a.kind === "todo"), [artifacts]);
+  const doneCount = todos.filter((t) => t.status === "resolved" || t.status === "superseded").length;
 
-  const intents = artifacts.filter((a) => a.kind === "intent");
-  const todos = artifacts.filter((a) => a.kind === "todo");
-  const todoDone = todos.filter((t) => t.status === "resolved" || t.status === "superseded").length;
-  const goal = intents.length > 0 ? intents[intents.length - 1] : null;
-  const hasContent = artifacts.length > 0;
-
-  // 工件构成(替代旧的四条硬编码 `—` 占位行)
-  const kindCounts = artifacts.reduce<Record<string, number>>((acc, a) => {
-    acc[a.kind] = (acc[a.kind] ?? 0) + 1;
-    return acc;
-  }, {});
+  /** kind 计数按数量倒序 —— 侧栏高度有限,先看到的主要产出。 */
+  const kinds = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const a of artifacts) counts.set(a.kind, (counts.get(a.kind) ?? 0) + 1);
+    return [...counts.entries()].sort((x, y) => y[1] - x[1]);
+  }, [artifacts]);
 
   return (
-    <aside
-      className="sansheng-card overflow-hidden flex flex-col"
-      style={{ minHeight: 0 }}
-    >
+    <aside className="sansheng-card overflow-hidden flex flex-col" style={{ minHeight: 0 }}>
       <div
-        className="px-3 py-2 flex items-center justify-between"
+        className="px-3 py-2 flex items-center justify-between flex-none"
         style={{ borderBottom: "1px solid var(--ink-3)" }}
       >
         <span style={{ fontSize: 12, color: "var(--bone-dim)" }}>Agent 活动</span>
-        <span className="sansheng-text-mute" style={{ fontSize: 11 }}>
-          {artifacts.length} 工件
-        </span>
+        <span className="ss-meta">{artifacts.length}</span>
       </div>
 
-      <div className="flex-1 overflow-y-auto p-3 flex flex-col gap-3">
-        <section className="sansheng-card-elevated p-3">
-          <div className="text-xs sansheng-text-mute mb-2">角色</div>
-          <ul className="flex flex-col gap-1.5">
-            {DISPLAY_ROLES.map((id) => {
-              const meta = ROLE_META[id];
-              const state = aggregateRole(artifacts, id);
-              const style = STATUS_STYLE[state];
-              const live = state === "work";
-              return (
-                <li
-                  key={id}
-                  className="flex items-center gap-2 px-2 py-1 rounded"
-                  style={{ background: "var(--ink-1)", border: "1px solid var(--ink-3)" }}
-                >
-                  <span style={{ color: "var(--jade)" }}>{meta.glyph}</span>
-                  <span style={{ fontSize: 12, color: "var(--bone)" }}>{meta.label}</span>
-                  <span
-                    className={live ? "animate-pulse-soft" : undefined}
-                    style={{
-                      fontSize: 10,
-                      padding: "0 6px",
-                      borderRadius: 4,
-                      background: style.bg,
-                      color: style.fg,
-                      letterSpacing: ".04em",
-                    }}
-                    title={`${artifacts.filter((a) => a.author === id).length} 个产出`}
-                  >
-                    {STATUS_LABEL[state]}
-                  </span>
-                  <span className="sansheng-text-mute ml-auto" style={{ fontSize: 11 }}>
-                    {meta.desc}
-                  </span>
-                </li>
-              );
-            })}
-          </ul>
-        </section>
+      <div className="flex-1 overflow-y-auto p-2 flex flex-col gap-2">
+        <ul className="flex flex-col gap-1">
+          {DISPLAY_ROLES.map((r) => {
+            const state = aggregateRole(r.id, artifacts);
+            const count = artifacts.filter((a) => a.author === r.id).length;
+            const meta = STATE_META[state];
+            return (
+              <li
+                key={r.id}
+                className="flex items-center gap-2 px-2 py-1 rounded"
+                style={{ background: "var(--ink-1)", border: "1px solid var(--ink-3)" }}
+                title={`${r.label} · ${r.desc} · 本会话 ${count} 个产出`}
+              >
+                <span style={{ fontSize: 12, color: "var(--bone)" }}>{r.label}</span>
+                <span className="sansheng-text-mute truncate" style={{ fontSize: 11 }}>
+                  {r.desc}
+                </span>
+                <span className="ml-auto flex-none">
+                  <Pill tone={meta.tone}>{meta.label}</Pill>
+                </span>
+              </li>
+            );
+          })}
+        </ul>
 
-        <section className="sansheng-card-elevated p-3">
-          <div className="text-xs sansheng-text-mute mb-2">Blackboard</div>
-          {error ? (
-            <div
-              className="rounded p-3"
-              style={{
-                background: "rgba(229, 72, 77, 0.06)",
-                border: "1px solid rgba(229, 72, 77, 0.4)",
-                color: "var(--bone-mute)",
-                fontSize: 12,
-                lineHeight: 1.6,
-              }}
-            >
-              <div className="font-serif mb-1" style={{ color: "var(--cinnabar)" }}>
-                加载失败
-              </div>
-              {error}
-            </div>
-          ) : hasContent ? (
-            <div
-              className="rounded p-3"
-              style={{
-                background: "var(--ink-1)",
-                border: "1px solid var(--ink-3)",
-                color: "var(--bone)",
-                fontSize: 12,
-                lineHeight: 1.6,
-              }}
-            >
-              {goal && (
-                <div className="mb-2" style={{ color: "var(--bone)" }}>
-                  <span style={{ color: "var(--jade)" }}>🎯 </span>
+        {error ? (
+          <div className="ss-empty" style={{ color: "var(--cinnabar)" }}>
+            加载失败:{error}
+          </div>
+        ) : artifacts.length === 0 ? (
+          <EmptyState>还没有工件。发一条 /plan 目标,这里会显示各角色的产出。</EmptyState>
+        ) : (
+          <div className="flex flex-col gap-1.5">
+            {goal && (
+              <div
+                className="flex items-start gap-1.5 rounded px-2 py-1.5"
+                style={{ background: "var(--ink-1)", border: "1px solid var(--ink-3)" }}
+              >
+                <span
+                  className="inline-block rounded-full flex-none"
+                  style={{ width: 5, height: 5, marginTop: 6, background: "var(--jade)" }}
+                />
+                <span className="ss-body ss-clamp-2" style={{ fontSize: 12 }}>
                   {goal.title}
-                </div>
-              )}
-              {todos.length > 0 && (
-                <div className="mb-1" style={{ color: "var(--bone-dim)" }}>
-                  Todos · {todoDone}/{todos.length} done
-                </div>
-              )}
-              <div style={{ color: "var(--bone-dim)" }}>工件 · {artifacts.length}</div>
-            </div>
-          ) : (
-            <div
-              className="rounded p-3"
-              style={{
-                background: "var(--ink-1)",
-                border: "1px dashed var(--ink-3)",
-                color: "var(--bone-mute)",
-                fontSize: 12,
-                lineHeight: 1.6,
-              }}
-            >
-              <div className="font-serif mb-1" style={{ color: "var(--bone-dim)" }}>
-                暂无会话
+                </span>
               </div>
-              intent · todo · evidence · critique
-              <br />
-              <span className="sansheng-text-mute">会在 Plan 启动时填充。</span>
-            </div>
-          )}
-        </section>
-
-        <section className="sansheng-card-elevated p-3">
-          <div className="text-xs sansheng-text-mute mb-2">工件构成</div>
-          {hasContent ? (
-            <div className="flex flex-col gap-1" style={{ fontSize: 11, color: "var(--bone-mute)" }}>
-              {Object.entries(kindCounts).map(([kind, n]) => (
-                <div key={kind} className="flex items-center gap-2 rounded px-2 py-1" style={{ background: "var(--ink-2)" }}>
-                  <span>{KIND_LABEL[kind] ?? kind}</span>
-                  <span className="ml-auto font-mono" style={{ color: "var(--bone-dim)" }}>
-                    {n}
-                  </span>
-                </div>
+            )}
+            {todos.length > 0 && (
+              <StatStrip
+                items={[
+                  { label: "待办", value: `${doneCount}/${todos.length}` },
+                  {
+                    label: "工件",
+                    value: artifacts.length,
+                    title: "本会话 blackboard 上的全部工件",
+                  },
+                ]}
+              />
+            )}
+            {/* 「Blackboard」与「工件构成」原本是两张卡,现在合成一块:目标 → 计数 → 构成。 */}
+            <div className="flex flex-col">
+              {kinds.map(([kind, n]) => (
+                <KV key={kind} label={kindLabel(kind)} value={<span className="font-mono">{n}</span>} />
               ))}
             </div>
-          ) : (
-            <div className="sansheng-text-mute" style={{ fontSize: 11 }}>
-              还没有工件。
-            </div>
-          )}
-        </section>
+          </div>
+        )}
       </div>
     </aside>
   );

@@ -292,7 +292,7 @@ export async function createApp(opts: AppOptions): Promise<Hono> {
         // 6 角色 prompt 摘要(行数/字符数/default|legacy_factory|user_edited|empty,
         // loader 版本链信息;state=user_edited 即「用户编辑过,ensureHarness 永不覆盖」)
         prompts: describePrompts(opts.dataDir),
-        // 批次 7-C:per-agent 工具集合(**真配置**,取代已删除的 config.enabledTools)。
+        // 批次 7-E:per-agent 工具集合(**真配置**,取代已删除的 config.enabledTools)。
         // 字段语义见 src/server/harness/tools.ts:
         //   allowed          = 真正交给 SDK 的名单(allow − deny − ceiling 外)
         //   blockedByCeiling = 集合文件里写了但被架构上界拒绝的(提权失败,可见)
@@ -308,7 +308,7 @@ export async function createApp(opts: AppOptions): Promise<Hono> {
           note: "内置 FALLBACK_HARNESS_PROMPT(shared/prompts/harness_manager.md 精简版);manager prompt 尚未纳入 dataDir harness 版本链(5c)",
         },
         config: {
-          // enabledTools 已删除(批次 7-C):它是 M3c 的扁平占位
+          // enabledTools 已删除(批次 7-E):它是 M3c 的扁平占位
           // ["fs_read","fs_write","shell","http"],四个名字在 SDK 工具闭合联合里
           // 不存在,且零执行点读取。真实工具面见顶层 toolSets。
           redLines: cfg.redLines,

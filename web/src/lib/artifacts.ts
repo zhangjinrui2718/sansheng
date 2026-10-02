@@ -45,18 +45,22 @@ export interface Artifact {
 }
 
 /**
- * 工件读取。所有 blackboard 派生页面(Agents / 工件 / 目标)共用这一个 hook。
+ * 工件读取。所有 blackboard 派生页面(Agents / 工件 / 目标 / Agent 侧栏)共用这一个 hook。
  * 依赖 store 的 `artifactRevision` —— WS 的 artifact_created / artifact_status_changed
  * / plan_done 会在那里打戳,于是页面是**事件驱动回查**而不是轮询。
  * 权威数据永远回查后端,不进 store(避免两份真相)。
+ *
+ * `pollMs` 只给右侧 Agent 侧栏用:它额外挂一个慢速兜底轮询,好在 WS 断流时仍能收敛
+ * (侧栏的「角色状态」是那三秒里唯一的真相)。三个页面传 0(纯事件驱动)。
  */
-export function useArtifacts(): {
+export function useArtifacts(options?: { pollMs?: number }): {
   artifacts: Artifact[];
   loading: boolean;
   error: string | null;
 } {
   const conversationId = useChatStore((s) => s.conversationId);
   const artifactRevision = useChatStore((s) => s.artifactRevision);
+  const pollMs = options?.pollMs ?? 0;
   const [artifacts, setArtifacts] = useState<Artifact[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -95,6 +99,14 @@ export function useArtifacts(): {
   useEffect(() => {
     void load();
   }, [load, artifactRevision]);
+
+  useEffect(() => {
+    if (pollMs <= 0) return;
+    const id = setInterval(() => {
+      void load();
+    }, pollMs);
+    return () => clearInterval(id);
+  }, [load, pollMs]);
 
   return { artifacts, loading, error };
 }

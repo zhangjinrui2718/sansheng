@@ -96,7 +96,7 @@ export class AgentRunner {
       model: model as Model<string>,
       agentDir: this.agentDir,
       cwd: this.cwd,
-      // 批次 7-C:不传 tools 时 SDK 会给默认工具面(read/bash/edit/write)——
+      // 批次 7-E:不传 tools 时 SDK 会给默认工具面(read/bash/edit/write)——
       // 一个没人审过的默认写权限。这里按角色架构上界兜底(read-only),
       // 宁可严不可宽。AgentRunner 整类当前零生产调用方
       // (docs/PRODUCT-DESIGN-2026-10-02.md §1),此行纯粹是防止它被复活时

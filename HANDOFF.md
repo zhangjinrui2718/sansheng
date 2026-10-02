@@ -1,8 +1,20 @@
 # Sansheng 项目交接包
 
-**生成时间**:2026-10-02 18:00 CST · **v6.9**(批次 6:固定工作目录默认值 + 存量迁移)
+**生成时间**:2026-10-02 21:10 CST · **v7.0**(批次 7-E:harness per-agent 工具集合)
 **适用**:下一会话(主对话 / worker)开盒即读
 **配套阅读**:`/root/projects/sansheng/PLAN.md`(v5 集成版),`/root/projects/sansheng/ARCHITECTURE.md`(12 层模块图,v6.4 新增),`/root/.pi/agent/memory/MEMORY.md`(长期偏好 + 教训)
+
+> **v7.0 · 批次 7-E(2026-10-02 晚,DSH 会话)**:**harness 的 tool 部分从「装饰」变成「真配置」**。
+> - **用户现场判断**「harness 层面的东西很薄弱,沟通员只有 read/grep/find/ls,能不能提前给每个 agent 打造各自的工具集合,以后 harness 的持续优化就经由升级这套集合」。查证后确认比描述更糙,三处硬事实:
+>   ① `HarnessConfig.enabledTools: ["fs_read","fs_write","shell","http"]`(`loader.ts:40`)**是 M3c 死装饰** —— 四个名字在 SDK 工具闭合联合(`read|bash|powershell|edit|write|grep|find|ls`)里**根本不存在**,唯一消费点是 `http.ts` 回显给 `/api/harness`,**零执行点读取**;前端自己就写着「不假装配置在生效」(`web/src/routes/Harness.tsx` 的反造假纪律第 2 条)。② planner / executor / harness_manager / sedimentation **全走 `completeSimple` 单轮补全,零工具**。③ `AgentRunner`(`runner.ts:94`)建 Pi session 不传 `tools` → 拿 SDK 默认 `read/bash/edit/write`,是条带执行权限的死代码。产品设计 §6.1 / open question #15 原文即「enabledTools/redLines/budget 变成真配置(per-agent 化)」—— 本批只做 tools 这一项。
+> - **核心设计 · ceiling / collection 两层**(本批的关键判断):工具集合若只是一张用户可写的名单,往 `communicator.json` 加一行 `"bash"` 就能推翻**批次 5b-1 P3「沟通员从机制上杜绝直接干活」**(jev A 方案 conf 1.00)。故拆成:`ROLE_CEILING`(代码内的架构上界,集合文件**突破不了**)+ `harness/tools/{role}.json`(上界内可自由增减的用户意图)。**「升级工具集合」与「解除架构约束」从此是两种动作** —— 前者改文件,后者改代码(需评审)。全部角色 v1 均为只读上界(`read/grep/find/ls`)。
+> - **落地**(`src/server/harness/tools.ts` 新增 ~430 行 + `loader.ts` 接线 + `agentKernel.ts` 换掉硬编码 + `runner.ts` 接 ceiling + `/api/harness` 顶层 `toolSets` + `Harness.tsx` 数据驱动渲染):解析全程 **fail-closed** —— 损坏 JSON / 顶层非对象 / `allow` 非数组 / 未知工具名 / 字段拼错(`allowed` vs `allow`)五类坏输入全部退回或收窄,绝不产出越界的 `allowed`;越权条目逐个进 `blockedByCeiling` 并产生 warning(**提权失败必须对用户可见**)。`ensureToolSets` 沿用 prompt 侧的三分支版本链语义(缺文件→写出厂默认 / 等于出厂→幂等 / 用户手笔→**永不覆盖**)。
+> - **行为零变化**:出厂 communicator 集合与 5b-1 P3 的硬编码名单逐字相同,`tests/server/communicator-readonly-tools.test.ts`(真 `createAgentSession` 端到端)2 passed —— 限权未松。
+> - **诚实留空(非遗漏)**:planner / executor / harness_manager / critic / memory / reflection 的 `enforced` 仍为 **false** —— 它们没有工具循环,集合「已就位、未接线」。给它们写非空出厂名单 = 换个姿势继续撒谎。`tools.ts` 文件头留了**完整接线清单(4 步)**;接线时**必须**把旧出厂值追加进 `LEGACY_TOOL_SETS`,否则存量用户文件会被误判「用户手笔」永不升级(prompt 侧 5a/5b-1/7-B 已踩过三次)。`redLines` / `budget` 仍是硬编码字面量,属 harness 设计范围,不在本批。
+> - **验证**:typecheck 0(server+web)· `npm test` **519 passed | 1 skipped(70 files)**(+16 新测试 = `tests/server/harness-tool-sets.test.ts`,守 ceiling / fail-closed / 不覆盖用户手笔)· build OK(`dist/src/server/harness/tools.js`)· `grep -rn 'as any' src/` = 0。唯一 failed 是 `tests/cli/daemon-start.test.ts > isAlive`,已用 `git stash` 在**干净 HEAD 上复现同一失败**(DSH 沙箱禁 `ps` → `readPidComm` 恒 null),与本批无关(见 `832870e` 已记录的归因)。
+> - **⚠️ 批次号更正**:commit `12eaac5` 的 message 把本批写成「批次 7-C」,**与早前 7-C(clarify 对齐)撞号**;正确编号是 **7-E**(7-A/7-B/7-C/7-D 均已被占)。代码内全部 20 处已改对,历史 11 处 clarify 批次引用未动。**是否 `git commit --amend` + `push --force` 重写该 commit message 属不可逆操作,留 user 决定(未做)。**
+> - **USER-side 生效条件**:重启 2718 server。启动即自动生成 `~/.sansheng/harness/tools/{7 个角色}.json`;改 `communicator.json` 的 `allow` 后,**下一次 start / resume / reset** 生效。往里写 `bash` 不会报错但也不会放行(进 `blockedByCeiling` + `log.warn` + UI 琥珀划线)。
+> - **浏览器手动验证**:Harness 页新增 **③ 工具集合** 区块 —— 7 张卡(逐角色 `allowed` chip + 🟢生效中/🟡已就位未接线 徽章 + `enforceBasis` + warnings);沟通员卡应显示绿 chip `read grep find ls` + 🟢,planner/executor 应显示「无(集合 allow 为空)」+ 🟡;④ 配置 区只剩 redLines / budget 两项(enabledTools 已删)。**若看到 communicator 出现 bash/edit/write 徽章即为回归,请报回。**
 
 > **v6.9 · 批次 6(2026-10-02 傍晚,DSH 会话,jev 闸门)**:
 > - **用户报障**:「/Users/fuyao 这个默认的文件夹不对,应该给一个固定的文件目录」—— 出厂 `cwd = $HOME` 让 agent 的工作根是**整个家目录**。jev 裁决路径 = **`~/sansheng-workspace`**(conf 1.00:可见、与应用数据 `~/.sansheng` 物理分离、ASCII、避开源码仓库名 `~/projects/sansheng`)。

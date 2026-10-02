@@ -940,7 +940,7 @@ export class AgentKernel {
     // 一次读盘拿两样:prompt + 工具集合(同源同生命周期,见 harness/tools.ts)
     const harness = loadHarness(dataDir);
     const harnessPrompt = harness.systemPrompts.communicator;
-    // 批次 7-C:白名单从硬编码字面量换成 harness 工具集合。
+    // 批次 7-E:白名单从硬编码字面量换成 harness 工具集合。
     // 批次 5b-1 P3(沟通员限权,机制层)仍然成立 —— 它现在由 tools.ts 的
     // ROLE_CEILING.communicator = 只读面承载,集合文件**突破不了**:
     // 用户往 harness/tools/communicator.json 里写 "bash" 会被解析器拒绝并

@@ -8,9 +8,10 @@
 - **Sansheng(三生)** = 单用户本地 Node 服务:Pi SDK 驱动多 agent + Blackboard 体系,SQLite + sqlite-vec 持久化,fs/http/browser 三类行动能力。
 - **状态指针**(按优先级读):`HANDOFF.md`(当前进度/待办)→ `ARCHITECTURE.md`(12 层模块图)→ `PLAN.md`(v5 集成版)→ `MIGRATION-HANDOFF.md`(pi→DSH 迁移)。
 - **排查「跑出来不对/失败了/行为怪」** → 读 `docs/TROUBLESHOOTING.md` + 跑 `npm run diagnose`(只读;概览 / 单会话全量 / harness 提示词体检)。**关键事实:artifacts 存在 `blackboards.artifacts_json` 列里(没有独立表);`goal`/`plan_json`/`todos_json` 是恒空的遗留列,别被带偏;`logs/sansheng.log` 恒为 0 字节,日志只走 stdout。**
-- **基线**:481 passed / 1 skipped(67 files)· typecheck 0 error · build 产物在 `dist/src/server/`(**所有 dist 路径必须含 `src/` 前缀**,如 `dist/src/cli/index.js`)。*2026-10-02 批次 7(7-A 截断救回 / 7-B harness prompt 接线 / 7-C clarify 对齐)收尾时点;此前数字(446/63、428/61、419/58、340/48、263/33)是更早的时点,以本行为准。*
+- **基线**:519 passed / 1 skipped(70 files)· typecheck 0 error · build 产物在 `dist/src/server/`(**所有 dist 路径必须含 `src/` 前缀**,如 `dist/src/cli/index.js`)。*2026-10-02 批次 7-E(harness per-agent 工具集合)收尾时点;此前数字(481/67、446/63、428/61、419/58、340/48、263/33)是更早的时点,以本行为准。*唯一 failed 的 `tests/cli/daemon-start.test.ts > isAlive` 是 **DSH 沙箱禁 `ps`**(`readPidComm` 恒 null)的环境性失败,干净 HEAD 上同样复现(见 commit `832870e`),不是回归。
 - 默认 port 2718 / host 127.0.0.1;数据目录 `~/.sansheng/`。
 - **harness prompt 生效性(批次 7-B 教训)**:`~/.sansheng/harness/system_prompts/{planner,executor}.md` 由 `Orchestrator` 构造时经 `loadHarness(dataDir)` 解析并注入。7-B 之前这段是**死接线**(`this.dataDir` 存了没用,spawn 只传 `{ storage }`),Planner/Executor 一直拿模块内 6-9 行 stub,`shared/prompts/planner.md` 那份 91 行正经提示词是死代码(`loadPlannerPrompt` 无调用方)。**改提示词前先确认它真的到达模型** —— 见 `tests/agents/orchestrator-harness-prompt.test.ts`。communicator 侧的 harness prompt 一直是对的(agentKernel 走 loadHarness)。
+- **harness 工具集合 = 权限面,分两层(批次 7-E)**:每个 agent 一份 `~/.sansheng/harness/tools/{role}.json`(实现 `src/server/harness/tools.ts`,与 `system_prompts/` 并列)。`ROLE_CEILING`(代码内)= **架构上界,集合文件突破不了**;集合文件 = 上界内可增减的用户意图。**「升级集合」(改文件)与「解除架构约束」(改 `ROLE_CEILING` 的代码动作)是两件事,别混。** 解析全程 **fail-closed**,越权条目进 `blockedByCeiling` 且必须对用户可见。当前**只有 communicator `enforced:true`**(kernel.createPiSession → `createAgentSession({ tools })`);其余 6 个角色走 `completeSimple` 单轮补全、**没有工具循环**,`enforced:false` = 集合已就位但未接线 —— **别给它们写非空出厂名单**(那是换个姿势继续撒谎,旧 `enabledTools` 就是这么烂掉的)。接线清单见 tools.ts 文件头 4 步;改 `FACTORY_SETS` 时**必须**把旧值追加进 `LEGACY_TOOL_SETS`,否则存量用户文件被永久误判为「用户手笔」(prompt 侧 5a/5b-1/7-B 已踩过三次)。
 
 ## 编码纪律
 

@@ -16,7 +16,7 @@
  *     批次 5b 才接线;直答模式下加载会让用户收到裸 JSON)。
  *   - ensureHarness() 增加三分支升级逻辑(见函数注释),绝不静默覆盖用户编辑。
  *
- * 批次 7-C(tool 这部分从装饰变成真配置):
+ * 批次 7-E(tool 这部分从装饰变成真配置):
  *   - 删除 `enabledTools: ["fs_read","fs_write","shell","http"]`。它是 M3c 的扁平
  *     占位:① 四个名字在 SDK 工具闭合联合(read|bash|powershell|edit|write|grep|
  *     find|ls)里**根本不存在**;② 零执行点读它,唯一消费点是 http.ts 回显给
@@ -390,7 +390,7 @@ export function ensureHarness(dataDir: string): void {
       );
     }
   }
-  // 批次 7-C:工具集合与 prompt 同为 harness 规约面,同一入口一起生成。
+  // 批次 7-E:工具集合与 prompt 同为 harness 规约面,同一入口一起生成。
   // 两者的三分支语义(缺失/出厂默认/用户手笔)完全一致,见 tools.ts ensureToolSets。
   ensureToolSets(dataDir);
 }
@@ -461,7 +461,7 @@ export function describePrompts(dataDir: string): HarnessPromptInfo[] {
 }
 
 /**
- * 批次 7-C:harness 只有一个对外入口。工具集合的实现与 ceiling 语义在 ./tools.ts,
+ * 批次 7-E:harness 只有一个对外入口。工具集合的实现与 ceiling 语义在 ./tools.ts,
  * 这里只做转出 —— 调用方(agentKernel / http / 测试)统一从 loader.js 取。
  */
 export {

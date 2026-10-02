@@ -1,5 +1,5 @@
 /**
- * 批次 7-C · harness 工具集合(src/server/harness/tools.ts)
+ * 批次 7-E · harness 工具集合(src/server/harness/tools.ts)
  *
  * 本文件守的是三件事,每件都是**权限面**的正确性,不是格式正确性:
  *
@@ -50,7 +50,7 @@ function writeSet(role: string, content: string): void {
   writeFileSync(toolSetFilePath(dataDir, role as (typeof TOOL_ROLES)[number]), content, "utf-8");
 }
 
-describe("harness 工具集合 · 生成与读取(批次 7-C)", () => {
+describe("harness 工具集合 · 生成与读取(批次 7-E)", () => {
   it("ensureToolSets 为全部 7 个角色生成集合文件(含 harness_manager)", () => {
     ensureToolSets(dataDir);
     for (const role of TOOL_ROLES) {

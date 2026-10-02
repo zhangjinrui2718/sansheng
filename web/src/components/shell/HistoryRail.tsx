@@ -1,12 +1,19 @@
+/**
+ * 会话历史侧栏 · M2(批次 UI U4:每条会话从三行压到两行)
+ *
+ * 改这一层之前,每条会话占**三行**:标题 / 预览 / 「N 条 · conv_xxxxxx」——
+ * 第三行里那个 `id.slice(-6)` 是没有任何信息量的尾巴(点开这条会话也看不到
+ * 完整 id,拿它干什么?),而消息条数在预览右侧已经能一眼看到量级。
+ * 现在第三行删掉,条数移到预览行右侧(为 0 时不渲染),每条少一行高 ——
+ * 侧栏能多露两条会话。
+ *
+ * 数据流完全没动:仍从 `/api/conversations?limit=50` 拉取,仍在
+ * `historyRefreshTrigger` 打戳时刷新,点击仍走 `loadConversation` + WS resume,
+ * 浅比对 `sameList` 也保留(它是防「列表跳变」的关键,不是冗余代码)。
+ */
 import { useEffect, useState } from "react";
 import { useChatStore } from "@/stores/chat";
 
-/**
- * 会话历史侧栏 · M2
- * - 「+ 新对话」按钮:清当前会话、换 conversationId
- * - 历史列表:从 /api/conversations 拉取,按 lastActiveAt 倒序
- * - 点击一条历史 → 拉详情 → useChatStore.loadConversation 覆盖本地状态
- */
 interface ConversationSummary {
   id: string;
   title: string | null;
@@ -106,21 +113,21 @@ export function HistoryRail() {
   return (
     <aside className="sansheng-card overflow-hidden flex flex-col" style={{ minHeight: 0 }}>
       <div
-        className="flex items-center justify-between px-3 py-2"
+        className="flex items-center justify-between px-3 py-2 flex-none"
         style={{ borderBottom: "1px solid var(--ink-3)" }}
       >
-        <span style={{ fontSize: 12, color: "var(--bone-dim)" }}>会话历史</span>
+        <span style={{ fontSize: 12, color: "var(--bone-dim)" }}>会话</span>
         <button
           className="sansheng-button"
-          style={{ padding: "2px 10px", fontSize: 12 }}
+          style={{ padding: "2px 8px", fontSize: 11 }}
           onClick={() => newConversation()}
           title="新建对话(清空当前,开始新会话)"
         >
-          + 新对话
+          + 新建
         </button>
       </div>
 
-      <div className="flex-1 overflow-y-auto p-2 flex flex-col gap-2">
+      <div className="flex-1 overflow-y-auto p-1.5 flex flex-col gap-1">
         {error && (
           <div
             className="rounded-md px-3 py-2"
@@ -134,35 +141,44 @@ export function HistoryRail() {
 
         {list.map((c) => {
           const isActive = c.id === conversationId;
+          const title = c.title ?? "(无标题)";
           return (
             <button
               key={c.id}
               type="button"
               onClick={() => openConversation(c.id)}
-              className="text-left rounded-md px-3 py-2 transition-colors"
+              className="text-left rounded-md px-2.5 py-1.5 transition-colors"
               style={{
                 background: isActive ? "var(--ink-2)" : "transparent",
-                border: isActive ? "1px solid var(--jade)" : "1px solid var(--ink-3)",
+                border: isActive ? "1px solid var(--jade)" : "1px solid transparent",
+                borderLeft: isActive ? undefined : "1px solid var(--ink-3)",
                 cursor: "pointer",
               }}
+              title={`${title} · ${c.id} · ${c.messageCount} 条消息`}
             >
               <div className="flex items-baseline justify-between gap-2">
                 <span
                   className="font-serif truncate"
-                  style={{ fontSize: 13, color: "var(--bone)", letterSpacing: ".04em", maxWidth: "70%" }}
-                  title={c.title ?? "(无标题)"}
+                  style={{ fontSize: 13, color: "var(--bone)", letterSpacing: ".04em" }}
                 >
-                  {c.title ?? "(无标题)"}
+                  {title}
                 </span>
-                <span className="sansheng-text-mute font-mono" style={{ fontSize: 10 }}>
+                <span className="sansheng-text-mute font-mono flex-none" style={{ fontSize: 10 }}>
                   {relativeTime(c.lastActiveAt)}
                 </span>
               </div>
-              <div className="font-mono mt-1 truncate" style={{ fontSize: 11, color: "var(--bone-mute)" }} title={c.preview}>
-                {c.preview || "(无内容)"}
-              </div>
-              <div className="sansheng-text-mute font-mono mt-1" style={{ fontSize: 10 }}>
-                {c.messageCount} 条 · {c.id.slice(-6)}
+              <div className="flex items-baseline gap-2 mt-0.5">
+                <span
+                  className="truncate flex-1"
+                  style={{ fontSize: 11, color: "var(--bone-mute)" }}
+                >
+                  {c.preview || "(无内容)"}
+                </span>
+                {c.messageCount > 0 && (
+                  <span className="sansheng-text-mute font-mono flex-none" style={{ fontSize: 10 }}>
+                    {c.messageCount}
+                  </span>
+                )}
               </div>
             </button>
           );

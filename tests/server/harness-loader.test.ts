@@ -155,7 +155,7 @@ describe("harness/loader · ensureHarness 升级逻辑(批次 5a T1)", () => {
     expect(comm).toContain("自然语言");
     expect(comm).not.toMatch(/只输出一个 JSON|必须输出\s*JSON|每次响应.*JSON/);
     // loadHarness 其它字段不受影响
-    // 批次 7-C:enabledTools 已删除(它是不存在的工具名的死装饰),改为断言
+    // 批次 7-E:enabledTools 已删除(它是不存在的工具名的死装饰),改为断言
     // 新的 per-agent 工具集合随 loadHarness 一并读出。
     expect(harness.toolSets.communicator.allowed).toEqual(["read", "grep", "find", "ls"]);
     expect(harness.budget.maxIterations).toBe(5);

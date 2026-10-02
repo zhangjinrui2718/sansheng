@@ -149,7 +149,7 @@ describe("batch5b-2 T2 · GET /api/harness(真实 createApp 接线)", () => {
     }
     expect(body.harnessManagerPrompt.source).toBeTruthy();
     expect(body.harnessManagerPrompt.lines).toBeGreaterThan(0);
-    // 批次 7-C:toolSets 取代已删除的 config.enabledTools。
+    // 批次 7-E:toolSets 取代已删除的 config.enabledTools。
     // 断言的是**真实生效的那一个**(communicator),不是"字段存在"。
     expect(body.toolSets.length).toBe(7); // RoleKind 6 + harness_manager
     const comm = body.toolSets.find((t) => t.role === "communicator");

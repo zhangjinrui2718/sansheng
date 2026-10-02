@@ -9,7 +9,6 @@ export function ChatSurface() {
   const [input, setInput] = useState("");
   const status = useChatStore((s) => s.status);
   const kernelReady = useChatStore((s) => s.kernelReady);
-  const error = useChatStore((s) => s.error);
   const provider = useChatStore((s) => s.provider);
   const modelId = useChatStore((s) => s.modelId);
   const conversationId = useChatStore((s) => s.conversationId);
@@ -67,26 +66,30 @@ export function ChatSurface() {
       className="sansheng-card overflow-hidden flex flex-col"
       style={{ minHeight: 0 }}
     >
+      {/* 批次 UI U4:同一份 error 此前在**两处**渲染 —— 这里(页头下方)一次,
+          MessageList 流尾又一次(AGENTS.md 记的 U2 批次遗留)。一次报错在屏幕上
+          出现两遍。现在只留 MessageList 里那一处:错误属于消息流的一部分,
+          位置在出错那一轮的下面,读起来才是对的。 */}
       <div
-        className="px-4 py-2 flex items-center justify-between"
+        className="px-4 py-2 flex items-center justify-between flex-none"
         style={{ borderBottom: "1px solid var(--ink-3)" }}
       >
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 min-w-0">
           <span style={{ fontSize: 13, color: "var(--bone)" }}>对话</span>
-          <span className="sansheng-text-mute" style={{ fontSize: 11 }}>·</span>
-          <span className="sansheng-text-mute" style={{ fontSize: 11 }}>
+          <span
+            className="sansheng-text-mute truncate"
+            style={{ fontSize: 11 }}
+            title={provider && modelId ? `${provider} / ${modelId}` : "未连接"}
+          >
             {provider && modelId ? `${provider} / ${modelId}` : "未连接"}
           </span>
           {conversationId && (
-            <span className="font-mono sansheng-text-mute" style={{ fontSize: 10 }}>
+            <span className="font-mono sansheng-text-mute flex-none" style={{ fontSize: 10 }}>
               · {conversationId.slice(-8)}
             </span>
           )}
         </div>
-        <div
-          className="flex items-center gap-2 font-mono"
-          style={{ fontSize: 11 }}
-        >
+        <div className="flex items-center gap-2 flex-none ss-meta">
           <span
             className={
               kernelReady
@@ -103,34 +106,13 @@ export function ChatSurface() {
               className="sansheng-button"
               style={{ padding: "2px 8px", fontSize: 11 }}
               onClick={reset}
+              title="强制重置 kernel(旧版本会话可能卡在后台进程里)"
             >
               ↻ 重置
             </button>
           )}
         </div>
       </div>
-
-      {error && (
-        <div
-          className="mx-6 mt-4 rounded-md px-3 py-2"
-          style={{
-            background: "rgba(229, 72, 77, 0.1)",
-            border: "1px solid rgba(229, 72, 77, 0.4)",
-            color: "var(--cinnabar)",
-            fontSize: 12,
-          }}
-        >
-          <div className="flex items-center justify-between gap-3">
-            <div>
-              <div className="font-mono" style={{ fontSize: 11 }}>{error.code}</div>
-              <div className="mt-1">{error.message}</div>
-            </div>
-            <button className="sansheng-button" onClick={reset} style={{ padding: "4px 10px" }}>
-              ↻ 重试
-            </button>
-          </div>
-        </div>
-      )}
 
       <MessageList />
 

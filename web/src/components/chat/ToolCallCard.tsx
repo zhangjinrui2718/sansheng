@@ -1,3 +1,10 @@
+/**
+ * 工具调用卡(批次 UI U4:工具图标从 emoji 换成与全站一致的几何字形)
+ *
+ * 原表混着 emoji(📄 🔍)与几何字形($ ✎ ≣)—— emoji 在不同系统里字形与
+ * 字重都不一样,深色底上还偏色,和全站「状态用色块 + mono pill,不用 emoji 当
+ * UI 标签」的规则也不一致。这里统一成几何字形。
+ */
 import { useState } from "react";
 import type { Block } from "@/stores/chat";
 
@@ -7,11 +14,11 @@ interface Props {
 
 const KIND_GLYPH: Record<string, string> = {
   bash: "$",
-  read: "📄",
+  read: "▤",
   write: "✎",
   edit: "✎",
-  grep: "🔍",
-  find: "🔍",
+  grep: "⌕",
+  find: "⌕",
   ls: "≣",
 };
 

@@ -21,7 +21,7 @@
  *              FALLBACK_HARNESS_PROMPT(agents/harnessManager.ts:127)。
  *   toolSets  : Array<{ role, allow[], deny[], allowed[], blockedByCeiling[],
  *                      enforced, enforceBasis, source:"factory"|"user", warnings[] }>
- *              —— **批次 7-C 新增,真配置**:per-agent 工具集合,来自
+ *              —— **批次 7-E 新增,真配置**:per-agent 工具集合,来自
  *              ~/.sansheng/harness/tools/{role}.json(src/server/harness/tools.ts)。
  *              `allowed` 是真正交给 SDK 的名单;`blockedByCeiling` 是集合里写了
  *              但被架构上界拒绝的;`enforced:false` = 该角色没有工具执行点,
@@ -36,7 +36,7 @@
  *   1. **不造示例条目**:proposals / previews 没有就是空态,并写清「为什么结构上永远不会来」
  *      (manager 只认 kind==="harness_proposal",executor 恒发 kind==="hypothesis")。
  *   2. **不假装配置在生效**:工具集合一栏只展示 API 返回的 `allowed` 并标明
- *      `enforced`(7-C 起 communicator 是 🟢 生效中,planner / executor 是 🟡
+ *      `enforced`(7-E 起 communicator 是 🟢 生效中,planner / executor 是 🟡
  *      「已就位、未接线」—— 它们走 completeSimple 单轮补全,没有工具循环);
  *      redLines / budget 仍一律标 🟡。集合被上界拒绝的条目要显式画出来,
  *      不让用户以为「我写进去就生效了」。
@@ -79,7 +79,7 @@ interface HarnessArtifact {
 }
 
 /**
- * 批次 7-C:per-agent 工具集合(GET /api/harness 的 toolSets 字段)。
+ * 批次 7-E:per-agent 工具集合(GET /api/harness 的 toolSets 字段)。
  * 字段语义以 src/server/harness/tools.ts 为准,这里只镜像前端要用的部分。
  */
 interface HarnessToolSetInfo {
@@ -235,7 +235,7 @@ function Em({ children }: { children: string }) {
 }
 
 /**
- * 批次 7-C:工具名单的渲染件。**名单不写死在前端** —— 全部来自 API 的 toolSets。
+ * 批次 7-E:工具名单的渲染件。**名单不写死在前端** —— 全部来自 API 的 toolSets。
  * 三种视觉状态,对应解析器的三条分支:
  *   绿(allowed)          = 真正交给 SDK 的工具
  *   琥珀虚线(blocked)     = 用户在集合文件里写了、被架构上界拒绝的 —— 必须画出来
@@ -298,7 +298,7 @@ interface ManualMeta {
   duty: string;
   /** 它的 system prompt 在哪里被读取并注入(徽章判定的依据) */
   injectBasis: string;
-  /** 工具面的补充说明。**工具名单本身不写在这里** —— 7-C 起由 API 的 toolSets 驱动 */
+  /** 工具面的补充说明。**工具名单本身不写在这里** —— 7-E 起由 API 的 toolSets 驱动 */
   toolsNote: string;
   /** 文件被改动后,系统什么时候读到 */
   apply: string;
@@ -448,7 +448,7 @@ export function HarnessPage() {
     if (isManualRole(p.role)) promptByRole.set(p.role, p);
   }
 
-  // 批次 7-C:工具集合同样只按 role 取,**不写死任何工具名**。
+  // 批次 7-E:工具集合同样只按 role 取,**不写死任何工具名**。
   // 名单、被上界拒绝的条目、生效状态全部来自 API 的 toolSets 字段。
   const toolSetByRole = new Map<string, HarnessToolSetInfo>();
   for (const t of toolSets) toolSetByRole.set(t.role, t);
@@ -691,7 +691,7 @@ export function HarnessPage() {
           </table>
         </section>
 
-        {/* ── ③ 工具集合(批次 7-C):真配置,🟢/🟡 逐角色如实标 ── */}
+        {/* ── ③ 工具集合(批次 7-E):真配置,🟢/🟡 逐角色如实标 ── */}
         <section className="sansheng-card p-4">
           <div className="flex items-center justify-between gap-2 mb-1">
             <h3 className="font-medium">工具集合</h3>
@@ -751,7 +751,7 @@ export function HarnessPage() {
           <p className="sansheng-text-mute mb-3" style={{ fontSize: 11, lineHeight: 1.7 }}>
             redLines / budget 两项仍是 harness/loader.ts 的<Em>硬编码字面量</Em>:
             没有磁盘来源、没有消费者、从不强制执行。budget 的三个字段在 loader.ts 之外全项目零引用。
-            (<Em>enabledTools 已删除</Em> —— 7-C 起由上一节的工具集合取代。)
+            (<Em>enabledTools 已删除</Em> —— 7-E 起由上一节的工具集合取代。)
           </p>
 
           <div className="font-mono" style={{ fontSize: 10, color: "var(--bone-mute)" }}>
@@ -785,7 +785,7 @@ export function HarnessPage() {
             </div>
             <div className="sansheng-text-mute">
               这不是页面的欠债,而是 harness 自身的设计未完成(产品设计 §6.1 已确认)。
-              工具集合这一项已在批次 7-C 变成真配置(per-agent + 落执行点);
+              工具集合这一项已在批次 7-E 变成真配置(per-agent + 落执行点);
               redLines / budget 要等同样的磁盘格式 + 至少一个执行点才成立。
             </div>
           </div>

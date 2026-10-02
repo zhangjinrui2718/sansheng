@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import type { ReactNode } from "react";
 import { TopBar } from "./components/shell/TopBar";
 import { HistoryRail } from "./components/shell/HistoryRail";
 import { AgentPanel } from "./components/shell/AgentPanel";
@@ -101,6 +102,18 @@ export function App() {
   const active = activeProviderOf(settings);
   const needsSetup = !settings || settings.providers.length === 0 || !active?.hasApiKey;
 
+  /**
+   * 非对话路由的统一外壳:滚动容器 + <main> 只在这里出现一次。
+   * 各路由组件自己只渲染 `<div className="ss-page">` —— 早前每页都自带
+   * `<main className="px-4 pb-4">`,于是 DOM 里出现了嵌套 <main>(非法),
+   * 而且每页各自管 padding,改一次间距要改七处。
+   */
+  const page = (node: ReactNode) => (
+    <main className="overflow-y-auto" style={{ background: "var(--ink-0)", minHeight: 0 }}>
+      {node}
+    </main>
+  );
+
   return (
     <div className="sansheng-shell">
       <TopBar
@@ -131,47 +144,25 @@ export function App() {
           <AgentPanel />
         </main>
       ) : route === "agents" ? (
-        <main className="overflow-y-auto" style={{ background: "var(--ink-0)" }}>
-          <AgentsPage conversationId={conversationId} />
-        </main>
+        page(<AgentsPage conversationId={conversationId} />)
       ) : route === "memory" ? (
-        <main className="overflow-y-auto" style={{ background: "var(--ink-0)" }}>
-          <MemoryPage />
-        </main>
+        page(<MemoryPage />)
       ) : route === "timeline" ? (
-        <main
-          className="overflow-y-auto"
-          style={{ background: "var(--ink-0)", minHeight: 0 }}
-        >
-          <TimelinePage conversationId={conversationId} />
-        </main>
+        page(<TimelinePage conversationId={conversationId} />)
       ) : route === "artifacts" ? (
-        <main
-          className="overflow-y-auto"
-          style={{ background: "var(--ink-0)", minHeight: 0 }}
-        >
-          <ArtifactsPage conversationId={conversationId} />
-        </main>
+        page(<ArtifactsPage conversationId={conversationId} />)
       ) : route === "goals" ? (
-        <main
-          className="overflow-y-auto"
-          style={{ background: "var(--ink-0)", minHeight: 0 }}
-        >
-          <GoalsPage conversationId={conversationId} />
-        </main>
+        page(<GoalsPage conversationId={conversationId} />)
       ) : route === "harness" ? (
-        <main
-          className="overflow-y-auto"
-          style={{ background: "var(--ink-0)", minHeight: 0 }}
-        >
-          <HarnessPage />
-        </main>
+        page(<HarnessPage />)
       ) : (
         <main
-          className="px-6 py-6 overflow-y-auto"
-          style={{ background: "var(--ink-0)" }}
+          className="overflow-y-auto"
+          style={{ background: "var(--ink-0)", minHeight: 0 }}
         >
-          <SettingsPanel />
+          <div className="ss-page" style={{ maxWidth: 720 }}>
+            <SettingsPanel />
+          </div>
         </main>
       )}
     </div>
@@ -184,21 +175,19 @@ function StuckHint({ onReset }: { onReset: () => void }) {
       className="sansheng-card overflow-hidden flex flex-col items-center justify-center"
       style={{ minHeight: 0 }}
     >
-      <div className="flex flex-col items-center gap-4 max-w-md text-center px-6">
-        <svg width="56" height="56" viewBox="0 0 64 64">
+      <div className="flex flex-col items-center gap-3 max-w-md text-center px-6">
+        <svg width="44" height="44" viewBox="0 0 64 64">
           <g stroke="#E5484D" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" fill="none">
             <circle cx="32" cy="32" r="18" />
             <path d="M32 22 L32 32 L40 36" />
           </g>
         </svg>
-        <div>
-          <div className="font-serif text-xl" style={{ color: "var(--bone)", letterSpacing: ".06em" }}>
-            看到状态卡住?
-          </div>
-          <p className="sansheng-text-dim mt-2" style={{ fontSize: 13 }}>
-            这通常是旧版本的 session 还卡在后台进程里。点下面的按钮强制重置 kernel:
-          </p>
+        <div className="font-serif text-lg" style={{ color: "var(--bone)", letterSpacing: ".06em" }}>
+          内核卡住了
         </div>
+        <p className="sansheng-text-dim" style={{ fontSize: 12, lineHeight: 1.7 }}>
+          通常是旧版本的会话还挂在后台进程里。强制重置,或重启 <code>sansheng start</code>。
+        </p>
         <button
           className="sansheng-button-primary"
           onClick={onReset}
@@ -206,9 +195,6 @@ function StuckHint({ onReset }: { onReset: () => void }) {
         >
           ↻ 重置 Kernel
         </button>
-        <p className="sansheng-text-mute" style={{ fontSize: 11 }}>
-          或者重启 <code>sansheng start</code>
-        </p>
       </div>
     </section>
   );
@@ -220,22 +206,20 @@ function SetupHint({ onGo }: { onGo: () => void }) {
       className="sansheng-card overflow-hidden flex flex-col items-center justify-center"
       style={{ minHeight: 0 }}
     >
-      <div className="flex flex-col items-center gap-4 max-w-md text-center px-6">
-        <svg width="56" height="56" viewBox="0 0 64 64">
+      <div className="flex flex-col items-center gap-3 max-w-md text-center px-6">
+        <svg width="44" height="44" viewBox="0 0 64 64">
           <g stroke="#C76B4A" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" fill="none">
             <path d="M16 22 L32 14 L48 22 L48 42 L32 50 L16 42 Z" />
             <path d="M32 14 L32 50" />
           </g>
           <circle cx="32" cy="32" r="3.5" fill="#C76B4A" />
         </svg>
-        <div>
-          <div className="font-serif text-xl" style={{ color: "var(--bone)", letterSpacing: ".06em" }}>
-            未配置 API Key
-          </div>
-          <p className="sansheng-text-dim mt-2" style={{ fontSize: 13 }}>
-            Sansheng 需要至少一个 LLM Provider 的 API Key 才能开始工作。
-          </p>
+        <div className="font-serif text-lg" style={{ color: "var(--bone)", letterSpacing: ".06em" }}>
+          未配置 API Key
         </div>
+        <p className="sansheng-text-dim" style={{ fontSize: 12, lineHeight: 1.7 }}>
+          至少配一个 LLM Provider 的 API Key 才能开始工作。
+        </p>
         <button
           className="sansheng-button-primary"
           onClick={onGo}
