@@ -102,6 +102,44 @@
 
 ---
 
+## ⚡ 当前状态速览(2026-10-02 · 批次 8 进行中)
+
+> **接新会话先读这一节,再往下读旧的 TL;DR(旧的已过时)。**
+
+**HEAD = `15f5ebc`,基线 481 passed / 1 skipped(67 files)· typecheck 0 error。**
+
+**批次 8 = 产品侧 UI 重做(P0)**,设计定稿在 **`docs/PRODUCT-DESIGN-2026-10-02.md`**(先读它,里面有全部 file:line 证据)。
+
+诊断(一句话):**产品不是太简单,是展示的系统模型和真实系统对不上** —— 三个错位:
+
+1. **角色表在撒谎**:UI 展示 6 个 agent,系统只跑 4 个。`critic`/`memory`/`reflection`
+   无 class 实现、无 prompt 消费者。**用户已决定:暂不实现,界面改为不列出**(不等于从
+   `RoleKind` 删除 —— 删要动共享类型 + 481 测试基线,保留不动)。
+2. **真数据在出进程时被丢弃**:`Orchestrator` 持有 `activeExecutors`/`waiting`/`depthByTodo`
+   但全是 `private` 无 getter;`ws.ts:358-373` 丢弃 9 个 `ProgressEvent` 中的 7 个;
+   `/api/agents/:id` 硬编码 `{agents:[]}`。
+3. **工件被当成日志渲染**:模型是对的(10 kind + author + status 状态机),但按时间倒序平铺。
+
+**排期**:
+- **P0(本批,进行中)** —— 6 项,全部是**已有数据的重新组织**,不动 DB / schema / 事件流:
+  blackboard 四区工作面 / 工件按沟通语义分组 + 待转述视图 / harness 雇员手册 + 三档生效徽章 /
+  角色表只列 4 个 / 总线线程化 / 失败原因上屏。
+- **P1** —— 补发被丢弃的 7 个 `ProgressEvent`、Orchestrator 状态快照 getter、
+  **`agent_run_traces` 表(migration 006)**、`AgentRunSummary` 复活、
+  真实 `/api/executors/:id/state`、`harness_proposal` 发射点。
+- **P2** —— harness 写接口、总线→工件闭环、`enabledTools`/`redLines`/`budget` 变成真配置。
+
+**两条已推翻的旧结论(别再走一遍)**:
+- ❌「planner/executor 的过程数据拿不到,得等 P2」→ **错**。`completeSimple` 返回完整
+  `AssistantMessage`(含 thinking / usage / **真实 cost** / stopReason),`ws.ts:220-224` 只收文本
+  其余全丢。数据一直在内存里,是「记下来」不是「拿不到」。详见设计文档 §2.1。
+- ❌「harness proposals 为空是因为代码读顶层 `callbackReason` 而提示词写在 metadata 下」
+  → **证伪**。真正生效的 `loader.ts` 默认提示词要求顶层,与 `executor.ts:343` 一致。
+  真实断点是 **kind 不匹配**:manager 只认 `kind==="harness_proposal"`,
+  executor 阻塞时**恒**发 `kind==="hypothesis"`。
+
+---
+
 ## TL;DR
 
 Sansheng = 单用户本地 Node 服务。M0-M4 + M3+ B1-B7 + 2 dep bumps + http.ts:224 cleanup + **5 E2E blocker closure** + **ARCHITECTURE.md** 已 commit + push(17 commits remote,origin/master = `e27a3c2`)。
