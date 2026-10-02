@@ -4,7 +4,16 @@
 > 日期:2026-10-02 · 基线 HEAD `702968f` · 481 passed / 1 skipped · typecheck 0 error。
 > 性质:**设计文档,零代码改动**。实施范围由本文末尾的 P0/P1/P2 排期决定。
 > 证据纪律:本文每条事实都带 `file:line`;涉及真实数据的部分标注了库内实测结果
-> (`~/.sansheng/sansheng.db`,只读查询)。凡是没查证的推断,一律标为「假设」。
+> (`~/.sansheng/sansheng.db` / `~/.sansheng/pi/`,只读查询)。凡是没查证的推断,一律标为「假设」。
+
+**修订记录(同日内)**
+- **r1 · §2.1** —— 推翻了初稿「planner/executor 的 token 级过程 P2 前拿不到」的结论。
+  核查发现 `completeSimple` 返回的是完整 `AssistantMessage`(含 thinking / usage / cost / stopReason),
+  `ws.ts:220-224` 只是把它扔了。**相关工作从 P2 提前到 P1(编号 9/10)。**
+- **r2 · §1 / §6** —— 用户决定 critic/memory/reflection **暂不实现**,
+  界面改为**不列出**它们(而非标「未接线」);徽章体系相应从四档缩到三档。
+- **r3 · §6.1** —— 用户确认 `enabledTools`/`redLines`/`budget` 属于 **harness 自身设计未完成**,
+  不是 UI 欠债;补了「什么条件下问题才真正消失」的判据。
 
 ---
 
@@ -48,8 +57,14 @@ Harness 页不是全局报表,而是**每个 agent 的雇员手册**;Agent 页�
 | memory | ❌ **无实现** | — | `memory.md` 191 字节,**无任何代码读取** |
 | reflection | ❌ **无实现** | — | `reflection.md` 217 字节,**无任何代码读取** |
 
-后三个**必须显式展示为「未接线」**,而不是留一行永远灰的 idle(沿用 `Agents.tsx:1-19` 头注释里
-那条「反造假纪律」:宁可如实显示空态,不摆假数据)。
+后三个**不进 agent 列表**(2026-10-02 用户决定:**暂不实现**)。
+展示策略随之调整:不是标成「未接线」灰行,而是**根本不出现在 agent 列表和 harness 手册里** ——
+三行永远点不亮的灰行是噪声,不如不列。
+
+> 代码层面它们仍留在 `RoleKind`(`shared/types/agents.ts:97`)和 `ArtifactAuthor`
+> (`shared/types/blackboard.ts:75-83`)里作为字符串。**是否从类型联合里删掉是另一件事** ——
+> 会动共享类型和 481 个测试的基线,收益仅是消除几个没人用的成员,不划算,建议**保留不动**。
+> 只需保证 UI 与 Harness 的提示词清单**不再枚举它们**。
 
 ---
 
@@ -105,11 +120,47 @@ intent_received → todos_planned → todo_started ⇄ callback_routed
 - **executor**:领取 todo → 执行 → 产出 evidence / 升级为 hypothesis 阻塞 / 失败
 - **communicator**:用户消息 → decide(chat/task/**clarify**/feedback,`shared/types/agents.ts:140-144`)→ 确认 / 澄清提问 / 委派
 
-**必须如实说明的缺口**:planner / executor 的过程**目前只有阶段转换,没有 token 级轨迹**。
-它们的 LLM 调用走 `completeSimple` 返回纯文本(`ws.ts:179-226`),**从不写库** ——
-`messages` 表的唯一写入点是 `agentKernel.ts:1563`,只存沟通员的对话轮次。
-所以 Layer 3 对这两个角色 v1 是「阶段 + 计时」,想要逐步细节需要 P2 的 trace 表。
-communicator 例外:`messages.tool_calls` / `messages.thinking` 里**已经有**真实工具与思考轨迹,从没被展示过。
+**必须如实说明的缺口 → 见 §2.1(2026-10-02 修订:本节原写「planner/executor 拿不到 token 级过程」,
+经核查**该结论错误**,数据一直在内存里,只是被丢弃)。**
+
+communicator 例外:`messages.tool_calls` / `messages.thinking` 里**已经有**真实工具与思考轨迹,从没被展示过;
+Pi 自己还落了一份更全的 session log(见 §2.1)。
+
+### 2.1 修订:planner/executor 的过程数据**一直都在**,只是被扔掉了
+
+> 2026-10-02 修订。原文写「它们的 LLM 调用走 `completeSimple` 返回纯文本,**从不写库** → Layer 3 拿不到」。
+> **前半句对、后半句错** —— 它返回的不是「纯文本」,而是一个完整的 `AssistantMessage`。
+
+`makeLlmCall`(`ws.ts:179-226`)拿到的 `completeSimple` 返回值
+(`node_modules/@earendil-works/pi-ai/dist/types.d.ts:353-373` 的 `AssistantMessage`)是:
+
+| 字段 | 内容 | 现状 |
+|---|---|---|
+| `content: (TextContent \| ThinkingContent \| ToolCall)[]` | 含 **thinking 块** | ❌ `ws.ts:220-224` 只 `if (c.type === "text")` 收文本,**thinking 直接丢弃** |
+| `usage: Usage` | input / output / cacheRead / cacheWrite / totalTokens | ❌ 整个丢弃 |
+| `usage.cost` | **真实美元成本**(分 input/output/cache 计价) | ❌ 整个丢弃 |
+| `stopReason` / `rawStopReason` | 截断信号(批次 7-A 刚为此加过逻辑) | ⚠️ 用来判截断,但**没被记下来** |
+| `responseId` / `model` / `provider` / `diagnostics` | 可追溯性 | ❌ 整个丢弃 |
+
+**结论:planner/executor 的 Layer 3 不必等 P2,它是一次「把已经在手里的东西写下去」的改动。**
+
+- **成本不在于技术难度**:调用点记一行 + 一张表(006)+ 约 20 行代码。
+- 建议表 `agent_run_traces`(migration 006,006 是当前下一个空号),字段:
+  `conversation_id, role, subject_id(intent/todo), user_prompt, response_text, response_thinking,
+   stop_reason, usage_json, cost_usd, duration_ms, created_at`。
+  这一张表同时喂 §2 的 Layer 2(概要)和 Layer 3(过程),**并让 §7 P1 第 9 项
+  (复活 `AgentRunSummary`)真正有数据可填** —— 现在那一项只能靠 artifact 反推。
+- 「让 planner/executor 走 Pi 的 session 层」是**另一个更大更重的选项,不推荐**:
+  它会顺带给这两个 agent 装上工具能力,而 executor 的提示词明确建立在「没有工具能力」之上
+  (`~/.sansheng/harness/system_prompts/executor.md`「没有工具能力时:用你掌握的领域知识…」),
+  那是**行为变更**,不是日志变更。
+
+**另:communicator 的全量轨迹其实已经在盘上。** Pi 把 session 落成
+`~/.sansheng/pi/sessions/<cwd-slug>/<timestamp>_<uuid>.jsonl`(实测 48K / 14 行),
+含 `session` / `model_change` / `thinking_level_change` / `message`(assistant 消息的 content 块实测为
+`thinking+text+toolCall+toolCall`,外加逐条 `usage` 与**真实 cost**)、`toolResult`(带 `isError` / `details`)。
+**它是 `messages` 表的超集。** v1 不必去读它(`messages` 够 communicator 用),但它是「原始现场」的
+权威副本 —— `npm run diagnose` 那类排查应该指向它,而不是只有 `artifacts_json`。
 
 ---
 
@@ -224,6 +275,7 @@ planner/executor 之间的大部分协作是**通过工件**完成的,不经过�
 2. **配置项是摆设** —— `enabledTools` / `redLines` / `budget` 是 `loader.ts:40-42` 的硬编码字面量,
    **无磁盘来源、无消费者、从不强制执行**;`maxIterations|perStepTimeoutMs|maxCostUsd` 在 `loader.ts` 之外**全项目零引用**。
    但页面上它们和真配置长得一模一样。
+   → **2026-10-02 用户已确认:这不是 UI 问题,是 harness 本身还没设计完。** 见 §6.1。
 3. **proposals 结构性永远为空** —— `harness_proposal` **没有生产发射点**。
    `HarnessManager` 只对 `kind === "harness_proposal"` 的工件反应(`harnessManager.ts:234`),
    而 executor 阻塞时**恒**产出 `kind: "hypothesis"` 的工件(`executor.ts:346`),
@@ -247,11 +299,16 @@ planner/executor 之间的大部分协作是**通过工件**完成的,不经过�
 | 徽章 | 含义 | 例子 |
 |---|---|---|
 | 🟢 生效中 | 真的被读取并注入模型 | planner / executor / communicator 的提示词 |
-| ⚪ 未接线 | 文件在,但没有消费者 | critic / memory / reflection |
+| 🔵 硬编码兜底 | 没有自己的文件,用的是编译进代码的常量 | harness_manager(`harnessManager.ts:127`) |
 | 🟡 仅声明未强制 | 展示了,但代码里不执行 | enabledTools / redLines / budget |
 
+> ⚪「未接线」这一档**在 2026-10-02 之后不再需要出现在用户可见的界面上** ——
+> critic/memory/reflection 决定不实现(§1),所以它们根本不出现在手册里,
+> 不存在「需要标注」的场景。徽章体系因此缩到三档。
+
 **光是这一层徽章,就把「太空」页变成了全 app 信息量最高的一页** —— 它如实告诉用户:
-「planner 有一份 3766 字节的手册在生效;critic 有一份 240 字节的草稿没人读」。
+「planner 有一份 3766 字节的手册在生效;executor 有一份 1424 字节的;
+harness_manager 压根没有文件,用的是代码里写死的那份」。
 
 **② 「生效时机」是编辑功能的关键细节** —— 用户未来要能改,但必须告诉他改完什么时候生效:
 
@@ -261,7 +318,8 @@ planner/executor 之间的大部分协作是**通过工件**完成的,不经过�
 | communicator (Pi 直答) | **下一次 start/resume/reset** | `agentKernel.ts:933-940` |
 | communicator (Communicator 实例) | **需要 kernel 失效重建** | 实例被 memoize(`agentKernel.ts:364-365`) |
 | harness_manager | **需要改代码** —— 它没有 md 文件,用编译内置的 fallback | `harnessManager.ts:127` |
-| critic / memory / reflection | **永远不生效** | 无消费者 |
+
+(原表还有「critic / memory / reflection → 永远不生效」一行,因三角色决定不实现、界面不再列出,已删除。)
 
 没有这张表,用户改完 prompt 发现没反应,会直接判定产品坏了。
 
@@ -277,6 +335,32 @@ planner/executor 之间的大部分协作是**通过工件**完成的,不经过�
 就额外发一条 `kind: "harness_proposal"` 的工件(或让 manager 也接受
 `kind==="hypothesis" && metadata.callbackReason==="harness_proposal"`),manager 第一次真的会活过来。
 
+### 6.1 `enabledTools` / `redLines` / `budget`:等 harness 设计完成就消失了吗?
+
+**是,但有前提 —— 前提是 harness 设计必须回答「谁执行它」。**
+
+现状是「harness 设计没做完」的症状,不是三个独立 bug。三条支持「它属于 harness 范围」的证据:
+
+- 它们现在是**全局**的,但按角色给才有意义。**「按 agent 约束工具」这条路已经走通过一次** ——
+  communicator 已有白名单 `["read","grep","find","ls"]`(`agentKernel.ts:965`),
+  不是从零开始。
+- `loader.ts:6-7` 的文档注释**早就承诺过**磁盘布局 `harness/enabled_tools.json` + `harness/policies/*.json`,
+  **但从未实现**(实测 `~/.sansheng/harness/` 下只有 `system_prompts/`,这两个路径不存在)。
+  也就是说文件格式的方案早就想好了,只是没落地。
+- `redLines` / `budget` 要真正生效需要**执行点**。budget 已有现成落点:
+  `makeLlmCall` 的 `maxTokens`(`ws.ts:204`,批次 7-A 刚加的 `PLANNER_EXECUTOR_MAX_TOKENS`)
+  和 `SettingsStore.costBudgetUsd`(已存储但无消费者)。
+
+| 情形 | 结果 |
+|---|---|
+| harness 设计完成(有磁盘格式 + per-agent 化 + budget 至少有一个执行点) | 三个字段自然变成真配置,徽章转 🟢,**问题消失** |
+| 只把字面量搬进 JSON 文件、不加执行点 | 变成「持久化的谎言」,比现在更糟(用户会以为它生效) |
+| 什么都不做 | 维持现状,用 🟡 徽章如实标注 |
+
+**过渡期唯一诚实的做法是 🟡 徽章**(§6①),并且不要在 P0/P1 里假装它们即将生效。
+是否推进到「真配置」属于 harness 设计本身的范围 —— 但要记的是:它已经是 harness 设计的一部分,
+**不是产品 UI 的欠债**,不该由 UI 批次来还。
+
 ---
 
 ## 7. 实施排期
@@ -288,42 +372,47 @@ planner/executor 之间的大部分协作是**通过工件**完成的,不经过�
 | 1 | Blackboard → 四区工作面,DAG 用树状布局 | `dependsOn`/`parentIntent`/`executors`/`status`(当前 0 使用) |
 | 2 | 工件 → 按沟通职能分组 + 生命周期展示 + 「待转述」视图 + 教学文案 | `kind`/`author`/`status` |
 | 3 | Harness → 每角色「生效状态」徽章 + 「生效时机」表 | `describePrompts` 已有的 `state` 字段(`loader.ts:416-437`) |
-| 4 | Agents 页角色表 → 4 真实 agent + 3 个显式「未接线」 | 编译期事实 |
+| 4 | Agents 页角色表 → **只列 4 个真实 agent**(critic/memory/reflection 不再出现) | 编译期事实 |
 | 5 | 总线 → question/reply 线程化 + 方向分道 + 范围说明 | `questionId`/`direction` |
 | 6 | 失败原因进入 blackboard 展示(修 §3.① 的真实缺陷) | `error{code:"todo_failed"}` + `metadata.errorReason` |
 
 P0 全部是**已有数据的重新组织**,不动 DB、不动 schema、不动事件流,回归风险低。
 其中 #1 和 #6 修的是真实缺陷(丢掉的 DAG 结构、看不见的失败原因),不是锦上添花。
 
-### P1 —— 小幅后端接线(全部在已有类型/事件上,**不需要新迁移**)
+### P1 —— 小幅后端接线 + 一张新表(2026-10-02 修订:原 P1 全部「不需新迁移」的说法已作废)
 
 | # | 内容 | 依据 |
 |---|---|---|
 | 7 | 补发被丢弃的 7 个 `ProgressEvent` | `ws.ts:358-373` 的 `default: break` —— 事件本身已定义 |
 | 8 | `Orchestrator` 状态快照 getter + 替换 `/api/agents/:id` 的硬编码 stub | `orchestrator.ts:157-162` 已有数据,缺 getter 和路由 |
-| 9 | 用 `AgentRunSummary` 契约复活 planner/executor 概要 | 类型已定义,实现是死代码 |
-| 10 | 真实 `/api/executors/:id/state` 替换 mock | `blackboardRoutes.ts:210-220` 现返回 `status:"idle", note:"mock · B1 stub"` |
-| 11 | 补上 `harness_proposal` 发射点(executor 阻塞时按 `callbackReason` 发对应 kind 的工件) | `harnessManager.ts:234` 过滤 + `executor.ts:346` 恒发 `hypothesis` |
+| 9 | `agent_run_traces` 表 + 在 `makeLlmCall` 调用点落库(thinking / usage / cost / stopReason / duration) | **原列 P2,现提前** —— 数据已在 `AssistantMessage` 里,只是被 `ws.ts:220-224` 丢弃(详见 §2.1) |
+| 10 | 用 `AgentRunSummary` 契约做 planner/executor 概要(**数据源改为 #9**) | 原方案只能靠 artifact 反推,#9 落地后可直接读 |
+| 11 | 真实 `/api/executors/:id/state` 替换 mock | `blackboardRoutes.ts:210-220` 现返回 `status:"idle", note:"mock · B1 stub"` |
+| 12 | 补上 `harness_proposal` 发射点(executor 阻塞时按 `callbackReason` 发对应 kind 的工件) | `harnessManager.ts:234` 过滤 + `executor.ts:346` 恒发 `hypothesis` |
 
-### P2 —— 需要新迁移 / 新写接口(需单独确认)
+> **#9 动 schema**(migration 006),所以 P1 不再是「零迁移」批次。它提前到 P1 的理由是:
+> 它的**技术风险最低**(写自己刚拿到的数据,不碰解析路径),而它解锁的产品面最大
+> (Layer 2 概要 + Layer 3 过程 + #10 的真实数据源)。如果仍然想保持 P1 零迁移,
+> 就把 #9/#10 整体留在 P2 —— 二者的差别只在于 Agent 详情页的概要/过程是「反推」还是「真读」。
+
+### P2 —— 写接口 / 闭环(需单独确认)
 
 | # | 内容 | 代价 |
 |---|---|---|
-| 12 | 步骤 trace 持久化(`migration 006`,006 是当前下一个空号) | 新 schema,动用户真实数据库 |
 | 13 | Harness 写接口 + `harness_manager.md` 入版本链 + `kernel.invalidate()` | 写用户 prompt 文件,需确认 |
 | 14 | 总线提问 → 决策工件的闭环回链 | 依赖 7/8 的事件补全 |
+| 15 | `enabledTools`/`redLines`/`budget` 变成真配置(per-agent 化 + 至少 budget 有执行点) | **属 harness 设计范围,不是 UI 欠债**(见 §6.1);P0/P1 期间用 🟡 徽章如实标注 |
 
 ---
 
 ## 8. 本设计**不**解决的问题(避免过度承诺)
 
-- **critic / memory / reflection 三个 agent 没有实现** —— 这是**后端产品缺口,不是 UI 缺口**。
-  本设计最多让它们被**诚实地标成「未接线」**;要它们真的会跑,是另一件事(实现三个 agent,
-  或从 `RoleKind` 里删掉)。删掉是更小的改动,但会动共享类型和 481 个测试的基线。
-- **planner/executor 的 token 级过程**在 P2 之前拿不到 —— 它们的 LLM 输出从不落库(见 §2 Layer 3)。
-- **Harness 的 enabledTools / redLines / budget 要么变成真的、要么从 UI 拿掉** ——
-  继续展示而不强制执行,是在对用户撒谎。这个二选一属于产品决策,本文不替用户定;
-  过渡期用 🟡 徽章如实标注是唯一诚实的处理。
+- **critic / memory / reflection 三个 agent 没有实现** —— **用户 2026-10-02 已决定:暂不实现。**
+  UI 的处置是**不列它们**(§1),但 `RoleKind` / `ArtifactAuthor` 里的字符串成员**保留不动**。
+- **planner/executor 的 token 级过程** —— **2026-10-02 修订:不需要新架构,数据已经在手里。**
+  原文把这列为「P2 前拿不到」是错的,详见 §2.1:它们从 P2 提前到 P1,成本是一张表 + 调用点一行。
+- **Harness 的 enabledTools / redLines / budget** —— 用户已确认这属于 **harness 自身设计未完成**,
+  不是 UI 欠债,§6.1 给了三条支持证据和「什么条件下问题才真正消失」的判据。
 
 ---
 
