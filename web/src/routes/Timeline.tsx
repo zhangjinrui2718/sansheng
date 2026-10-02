@@ -1,6 +1,6 @@
 /**
  * Sansheng · 总线页(原「Agents Live Trace」)—— 产品设计 §5「总线:它是什么、该显示什么」
- * 实施批次 P0 #5(docs/PRODUCT-DESIGN-2026-10-02.md:239-266)。
+ * 实施批次 P0 #5(docs/PRODUCT-DESIGN-2026-10-02.md:239-266);批次 UI U4 文本分层。
  *
  * **零后端改动**:数据全部来自 zustand(chat store 的 busStream / pendingQuestions),
  * 不动 WS 事件、不动 bus.jsonl、不加端点 —— 只是把**已有的** BusMessage 重新组织成
@@ -24,7 +24,7 @@
  * 三条道本就是三条不同语义的通道,混在一条时间轴里只会被时间戳淹没(旧实现的问题)。
  *
  * ── ③ 计数口径(页面上每个 N 都写明数的是什么) ──────────────────────
- *   - 状态条右侧「N 条消息 · M 个线程」:N = 当前过滤后**原始 BusMessage 条数**
+ *   - 页首的「N 条消息 · M 个线程」:N = 当前过滤后**原始 BusMessage 条数**
  *     (与旧版「N 条 bus 消息」同口径,未变),M = **线程数**,即下方实际渲染的卡片数。
  *   - 每条通道标题的「N 个线程」= 该道内的卡片数。
  * 页面上不存在第三个口径,任何数字都和它标注的东西一一对应。
@@ -48,10 +48,27 @@
  *   - 成立前提:buildThreads 的结果**引用稳定** —— 它挂在 [filtered, pendingIds] 上,
  *     两者都是 useMemo 的稳定引用,内容不变时 threads 数组与其中每个 thread 对象
  *     都保持同一引用,memo 才真的生效(否则每次重渲都是新对象,memo 形同虚设)。
+ *
+ * ── U4:屏幕上文字分层(这一版的改动)────────────────────────────────────
+ * 上一版每条消息同时说了同一件事三遍:方向标签「worker → 沟通员」、角色行
+ * 「executor → communicator」、再挂一行原始 `questionId=…`;页面上还有一段
+ * 总线范围说明、一张写满解释的沟通员状态卡、一节罗列 worker 角色名的「角色概览」。
+ * 这一版只保留**结论**,被移走的句子去的地方如下(反造假纪律没放松,都还能查到):
+ *   - 范围说明(总线只承载升级 / 求助,planner ↔ executor 走工件)→ 页首 hint 的 `hintTitle`;
+ *   - 沟通员状态卡的描述句(「用户消息先过我,我决定 chat / task / clarify / feedback」)
+ *     → 本段注释 + 状态 pill 的 `title=`,屏幕上只留「待命 / 思考中 / 调用工具」;
+ *   - 行的 `fromRole → toRole` 与 `questionId=…` → 行的 `title=`(一行内两行,悬停可见);
+ *   - 「Worker 角色概览」整节 → 删除(角色名本来就写在每条消息的方向标签里);
+ *   - 线程卡上的通道名 → 删除(上面那一节的标题已经写了它是哪条道);
+ *   - LANE_HINT 里的方向前缀(「worker → 沟通员:」)→ 删除,行内方向已经写着。
+ * 根元素改 `<div className="ss-page">` —— App 的非对话路由外壳已经提供滚动容器与
+ * `<main>`,页面再自带 `<main>` 就是嵌套 <main>(非法 HTML)。
  */
 import { memo, useEffect, useMemo, useRef, useState } from "react";
 import { useChatStore } from "@/stores/chat";
 import { BUS_ROW_NOW_BUCKET_MS, busRowPropsEqual, nowBucket } from "@/lib/busRow";
+import { EmptyState, PageHeader, Pill, StatStrip, toneColor } from "@/components/ui/primitives";
+import type { Tone } from "@/components/ui/primitives";
 import type { BusDirection, BusMessage, BusKind } from "@shared/types/agents";
 
 const DIR_ICON: Record<BusDirection, string> = {
@@ -68,10 +85,10 @@ const DIR_LABEL: Record<BusDirection, string> = {
   "worker→comm": "worker → 沟通员",
 };
 
-const KIND_BADGE: Record<BusKind, { label: string; tone: string }> = {
-  question: { label: "提问", tone: "var(--amber)" },
-  broadcast: { label: "广播", tone: "var(--jade)" },
-  reply: { label: "回复", tone: "var(--cyan, #4cc9c0)" },
+const KIND_BADGE: Record<BusKind, { label: string; tone: Tone }> = {
+  question: { label: "提问", tone: "amber" },
+  broadcast: { label: "广播", tone: "jade" },
+  reply: { label: "回复", tone: "cyan" },
 };
 
 // ── 通道(分道)定义:三类语义完全不同的总线用途 ──────────────────────────
@@ -84,17 +101,21 @@ const LANE_LABEL: Record<LaneKey, string> = {
   dialogue: "对话",
 };
 
-const LANE_TONE: Record<LaneKey, string> = {
-  escalation: "var(--amber)",
-  delegation: "var(--cyan, #4cc9c0)",
-  dialogue: "var(--jade)",
+const LANE_TONE: Record<LaneKey, Tone> = {
+  escalation: "amber",
+  delegation: "cyan",
+  dialogue: "jade",
 };
 
-/** 一行说明这条道是干什么的 —— 不解释总线为什么不承载其它往来(见 §5 ⑤ 范围说明行)。 */
+/**
+ * 一行说明这条道是干什么的 —— **不再带方向前缀**:每条消息上方已经写着
+ * 「worker → 沟通员」,这里重复一遍只是把同一句话说两次。
+ * (不解释总线为什么不承载其它往来:那句在页首 hint 的 title= 里。)
+ */
 const LANE_HINT: Record<LaneKey, string> = {
-  escalation: "worker → 沟通员:卡住了,要一个决定",
-  delegation: "沟通员 → worker:派活 / 回话",
-  dialogue: "沟通员 ↔ 用户:原话与应答",
+  escalation: "卡住了,要一个决定",
+  delegation: "派活 / 回话",
+  dialogue: "原话与应答",
 };
 
 /** 展示顺序:要人拍板的排最前,对话条数最多、最不需要优先看,排最后。 */
@@ -106,6 +127,16 @@ const LANE_OF: Record<BusDirection, LaneKey> = {
   "user→comm": "dialogue",
   "comm→user": "dialogue",
 };
+
+/** 沟通员三态:屏幕上一个词就够,展开的自我解释进 title=。 */
+const COMM_STATUS: Record<"idle" | "thinking" | "tool_use", { label: string; tone: Tone }> = {
+  idle: { label: "待命", tone: "jade" },
+  thinking: { label: "思考中", tone: "amber" },
+  tool_use: { label: "调用工具", tone: "cyan" },
+};
+
+const COMM_STATUS_TITLE =
+  "待命:用户消息先过沟通员,由它决定走 chat / task / clarify / feedback;思考中:正在判断这条消息怎么走;调用工具:沟通员自己在查代码 / 读工具。";
 
 function fmtRel(ts: number, now: number): string {
   const diff = Math.max(0, now - ts);
@@ -133,6 +164,17 @@ function contextChips(ctx: Record<string, unknown> | undefined): Array<[string, 
   return out;
 }
 
+/** 状态点:一个小圆点,替代旧版那张「communicator 状态卡」。 */
+function StatusDot({ tone }: { tone: Tone }) {
+  const c = toneColor(tone);
+  return (
+    <span
+      className="inline-block flex-none"
+      style={{ width: 7, height: 7, borderRadius: 999, background: c, boxShadow: `0 0 6px ${c}` }}
+    />
+  );
+}
+
 // ── 线程化 ────────────────────────────────────────────────────────────
 
 /** 线程状态:全部由真实字段推出(见文件头 ④)。 */
@@ -152,6 +194,9 @@ interface BusThread {
 /**
  * 把扁平流折成线程(纯函数,无副作用,便于心算与将来单测)。
  * pendingIds 来自 store 的 pendingQuestions —— 线程是否「等待回答」只由它决定。
+ *
+ * 引用稳定性是两层 memo 的前提,**改这一段之前先读文件头 ⑤**:它必须继续挂在
+ * [filtered, pendingIds] 两个稳定引用上,且内容不变时每个 thread 对象都保持同引用。
  */
 function buildThreads(messages: BusMessage[], pendingIds: ReadonlySet<string>): BusThread[] {
   const byKey = new Map<string, BusMessage[]>();
@@ -194,12 +239,12 @@ function buildThreads(messages: BusMessage[], pendingIds: ReadonlySet<string>): 
   return threads;
 }
 
-const THREAD_STATE: Record<ThreadState, { label: string; tone: string }> = {
-  oneway: { label: "单向 · 无需回复", tone: "var(--jade)" },
-  awaiting: { label: "等待回答", tone: "var(--amber)" },
-  answered: { label: "已回复", tone: "var(--bamboo)" },
-  silent: { label: "未收到回复", tone: "var(--bone-mute)" },
-  orphan: { label: "回复 · 原提问不在流内", tone: "var(--bone-dim)" },
+const THREAD_STATE: Record<ThreadState, { label: string; tone: Tone }> = {
+  oneway: { label: "单向 · 无需回复", tone: "jade" },
+  awaiting: { label: "等待回答", tone: "amber" },
+  answered: { label: "已回复", tone: "bamboo" },
+  silent: { label: "未收到回复", tone: "mute" },
+  orphan: { label: "回复 · 原提问不在流内", tone: "bone" },
 };
 
 interface Props {
@@ -264,14 +309,7 @@ export function TimelinePage({ conversationId }: Props) {
     setStickToBottom(atBottom);
   };
 
-  const workerMessages = filtered.filter((m) => m.fromRole !== "communicator" && m.fromRole !== "user");
-
-  const status = communicatorStatus; // "idle" | "thinking" | "tool_use"
-  const statusColor = {
-    idle: "var(--jade)",
-    thinking: "var(--amber)",
-    tool_use: "var(--cyan, #4cc9c0)",
-  }[status];
+  const status = COMM_STATUS[communicatorStatus];
 
   const onSubmitAnswer = (questionId: string) => {
     const text = answerDraft.get(questionId) ?? "";
@@ -281,59 +319,37 @@ export function TimelinePage({ conversationId }: Props) {
   };
 
   return (
-    <main className="px-4 pb-4">
-      <div className="flex items-baseline justify-between mb-2">
-        <h2 className="sansheng-h2">总线 Bus</h2>
-        <div className="text-xs sansheng-text-mute font-mono">
-          {conversationId ?? "全局流(当前会话未加载)"}
-        </div>
-      </div>
+    <div className="ss-page">
+      <PageHeader
+        title="总线"
+        hint="只走升级 / 求助"
+        hintTitle="总线只承载升级 / 求助;planner 与 executor 之间的大部分协作通过工件完成,不经过总线。"
+        aside={
+          <>
+            <span className="flex items-center gap-1.5" title={COMM_STATUS_TITLE}>
+              <StatusDot tone={status.tone} />
+              <Pill tone={status.tone}>{status.label}</Pill>
+            </span>
+            <StatStrip
+              items={[
+                { label: "条消息", value: filtered.length, title: "当前会话总线上的原始消息条数" },
+                { label: "个线程", value: threads.length, title: "线程化后实际渲染的卡片数" },
+              ]}
+            />
+            <span className="ss-meta truncate" style={{ maxWidth: 200 }}>
+              {conversationId ?? "全局流(当前会话未加载)"}
+            </span>
+          </>
+        }
+      />
 
-      {/* §5 ⑤ 范围说明:一句话讲清总线承载什么、不承载什么 —— 不写这句,
-          用户会一直找「为什么看不到 planner 和 executor 的对话」。 */}
-      <div className="text-xs sansheng-text-mute mb-3">
-        总线只承载升级 / 求助;planner 与 executor 之间的大部分协作通过工件完成,不经过总线。
-      </div>
-
-      {/* Communicator 状态条 */}
-      <section
-        className="sansheng-card p-3 mb-3"
-        style={{ borderColor: statusColor, borderWidth: 1 }}
-      >
-        <div className="flex items-center gap-3">
-          <span
-            className="inline-block rounded-full"
-            style={{
-              width: 10,
-              height: 10,
-              background: statusColor,
-              boxShadow: `0 0 8px ${statusColor}`,
-            }}
-          />
-          <div className="flex-1">
-            <div className="text-sm">沟通员(Communicator)</div>
-            <div className="text-xs sansheng-text-mute">
-              {status === "idle" && "待命 · 用户消息先过我,我决定 chat / task / feedback"}
-              {status === "thinking" && "思考中 · 正在判断这条消息怎么走"}
-              {status === "tool_use" && "调用工具 · 自己查代码 / 读工具"}
-            </div>
-          </div>
-          <div className="text-xs font-mono sansheng-text-mute">
-            {filtered.length} 条消息 · {threads.length} 个线程
-          </div>
-        </div>
-      </section>
-
-      {/* pending question 升级提示 —— 回答 / 取消的真交互,保留原样。
+      {/* pending question 升级提示 —— 回答 / 取消是真交互,保留原样(U4 只压了它的抬头)。
           线程卡只显示「等待回答」状态,不在卡里再放一份输入框(同一个 questionId
           的两个输入框会互相打架);回答入口唯一,就在这里。 */}
       {pendingQuestions.length > 0 && (
-        <section className="sansheng-card p-3 mb-3" style={{ borderColor: "var(--amber)" }}>
-          <div className="text-sm mb-2 flex items-center gap-2">
-            <span
-              className="inline-block"
-              style={{ width: 8, height: 8, background: LANE_TONE.escalation }}
-            />
+        <section className="sansheng-card p-3" style={{ borderColor: "var(--amber)" }}>
+          <div className="ss-section mb-2 flex items-center gap-2">
+            <StatusDot tone={LANE_TONE.escalation} />
             <span>Worker 升级了 {pendingQuestions.length} 个问题给你</span>
           </div>
           <div className="flex flex-col gap-2">
@@ -381,14 +397,8 @@ export function TimelinePage({ conversationId }: Props) {
         </section>
       )}
 
-      {/* Bus 线程流(按通道分道) */}
+      {/* Bus 线程流(按通道分道)。抬头与计数已上移到页首,这里不再重复一遍。 */}
       <section className="sansheng-card p-3">
-        <div className="flex items-baseline justify-between mb-2">
-          <div className="text-sm sansheng-text-mute">总线线程</div>
-          <div className="text-xs sansheng-text-mute font-mono">
-            {threads.length} 个线程 / {filtered.length} 条消息
-          </div>
-        </div>
         <div
           ref={scrollRef}
           onScroll={handleScroll}
@@ -401,27 +411,18 @@ export function TimelinePage({ conversationId }: Props) {
           }}
         >
           {threads.length === 0 ? (
-            <div className="text-xs sansheng-text-mute text-center py-8">
-              还没有 bus 消息。发一条试试看,Communicator 会自动分流。
-            </div>
+            <EmptyState>还没有 bus 消息 —— 发一条试试看,Communicator 会自动分流。</EmptyState>
           ) : (
             LANE_ORDER.map((lane) => {
               const list = lanes.get(lane) ?? [];
               if (list.length === 0) return null;
               return (
                 <section key={lane} className="flex flex-col gap-2">
-                  <div className="flex items-baseline gap-2">
-                    <span
-                      className="inline-block"
-                      style={{ width: 8, height: 8, background: LANE_TONE[lane] }}
-                    />
-                    <span className="text-xs" style={{ color: LANE_TONE[lane] }}>
-                      {LANE_LABEL[lane]}
-                    </span>
-                    <span className="text-xs sansheng-text-mute">{LANE_HINT[lane]}</span>
-                    <span className="ml-auto text-xs sansheng-text-mute font-mono">
-                      {list.length} 个线程
-                    </span>
+                  <div className="flex items-baseline gap-2 flex-wrap">
+                    <StatusDot tone={LANE_TONE[lane]} />
+                    <span className="ss-section">{LANE_LABEL[lane]}</span>
+                    <span className="ss-note truncate">{LANE_HINT[lane]}</span>
+                    <span className="ss-meta ml-auto">{list.length} 个线程</span>
                   </div>
                   {list.map((t) => (
                     <BusThreadRow key={t.key} thread={t} now={now} />
@@ -433,7 +434,7 @@ export function TimelinePage({ conversationId }: Props) {
         </div>
         {/* 滚动高度由消息量决定(线程卡更高,条目数不再是好的判据),阈值沿用旧版的 20 条。 */}
         {filtered.length > 20 && (
-          <div className="text-xs sansheng-text-mute mt-2 text-center">
+          <div className="ss-meta mt-2 text-center">
             {stickToBottom ? (
               <span>已自动跟随最新事件 ↓</span>
             ) : (
@@ -452,18 +453,7 @@ export function TimelinePage({ conversationId }: Props) {
           </div>
         )}
       </section>
-
-      {workerMessages.length > 0 && (
-        <section className="sansheng-card p-3 mt-3 text-xs sansheng-text-mute">
-          <div className="font-mono mb-1">Worker 角色概览</div>
-          <div className="flex flex-wrap gap-2">
-            {Array.from(new Set(workerMessages.map((m) => String(m.fromRole)))).map((r) => (
-              <span key={r} className="font-mono">{r}</span>
-            ))}
-          </div>
-        </section>
-      )}
-    </main>
+    </div>
   );
 }
 
@@ -478,24 +468,15 @@ function BusThreadImpl({ thread, now }: { thread: BusThread; now: number }) {
       className="rounded p-2 flex flex-col gap-1"
       style={{ background: "var(--ink-2)", border: "1px solid var(--ink-3)" }}
     >
-      {/* 线程头:哪条通道 + 现在什么状态 + 收了几条回复 */}
+      {/* 线程头:现在什么状态 + 收了几条回复 + 什么时候发起。
+          通道名**不再重复**——上面那一节的标题已经写了这是哪条道。 */}
       <div className="flex items-center gap-2 flex-wrap">
-        <span className="text-xs" style={{ color: LANE_TONE[thread.lane] }}>
-          {LANE_LABEL[thread.lane]}
-        </span>
-        <span
-          className="font-mono text-xs px-1 rounded"
-          style={{ background: state.tone, color: "var(--ink-0)" }}
-        >
-          {state.label}
-        </span>
+        <Pill tone={state.tone}>{state.label}</Pill>
         {/* 只有「一问一答」型线程才谈得上回复条数;broadcast / 孤立 reply 不凑数。 */}
         {thread.anchor.kind !== "broadcast" && thread.state !== "orphan" && (
-          <span className="text-xs sansheng-text-mute">{replies.length} 条回复</span>
+          <span className="ss-meta">{replies.length} 条回复</span>
         )}
-        <span className="ml-auto text-xs sansheng-text-mute font-mono">
-          发起于 {fmtRel(thread.anchor.ts, now)}
-        </span>
+        <span className="ss-meta ml-auto">发起于 {fmtRel(thread.anchor.ts, now)}</span>
       </div>
       <BusRow msg={thread.anchor} now={now} />
       {replies.map((r) => (
@@ -529,35 +510,30 @@ function BusRowImpl({ msg, now }: { msg: BusMessage; now: number }) {
   const icon = DIR_ICON[dir] ?? "?";
   const dirLabel = DIR_LABEL[dir] ?? dir;
   const badge = KIND_BADGE[msg.kind];
-  const isQuestion = msg.kind === "question";
   const ctx = contextChips(msg.context);
+  // 旧版把「executor → communicator」和 questionId 各占一行常驻显示:U4 把它们
+  // 折进同一个 title= —— 事实一条没少,但默认不再占屏幕(第一行已经是「worker → 沟通员」)。
+  const rowTitle = `${String(msg.fromRole)} → ${String(msg.toRole)}${
+    msg.questionId ? `\nquestionId=${msg.questionId}` : ""
+  }`;
 
   return (
     <div
       className="rounded p-2"
       style={{
         background: "var(--ink-1)",
-        borderLeft: `3px solid ${badge?.tone ?? "var(--bone-dim)"}`,
+        borderLeft: `3px solid ${badge ? toneColor(badge.tone) : "var(--bone-dim)"}`,
         fontSize: 12,
         opacity: msg.kind === "reply" ? 0.85 : 1,
       }}
+      title={rowTitle}
     >
       <div className="flex items-center gap-2 mb-1">
-        <span className="font-mono" style={{ color: badge?.tone }}>
+        <span className="font-mono" style={{ color: badge ? toneColor(badge.tone) : undefined }}>
           {icon}
         </span>
-        <span className="font-mono text-xs sansheng-text-mute">
-          {dirLabel}
-        </span>
-        <span
-          className="font-mono text-xs px-1 rounded"
-          style={{ background: badge?.tone, color: "var(--ink-0)" }}
-        >
-          {badge?.label ?? msg.kind}
-        </span>
-        <span className="font-mono text-xs sansheng-text-mute">
-          {String(msg.fromRole)} → {String(msg.toRole)}
-        </span>
+        <span className="font-mono text-xs sansheng-text-mute">{dirLabel}</span>
+        {badge ? <Pill tone={badge.tone}>{badge.label}</Pill> : null}
         <span className="ml-auto text-xs sansheng-text-mute">{fmtRel(msg.ts, now)}</span>
       </div>
       <div
@@ -580,11 +556,6 @@ function BusRowImpl({ msg, now }: { msg: BusMessage; now: number }) {
           ))}
         </div>
       )}
-      {isQuestion && msg.questionId && (
-        <div className="text-xs sansheng-text-mute mt-1 font-mono">
-          questionId={msg.questionId.slice(0, 12)}
-        </div>
-      )}
     </div>
   );
 }
@@ -600,5 +571,6 @@ function BusRowImpl({ msg, now }: { msg: BusMessage; now: number }) {
  *
  * 线程化之后它降为第二层:线程卡(BusThreadRow)整体已经能跳过,行级 memo 现在
  * 负责的是「卡内只有一条 reply 变了」这类局部更新,以及 30s 桶刷新时的逐行判断。
+ * 比较器与 lib/busRow.ts 都**冻结**:U4 只改了行内的展示内容,没碰 memo 语义。
  */
 export const BusRow = memo(BusRowImpl, busRowPropsEqual);

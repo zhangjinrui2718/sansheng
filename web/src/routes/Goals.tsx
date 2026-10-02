@@ -1,8 +1,9 @@
 /**
- * Sansheng · 目标页(批次 UI U1)
+ * Sansheng · 目标页(批次 UI U1 · 批次 UI U4 文字分层)
  *
- * ⚠️ 数据来源声明(必须显眼 —— 这是**投影视图**,不是独立的 goals 子系统):
- *   PLAN.md 的 M7「Goals」目前**后端没有实现**。本批开工前逐项查证:
+ * ⚠️ 数据来源声明(这是**投影视图**,不是独立的 goals 子系统;完整论证在下面,
+ * 页面上的那两行说明已移进 `PageHeader` 的 `hintTitle`,悬停可见):
+ *   PLAN.md 的 M7「Goals」目前**后端没有实现**。开工前逐项查证:
  *     - `shared/types/goals.ts` 只有 `Goal`/`RedLine` 两个 interface,文件头自述
  *       「M5/M7/M8 填实」,全仓**零消费者**(grep `types/goals` 在 src/ web/ tests/ 无命中);
  *     - `migrations/001..005_*.sql` 里**没有 goals 表**(artifacts 存在 blackboards
@@ -15,100 +16,51 @@
  *   `/api/goals`,页面结构与设计不动。**零 mock 数据** —— 空库就显示空态。
  *
  * 数据源:`GET /api/artifacts?conversationId=<id>&limit=200`(同工件页的权威端点),
+ *   由 `lib/artifacts.ts` 的 `useArtifacts()` 统一读取(同端点 / 同 limit / 同错误解析),
  *   intent 取 kind=intent,todo 取 kind=todo 并按 parentIntent 归组。
+ *
+ * ── 批次 UI U4:本页搬走了什么 ────────────────────────────────────
+ *  - 页首那段两行「数据来源:本会话的 intent 工件(沟通员/用户表达过的目标)+ 其名下
+ *    todo 的真实状态。M7 Goals 子系统尚未实现,当前为投影视图。」从**常驻正文**降级为
+ *    `PageHeader` 的 `hintTitle`(悬停可见);h1 旁边只留一句短的 hint。
+ *    —— 事实一个字没删,只是不再要求每个读者读完才看到第一个目标。
+ *  - 标题前的靶心 emoji(本行刻意不写该字符,以免被 emoji 静态扫描误判)→ 一个 jade
+ *    圆点(项目规则:UI 标签不用 emoji)。
+ *  - 本地自持的三张词表(`STATUS_LABEL` / `STATUS_TONE` / `TODO_TONE`)+ 自己抄的
+ *    fetch/useState 三件套 → 全部换成 `lib/artifacts.ts` 的共享版本。
+ *    ⚠️ **这修了一处真实的读法漂移**:本页旧词表把 `open` 写成「进行中」、
+ *    `resolved` 写成「已达成」、`failed` 写成「未达成」,而工件页 / Agents 页把同一个
+ *    状态写成「待处理」/「已解决」/「失败」—— 同一个工件两种读法。现在四页一致,
+ *    目标卡显示的是**共享状态标签**(即 intent 工件本身的状态,不是本页另造的一套)。
+ *  - 目标正文由「整段撑开」改为默认 `Clamp(2)` + 长文才出现的 `Disclosure`
+ *    (长度判据是 `excerpt(body,120) !== body`,对真实字段做的计算,不是拍脑袋的阈值),
+ *    免得一个长 body 把下面所有目标卡推出首屏。
+ *  - 根元素 `<main className="px-4 pb-4">` → `<div className="ss-page">`:
+ *    app shell 已经拥有 `<main>` 与滚动容器,嵌套 `<main>` 是无效 HTML。
  */
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { useChatStore } from "@/stores/chat";
-import type { ArtifactStatus } from "@shared/types/blackboard";
+import { useMemo } from "react";
+import { excerpt, fmtTime, statusLabel, statusTone, useArtifacts } from "@/lib/artifacts";
+import {
+  Clamp,
+  Disclosure,
+  EmptyState,
+  Flag,
+  PageHeader,
+  Pill,
+  Progress,
+  StatStrip,
+  toneColor,
+} from "@/components/ui/primitives";
 
-const LIMIT = 200;
-
-interface Artifact {
-  id: string;
-  kind: string;
-  title: string;
-  body: string;
-  author: string;
-  status: ArtifactStatus;
-  parentIntent?: string;
-  dependsOn?: string[];
-  createdAt: number;
-  updatedAt: number;
-}
-
-const STATUS_LABEL: Record<string, string> = {
-  open: "进行中",
-  in_progress: "执行中",
-  waiting_for_decision: "等决策",
-  resolved: "已达成",
-  superseded: "被取代",
-  failed: "未达成",
-};
-
-const STATUS_TONE: Record<string, string> = {
-  open: "var(--jade)",
-  in_progress: "var(--jade)",
-  waiting_for_decision: "var(--amber)",
-  resolved: "var(--bamboo)",
-  superseded: "var(--bone-mute)",
-  failed: "var(--cinnabar)",
-};
-
-const TODO_TONE: Record<string, string> = {
-  open: "var(--bone-mute)",
-  in_progress: "var(--jade)",
-  waiting_for_decision: "var(--amber)",
-  resolved: "var(--bamboo)",
-  superseded: "var(--bone-mute)",
-  failed: "var(--cinnabar)",
-};
-
-const DONE_STATUSES = new Set<string>(["resolved", "superseded"]);
+/** 计入「已完成」的 todo 状态(本地进度口径,不是工件页的终态表)。 */
+const DONE_STATUSES: ReadonlySet<string> = new Set<string>(["resolved", "superseded"]);
 
 interface Props {
   conversationId: string | null;
 }
 
 export function GoalsPage({ conversationId }: Props) {
-  const artifactRevision = useChatStore((s) => s.artifactRevision);
-  const [artifacts, setArtifacts] = useState<Artifact[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  const load = useCallback(async () => {
-    if (!conversationId) {
-      setArtifacts([]);
-      setError(null);
-      return;
-    }
-    setLoading(true);
-    try {
-      const res = await fetch(
-        `/api/artifacts?conversationId=${encodeURIComponent(conversationId)}&limit=${LIMIT}`,
-      );
-      const data = (await res.json()) as {
-        artifacts?: Artifact[];
-        error?: string;
-        message?: string;
-      };
-      if (!res.ok || data.error) {
-        setError(data.message ?? data.error ?? `HTTP ${res.status}`);
-        setArtifacts([]);
-      } else {
-        setArtifacts(Array.isArray(data.artifacts) ? data.artifacts : []);
-        setError(null);
-      }
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-      setArtifacts([]);
-    } finally {
-      setLoading(false);
-    }
-  }, [conversationId]);
-
-  useEffect(() => {
-    void load();
-  }, [load, artifactRevision]);
+  const { artifacts, loading, error } = useArtifacts();
 
   // 目标 = intent artifact;进度 = 名下 todo 的真实状态聚合
   const goals = useMemo(() => {
@@ -125,106 +77,99 @@ export function GoalsPage({ conversationId }: Props) {
   const settled = goals.filter((g) => g.intent.status === "resolved" || g.intent.status === "failed");
 
   return (
-    <main className="px-4 pb-4">
-      <div className="flex items-baseline justify-between mb-1">
-        <h2 className="sansheng-h2">目标</h2>
-        <div className="text-xs sansheng-text-mute font-mono">
-          {goals.length} 个目标{settled.length > 0 && ` · ${settled.length} 已收口`}
-          {loading && " · 刷新中"}
-        </div>
-      </div>
-      <p className="sansheng-text-mute mb-3" style={{ fontSize: 11, lineHeight: 1.6 }}>
-        数据来源:本会话的 intent 工件(沟通员/用户表达过的目标)+ 其名下 todo 的真实状态。
-        M7 Goals 子系统尚未实现,当前为投影视图。
-      </p>
+    <div className="ss-page">
+      <PageHeader
+        title="目标"
+        hint="本会话的 intent 投影"
+        hintTitle="数据来源:本会话的 intent 工件(沟通员 / 用户表达过的目标)+ 其名下 todo 的真实状态。M7 Goals 子系统尚未实现,当前为投影视图,不是独立的 goals 存储。"
+        aside={
+          <StatStrip
+            items={[
+              { label: "目标", value: goals.length },
+              { label: "已收口", value: settled.length, tone: settled.length > 0 ? "bamboo" : undefined },
+              ...(loading && artifacts.length > 0 ? [{ label: "状态", value: "刷新中" }] : []),
+            ]}
+          />
+        }
+      />
 
       {error && (
-        <div className="sansheng-card p-3 text-xs mb-3" style={{ color: "var(--cinnabar)" }}>
-          加载失败:{error}
-        </div>
+        <Flag tone="cinnabar">
+          <span className="ss-body" style={{ color: "var(--cinnabar)" }}>
+            加载失败:{error}
+          </span>
+        </Flag>
       )}
 
       {!conversationId ? (
-        <div className="sansheng-card p-4 text-sm opacity-80">
-          先在「对话」选一个会话,再切换到「目标」查看该会话表达过的目标。
-        </div>
+        <EmptyState>先在「对话」选一个会话,再切换到「目标」查看该会话表达过的目标。</EmptyState>
       ) : !error && !loading && goals.length === 0 ? (
-        <div className="sansheng-card p-4 text-sm opacity-80">
-          本会话暂无目标。发送 /plan 你的目标 触发规划后,目标会出现在这里。
-        </div>
+        <EmptyState>
+          本会话暂无目标。发送 <code>/plan 你的目标</code> 触发规划后,目标会出现在这里。
+        </EmptyState>
       ) : (
         <div className="grid gap-2">
           {goals.map(({ intent, todos, done, total }) => {
             const pct = total === 0 ? 0 : Math.round((done / total) * 100);
+            const tone = intent.status === "failed" ? "cinnabar" : "jade";
+            const body = intent.body && intent.body !== intent.title ? intent.body : "";
+            // 长文才给「展开」入口:判据是对真实 body 做的截断比较,不是固定字数拍脑袋。
+            const bodyLong = body.length > 0 && excerpt(body, 120) !== body;
             return (
               <article key={intent.id} className="sansheng-card p-3">
-                <div className="flex items-center gap-2 mb-1">
-                  <span style={{ color: "var(--jade)" }}>🎯</span>
+                <div className="flex items-center gap-2 flex-wrap">
                   <span
-                    className="font-mono rounded"
                     style={{
-                      fontSize: 10,
-                      padding: "0 6px",
-                      background: "var(--ink-3)",
-                      color: STATUS_TONE[intent.status] ?? "var(--bone-mute)",
+                      width: 6,
+                      height: 6,
+                      borderRadius: 3,
+                      background: "var(--jade)",
+                      flex: "0 0 auto",
                     }}
-                  >
-                    {STATUS_LABEL[intent.status] ?? intent.status}
-                  </span>
-                  <span className="sansheng-text-mute font-mono ml-auto" style={{ fontSize: 10 }}>
-                    {new Date(intent.createdAt).toLocaleString()}
-                  </span>
+                  />
+                  <Pill tone={statusTone(intent.status)} title="intent 工件状态(与工件页同一套词表)">
+                    {statusLabel(intent.status)}
+                  </Pill>
+                  <span className="ss-meta ml-auto">{fmtTime(intent.createdAt)}</span>
                 </div>
-                <div className="text-sm" style={{ color: "var(--bone)" }}>
+                <div className="ss-body" style={{ color: "var(--bone)" }}>
                   {intent.title}
                 </div>
-                {intent.body && intent.body !== intent.title && (
-                  <div
-                    className="text-xs mt-1"
-                    style={{ color: "var(--bone-dim)", whiteSpace: "pre-wrap", lineHeight: 1.6 }}
-                  >
-                    {intent.body}
-                  </div>
+                {body.length > 0 && (
+                  <>
+                    <Clamp lines={2} style={{ marginTop: 4 }}>
+                      {body}
+                    </Clamp>
+                    {bodyLong && (
+                      <Disclosure summary="展开原文">
+                        <div style={{ whiteSpace: "pre-wrap" }}>{body}</div>
+                      </Disclosure>
+                    )}
+                  </>
                 )}
 
                 {total > 0 ? (
                   <div className="mt-2">
-                    <div className="flex items-center gap-2 mb-1">
-                      <div
-                        style={{
-                          flex: 1,
-                          height: 3,
-                          background: "var(--ink-3)",
-                          borderRadius: 2,
-                          overflow: "hidden",
-                        }}
-                      >
-                        <div
-                          style={{
-                            width: `${pct}%`,
-                            height: "100%",
-                            background:
-                              intent.status === "failed" ? "var(--cinnabar)" : "var(--jade)",
-                          }}
-                        />
-                      </div>
-                      <span className="font-mono sansheng-text-mute" style={{ fontSize: 10 }}>
+                    <div className="flex items-center gap-2">
+                      <Progress pct={pct} tone={tone} />
+                      <span className="ss-meta">
                         {done}/{total} · {pct}%
                       </span>
                     </div>
-                    <ul className="grid gap-1">
+                    <ul className="grid gap-1 mt-2">
                       {todos.map((t) => (
                         <li key={t.id} className="flex items-center gap-2">
                           <span
-                            className="font-mono"
+                            title={`${statusLabel(t.status)}${t.id ? ` · ${t.id}` : ""}`}
                             style={{
-                              fontSize: 10,
-                              color: TODO_TONE[t.status] ?? "var(--bone-mute)",
+                              width: 6,
+                              height: 6,
+                              borderRadius: 2,
+                              flex: "0 0 auto",
+                              background: toneColor(statusTone(t.status)),
                             }}
-                          >
-                            {DONE_STATUSES.has(t.status) ? "✓" : t.status === "failed" ? "✗" : "◌"}
-                          </span>
-                          <span className="truncate" style={{ fontSize: 12, color: "var(--bone-dim)" }}>
+                          />
+                          <span className="truncate ss-body" style={{ color: "var(--bone-dim)" }}>
                             {t.title}
                           </span>
                         </li>
@@ -232,15 +177,13 @@ export function GoalsPage({ conversationId }: Props) {
                     </ul>
                   </div>
                 ) : (
-                  <div className="sansheng-text-mute mt-2" style={{ fontSize: 11 }}>
-                    尚无 todo —— Planner 还没拆解这个目标。
-                  </div>
+                  <div className="ss-note mt-2">尚无 todo —— Planner 还没拆解这个目标。</div>
                 )}
               </article>
             );
           })}
         </div>
       )}
-    </main>
+    </div>
   );
 }

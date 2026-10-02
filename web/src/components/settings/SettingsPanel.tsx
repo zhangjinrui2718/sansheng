@@ -196,8 +196,7 @@ export function SettingsPanel() {
               <div className="grid grid-cols-2 gap-3">
                 <Field label="备注名">
                   <input
-                    className="sansheng-input"
-                    style={inputStyle}
+                    className="sansheng-input sansheng-input-block"
                     value={d.label}
                     onChange={(e) => updateDraft(d.id, { label: e.target.value })}
                     placeholder="如:MiniMax 主力"
@@ -205,8 +204,7 @@ export function SettingsPanel() {
                 </Field>
                 <Field label="Provider">
                   <select
-                    className="sansheng-input"
-                    style={selectStyle}
+                    className="sansheng-input sansheng-input-block"
                     value={d.provider}
                     onChange={(e) => {
                       const pid = e.target.value;
@@ -224,8 +222,7 @@ export function SettingsPanel() {
                 </Field>
                 <Field label="Model">
                   <select
-                    className="sansheng-input"
-                    style={selectStyle}
+                    className="sansheng-input sansheng-input-block"
                     value={d.modelId}
                     onChange={(e) => updateDraft(d.id, { modelId: e.target.value })}
                     disabled={models.length === 0}
@@ -241,8 +238,7 @@ export function SettingsPanel() {
                 </Field>
                 <Field label="思考">
                   <select
-                    className="sansheng-input"
-                    style={selectStyle}
+                    className="sansheng-input sansheng-input-block"
                     value={d.thinkingLevel}
                     onChange={(e) => updateDraft(d.id, { thinkingLevel: e.target.value as ThinkingLevel })}
                   >
@@ -256,8 +252,7 @@ export function SettingsPanel() {
                 <Field label="API Key" full>
                   <input
                     type="password"
-                    className="sansheng-input"
-                    style={inputStyle}
+                    className="sansheng-input sansheng-input-block"
                     value={d.apiKey}
                     onChange={(e) => updateDraft(d.id, { apiKey: e.target.value })}
                     placeholder={d.hasApiKey ? "(已保存,留空保持不变)" : "粘贴 API Key"}
@@ -266,8 +261,7 @@ export function SettingsPanel() {
                 </Field>
                 <Field label="Base URL" full>
                   <input
-                    className="sansheng-input"
-                    style={inputStyle}
+                    className="sansheng-input sansheng-input-block"
                     value={d.baseUrl}
                     onChange={(e) => updateDraft(d.id, { baseUrl: e.target.value })}
                     placeholder="(可选)自定义 gateway,如 https://api.minimax.cn/anthropic"
@@ -285,18 +279,21 @@ export function SettingsPanel() {
         </h2>
         <div className="flex flex-col gap-3">
           <Field label="显示名">
-            <input className="sansheng-input" style={inputStyle} value={personaName} onChange={(e) => setPersonaName(e.target.value)} />
+            <input className="sansheng-input sansheng-input-block" value={personaName} onChange={(e) => setPersonaName(e.target.value)} />
           </Field>
           <Field label="工作目录">
-            <input className="sansheng-input" style={inputStyle} value={cwd} onChange={(e) => setCwd(e.target.value)} />
+            <input className="sansheng-input sansheng-input-block" value={cwd} onChange={(e) => setCwd(e.target.value)} />
           </Field>
-          <p className="sansheng-text-mute" style={{ fontSize: 11 }}>
-            工作目录 = 三生跑命令 / 读写文件的根。Pi 工具相对它解析路径。
-          </p>
-          {/* 批次 6:出厂默认已从 $HOME 固定为 ~/sansheng-workspace(见 store.ts defaultWorkspaceDir) */}
-          <p className="sansheng-text-mute" style={{ fontSize: 11 }}>
-            默认工作目录是 <code>~/sansheng-workspace</code>(首次启动自动创建):agent 的相对路径都落在这里,
-            不再是整个家目录。可改成任意绝对路径(需自行创建,系统不会代建)。
+          {/* 批次 UI U4:这里原本是**两段**说明("工作目录 = 三生跑命令 / 读写文件的根…"
+              与"默认工作目录是 ~/sansheng-workspace…")。合并成一句;细节靠 title。
+              出厂默认见 store.ts defaultWorkspaceDir(批次 6 起从 $HOME 改为
+              ~/sansheng-workspace,且只对出厂默认自动建目录)。 */}
+          <p
+            className="sansheng-text-mute"
+            style={{ fontSize: 11 }}
+            title="工作目录 = 三生跑命令 / 读写文件的根,Pi 工具相对它解析路径。出厂默认 ~/sansheng-workspace(首次启动自动创建);可改成任意绝对路径,需自行创建,系统不会代建。"
+          >
+            agent 跑命令、读写文件的根。默认 <code>~/sansheng-workspace</code>(自动创建)。
           </p>
         </div>
       </section>
@@ -367,14 +364,14 @@ function ResetSection() {
       >
         危险区
       </h2>
-      <p className="sansheng-text-mute mb-3" style={{ fontSize: 11, lineHeight: 1.6 }}>
-        重置将删除数据库、密钥环、设置与 Pi 会话目录(日志保留)。需要手动 <code>stop && start</code>。
-      </p>
+      {/* 批次 UI U4:这段说明与 window.confirm 里的那段**逐条重复** —— 点按钮之前
+          说一遍,点下去还要再确认一遍。屏幕上只留 confirm 弹窗那一版。 */}
       <div className="flex items-center gap-3">
         <button
           onClick={onReset}
           disabled={busy}
           className="sansheng-button"
+          title="删除数据库、密钥环、设置与 Pi 会话目录(日志保留)"
           style={{
             padding: "8px 16px",
             color: "var(--cinnabar)",
@@ -409,15 +406,3 @@ function Field({ label, children, full }: { label: string; children: React.React
   );
 }
 
-const inputStyle: React.CSSProperties = {
-  width: "100%",
-  background: "var(--ink-1)",
-  border: "1px solid var(--ink-3)",
-  color: "var(--bone)",
-  padding: "6px 10px",
-  borderRadius: 6,
-  fontSize: 13,
-  outline: "none",
-};
-
-const selectStyle: React.CSSProperties = { ...inputStyle, cursor: "pointer" };

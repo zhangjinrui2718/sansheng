@@ -5,11 +5,44 @@
  * 对应排期 P0 #1(四区工作面)/ #4(只列 4 个真实 agent)/ #6(失败原因可见)。
  * 零后端改动:本文件只重新组织**已有**工件数据,不动 DB、不加端点、不动 WS 事件。
  *
+ * ── 批次 UI U4:屏幕文字分层(本页)──────────────────────────────────
+ * 这一版**没有增删任何数据源**,只重新组织已经在屏幕上的东西。原则一句话:
+ * **结论留在屏幕上,解释移进 `Disclosure` / `title=`,开发者自述回到本注释。**
+ * 为了让这段搬移可回溯(也为了后来的人能一眼看出「哪句话被挪到哪儿了」),
+ * 逐条记录:
+ *  - 四区的编号「① 意图头 / ② DAG 区 / ③ 阻塞队列 / ④ 沉淀区」删除 ——
+ *    那是产品设计文档的行号,对读页面的人零信息量(见 primitives.tsx 的 Section)。
+ *    「意图头」与「DAG 区」并成**一张卡**:意图标题 + 状态 + 一行健康度,下面直接是树。
+ *  - DAG 节点上原来那行 `依赖 todo-1, todo-2` 与裸 id `{todo.id}` → 节点 `title=`。
+ *    ⚠️ 这里修的是一个**把正常当异常显示**的旧 bug:旧代码的渲染条件是
+ *    `missingDeps.length > 0 || selfDep || dependsOn.length > 0` —— 于是**每个正常的
+ *    有依赖节点**都渲染一行「缺失依赖 …(本会话无此 todo,未建边)」样式的元信息,
+ *    即使 missingDeps 是空的。现在:**没有异常就什么都不显示**;缺失依赖 / 自环
+ *    是真异常,仍然留在屏幕上(配一个 cinnabar Pill + 明细),不进折叠层。
+ *  - 每个节点无条件挂的「未声明 executor」pill → **只在真的声明了 executor 时才挂**;
+ *    没声明不是一条需要通知读者的信息。未声明的事实并进节点 `title=`。
+ *  - 失败原因旁的「来源 metadata.errorReason(…)」/「来源工件正文(planner 写的
+ *    待办描述,通常不含失败信息)」长标签 → `<Pill>来源</Pill>`,全句进 `title=`。
+ *    **失败正文本身一个字没删**(P0 #6:这是全页最高价值的信息,不受本次分层影响)。
+ *    「无详细原因(见对话页错误提示)—— 该工件既没有 metadata.errorReason,正文也是
+ *    空的。」保留前半句,后半句进 `title=`。
+ *  - 阻塞队列末尾 5 行「等待时长是估算值」脚注 → `<Disclosure summary="等待时长怎么算的">`,
+ *    **原文一字未改** —— 这是反造假口径,不许丢,只是不再要求每个读者读完。
+ *  - 沉淀区脚注「「活下来」= status 不在 failed / superseded 里」→ 本注释 + Section 的一行 hint。
+ *  - 角色表后面 4 段解释(「—」的含义 / 术语规则 / 只列 4 个角色的理由 /
+ *    harness_manager 的提示词来源)→ 全部搬进本注释;页面上只留**一行** `ss-note`
+ *    + 它的 `title=`(三种事实各留一句最短的说法,详见 ROLE_TABLE_NOTE)。
+ *  - 抬头那串 kind 汇总(「意图 2 · 待办 6 · 笔记 1」)→ `PageHeader` 的 `hintTitle`
+ *    (悬停可见),as StatStrip 的主体在右侧。
+ *  **反造假纪律没有放松**:每一个数字仍然是对**本次真实数组** filter 后的 `.length`,
+ *    阈值仍是 orchestrator 的默认值(见下方阻塞队列段),没有一处新造的指标。
+ *
  * ── 数据源(唯一)──────────────────────────────────────────────────────
  * `GET /api/artifacts?conversationId=<id>&limit=200` → `{ artifacts: BlackboardArtifact[] }`
- * (src/server/http/blackboardRoutes.ts)。实时性仍靠 WS 的 `artifact_created` /
- * `artifact_status_changed` / `plan_done` 汇总出的 `artifactRevision` 计数触发回查
- * (与 Artifacts.tsx 同款);**不把工件本体塞进 store**,权威数据永远回查后端。
+ * (src/server/http/blackboardRoutes.ts),经 `lib/artifacts.ts` 的 `useArtifacts()` 读取
+ * —— 与本文件自己的 fetch 逐字等价(同端点 / 同 limit / 同错误解析),只是不再抄第四份。
+ * 实时性仍靠 WS 的 `artifact_created` / `artifact_status_changed` / `plan_done` 汇总出的
+ * `artifactRevision` 计数触发回查;**不把工件本体塞进 store**,权威数据永远回查后端。
  * 取代了上一版对 legacy `GET /api/blackboard/:id` 的轮询(upsertBlackboard 全仓
  * 无调用方 → 恒 null)与 `/api/agents/:id`(硬编码 `{agents:[]}` 的 M3c 占位)。
  *
@@ -25,16 +58,24 @@
  * communicator/planner/executor/critic/memory/reflection),但它是真实 class
  * (harnessManager.ts:145)且是合法 `ArtifactAuthor`(shared/types/blackboard.ts:83)
  * —— 故本页用本地 `RealAgent` 联合,不为了 UI 去动共享类型(设计文档 §8 明确「保留不动」)。
- * 称呼按 §1.1 术语规则:角色表里是配置键/文件名 → 英文 id;工件上的「谁产出的」→ 中文读法。
+ * 称呼按 §1.1 术语规则:角色表里是配置键/文件名 → 英文 id;工件上的「谁产出的」→ 中文读法
+ * (实现即 `lib/artifacts.ts` 的 `authorLabel()` / `AUTHOR_LABEL`,共享给四个页面)。
  *
- * ── §3 四区:每区用哪些字段,为什么不用别的方式 ─────────────────────
- * ① 意图头 —— `intent.title/status/author/createdAt` + 名下 todo 的 status 聚合。
- *    **健康度一行是本批最关键的修复**:旧版只写 `todo 0/6 done`,而实测
+ * ROLE_TABLE_NOTE(页面上一行 `ss-note` 的 `title=`,原文):
+ *   「—」= 本会话没有该角色产出的工件,不是「空闲」—— 后端没有 per-role 运行态接口,
+ *   这里展示的是**工件作者维度的事实**。表内用英文 id,因为它是配置键 / harness
+ *   文件名(旁边那列就是「提示词来源」);工件上的「谁产出的」用中文读法。未知 author
+ *   值原样透出,不猜。只列这 4 个:critic / memory / reflection 没有实现,也没有任何
+ *   代码读它们的 harness 提示词,故界面不列出(不摆点不亮的灰行)。
+ *
+ * ── 每块板的字段(为什么用这些、不用别的)───────────────────────────
+ * 意图头 —— `intent.title/status/author/createdAt` + 名下 todo 的 status 聚合。
+ *    **健康度一行是 P0 最关键的修复**:旧版只写 `todo 0/6 done`,而实测
  *    conv_muqsidb0_wgru 的 6 个 todo **全部 failed**,失败原因完全不可见。
  *    现在失败数是 `status==="failed"` 的 todo 计数(真实字段,不是推断)。
  *    「已耗时」用 `Date.now()-createdAt`,靠 `useNow` 的 1s tick 驱动重渲染
  *    —— 页面不轮询后端,只重算展示值。
- * ② DAG 区 —— todo 是节点、`dependsOn` 是边,**树状缩进**而非 canvas:
+ * DAG 区 —— todo 是节点、`dependsOn` 是边,**树状缩进**而非 canvas:
  *    一次计划本来就是 DAG,旧版把它画成平铺列表,`dependsOn/executors/status`
  *    三个字段一个都没用(设计文档 §3)。节点上挂三类结果工件
  *    (evidence / hypothesis / note)。
@@ -45,20 +86,21 @@
  *    (真实路径)/ `refs`(契约里声明的)。空数组时是无副作用的 no-op。
  *    失败 todo 的 note 被并进「失败记录」块(它们是失败原因本身),不再重复
  *    出现在通用结果列表里;非失败 todo 的 note 走通用列表。
- * ③ 阻塞队列 —— `status==="waiting_for_decision"` 的 todo 单独一条泳道。
+ * 阻塞队列 —— `status==="waiting_for_decision"` 的 todo 单独一条泳道。
  *    这是整个系统最有信息量的状态(executor 卡住等人拍板),旧版完全不可见。
- *    等待时长 = `Date.now()-updatedAt`,**页面上明写这是估算**:工件 updatedAt 是
- *    「最后一次写入时间」,不等于后台 `waiting` map 的入队时刻(那个 map 是 private,
- *    无 getter / HTTP / 事件,只能 P1 补发)。阈值色标取 `orchestrator.ts:207-208`
- *    的默认 escalationMs(5 分钟)/ failMs(1 小时),同样是默认值不是运行实例的实配值。
- * ④ 沉淀区 —— `decision` / `note` / `reflection` 中「还活着」的:
+ *    等待时长 = `Date.now()-updatedAt`,**页面上明写这是估算**(Disclosure 里):
+ *    工件 updatedAt 是「最后一次写入时间」,不等于后台 `waiting` map 的入队时刻
+ *    (那个 map 是 private,无 getter / HTTP / 事件,只能 P1 补发)。阈值色标取
+ *    `orchestrator.ts:207-208` 的默认 escalationMs(5 分钟)/ failMs(1 小时),
+ *    同样是默认值不是运行实例的实配值。
+ * 沉淀区 —— `decision` / `note` / `reflection` 中「还活着」的:
  *    status ∉ {failed, superseded}(被取代的结论不算活下来的)。
  *    已经在 DAG 节点下作为执行结果展示的不重复列,只在一行注明数量。
  *
  * ── P0 #6 失败原因可见 ──────────────────────────────────────────────
  * 取值优先级:`metadata.errorReason`(字符串)→ `body` → 「无详细原因(见对话页错误提示)」。
  * 两处刻意加了限定,否则会**说谎**:
- *  - 走 `body` 分支时明确标「取自工件正文」:todo 的 body 是 **planner 写的待办描述**,
+ *  - 走 `body` 分支时出处标「工件正文」:todo 的 body 是 **planner 写的待办描述**,
  *    executor 直接失败时 orchestrator 只 `updateArtifactStatus(failed)`、**不写**
  *    errorReason(blackboards.ts:352-397),此时 body 里根本没有失败信息。
  *  - 两者都空时,回落到「节点下产出的失败 note」标题 —— 真实样本正是这条路:
@@ -77,40 +119,45 @@
  *  - 重复 id 以先出现者为准(后写覆盖同 id 的 node,children 累加),不抛异常。
  *
  * ── 视觉 ────────────────────────────────────────────────────────────
- * 完全沿用既有骨架(`<main className="px-4 pb-4">` + `sansheng-h2` + `sansheng-card` +
- * `sansheng-button` + `sansheng-text-mute`)与既有 CSS 变量(`--ink-1..4`、`--bone*`、
- * `--jade/--jade-soft`、`--bamboo`、`--amber`、`--ochre`、`--cinnabar`、`--cyan, #4cc9c0`),
- * 不引入新配色/字体/间距;状态用色块 + mono pill 表达,不用 emoji 当 UI 标签。
- * 标签映射(KIND_LABEL / STATUS_LABEL / KIND_TONE / STATUS_TONE)在本文件内自持一份,
- * **不抽公共模块** —— Artifacts.tsx 也各自持有一份,抽出去会和并行改动打架。
+ * 根元素是 `<div className="ss-page">`(不是 `<main>`:app shell 已经拥有滚动容器和
+ * `<main>`,嵌套 `<main>` 是无效 HTML)。字号层级交给 `components/ui/primitives` +
+ * globals.css 的 `.ss-*` 类,标签映射(kind / status / author / 时长)交给
+ * `lib/artifacts.ts` 的共享词表 —— 本文件**不再自持任何标签表或 Pill/Section 组件**。
+ * 状态用色点 + mono pill 表达,不用 emoji 当 UI 标签。
  */
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
-import { useChatStore } from "@/stores/chat";
-import type { ArtifactKind, ArtifactStatus } from "@shared/types/blackboard";
+import type { ArtifactKind } from "@shared/types/blackboard";
+import {
+  ALIVE_STATUSES,
+  TERMINAL_STATUSES,
+  authorLabel,
+  excerpt,
+  fmtDuration,
+  fmtTime,
+  isString,
+  kindLabel,
+  kindTone,
+  statusLabel,
+  statusTone,
+  strList,
+  useArtifacts,
+} from "@/lib/artifacts";
+import type { Artifact } from "@/lib/artifacts";
+import {
+  Clamp,
+  Disclosure,
+  EmptyState,
+  Flag,
+  PageHeader,
+  Pill,
+  Section,
+  StatStrip,
+  toneColor,
+} from "@/components/ui/primitives";
+import type { Tone } from "@/components/ui/primitives";
 
-/** 与 src/server/http/blackboardRoutes.ts listArtifacts 的上限一致。 */
-const LIMIT = 200;
-
-interface Artifact {
-  id: string;
-  scope: "global" | "conversation";
-  conversationId?: string;
-  kind: ArtifactKind;
-  title: string;
-  body: string;
-  refs?: string[];
-  author: string;
-  status: ArtifactStatus;
-  executors?: string[];
-  dependsOn?: string[];
-  parentIntent?: string;
-  metadata?: { [k: string]: unknown };
-  createdAt: number;
-  updatedAt: number;
-}
-
-// ───────────────────────────── 静态表(本地自持,见文件头)─────────────────────────────
+// ───────────────────────────── 静态表 ─────────────────────────────
 
 /** §1:真实存在的 4 个 agent(critic/memory/reflection 无实现,界面不列出)。 */
 type RealAgent = "communicator" | "planner" | "executor" | "harness_manager";
@@ -127,114 +174,22 @@ const AGENT_PROMPT_SOURCE: Record<RealAgent, string> = {
   harness_manager: "内置兜底",
 };
 
-/**
- * 角色**叙事读法**(设计文档 §1.1 术语规则:角色作为「谁产出的」主语 → 中文读法;
- * 角色作为配置键/文件名 → 英文 id,见下面的 Agent 角色表)。
- * 它是「任意 author 值的翻译表」不是「角色名册」—— critic/memory/reflection 虽
- * 不进角色表(§1:暂不实现),但历史数据里可能有这些 author,原样显示才是信息。
- * 与 Artifacts.tsx 的同名表是两份本地副本(不抽公共模块,避免与并行改动冲突)。
- */
-const AUTHOR_LABEL: Record<string, string> = {
-  user: "用户",
-  communicator: "沟通员",
-  planner: "规划员",
-  executor: "执行员",
-  critic: "评审员",
-  memory: "记忆员",
-  reflection: "反思员",
-  harness_manager: "Harness 管理员",
-};
-
-const KIND_LABEL: Record<string, string> = {
-  intent: "意图",
-  hypothesis: "假设",
-  note: "笔记",
-  decision: "决策",
-  todo: "待办",
-  evidence: "证据",
-  critique: "批驳",
-  reflection: "反思",
-  harness_proposal: "提案",
-  implementation_preview: "预览",
-};
-
-const KIND_TONE: Record<string, string> = {
-  intent: "var(--jade)",
-  hypothesis: "var(--amber)",
-  note: "var(--bone-dim)",
-  decision: "var(--bamboo)",
-  todo: "var(--cyan, #4cc9c0)",
-  evidence: "var(--bone-dim)",
-  critique: "var(--ochre)",
-  reflection: "var(--bone-dim)",
-  harness_proposal: "var(--ochre)",
-  implementation_preview: "var(--ochre)",
-};
-
-const STATUS_LABEL: Record<string, string> = {
-  open: "待处理",
-  in_progress: "进行中",
-  waiting_for_decision: "等决策",
-  resolved: "已解决",
-  superseded: "被取代",
-  failed: "失败",
-};
-
-const STATUS_TONE: Record<string, string> = {
-  open: "var(--bone-mute)",
-  in_progress: "var(--jade)",
-  waiting_for_decision: "var(--amber)",
-  resolved: "var(--bamboo)",
-  superseded: "var(--bone-mute)",
-  failed: "var(--cinnabar)",
-};
-
-/** ② DAG 节点下挂的结果工件种类(设计文档 §3②「evidence / hypothesis / failure」)。 */
+/** DAG 节点下挂的结果工件种类(设计文档 §3②「evidence / hypothesis / failure」)。 */
 const OUTPUT_KINDS: ArtifactKind[] = ["evidence", "hypothesis", "note"];
 
-/** ④ 沉淀区:事后活下来的 kind。 */
+/** 沉淀区:事后活下来的 kind。 */
 const SETTLED_KINDS: ArtifactKind[] = ["decision", "note", "reflection"];
 
-/** 「还活着」= 没失败、没被取代。 */
-const ALIVE_STATUSES: ArtifactStatus[] = ["open", "in_progress", "waiting_for_decision", "resolved"];
-
-/** 终态 todo 才显示「用时」(open/in_progress 的 updatedAt 差值会随时间失真)。 */
-const TERMINAL_STATUSES: ArtifactStatus[] = ["resolved", "failed", "superseded"];
-
-/** orchestrator.ts:207-208 的默认 escalationMs / failMs(实配值 UI 读不到,页面已注明)。 */
+/** orchestrator.ts:207-208 的默认 escalationMs / failMs(实配值 UI 读不到,页面上注明)。 */
 const ESCALATION_MS = 5 * 60 * 1000;
 const FAIL_MS = 60 * 60 * 1000;
 
-// ───────────────────────────── module-level type guard ─────────────────────────────
-
-function isString(v: unknown): v is string {
-  return typeof v === "string";
-}
-
-/** 从 `unknown` 字段里安全取字符串数组(artifact 的可选字段全是 unknown)。 */
-function strList(v: unknown): string[] {
-  return Array.isArray(v) ? v.filter(isString) : [];
-}
-
-// ───────────────────────────── 展示工具 ─────────────────────────────
-
-function fmtDuration(ms: number): string {
-  if (!Number.isFinite(ms) || ms < 0) return "—";
-  const s = Math.floor(ms / 1000);
-  if (s < 60) return `${s} 秒`;
-  const m = Math.floor(s / 60);
-  if (m < 60) return `${m} 分 ${s % 60} 秒`;
-  const h = Math.floor(m / 60);
-  return `${h} 小时 ${m % 60} 分`;
-}
-
-function fmtTime(ts: number): string {
-  return new Date(ts).toLocaleString();
-}
-
-function excerpt(text: string, n: number): string {
-  const flat = text.replace(/\s+/g, " ").trim();
-  return flat.length > n ? `${flat.slice(0, n)}…` : flat;
+/** StatStrip 的 item 类型(与 primitives 一致,用于在 useMemo 外组装常量数组)。 */
+interface Stat {
+  label: string;
+  value: ReactNode;
+  tone?: Tone;
+  title?: string;
 }
 
 /** 1s tick:让「已耗时 / 已等待」这类 `Date.now()` 派生值能自己往前走(不轮询后端)。 */
@@ -366,48 +321,39 @@ function failureInfo(todo: Artifact, outputs: Artifact[]): FailureInfo {
   return { source: "none", text: "" };
 }
 
-const FAILURE_SOURCE_LABEL: Record<FailureSource, string> = {
-  errorReason: "来源 metadata.errorReason",
+/**
+ * 出处说明。页面上只显示 `Pill「来源」`,全文走 `title=`(悬停可见)——
+ * 限定语必须留着:走 body 分支时,那句话里的「通常不含失败信息」是本条最容易
+ * 被误读成「这就是失败原因」的地方。
+ */
+const FAILURE_SOURCE_TITLE: Record<FailureSource, string> = {
+  errorReason: "来源 metadata.errorReason(写入方在工件上记录的失败原因)",
   body: "来源工件正文(planner 写的待办描述,通常不含失败信息)",
-  note: "来源该节点产出的失败记录",
+  note: "来源该节点产出的失败记录(note 工件的标题)",
   none: "",
 };
 
-// ───────────────────────────── 本地小组件 ─────────────────────────────
+/** 失败原因彻底取不到时的兜底文案(后半句解释进 title=)。 */
+const NO_REASON_NOTE =
+  "该工件既没有 metadata.errorReason,正文也是空的,后端未记录更细的失败原因。";
 
-function Pill({ text, tone, bg }: { text: string; tone: string; bg?: string }) {
-  return (
-    <span
-      className="font-mono rounded"
-      style={{
-        fontSize: 10,
-        padding: "0 6px",
-        background: bg ?? "var(--ink-3)",
-        color: tone,
-        whiteSpace: "nowrap",
-      }}
-    >
-      {text}
-    </span>
-  );
-}
+/** 角色表那三件事(「—」的含义 / 术语规则 / 为什么只有 4 个角色)的完整解释。 */
+const ROLE_TABLE_NOTE =
+  "「—」= 本会话没有该角色产出的工件,不是「空闲」—— 后端没有 per-role 运行态接口," +
+  "这里展示的是工件作者维度的事实。表内用英文 id,因为它是配置键 / harness 文件名" +
+  "(旁边那列就是「提示词来源」);工件上的「谁产出的」用中文读法。未知 author 值原样透出,不猜。" +
+  " 只列这 4 个:critic / memory / reflection 没有实现,也没有任何代码读它们的 harness 提示词,故界面不列出。";
 
-function SectionTitle({ children, right }: { children: ReactNode; right?: ReactNode }) {
-  return (
-    <div className="flex items-baseline justify-between mb-2 flex-wrap gap-2">
-      <h3 className="font-medium">{children}</h3>
-      {right ? <div className="sansheng-text-mute font-mono" style={{ fontSize: 10 }}>{right}</div> : null}
-    </div>
-  );
-}
+/** 等待时长的估算口径(原文照抄,进 Disclosure;见文件头阻塞队列段)。 */
+const WAIT_ESTIMATE_NOTE = (
+  <>
+    等待时长 = 现在 − 工件 updatedAt,是<b>估算值</b>:updatedAt 只是「最后一次写入时间」,
+    不等于后台 waiting 队列的入队时刻(该队列无 getter / 事件,要走状态快照接口补齐才是真计时)。
+    阈值取 orchestrator 的默认 escalationMs = 5 分钟 / failMs = 1 小时,自建实例改过这两个参数时页面上看不到。
+  </>
+);
 
-function EmptyHint({ children }: { children: ReactNode }) {
-  return (
-    <p className="text-sm opacity-80" style={{ lineHeight: 1.7 }}>
-      {children}
-    </p>
-  );
-}
+// ───────────────────────────── 节点视图 ─────────────────────────────
 
 interface TodoNodeViewProps {
   node: DagNode;
@@ -415,7 +361,12 @@ interface TodoNodeViewProps {
   outputsByTodo: Map<string, Artifact[]>;
 }
 
-/** ② DAG 的一个节点:状态色块 + 标题 + 状态 + 指派 executor + 用时 + 失败原因 + 结果工件。 */
+/**
+ * DAG 的一个节点。屏幕上只有「状态色点 + 标题 + 状态 pill(非 open 时)+ 终态用时
+ * + 已声明的 executor」;裸 id / 依赖 id 进 `title=`。
+ * **异常(缺失依赖 / 自环)例外 —— 它必须可见**(配 cinnabar Pill 与一行明细),
+ * 这是「关系不假装」的落点,不是噪声。
+ */
 function TodoNodeView({ node, depth, outputsByTodo }: TodoNodeViewProps) {
   const todo = node.todo;
   const outputs = outputsByTodo.get(todo.id) ?? [];
@@ -424,7 +375,21 @@ function TodoNodeView({ node, depth, outputsByTodo }: TodoNodeViewProps) {
   // 失败 todo 的 note 是失败原因本身,已在失败块里展开,不再进通用结果列表。
   const genericOutputs = failed ? outputs.filter((a) => a.kind !== "note") : outputs;
   const terminal = TERMINAL_STATUSES.includes(todo.status);
-  const tone = STATUS_TONE[todo.status] ?? "var(--bone-mute)";
+  const tone = statusTone(todo.status);
+  const deps = strList(todo.dependsOn);
+  const executors = strList(todo.executors);
+  const anomaly = node.missingDeps.length > 0 || node.selfDep;
+
+  // 节点原始字段(id / 依赖 / executor / 异常明细)——只在悬停时出现。
+  const rawTitle = [
+    todo.id,
+    deps.length > 0 ? `依赖 ${deps.join(", ")}` : null,
+    executors.length > 0 ? `executor ${executors.join(", ")}` : "未声明 executor",
+    ...node.missingDeps.map((d) => `缺失依赖 ${d}(本会话无此 todo,未建边)`),
+    node.selfDep ? "自环依赖(按根节点处理)" : null,
+  ]
+    .filter((s): s is string => s !== null)
+    .join(" · ");
 
   return (
     <div
@@ -450,41 +415,36 @@ function TodoNodeView({ node, depth, outputsByTodo }: TodoNodeViewProps) {
               width: 8,
               height: 8,
               borderRadius: 2,
-              background: tone,
+              background: toneColor(tone),
               flex: "0 0 auto",
               marginTop: 6,
             }}
           />
           <div className="min-w-0 flex-1">
-            <div className="text-sm" style={{ color: "var(--bone)", lineHeight: 1.5 }}>
-              {todo.title}
-            </div>
-            <div className="flex items-center gap-2 mt-1 flex-wrap">
-              <Pill text={STATUS_LABEL[todo.status] ?? todo.status} tone={tone} />
-              <Pill
-                text={todo.executors?.length ? `executor: ${todo.executors.join(", ")}` : "未声明 executor"}
-                tone="var(--bone-mute)"
-              />
-              {terminal && (
-                <span className="sansheng-text-mute font-mono" style={{ fontSize: 10 }}>
-                  用时 {fmtDuration(todo.updatedAt - todo.createdAt)}
-                </span>
-              )}
-              <span className="sansheng-text-mute font-mono" style={{ fontSize: 10 }}>
-                {todo.id}
+            <div className="flex items-baseline gap-2 flex-wrap" title={rawTitle}>
+              <span className="ss-body" style={{ color: "var(--bone)" }}>
+                {todo.title}
               </span>
+              {/* open 的色点已经说完了(「还没开始」),不再挂同义的 pill。 */}
+              {todo.status !== "open" && <Pill tone={tone}>{statusLabel(todo.status)}</Pill>}
+              {anomaly && (
+                <Pill tone="cinnabar" title={rawTitle}>
+                  依赖异常
+                </Pill>
+              )}
+              {executors.length > 0 && <Pill tone="bone" title="工件 executors 字段(谁被指派执行)">指派 {executors.join(", ")}</Pill>}
+              {terminal && <span className="ss-meta">用时 {fmtDuration(todo.updatedAt - todo.createdAt)}</span>}
             </div>
-            {(node.missingDeps.length > 0 || node.selfDep || strList(todo.dependsOn).length > 0) && (
-              <div className="sansheng-text-mute font-mono mt-1" style={{ fontSize: 10, lineHeight: 1.6 }}>
-                {strList(todo.dependsOn).length > 0 && <>依赖 {strList(todo.dependsOn).join(", ")}</>}
-                {node.missingDeps.length > 0 && (
-                  <span style={{ color: "var(--cinnabar)" }}>
-                    {" · "}缺失依赖 {node.missingDeps.join(", ")}(本会话无此 todo,未建边)
-                  </span>
-                )}
-                {node.selfDep && (
-                  <span style={{ color: "var(--cinnabar)" }}>{" · "}自环依赖(按根节点处理)</span>
-                )}
+            {anomaly && (
+              <div className="ss-meta" style={{ color: "var(--cinnabar)" }}>
+                {[
+                  node.missingDeps.length > 0
+                    ? `缺失依赖 ${node.missingDeps.join(", ")}(本会话无此 todo,未建边)`
+                    : null,
+                  node.selfDep ? "自环依赖(按根节点处理)" : null,
+                ]
+                  .filter((s): s is string => s !== null)
+                  .join(" · ")}
               </div>
             )}
             {failure && <FailureBlock info={failure} notes={outputs.filter((a) => a.kind === "note")} />}
@@ -509,33 +469,31 @@ function TodoNodeView({ node, depth, outputsByTodo }: TodoNodeViewProps) {
 
 function FailureBlock({ info, notes }: { info: FailureInfo; notes: Artifact[] }) {
   return (
-    <div style={{ borderLeft: "2px solid var(--cinnabar)", paddingLeft: 8, marginTop: 6 }}>
-      <div style={{ fontSize: 10 }} className="font-mono" >
-        <span style={{ color: "var(--cinnabar)" }}>失败</span>
+    <Flag tone="cinnabar">
+      <div className="mt-1 flex items-center gap-1.5 flex-wrap">
+        <Pill tone="cinnabar">失败</Pill>
         {info.source !== "none" && (
-          <span className="sansheng-text-mute">{" · " + FAILURE_SOURCE_LABEL[info.source]}</span>
+          <Pill tone="bone" title={FAILURE_SOURCE_TITLE[info.source]}>
+            来源
+          </Pill>
         )}
       </div>
       {info.source === "none" ? (
-        <div className="sansheng-text-mute" style={{ fontSize: 11 }}>
-          无详细原因(见对话页错误提示)—— 该工件既没有 metadata.errorReason,正文也是空的。
+        <div className="ss-note" title={NO_REASON_NOTE}>
+          无详细原因(见对话页错误提示)
         </div>
       ) : (
-        <div style={{ fontSize: 11, color: "var(--bone-dim)", whiteSpace: "pre-wrap", lineHeight: 1.6 }}>
+        <div className="ss-body" style={{ whiteSpace: "pre-wrap" }}>
           {info.text}
         </div>
       )}
       {notes.map((n) => (
-        <div key={n.id} style={{ marginTop: 4 }}>
-          <div style={{ fontSize: 11, color: "var(--bone-dim)" }}>{n.title}</div>
-          {n.body && (
-            <div className="sansheng-text-mute" style={{ fontSize: 11, lineHeight: 1.6 }}>
-              {excerpt(n.body, 240)}
-            </div>
-          )}
+        <div key={n.id} className="mt-1">
+          <div className="ss-body">{n.title}</div>
+          {n.body && <div className="ss-note">{excerpt(n.body, 240)}</div>}
         </div>
       ))}
-    </div>
+    </Flag>
   );
 }
 
@@ -546,22 +504,138 @@ function OutputRow({ artifact }: { artifact: Artifact }) {
       style={{ background: "var(--ink-1)", borderTop: "1px solid var(--ink-3)" }}
     >
       <div className="flex items-center gap-2 flex-wrap">
-        <Pill text={KIND_LABEL[artifact.kind] ?? artifact.kind} tone={KIND_TONE[artifact.kind] ?? "var(--bone-dim)"} />
-        <Pill
-          text={STATUS_LABEL[artifact.status] ?? artifact.status}
-          tone={STATUS_TONE[artifact.status] ?? "var(--bone-mute)"}
-        />
-        <span className="sansheng-text-mute font-mono ml-auto" style={{ fontSize: 10 }}>
-          {AUTHOR_LABEL[artifact.author] ?? artifact.author} · {fmtTime(artifact.createdAt)}
+        <Pill tone={kindTone(artifact.kind)}>{kindLabel(artifact.kind)}</Pill>
+        {artifact.status !== "open" && (
+          <Pill tone={statusTone(artifact.status)}>{statusLabel(artifact.status)}</Pill>
+        )}
+        <span className="ss-meta ml-auto">
+          {authorLabel(artifact.author)} · {fmtTime(artifact.createdAt)}
         </span>
       </div>
-      <div style={{ fontSize: 12, color: "var(--bone)", lineHeight: 1.5 }}>{artifact.title}</div>
+      <div className="ss-body" style={{ color: "var(--bone)" }}>
+        {artifact.title}
+      </div>
+      {/* 结果工件的正文可能有几百字(实测 evidence 常常是整篇调研报告),压到两行:
+          全文在工件页与对话页都拿得到,这里要的是「产出了什么」而不是全文。 */}
       {artifact.body && (
-        <div className="sansheng-text-mute" style={{ fontSize: 11, lineHeight: 1.6 }}>
-          {excerpt(artifact.body, 200)}
-        </div>
+        <Clamp lines={2}>
+          <span className="ss-note">{excerpt(artifact.body, 200)}</span>
+        </Clamp>
       )}
     </div>
+  );
+}
+
+// ───────────────────────────── 一块板 ─────────────────────────────
+
+interface IntentCardProps {
+  board: Board;
+  now: number;
+  outputsByTodo: Map<string, Artifact[]>;
+}
+
+/** 一块板 = **一张卡**:意图标题 + 状态 + 健康度一行,下面直接是执行树。 */
+function IntentCard({ board, now, outputsByTodo }: IntentCardProps) {
+  const intent = board.intent;
+  const own = board.todos;
+  const forest = useMemo(() => buildDag(own), [own]);
+  const done = own.filter((t) => t.status === "resolved" || t.status === "superseded").length;
+  const failed = own.filter((t) => t.status === "failed").length;
+  const waiting = own.filter((t) => t.status === "waiting_for_decision").length;
+  const anomalies = forest.anomalyCount + forest.detached.length;
+  const intentOutputs = intent ? (outputsByTodo.get(intent.id) ?? []) : [];
+  const intentFailure =
+    intent && intent.status === "failed" ? failureInfo(intent, intentOutputs) : null;
+
+  const stats: Stat[] = [
+    { label: "待办", value: own.length },
+    { label: "完成", value: done, tone: done > 0 ? "bamboo" : undefined },
+    { label: "等决策", value: waiting, tone: waiting > 0 ? "amber" : undefined },
+    { label: "失败", value: failed, tone: failed > 0 ? "cinnabar" : undefined },
+  ];
+  if (anomalies > 0) stats.push({ label: "依赖异常", value: anomalies, tone: "cinnabar" });
+  if (intent) stats.push({ label: "已耗时", value: fmtDuration(now - intent.createdAt) });
+
+  return (
+    <section className="sansheng-card p-4">
+      <div className="flex items-start gap-2 flex-wrap">
+        {intent ? (
+          <>
+            <Pill tone={statusTone(intent.status)} title={`intent 状态:${statusLabel(intent.status)}`}>
+              {statusLabel(intent.status)}
+            </Pill>
+            <span className="ss-body" style={{ color: "var(--bone)" }}>
+              {intent.title}
+            </span>
+          </>
+        ) : (
+          <span className="ss-body" style={{ color: "var(--bone)" }}>
+            未归属意图的待办
+          </span>
+        )}
+      </div>
+      <div className="mt-1 flex items-center gap-2 flex-wrap">
+        <StatStrip items={stats} />
+        <span className="ss-meta">
+          {intent
+            ? `提出者 ${authorLabel(intent.author)} · ${fmtTime(intent.createdAt)}`
+            : "未归属任何意图"}
+        </span>
+      </div>
+      {intentFailure && (
+        <FailureBlock
+          info={intentFailure}
+          notes={intentOutputs.filter((a) => a.kind === "note")}
+        />
+      )}
+
+      <div className="mt-3">
+        <Section
+          title="执行树"
+          count={own.length}
+          hint={own.length > 0 ? `${forest.roots.length} 个根` : undefined}
+        >
+          {own.length === 0 ? (
+            <EmptyState>这个意图下还没有 todo 工件。</EmptyState>
+          ) : (
+            <div className="grid gap-1">
+              {forest.roots.map((node) => (
+                <TodoNodeView key={node.todo.id} node={node} depth={0} outputsByTodo={outputsByTodo} />
+              ))}
+              {forest.detached.length > 0 && (
+                <div
+                  className="rounded p-2 mt-2"
+                  style={{ border: "1px solid var(--cinnabar)" }}
+                >
+                  <div className="ss-note" style={{ color: "var(--cinnabar)" }}>
+                    成环,这 {forest.detached.length} 个待办从任何根都到不了,单独列出。
+                  </div>
+                  <div className="grid gap-1 mt-1">
+                    {forest.detached.map((t) => (
+                      <div
+                        key={t.id}
+                        className="rounded p-1"
+                        style={{ background: "var(--ink-1)" }}
+                      >
+                        <div className="ss-body" style={{ color: "var(--bone)" }}>
+                          {t.title}
+                        </div>
+                        <div className="ss-meta" title={`${t.id} · 依赖 ${strList(t.dependsOn).join(", ") || "—"}`}>
+                          <Pill tone={statusTone(t.status)}>{statusLabel(t.status)}</Pill>
+                          <span className="ml-1">
+                            依赖 {strList(t.dependsOn).join(", ") || "—"} · {t.id}
+                          </span>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+        </Section>
+      </div>
+    </section>
   );
 }
 
@@ -572,47 +646,7 @@ interface Props {
 }
 
 export function AgentsPage({ conversationId }: Props) {
-  // artifactRevision:artifact 生命周期事件(批次 U1 接线)→ 回查
-  const artifactRevision = useChatStore((s) => s.artifactRevision);
-  const [artifacts, setArtifacts] = useState<Artifact[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  const load = useCallback(async () => {
-    if (!conversationId) {
-      setArtifacts([]);
-      setError(null);
-      return;
-    }
-    setLoading(true);
-    try {
-      const res = await fetch(
-        `/api/artifacts?conversationId=${encodeURIComponent(conversationId)}&limit=${LIMIT}`,
-      );
-      const data = (await res.json()) as {
-        artifacts?: Artifact[];
-        error?: string;
-        message?: string;
-      };
-      if (!res.ok || data.error) {
-        setError(data.message ?? data.error ?? `HTTP ${res.status}`);
-        setArtifacts([]);
-      } else {
-        setArtifacts(Array.isArray(data.artifacts) ? data.artifacts : []);
-        setError(null);
-      }
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-      setArtifacts([]);
-    } finally {
-      setLoading(false);
-    }
-  }, [conversationId]);
-
-  useEffect(() => {
-    void load();
-  }, [load, artifactRevision]);
-
+  const { artifacts, loading, error } = useArtifacts();
   const now = useNow(artifacts.length > 0);
 
   // §1 角色表:按 artifact.author 聚合(真实数据,没有就是没有)
@@ -673,13 +707,13 @@ export function AgentsPage({ conversationId }: Props) {
     return list;
   }, [intents, todos]);
 
-  // ③ 阻塞队列:waiting_for_decision 的 todo(全会话,不按 intent 切)
+  // 阻塞队列:waiting_for_decision 的 todo(全会话,不按 intent 切)
   const waitingTodos = useMemo(
     () => todos.filter((t) => t.status === "waiting_for_decision"),
     [todos],
   );
 
-  // ④ 沉淀区:活下来的 decision / note / reflection,已挂在 DAG 节点下的不重复列
+  // 沉淀区:活下来的 decision / note / reflection,已挂在执行树下的不重复列
   const settled = useMemo(
     () =>
       artifacts
@@ -698,271 +732,153 @@ export function AgentsPage({ conversationId }: Props) {
     [byRole],
   );
 
+  const failedTodos = useMemo(() => todos.filter((t) => t.status === "failed").length, [todos]);
+
+  // kind 汇总:每个数字都是本次真实数组的计数,只是不再常驻屏幕(见 PageHeader hintTitle)
   const kindSummary = useMemo(() => {
-    const acc: Record<string, number> = {};
-    for (const a of artifacts) acc[a.kind] = (acc[a.kind] ?? 0) + 1;
-    return Object.entries(acc)
-      .map(([k, n]) => `${KIND_LABEL[k] ?? k} ${n}`)
-      .join(" · ");
+    const acc = new Map<string, number>();
+    for (const a of artifacts) acc.set(a.kind, (acc.get(a.kind) ?? 0) + 1);
+    return [...acc.entries()].map(([k, n]) => `${kindLabel(k)} ${n}`).join(" · ");
   }, [artifacts]);
 
+  const headerStats: Stat[] = [
+    { label: "工件", value: artifacts.length },
+    { label: "意图", value: intents.length },
+    { label: "待办", value: todos.length },
+    { label: "等决策", value: waitingTodos.length, tone: waitingTodos.length > 0 ? "amber" : undefined },
+    { label: "失败", value: failedTodos, tone: failedTodos > 0 ? "cinnabar" : undefined },
+  ];
+  if (loading && artifacts.length > 0) headerStats.push({ label: "状态", value: "刷新中", tone: "mute" });
+
   return (
-    <main className="px-4 pb-4">
-      <div className="flex items-baseline justify-between mb-3 flex-wrap gap-2">
-        <h2 className="sansheng-h2">Agents & Blackboard</h2>
-        <div className="text-xs sansheng-text-mute font-mono">
-          {artifacts.length} 个工件{kindSummary ? ` · ${kindSummary}` : ""}
-          {loading ? " · 刷新中" : ""}
-        </div>
-      </div>
+    <div className="ss-page">
+      <PageHeader
+        title="Agent 工作面"
+        hint="本会话的 blackboard"
+        hintTitle={
+          kindSummary
+            ? `${kindSummary} —— 本页只读本会话的工件(GET /api/artifacts,limit=200),实时性靠 WS 的工件事件触发回查,不轮询。`
+            : "本页只读本会话的工件(GET /api/artifacts,limit=200),实时性靠 WS 的工件事件触发回查,不轮询。"
+        }
+        aside={<StatStrip items={headerStats} />}
+      />
 
       {error && (
-        <div className="sansheng-card p-3 text-xs mb-3" style={{ color: "var(--cinnabar)" }}>
-          加载失败:{error}
-        </div>
+        <Flag tone="cinnabar">
+          <span className="ss-body" style={{ color: "var(--cinnabar)" }}>
+            加载失败:{error}
+          </span>
+        </Flag>
       )}
 
       {!conversationId ? (
-        <div className="sansheng-card p-4 text-sm opacity-80">
-          先在「对话」选一个会话,再切换到「Agent」查看 blackboard。
-        </div>
+        <EmptyState>先在「对话」里选一个会话。</EmptyState>
+      ) : loading && artifacts.length === 0 ? (
+        <EmptyState>加载中…</EmptyState>
+      ) : artifacts.length === 0 ? (
+        <EmptyState>
+          本会话还没有工件。发送 <code>/plan 你的目标</code> 后,意图与待办会出现在这里。
+        </EmptyState>
       ) : (
         <div className="grid gap-3">
-          {loading && artifacts.length === 0 ? (
-            <div className="sansheng-card p-4 text-sm opacity-80">加载中…</div>
-          ) : artifacts.length === 0 ? (
-            <div className="sansheng-card p-4 text-sm opacity-80">
-              <EmptyHint>
-                本会话还没有任何工件,所以四区(意图头 / DAG / 阻塞队列 / 沉淀区)没有内容可画 ——
-                这是真实空态,不是没接上。
-                <br />
-                发送 <code>/plan 你的目标</code> 后,communicator 会写 intent、planner 会写带
-                dependsOn 的 todo,executor 的产出落在节点下。
-              </EmptyHint>
-            </div>
-          ) : (
-            <>
-              {boards.map((board) => {
-                const forest = buildDag(board.todos);
-                const own = board.todos;
-                const done = own.filter(
-                  (t) => t.status === "resolved" || t.status === "superseded",
-                ).length;
-                const failed = own.filter((t) => t.status === "failed").length;
-                const waiting = own.filter((t) => t.status === "waiting_for_decision").length;
-                const intentFailure =
-                  board.intent && board.intent.status === "failed"
-                    ? failureInfo(board.intent, outputsByTodo.get(board.intent.id) ?? [])
-                    : null;
-                return (
-                  <div key={board.key} className="grid gap-3">
-                    {/* ① 意图头 */}
-                    <section className="sansheng-card p-4">
-                      <SectionTitle
-                        right={
-                          board.intent
-                            ? `提出者 ${AUTHOR_LABEL[board.intent.author] ?? board.intent.author} · ${fmtTime(
-                                board.intent.createdAt,
-                              )}`
-                            : "无 intent 工件"
-                        }
-                      >
-                        ① 意图头
-                      </SectionTitle>
-                      {board.intent ? (
-                        <>
-                          <div className="flex items-start gap-2">
-                            <Pill
-                              text={STATUS_LABEL[board.intent.status] ?? board.intent.status}
-                              tone={STATUS_TONE[board.intent.status] ?? "var(--bone-mute)"}
-                            />
-                            <div className="text-sm" style={{ color: "var(--bone)", lineHeight: 1.5 }}>
-                              {board.intent.title}
-                            </div>
-                          </div>
-                          <div className="sansheng-text-mute mt-2" style={{ fontSize: 11, lineHeight: 1.7 }}>
-                            已耗时 {fmtDuration(now - board.intent.createdAt)}
-                            {" · "}
-                            {own.length} 个 todo · {done} 完成 · {waiting} 等决策 · {failed} 失败
-                            {forest.anomalyCount + forest.detached.length > 0 &&
-                              ` · ${forest.anomalyCount + forest.detached.length} 处依赖异常`}
-                          </div>
-                          {intentFailure && (
-                            <FailureBlock
-                              info={intentFailure}
-                              notes={(outputsByTodo.get(board.intent.id) ?? []).filter(
-                                (a) => a.kind === "note",
-                              )}
-                            />
-                          )}
-                        </>
-                      ) : (
-                        <EmptyHint>
-                          本会话没有 intent 工件,下面这 {own.length} 个待办的 parentIntent
-                          指向了不存在的 intent(或没写),单独成板以免丢数据。
-                        </EmptyHint>
-                      )}
-                    </section>
+          {boards.map((board) => (
+            <IntentCard key={board.key} board={board} now={now} outputsByTodo={outputsByTodo} />
+          ))}
 
-                    {/* ② DAG 区 */}
-                    <section className="sansheng-card p-4">
-                      <SectionTitle
-                        right={`${own.length} 个 todo · ${forest.roots.length} 个根${
-                          forest.detached.length > 0 ? ` · ${forest.detached.length} 个未挂载` : ""
-                        }`}
+          <div className="grid gap-3 lg:grid-cols-2">
+            {/* 阻塞队列 */}
+            <Section
+              title="等决策"
+              count={waitingTodos.length}
+              hint="executor 卡住等人拍板"
+              className="sansheng-card p-4"
+              aside={<Pill tone="mute" title="status = waiting_for_decision">waiting_for_decision</Pill>}
+            >
+              {waitingTodos.length === 0 ? (
+                <EmptyState>没有待办卡在等决策(不代表都跑完了)。</EmptyState>
+              ) : (
+                <div className="grid gap-2">
+                  {waitingTodos.map((t) => {
+                    const waited = now - t.updatedAt;
+                    const overFail = waited >= FAIL_MS;
+                    const overEscalation = waited >= ESCALATION_MS;
+                    const executors = strList(t.executors);
+                    return (
+                      <div
+                        key={t.id}
+                        className="rounded p-2"
+                        style={{ background: "var(--ink-1)" }}
                       >
-                        ② DAG 区
-                      </SectionTitle>
-                      {own.length === 0 ? (
-                        <EmptyHint>
-                          这个意图名下没有 todo 工件(Planner 还没写,或已被清理)。树状布局按
-                          dependsOn 画边,没有 todo 就没有边可画。
-                        </EmptyHint>
-                      ) : (
-                        <div className="grid gap-1">
-                          {forest.roots.map((node) => (
-                            <TodoNodeView
-                              key={node.todo.id}
-                              node={node}
-                              depth={0}
-                              outputsByTodo={outputsByTodo}
-                            />
-                          ))}
-                          {forest.detached.length > 0 && (
-                            <div
-                              className="rounded p-2 mt-2"
-                              style={{ border: "1px solid var(--cinnabar)" }}
-                            >
-                              <div style={{ fontSize: 11, color: "var(--cinnabar)" }}>
-                                依赖成环,这 {forest.detached.length} 个 todo 从任何根都到不了,
-                                单独列出(不丢数据、不假装它们有父节点):
-                              </div>
-                              <div className="grid gap-1 mt-1">
-                                {forest.detached.map((t) => (
-                                  <div
-                                    key={t.id}
-                                    className="rounded p-1"
-                                    style={{ background: "var(--ink-1)" }}
-                                  >
-                                    <div style={{ fontSize: 12, color: "var(--bone)" }}>{t.title}</div>
-                                    <div className="sansheng-text-mute font-mono" style={{ fontSize: 10 }}>
-                                      <Pill
-                                        text={STATUS_LABEL[t.status] ?? t.status}
-                                        tone={STATUS_TONE[t.status] ?? "var(--bone-mute)"}
-                                      />
-                                      {"  "}
-                                      依赖 {strList(t.dependsOn).join(", ") || "—"} · {t.id}
-                                    </div>
-                                  </div>
-                                ))}
-                              </div>
-                            </div>
-                          )}
-                        </div>
-                      )}
-                    </section>
-                  </div>
-                );
-              })}
-
-              <div className="grid grid-cols-2 gap-3">
-                {/* ③ 阻塞队列 */}
-                <section className="sansheng-card p-4">
-                  <SectionTitle right={`${waitingTodos.length} 个待办卡在等决策`}>③ 阻塞队列</SectionTitle>
-                  {waitingTodos.length === 0 ? (
-                    <EmptyHint>
-                      本会话没有 status=waiting_for_decision 的待办 —— executor 没有卡在拍板上
-                      (这不代表它们都跑完了,失败与未开始的去看 ② DAG 区)。
-                    </EmptyHint>
-                  ) : (
-                    <div className="grid gap-2">
-                      {waitingTodos.map((t) => {
-                        const waited = now - t.updatedAt;
-                        const overFail = waited >= FAIL_MS;
-                        const overEscalation = waited >= ESCALATION_MS;
-                        return (
-                          <div
-                            key={t.id}
-                            className="rounded p-2"
-                            style={{
-                              background: "var(--ink-1)",
-                              borderLeft: `2px solid ${overFail ? "var(--cinnabar)" : "var(--amber)"}`,
-                            }}
-                          >
-                            <div style={{ fontSize: 12, color: "var(--bone)", lineHeight: 1.5 }}>
+                        <Flag tone={overFail ? "cinnabar" : "amber"}>
+                          <div className="flex items-baseline justify-between gap-2 flex-wrap">
+                            <span className="ss-body" style={{ color: "var(--bone)" }}>
                               {t.title}
-                            </div>
-                            <div className="sansheng-text-mute font-mono mt-1" style={{ fontSize: 10 }}>
+                            </span>
+                            <span
+                              className="ss-meta"
+                              style={{ color: toneColor(overFail ? "cinnabar" : "amber") }}
+                            >
                               已等 {fmtDuration(waited)}
-                              {overEscalation && (
-                                <span style={{ color: overFail ? "var(--cinnabar)" : "var(--amber)" }}>
-                                  {overFail ? " · 已过 1 小时判失败阈值" : " · 已过 5 分钟升级阈值"}
-                                </span>
-                              )}
-                            </div>
-                            <div className="sansheng-text-mute font-mono" style={{ fontSize: 10 }}>
-                              {t.executors?.length ? `${t.executors.join(", ")} · ` : ""}
-                              最后写入 {fmtTime(t.updatedAt)}
-                            </div>
-                            {t.body && (
-                              <div className="sansheng-text-mute mt-1" style={{ fontSize: 11, lineHeight: 1.6 }}>
-                                {excerpt(t.body, 160)}
-                              </div>
-                            )}
+                              {overEscalation
+                                ? overFail
+                                  ? " · 已过 1 小时判失败阈值"
+                                  : " · 已过 5 分钟升级阈值"
+                                : ""}
+                            </span>
                           </div>
-                        );
-                      })}
-                      <div className="sansheng-text-mute" style={{ fontSize: 10, lineHeight: 1.6 }}>
-                        等待时长 = 现在 − 工件 updatedAt,是
-                        <span style={{ color: "var(--bone-dim)" }}>估算值</span>:updatedAt 只是「最后一次
-                        写入时间」,不等于后台 waiting 队列的入队时刻(该队列无 getter / 事件,
-                        要等状态快照接口补齐才是真计时)。阈值取 orchestrator 的默认
-                        escalationMs=5 分钟 / failMs=1 小时,自建实例改过这两个参数时页面上看不到。
+                          <div className="ss-meta">
+                            {executors.length > 0 ? <>{executors.join(", ")} · </> : null}
+                            最后写入 {fmtTime(t.updatedAt)}
+                          </div>
+                          {t.body && <div className="ss-note">{excerpt(t.body, 160)}</div>}
+                        </Flag>
                       </div>
-                    </div>
-                  )}
-                </section>
+                    );
+                  })}
+                  <Disclosure summary="等待时长怎么算的">{WAIT_ESTIMATE_NOTE}</Disclosure>
+                </div>
+              )}
+            </Section>
 
-                {/* ④ 沉淀区 */}
-                <section className="sansheng-card p-4">
-                  <SectionTitle
-                    right={`${settledTop.length} 条${
-                      settledLinked > 0 ? ` · 另 ${settledLinked} 条已挂在 DAG 节点下` : ""
-                    }`}
-                  >
-                    ④ 沉淀区
-                  </SectionTitle>
-                  {settledTop.length === 0 ? (
-                    <EmptyHint>
-                      {settled.length === 0
-                        ? "本会话没有活下来的 decision / note / reflection(被取代 superseded 和失败的都不算)。"
-                        : "本会话的 decision / note / reflection 全部已作为执行结果挂在 ② DAG 区节点下,不在此重复列出。"}
-                    </EmptyHint>
-                  ) : (
-                    <div className="grid gap-2">
-                      {settledTop.map((a) => (
-                        <OutputRow key={a.id} artifact={a} />
-                      ))}
-                      <div className="sansheng-text-mute" style={{ fontSize: 10, lineHeight: 1.6 }}>
-                        「活下来」= status 不在 failed / superseded 里(被取代的结论不算)。
-                      </div>
-                    </div>
-                  )}
-                </section>
-              </div>
-            </>
-          )}
+            {/* 沉淀区 */}
+            <Section
+              title="沉淀"
+              count={settledTop.length}
+              hint="活下来的结论(不含失败与被取代)"
+              className="sansheng-card p-4"
+              aside={
+                settledLinked > 0 ? (
+                  <Pill tone="mute" title="已作为执行结果挂在执行树节点下的条数,不在此重复列">
+                    另 {settledLinked} 条在执行树下
+                  </Pill>
+                ) : null
+              }
+            >
+              {settledTop.length === 0 ? (
+                <EmptyState>
+                  {settled.length === 0
+                    ? "本会话没有活下来的 decision / note / reflection。"
+                    : "全部已挂在执行树节点下。"}
+                </EmptyState>
+              ) : (
+                <div className="grid gap-2">
+                  {settledTop.map((a) => (
+                    <OutputRow key={a.id} artifact={a} />
+                  ))}
+                </div>
+              )}
+            </Section>
+          </div>
 
           {/* §1 角色表 */}
-          <section className="sansheng-card p-4">
-            <SectionTitle right={`本会话 ${artifacts.length} 个工件`}>Agent 角色表</SectionTitle>
+          <Section title="Agent 角色表" hint="按工件作者聚合" className="sansheng-card p-4">
             <table className="w-full text-sm">
               <thead>
                 <tr className="text-left sansheng-text-mute">
-                  <th style={{ fontSize: 11 }}>角色</th>
-                  <th style={{ fontSize: 11 }}>提示词</th>
-                  <th style={{ fontSize: 11 }}>产出</th>
-                  <th style={{ fontSize: 11 }}>最新</th>
+                  <th className="ss-meta font-normal">角色</th>
+                  <th className="ss-meta font-normal">提示词来源</th>
+                  <th className="ss-meta font-normal">产出数</th>
+                  <th className="ss-meta font-normal">最新</th>
                 </tr>
               </thead>
               <tbody>
@@ -971,15 +887,15 @@ export function AgentsPage({ conversationId }: Props) {
                   const last = items ? items[items.length - 1] : undefined;
                   return (
                     <tr key={r} style={{ borderTop: "1px solid var(--ink-3)" }}>
-                      <td className="py-1">{r}</td>
-                      <td className="font-mono sansheng-text-mute" style={{ fontSize: 11 }}>
-                        {AGENT_PROMPT_SOURCE[r]}
+                      <td className="py-1 font-mono" style={{ fontSize: 11 }}>
+                        {r}
                       </td>
-                      <td className="font-mono sansheng-text-mute">{items ? items.length : "—"}</td>
+                      <td className="ss-meta">{AGENT_PROMPT_SOURCE[r]}</td>
+                      <td className="ss-meta">{items ? items.length : "—"}</td>
                       <td
-                        className="truncate"
-                        style={{ maxWidth: 200, color: last ? "var(--bone-dim)" : undefined }}
-                        title={last ? `${last.title} · ${fmtTime(last.createdAt)}` : undefined}
+                        className="truncate ss-body"
+                        style={{ maxWidth: 240, color: last ? "var(--bone-dim)" : undefined }}
+                        title={last ? `${last.title} · ${fmtTime(last.createdAt)}` : ROLE_TABLE_NOTE}
                       >
                         {last ? last.title : "—"}
                       </td>
@@ -988,35 +904,24 @@ export function AgentsPage({ conversationId }: Props) {
                 })}
               </tbody>
             </table>
-            <div className="sansheng-text-mute mt-2" style={{ fontSize: 11, lineHeight: 1.7 }}>
-              「—」= 本会话没有该角色产出的工件(不是「空闲」,后端没有 per-role 运行态接口,
-              这里展示的是工件作者维度的事实)。
-              {harnessNote(artifacts)}
-            </div>
+            <p className="ss-note mt-2" title={ROLE_TABLE_NOTE}>
+              「—」= 本会话没有该角色的工件。表内用配置键(英文),critic / memory / reflection
+              尚未实现故不列。
+            </p>
             {otherAuthors.length > 0 && (
-              <div className="sansheng-text-mute mt-1" style={{ fontSize: 11, lineHeight: 1.7 }}>
-                本会话还出现过的其它工件作者:
-                {otherAuthors.map((k) => AUTHOR_LABEL[k] ?? k).join(" · ")}
-              </div>
+              <p className="ss-meta mt-1">本会话其它工件作者:{otherAuthors.map((k) => authorLabel(k)).join(" · ")}</p>
             )}
-            <div className="sansheng-text-mute mt-1" style={{ fontSize: 11, lineHeight: 1.7 }}>
-              只列这 4 个:critic / memory / reflection 没有实现,也没有任何代码读它们的
-              harness 提示词,决定暂不实现,故界面不列出(不摆点不亮的灰行)。
-            </div>
-            <div className="sansheng-text-mute mt-1" style={{ fontSize: 11, lineHeight: 1.7 }}>
-              称呼按设计文档 §1.1:角色名在本表用英文 id(它是配置键 / harness 文件名,
-              旁边就是「提示词来源」);工件上的「谁产出的」用中文读法(沟通员 / 规划员 /
-              执行员)。未知 author 值原样透出,不猜。
-            </div>
-          </section>
+            {!artifacts.some((a) => a.author === "harness_manager") && (
+              <p
+                className="ss-meta mt-1"
+                title="harness_manager 的提示词编译在代码里(没有 md 文件),且它只对 harness_proposal 工件有反应 —— 发射点还没补(设计文档 §6③)。"
+              >
+                harness_manager:本会话无产出。
+              </p>
+            )}
+          </Section>
         </div>
       )}
-    </main>
+    </div>
   );
-}
-
-/** harness_manager 在工件里几乎没有 author —— 如实说明,不要留一个光秃秃的 0。 */
-function harnessNote(artifacts: Artifact[]): string {
-  if (artifacts.some((a) => a.author === "harness_manager")) return "";
-  return " harness_manager 提示词编译在代码里(没有 md 文件),且它只对 harness_proposal 工件有反应 —— 本会话没有它的产出。";
 }

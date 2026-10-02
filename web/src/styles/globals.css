@@ -135,6 +135,15 @@
     box-shadow: var(--shadow-jade-glow);
   }
   .sansheng-input::placeholder { color: var(--bone-mute); }
+  /*
+   * 块级输入框(设置页的网格子项)。此前设置页**同时**挂着 `.sansheng-input`
+   * 和一份手抄的 `inputStyle` 行内样式(圆角/描边/底色/字号逐条复制 CSS),
+   * 行内样式还把 class 覆盖掉了 —— 改一次输入框样式要改两处,且永远不知道
+   * 哪一处是生效的。调用点现在只写 class。
+   * 单独一条而不并进 .sansheng-input:总线的回答输入框用 `flex-1`,那里不需要
+   * 撑满宽度(flex-1 的 flex-basis:0 已经压过 width)。
+   */
+  .sansheng-input-block { width: 100%; }
 
   .sansheng-h2 {
     font-family: theme('fontFamily.serif');
