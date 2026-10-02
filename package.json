@@ -10,6 +10,7 @@
   },
   "files": [
     "dist",
+    "migrations",
     "README.md",
     "LICENSE"
   ],

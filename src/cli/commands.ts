@@ -93,6 +93,31 @@ export function isAlive(pid: number): boolean {
   return isNodeComm(readPidComm(pid));
 }
 
+/**
+ * 批次 4b C11(审查 §C11「daemon 强制 PI_OFFLINE=1 覆盖用户显式值」):
+ * daemon 子进程的环境变量。
+ *
+ * 旧实现无条件写 `PI_OFFLINE: "1"`,覆盖用户在 shell 里显式设的 `PI_OFFLINE=0` ——
+ * 而前台 `sansheng start` 走 index.ts 的
+ * `process.env.PI_OFFLINE = process.env.PI_OFFLINE ?? "1"`,**尊重**用户值。
+ * 同一份配置两种行为:用户明明要联网跑,`-d` 起的后台进程却在离线模式。
+ *
+ * 契约:缺省才补 "1"(离线仍是无网络环境下的安全默认),显式值(含 "0")原样传递,
+ * 前台 / daemon 行为一致。纯函数:不修改传入的 base。
+ */
+export function buildDaemonEnv(
+  base: NodeJS.ProcessEnv,
+  dataDirPath: string,
+): NodeJS.ProcessEnv {
+  return {
+    ...base,
+    SANSHENG_DATA: dataDirPath,
+    SANSHENG_DAEMON: "1",
+    // 与 index.ts 同款「缺省才补」语义
+    PI_OFFLINE: base.PI_OFFLINE ?? "1",
+  };
+}
+
 export interface WaitForHealthOptions {
   /** 总超时(默认 10s) */
   timeoutMs?: number;
@@ -160,7 +185,7 @@ export async function runStart(opts: StartOptions): Promise<void> {
     const child = spawn(process.execPath, [entry, "--host", opts.host, "--port", opts.port], {
       detached: true,
       stdio: ["ignore", logFd, logFd],
-      env: { ...process.env, SANSHENG_DATA: opts.data ?? dataDir(), SANSHENG_DAEMON: "1", PI_OFFLINE: "1" },
+      env: buildDaemonEnv(process.env, opts.data ?? dataDir()),
     });
     child.unref();
     // B10-6:早死检测 —— 子进程在健康检查通过前 exit(EADDRINUSE / dist 缺失 /

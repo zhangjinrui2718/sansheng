@@ -20,6 +20,7 @@
 import { nanoid } from "nanoid";
 import type { BlackboardArtifact, ArtifactStatus } from "../../../shared/types/blackboard.js";
 import { artifactBus, makeArtifact } from "../bus/index.js";
+import { log } from "../../shared/log.js";
 import {
   upsertArtifact,
   updateArtifactStatus,
@@ -83,6 +84,43 @@ function dropCycles(
     );
   }
   return todos.filter((t) => !cycleMembers.has(t.id));
+}
+
+/**
+ * 批次 4b C3:抽取「unknown dependsOn 过滤」为独立函数,并让它**迭代到不动点**。
+ *
+ * 循环上限的论证(为什么不会死循环):每一轮要么至少 drop 一个 todo(集合严格变小,
+ * 最多 todos.length 轮必然空),要么一轮内一个都没 drop(直接 break)。两条路都收敛,
+ * 上限只是纵深防御 —— 真正的收益是「调用点可以在中间插入任意 drop 步骤
+ * (dropCycles)之后再回来重跑」。
+ */
+const MAX_DEP_FILTER_ROUNDS = 8;
+
+function dropUnknownDeps(
+  todos: PlannedTodo[],
+  warnings: string[],
+  reason: string,
+): PlannedTodo[] {
+  let survivors = todos;
+  for (let round = 0; round < MAX_DEP_FILTER_ROUNDS; round++) {
+    const known = new Set(survivors.map((t) => t.id));
+    const next: PlannedTodo[] = [];
+    for (const t of survivors) {
+      const badDeps = t.dependsOn.filter((d) => !known.has(d));
+      if (badDeps.length > 0) {
+        warnings.push(`dropped todo ${t.id} due to ${reason}: ${badDeps.join(",")}`);
+        continue;
+      }
+      next.push(t);
+    }
+    if (next.length === survivors.length) return next; // 不动点
+    survivors = next;
+  }
+  // 上限触发:理论上不可达(见函数注释),留一条日志线索而不是静默返回。
+  warnings.push(
+    `planner: unknown-dep filter hit the ${MAX_DEP_FILTER_ROUNDS}-round cap; ${survivors.length} todo(s) kept`,
+  );
+  return survivors;
 }
 
 /* ────────────────────────────────────────────────────────── *
@@ -174,6 +212,13 @@ export class Planner {
 
     // 4. 校验 + 规范化
     const validated = this.validateAndNormalize(planned);
+    // C3(审查 §C3「warnings 算完即丢,静默发生」):留痕。drop 是**有损**操作
+    // (LLM 少产了 todo / 依赖写错 / 成环),用户看到的却是「计划里本来就没这几条」,
+    // 无从判断是模型还是管线出的问题。每条 warning 一行 log.warn,便于事后
+    // 对照 timeline / blackboard 复盘。
+    for (const w of validated.warnings) {
+      log.warn(`planner: ${w}`);
+    }
     if (validated.todos.length === 0) {
       await this.handleParseFailure(intent, raw, "0 valid todos after validation");
       return { intent, todos: [] };
@@ -293,21 +338,22 @@ export class Planner {
         metadata: t.metadata && typeof t.metadata === "object" ? t.metadata : undefined,
       });
     }
-    // 校验:dependsOn 引用的 id 必须在 todos 数组内;含任何未知 id → 整个 todo drop
-    const allIds = new Set(todos.map((t) => t.id));
-    const filtered: PlannedTodo[] = [];
-    for (const t of todos) {
-      const badDeps = t.dependsOn.filter((d) => !allIds.has(d));
-      if (badDeps.length > 0) {
-        warnings.push(`dropped todo ${t.id} due to unknown dependsOn: ${badDeps.join(",")}`);
-        continue;
-      }
-      filtered.push(t);
-    }
+    // 校验(第一轮):dependsOn 引用的 id 必须在 todos 数组内;含任何未知 id → 整个 todo drop
+    let survivors = dropUnknownDeps(todos, warnings, "unknown dependsOn");
     // 校验:DAG 环检测(LLM 可能输出 A→B,B→A 这种自反 / 互反依赖)。
     // 环上节点全部 drop(Orchestrator 永远 resolve 不了,会无限等待)。
-    const cycleDropped = dropCycles(filtered, warnings);
-    return { todos: cycleDropped, warnings };
+    survivors = dropCycles(survivors, warnings);
+    // C3(审查 §C3「dropCycles 不级联」):环 drop 之后**必须重跑** unknown-dep 过滤。
+    // 旧顺序是「过滤 → dropCycles」一次到底,于是环上节点被 drop 后,依赖它们的
+    // 存活 todo 的 dependsOn 指向了不存在的 id —— Orchestrator 的 areDepsResolved
+    // 永远 false → 该 todo 永不 spawn,run 只能等满 maxRunMs 超时(叠加 §A3 放大)。
+    // 例:A→B,B↔C 成环 ⇒ drop B、C 之后 A 成为悬空依赖,必须连 A 一起 drop。
+    // 两轮已足够收敛:第一轮 drop 掉的节点不会引入新悬空;第二轮之后剩余集合
+    // 内部的依赖图已经没有环(dropCycles 已清),每条边都指向集合内的存活节点。
+    // 再多轮只是重复同一批断言 —— 仍保留循环上限(见 dropUnknownDeps),万一将来
+    // 校验规则增加,也不会退化成死循环。
+    survivors = dropUnknownDeps(survivors, warnings, "unknown dependsOn (after cycle drop)");
+    return { todos: survivors, warnings };
   }
 
   private async handleParseFailure(

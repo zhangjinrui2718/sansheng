@@ -61,22 +61,10 @@ function errMsg(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
-/**
- * C9-4(审查 §C9):统一 ?limit= 解析 —— /api/memory/fragments 与
- * /api/conversations 两端点同一契约。
- * 旧行为不一致:fragments 把 Number("abc")=NaN 直传 SQL LIMIT → better-sqlite3
- * datatype mismatch → 500(客户端参数错报成服务端故障);conversations
- * parseInt+isFinite 静默回退 50 → 200(错误被吞)。
- * 新契约:缺省/空 → fallback;非法(非有限数值)→ null,调用方回
- * 400 invalid_limit;合法 → trunc + clamp 到 [1, max]。
- * 注:blackboardRoutes.ts 自带静默回退防御(不会 500),独立文件本批次不动。
- */
-function parseLimitQuery(raw: string | undefined, fallback: number, max: number): number | null {
-  if (raw === undefined || raw === "") return fallback;
-  const n = Number(raw);
-  if (!Number.isFinite(n)) return null;
-  return Math.min(Math.max(Math.trunc(n), 1), max);
-}
+// C9-4(审查 §C9)+ 4b 4a-OQ2:统一 ?limit= 解析。实现搬到 src/server/http/query.ts,
+// 让 blackboardRoutes.ts(4a 当时显式留作 OQ 的静默回退点)也能共用同一契约
+// —— 放进本文件会形成 blackboardRoutes → http 的循环依赖。
+import { parseLimitQuery } from "./http/query.js";
 
 /** 把内部 Settings 转成对外(掩码 apiKey)的 SettingsPublic */
 function toPublic(s: ReturnType<SettingsStore["load"]>) {

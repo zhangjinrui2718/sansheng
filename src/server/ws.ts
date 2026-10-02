@@ -49,6 +49,80 @@ import { buildPlanSummary } from "./agents/planSummary.js";
 // B4:WS 握手 Origin 校验与 HTTP 安全中间件共用同一 hostname 白名单(单一来源)
 import { isAllowedOriginHeader } from "./http/security.js";
 
+/** 批次 4b C6:默认心跳间隔 30s(两拍无 pong = 60s 判死,远小于任何中间设备的空闲超时)。 */
+export const WS_HEARTBEAT_INTERVAL_MS = 30_000;
+
+/** 心跳只需要 socket 的这两个能力(结构化类型,便于用假 client 单测)。 */
+export interface HeartbeatSocket {
+  ping(): void;
+  terminate(): void;
+}
+
+export interface HeartbeatController {
+  /** 连接建立时登记 + 每次收到 pong 时调用(置「活着」)。 */
+  markAlive(sock: HeartbeatSocket): void;
+  /** 停定时器(wss close 时调用;unref 保证即使忘了调也不吊住进程)。 */
+  stop(): void;
+  readonly intervalMs: number;
+}
+
+/**
+ * 批次 4b C6:WS 心跳(ping/pong + 超时 terminate)。
+ *
+ * 旧实现 ws.ts 全文没有心跳:半开连接(对端断电 / 笔记本合盖 / 网络黑洞)不会触发
+ * `close` → `wss.clients` 与 per-connection busUnsubs 一直泄漏,broadcast 持续
+ * 往死 socket 缓冲(浏览器端表现为「进程内存一直涨」)。
+ *
+ * 算法(与 `ws` 官方 README 的 isAlive 同款,只是把状态放到 controller 里,
+ * 便于用假 socket 单测):
+ *  - 新连接 markAlive → 每个 tick:「活着」则清标记 + ping;「不活」则 terminate;
+ *    terminate 会触发 socket 的 close 事件 → 既有的 close handler 照常执行
+ *    (detachSink / busUnsubs 退订 / kernel.setOnTask 解绑),语义零变化。
+ *  - 从 clients 列表里消失的连接会从 alive 集合剔除,不留悬挂状态。
+ *  - 定时器 unref:不阻止进程退出;再叠加 wss.on("close") 里的 stop()。
+ */
+export function startWsHeartbeat(
+  getClients: () => Iterable<HeartbeatSocket>,
+  opts: { intervalMs?: number } = {},
+): HeartbeatController {
+  const intervalMs = opts.intervalMs ?? WS_HEARTBEAT_INTERVAL_MS;
+  const alive = new Set<HeartbeatSocket>();
+  const timer = setInterval(() => {
+    const current = new Set<HeartbeatSocket>(getClients());
+    for (const stale of [...alive]) {
+      if (!current.has(stale)) alive.delete(stale);
+    }
+    for (const client of current) {
+      if (!alive.has(client)) {
+        // 上一拍到现在没收到 pong → 半开连接,强制回收
+        try {
+          client.terminate();
+        } catch {
+          /* ignore */
+        }
+        continue;
+      }
+      alive.delete(client);
+      try {
+        client.ping();
+      } catch {
+        /* ignore */
+      }
+    }
+  }, intervalMs);
+  timer.unref?.();
+  return {
+    markAlive: (sock) => {
+      alive.add(sock);
+    },
+    stop: () => {
+      clearInterval(timer);
+      alive.clear();
+    },
+    intervalMs,
+  };
+}
+
 /**
  * 把 user message 包成含历史 context 的 prompt
  * M3a: 简单 LIKE 匹配 fragments + profile 注入
@@ -115,6 +189,13 @@ export interface AttachOptions {
   settingsStore?: SettingsStore;
   dataDir?: string;
   /**
+   * 批次 4b C6(审查 §C6「无 WS 心跳:半开连接不触发 close」):
+   *  - `intervalMs`:ping 间隔(ms),缺省 WS_HEARTBEAT_INTERVAL_MS(30s);
+   *  - `enabled:false`:完全关闭(测试可显式关,不让心跳干扰连接生命周期断言)。
+   * 生产(index.ts)不传 → 默认心跳。
+   */
+  heartbeat?: { intervalMs?: number; enabled?: boolean };
+  /**
    * 测试注入 seam(仅集成测试用):替换默认的 makeLlmCall。
    * 生产(index.ts)不传 → 行为不变(makeLlmCall(kernel))。
    * 只有 llmCall 允许 fake — runPlan 闭包 / Orchestrator / sink / 生命周期全部走生产路径
@@ -136,6 +217,19 @@ export function attachWebSocket(
    *  发起连接中途关闭不打断 plan,也不允许 close handler abort 它。 */
   let activeOrchestrator: Orchestrator | null = null;
   const wss = new WebSocketServer({ noServer: true });
+
+  // C6:心跳。terminate 触发的 close 走的是既有关闭路径,ws-lifecycle 的 6 个场景
+  // 与 bus_replay 语义不受影响(客户端正常回 pong,永远不会被回收)。
+  const heartbeat =
+    opts.heartbeat?.enabled === false
+      ? null
+      : startWsHeartbeat(
+          () => wss.clients as unknown as Iterable<HeartbeatSocket>,
+          opts.heartbeat?.intervalMs !== undefined ? { intervalMs: opts.heartbeat.intervalMs } : {},
+        );
+  wss.on("close", () => {
+    heartbeat?.stop();
+  });
 
   /**
    * C7(S2):广播到所有 OPEN 客户端。
@@ -320,6 +414,12 @@ export function attachWebSocket(
 
   wss.on("connection", (ws: WebSocket) => {
     log.muted(`ws connected (clients=${wss.clients.size})`);
+    // C6:登记心跳并监听 pong(收到即置「活着」)。terminate 触发的 close 走
+    // 下方既有关闭路径,语义不变。
+    if (heartbeat) {
+      heartbeat.markAlive(ws);
+      ws.on("pong", () => heartbeat.markAlive(ws));
+    }
     // S1(A7):连接建立即 attachSink —— kernel 的流式 delta / bus_event / ready 等
     // 经 emit 多播到所有活连接;close 时 detach。本连接死亡不再影响 kernel 输出,
     // 重连的新连接立即开始收流(旧实现把首个连接的 sink 捕获进 kernel 闭包)。

@@ -92,15 +92,21 @@ describe("C5 · 损坏的 settings.json 不再被静默清空", () => {
     expect(backups).toHaveLength(2);
   });
 
-  it("备份里的内容仍然可被 keyring 解密(备份是完整原文件,不是清空后的默认)", () => {
+  it("备份是逐字节原文件(不是重新序列化的清空默认),且权限 0600", () => {
     const store = new SettingsStore(file, keyring);
-    store.save(BASE); // 先写一份合法的加密配置
+    store.save(BASE); // 写一份合法的加密配置
     const good = readFileSync(file, "utf-8");
-    writeFileSync(file, good.slice(0, 40), { mode: 0o600 }); // 模拟截断写
+    // 模拟「写到一半崩溃」:内容被截断成非法 JSON
+    const truncated = good.slice(0, Math.floor(good.length / 2));
+    writeFileSync(file, truncated, { mode: 0o600 });
     new SettingsStore(file, keyring).load();
-    const backup = readdirSync(dir).find((f) => f.startsWith("settings.json.corrupt-"))!;
-    const restored = JSON.parse(readFileSync(join(dir, backup), "utf-8")) as Settings;
-    expect(restored.providers[0]?.apiKey).toBe(keyring.encrypt(BASE.providers[0]!.apiKey));
+
+    const backupName = readdirSync(dir).find((f) => f.startsWith("settings.json.corrupt-"))!;
+    // RED(修复前):没有任何备份;若有备份也会是「降级后的默认」内容
+    expect(readFileSync(join(dir, backupName), "utf-8")).toBe(truncated);
+    expect(statSync(join(dir, backupName)).mode & 0o777).toBe(0o600);
+    // 备份里出现的是原文件的「providers」键,而不是降级默认的空数组
+    expect(readFileSync(join(dir, backupName), "utf-8")).toContain('"id": "p1"');
   });
 });
 

@@ -6,11 +6,44 @@
  * M2:    apiKey 在磁盘上用 Keyring 加密;内存里永远保持明文方便 kernel / UI 读取。
  *        启动时检测到明文残留会一次性升级为加密格式。
  */
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { randomBytes } from "node:crypto";
 import { log } from "../../shared/log.js";
 import { Keyring, isEncrypted } from "../storage/index.js";
+
+/**
+ * 批次 4b C5(审查 §C5「settings.json 写盘非原子」):同目录 tmp + rename。
+ *
+ * 为什么必须原子:`writeFileSync(目标路径)` 是「截断 → 逐块写」,写一半崩溃 /
+ * 断电 / 磁盘满都会留下**截断的 JSON**;而 load() 遇到解析失败恰恰是静默清空
+ * 全部配置(见 load 的 catch)。两个缺陷互相成就:一次半截写 = 静默丢掉用户全部
+ * provider 配置。同目录 rename 在同一文件系统上是原子的,读者要么看到完整旧
+ * 文件,要么看到完整新文件。
+ *
+ * 序列化在写之前完成(见 SettingsStore.save):序列化抛错时**一个字节都没落盘**,
+ * 旧文件原样保留。
+ */
+export function writeJsonAtomic(file: string, data: string, mode = 0o600): void {
+  const dir = dirname(file);
+  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+  // tmp 名带 pid + 随机:并发多进程 / 残留 tmp 都不会互相覆盖
+  const tmp = join(dir, `.${randomBytes(6).toString("hex")}-${process.pid}.tmp`);
+  try {
+    writeFileSync(tmp, data, { mode });
+    // rename 保留 mode(tmp 上就已经是 0600),显式 chmod 只是把「umask 改坏了」
+    // 这种环境也拉回 0600。
+    renameSync(tmp, file);
+  } catch (err) {
+    // rename 失败时别把 tmp 留在磁盘上(里面是**全部 provider 的密钥**)。
+    try {
+      unlinkSync(tmp);
+    } catch {
+      /* ignore */
+    }
+    throw err;
+  }
+}
 
 function isMaskedApiKey(s: string): boolean {
   if (!s) return true;
@@ -73,7 +106,18 @@ export class SettingsStore {
       const raw = JSON.parse(readFileSync(this.file, "utf-8")) as Record<string, unknown>;
       wasLegacy = !Array.isArray(raw.providers);
       parsed = this.migrate(raw);
-    } catch {
+    } catch (err) {
+      // C5(审查 §C5「损坏 → 静默清空全部配置」):旧实现这个 catch 只做了
+      // `parsed = {...DEFAULTS}`,没有一行日志 —— 用户看到的是「所有 provider
+      // 都没了」,而日志里干干净净;随后任意一次 save() 还会把默认值写回磁盘,
+      // 旧配置**永久**丢失。现在:响亮 log.error + 先备份原文件再降级。
+      // 仍然降级为默认值(不猜内容),但内容没丢:备份在同目录,人可恢复。
+      log.error(
+        `settings: ${this.file} is corrupt — falling back to defaults. A verbatim backup has been kept; fix the file and restart to restore. (parse error: ${
+          err instanceof Error ? err.message : String(err)
+        })`,
+      );
+      this.backupCorruptFile();
       parsed = { ...DEFAULTS, providers: [] };
       this.cache = parsed;
       return this.cache;
@@ -205,8 +249,32 @@ export class SettingsStore {
       }),
     };
 
-    writeFileSync(this.file, JSON.stringify(onDisk, null, 2), { mode: 0o600 });
+    // 先序列化再落盘:序列化抛错(循环引用 / BigInt)时**一个字节都没写**,
+    // 旧文件原样保留 —— 原子写的另一半(见 writeJsonAtomic 注释)。
+    const data = JSON.stringify(onDisk, null, 2);
+    // C5:tmp + rename,不再原地截断重写(半截 JSON 正好触发上面的静默清空)。
+    writeJsonAtomic(this.file, data, 0o600);
     this.cache = s;
+  }
+
+  /**
+   * C5:损坏的 settings.json 在降级为默认值**之前**留一份逐字节备份。
+   * 命名带时间戳 → 连续两次损坏产生两份备份,不会互相覆盖。
+   * 备份失败不阻塞降级(用户至少还能看到 log.error 里的文件名)。
+   */
+  private backupCorruptFile(): void {
+    // 名字带时间戳 + 随机串:同一毫秒内连续两次损坏(例如 load 两次)也不会互相覆盖。
+    const backup = `${this.file}.corrupt-${Date.now()}-${randomBytes(4).toString("hex")}`;
+    try {
+      // 逐字节复制:不重新序列化(那正是坏掉的东西)。
+      writeFileSync(backup, readFileSync(this.file), { mode: 0o600 });
+      log.warn(`settings: corrupt file backed up to ${backup}`);
+    } catch (err) {
+      log.error(
+        `settings: failed to back up corrupt file to ${backup} — it will be overwritten by the next save():`,
+        err,
+      );
+    }
   }
 
   /** 返回当前激活的 provider 配置(可能为 undefined) */

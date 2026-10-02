@@ -25,6 +25,8 @@ import {
   GLOBAL_BLACKBOARD_ID,
 } from "../storage/index.js";
 import type { Storage } from "../storage/index.js";
+// 4b 4a-OQ2:与 http.ts 共用同一 ?limit= 契约(单一来源见 query.ts 文件头)。
+import { parseLimitQuery } from "./query.js";
 import {
   isArtifactKind,
   isArtifactStatus,
@@ -74,10 +76,16 @@ export function registerBlackboardArtifactRoutes(app: Hono, storage: Storage): v
     const kindQ = c.req.query("kind");
     const statusQ = c.req.query("status");
     const conversationId = c.req.query("conversationId");
-    const limitQ = parseInt(c.req.query("limit") ?? "100", 10);
-    const safeLimit = Number.isFinite(limitQ)
-      ? Math.min(Math.max(limitQ, 1), 500)
-      : 100;
+    // 4b 4a-OQ2(审查 §C9 遗留 OQ):统一到 parseLimitQuery —— 旧实现
+    // `parseInt(limit ?? "100") + isFinite` 把非法值静默回退成 100(200 + 一份
+    // 「看起来正常」的数据),与 http.ts 的 400 invalid_limit 契约不一致。
+    const limit = parseLimitQuery(c.req.query("limit"), 100, 500);
+    if (limit === null) {
+      return c.json(
+        { error: "invalid_limit", message: "limit must be a finite number" },
+        400,
+      );
+    }
 
     if (scopeQ && scopeQ !== "global" && scopeQ !== "conversation") {
       return c.json(
@@ -113,7 +121,7 @@ export function registerBlackboardArtifactRoutes(app: Hono, storage: Storage): v
         conversationId: conversationId ?? GLOBAL_BLACKBOARD_ID,
         kind: kindQ,
         status: statusQ,
-        limit: safeLimit,
+        limit,
       });
       return c.json({ artifacts });
     } catch (err) {
