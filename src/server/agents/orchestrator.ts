@@ -38,6 +38,7 @@ import type {
 } from "../../../shared/types/bus.js";
 import { artifactBus, makeArtifact } from "../bus/index.js";
 import { log } from "../../shared/log.js";
+import { loadHarness } from "../harness/loader.js";
 import {
   upsertArtifact,
   updateArtifactStatus,
@@ -99,6 +100,23 @@ export interface OrchestratorOptions {
   maxCallbackDepth?: number;
   /** run() 的最大等待时长(ms);默认 30min。 */
   maxRunMs?: number;
+  /**
+   * 批次 7-B:Planner / Executor 的 system prompt。
+   *
+   * 不传 → 从 `dataDir/harness/system_prompts/{planner,executor}.md` 读
+   * (即用户在 harness/ 里编辑的那份「雇员手册」);文件缺失/为空 → 回落
+   * Planner/Executor 各自的模块内 DEFAULT_*_PROMPT。
+   *
+   * 修复前的死接线:`this.dataDir` 存了却从没用过,spawnPlanner 只传
+   * `{ storage }`,于是 Planner 永远拿模块内那份 6 行 stub
+   * (DEFAULT_PLANNER_PROMPT,planner.ts:437)—— `shared/prompts/planner.md`
+   * 那份 91 行、含输出协议 / 字段语义 / 拆解示例的正经提示词是**死代码**
+   * (`loadPlannerPrompt` 全项目无调用方),用户在 harness 里编辑的
+   * planner.md 也从未被读取。Planner 实际只收到 4 句指令,这正是
+   * 「分发任务太简单暴力、没做归类拆解」的直接成因。
+   */
+  plannerSystemPrompt?: string;
+  executorSystemPrompt?: string;
 }
 
 /* ────────────────────────────────────────────────────────── *
@@ -122,6 +140,8 @@ export class Orchestrator {
   private readonly executorFactory: (opts: ExecutorOptions) => Executor;
   private readonly plannerLlmCall: PlannerLlmCall | undefined;
   private readonly executorLlmCall: ExecutorLlmCall | undefined;
+  private readonly plannerSystemPrompt: string | undefined;
+  private readonly executorSystemPrompt: string | undefined;
   private readonly routeCallback: CallbackRouter;
   private readonly escalationMs: number;
   private readonly failMs: number;
@@ -160,6 +180,12 @@ export class Orchestrator {
     this.bus = opts.bus ?? artifactBus;
     this.plannerLlmCall = opts.plannerLlmCall;
     this.executorLlmCall = opts.executorLlmCall;
+    // 批次 7-B:解析 harness prompt(构造时一次性读盘,避免每次 spawn 重读)。
+    // 显式 opts 优先;空串视作「没配」→ 交给 Planner/Executor 的模块默认。
+    this.plannerSystemPrompt =
+      opts.plannerSystemPrompt ?? this.loadHarnessPrompt("planner");
+    this.executorSystemPrompt =
+      opts.executorSystemPrompt ?? this.loadHarnessPrompt("executor");
     // 注入 llmCall 的策略:wrapper factory 在 Planner/Executor 构造前修改 opts.llmCall,
     // 这样测试 factory 也能受益(若 factory 没显式设置 llmCall,默认会拿到 orchestrator 注入的值)。
     // 这避免了「factory 设置了一个会 throw 的 llmCall」的边界陷阱。
@@ -167,12 +193,14 @@ export class Orchestrator {
       opts.plannerFactory ??
       ((p) => {
         if (this.plannerLlmCall && !p.llmCall) p.llmCall = this.plannerLlmCall;
+        if (this.plannerSystemPrompt && !p.systemPrompt) p.systemPrompt = this.plannerSystemPrompt;
         return new Planner(p);
       });
     this.executorFactory =
       opts.executorFactory ??
       ((e) => {
         if (this.executorLlmCall && !e.llmCall) e.llmCall = this.executorLlmCall;
+        if (this.executorSystemPrompt && !e.systemPrompt) e.systemPrompt = this.executorSystemPrompt;
         return new Executor(e);
       });
     this.routeCallback = opts.routeCallback ?? defaultRouteCallback;
@@ -342,6 +370,22 @@ export class Orchestrator {
   }
 
   /* ── Bus event handlers ─────────────────────────────────── */
+
+  /**
+   * 批次 7-B:从 `dataDir/harness/system_prompts/{role}.md` 读角色提示词。
+   * 读不到 / 内容为空 → 返回 undefined,让 Planner/Executor 用模块内默认
+   * (DEFAULT_PLANNER_PROMPT / DEFAULT_EXECUTOR_PROMPT)。读盘失败一律吞掉:
+   * prompt 缺失不该让整个 plan 起不来。
+   */
+  private loadHarnessPrompt(role: "planner" | "executor"): string | undefined {
+    try {
+      const text = loadHarness(this.dataDir).systemPrompts[role];
+      return text && text.trim() ? text : undefined;
+    } catch (err) {
+      log.warn(`orchestrator: loadHarness prompt(${role}) failed:`, err);
+      return undefined;
+    }
+  }
 
   private async onArtifactCreated(e: ArtifactCreatedEvent): Promise<void> {
     const a = e.artifact;
