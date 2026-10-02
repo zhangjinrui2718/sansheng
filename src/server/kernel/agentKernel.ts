@@ -43,6 +43,7 @@ import {
   getConversation,
   setConversationTitle,
   upsertFragmentEmbedding,
+  upsertProfile,
 } from "../storage/index.js";
 
 function isStreaming(s: unknown): s is { isStreaming: boolean } {
@@ -1005,7 +1006,7 @@ export class AgentKernel {
   private persistHandoff(
     userText: string,
     ack: { messageId: string; text: string } | null,
-    _decision: CommunicatorDecision,
+    decision: CommunicatorDecision,
   ): void {
     const turnIndex = this.currentTurnIndex;
     const userMsgId = `m_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
@@ -1072,6 +1073,25 @@ export class AgentKernel {
         recordMessageUsage(this.storage.db, this.conversationId, 0, 0, 0);
       } catch (err) {
         log.warn("storage: insertMessage(assistant/handoff-ack) failed:", err);
+      }
+    }
+    // 批次 5b-1 P4:feedback 收录 —— 从用户 raw 提取 fragment 入库(复用
+    // extract→insert→embed 管道,role:"user" 激活 NAME_RE/LIKE_RE 用户侧模式),
+    // 身份 fact「用户名字:X」同时接线 profile.name(listProfile 已在 ws 层
+    // contextBlock 读回 → 记忆闭环)。只 feedback 进本分支;assistant 侧
+    // extractAndStoreFragments 既有路径零改动。
+    if (decision.kind === "feedback") {
+      void this.extractAndStoreFragments(userText, userMsgId, "user");
+      try {
+        const frags = extractFragments({ role: "user", content: userText });
+        for (const f of frags) {
+          if (f.kind === "fact" && f.content.startsWith("用户名字:")) {
+            const name = f.content.slice("用户名字:".length).trim();
+            if (name) upsertProfile(this.storage.db, "name", name, 0.8);
+          }
+        }
+      } catch (err) {
+        log.warn("feedback: profile wiring failed:", err);
       }
     }
   }
@@ -1350,12 +1370,18 @@ export class AgentKernel {
    * 不抛错:embed 失败只 warn,不影响 streaming。
    * 批次 5a.5 T1:仅剩「记住:」触发词 fact 提取(assistant 全文 summary 提取已删,
    * 见 extractor.ts);thinking 参数随之无用,已清理。智能提取属 M3+/批次 5b。
+   * 批次 5b-1 P4:`role` 参数(默认 assistant 不变)—— feedback 路径以 role:"user"
+   * 复用同一套「提取→入库→embed」管道(assistant 侧调用点零改动)。
    */
-  private async extractAndStoreFragments(text: string, messageId: string): Promise<void> {
+  private async extractAndStoreFragments(
+    text: string,
+    messageId: string,
+    role: "user" | "assistant" = "assistant",
+  ): Promise<void> {
     if (!text) return;
     let frags;
     try {
-      frags = extractFragments({ role: "assistant", content: text });
+      frags = extractFragments({ role, content: text });
     } catch (err) {
       log.warn("fragment: extractor failed:", err);
       return;

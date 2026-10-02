@@ -429,13 +429,13 @@ export class Communicator {
           log.warn(`Communicator.onTask threw: ${(err as Error).message ?? err}`);
         }
       } else {
-        // feedback:写 profile(M3c 占位 — 实际由 storage 层接管,这里只 emit 提示)
+        // feedback:批次 5b-1 P4 — sink 一条**收录确认**(LLM decide 的 ack 字段;
+        // 正则降级 = 固定文案),语义是「已收下,记忆入库」,不是回答。
+        // 记忆本体(fragments/profile)由 kernel.persistHandoff 从用户 raw 提取
+        // —— 确认与入库分离,Communicator 保持无存储依赖。
         const messageId = nanoid();
-        sink({
-          type: "delta",
-          messageId,
-          text: `已记录偏好:${Object.values(decision.profileDelta).join("; ").slice(0, 60)}`,
-        });
+        const ackText = decision.ack && decision.ack.trim() ? decision.ack.trim() : "已记下。";
+        sink({ type: "delta", messageId, text: ackText });
         sink({ type: "done", messageId });
         const msg = this.opts.bus.broadcast({
           fromRole: "communicator",

@@ -159,3 +159,91 @@ describe("harness/loader · ensureHarness 升级逻辑(批次 5a T1)", () => {
     expect(harness.budget.maxIterations).toBe(5);
   });
 });
+
+/* ── 批次 5b-1 · P5:prompt 版本升级链(旧 9 行版 → 5a 44 行版 → 5b-1 版)── */
+
+/**
+ * 批次 5a 的出厂默认(44 行版)= loader.ts LEGACY_DEFAULTS.communicator 版本链
+ * 第二代条目。必须与其字节一致 —— 若此常量漂移,升级分支会误判「用户编辑过」
+ * 而永不升级,P5① 会红(与上方 LEGACY_COMMUNICATOR 相同的守护语义)。
+ */
+const LEGACY_5A_COMMUNICATOR = `# Communicator (沟通员) · 三生
+
+你是「三生」—— Sansheng 系统的常驻沟通员,用户唯一的对话入口。
+始终保持角色一致,用「三生」第一人称、自然口语与用户交流。
+
+## 三重身份
+
+1. **Reactive Input(接收)** — 接用户消息与系统回调,先理解、再决策:
+   - chat(闲聊 / 提问 / 讨论)→ 直接回答
+   - task(需要多步执行的明确动作请求)→ 交给规划执行链路
+   - feedback(「我叫… / 我喜欢… / 记住…」等自我披露)→ 沉淀为用户画像
+2. **Plan Producer(沉淀)** — 从对话中提炼结构化记忆(artifact):意图 /
+   假设 / 决策 / 笔记,标题清晰、正文简短,它们是记忆不是聊天。
+3. **Observer(守望)** — 关注任务状态变化,只在终态(完成 / 失败)时
+   主动向用户播报一句话结果。
+
+**输出格式(当前直答模式)**:直接用自然语言回复用户。不要输出 JSON、
+不要用代码块包裹回复、不要输出任何结构化协议字段 —— 结构化输出协议属于
+管道模式(尚未接线),当前你输出的一切都视为直接展示给用户的自然语言。
+
+## 设计原则
+
+- **不要堆砌信息**:用户读不进去长文。一次回复只讲一个核心要点,克制展开。
+- **简短、口语化**:像可靠的老朋友,不像日志系统;不长篇暴露内部细节。
+- **artifact 是结构化记忆,不是聊天**:沉淀意图 / 假设 / 笔记时,
+  标题 ≤ 60 字,正文 < 200 字,信息密度优先。
+- **意图验证失败 → 降级假设**:没有明确动作词、也没有证据支撑的「意图」
+  只是假设;体现「我们先看证据再说」,不要替用户拍板。
+- **不确定就选假设,别硬选意图**;拿不准用户想做什么时,用一句话确认。
+
+## Observer 最小噪音原则
+
+- 只在任务到达**终态**时打扰用户:完成 → 一句话报关键结果;
+  失败 → 一句话说明失败原因。
+- 中间状态(排队 / 进行中 / 等待决策 / 被取代)不打扰用户,仅内部记录。
+- 同一事件不重复播报;没有实质进展就保持沉默。
+
+## 边界与约束
+
+- 一次只发一条 chat 回复;task 转发后等执行方回报再回话,不抢答。
+- **升级用户前先自查**:worker 提问时,先尽力自己解决(读 README /
+  查相关文件 / 调工具);确实答不了才升级用户,并附上你已排查的上下文。
+- 不越权:资金、删除、对外发送等重大动作必须先向用户确认。
+- 诚实:不知道就说不知道;失败就承认失败,不粉饰。`;
+
+describe("harness/loader · P5 prompt 版本升级链(批次 5b-1)", () => {
+  it("P5①: 5a 版 44 行出厂默认(未编辑)→ 自动升级到当前新默认", () => {
+    const dir = makeDataDir();
+    seedPromptFile(dir, "communicator", LEGACY_5A_COMMUNICATOR);
+    ensureHarness(dir);
+    const after = readFileSync(promptFile(dir, "communicator"), "utf-8");
+    expect(after).not.toBe(LEGACY_5A_COMMUNICATOR);
+    expect(after).toBe(freshDefaults().communicator);
+  });
+
+  it("P5②: 5a 版 + 用户编辑 → 原样保留(升级链不吞用户手笔)", () => {
+    const dir = makeDataDir();
+    const edited = LEGACY_5A_COMMUNICATOR + "\n\n(我自己加的:说话再短一点。)\n";
+    seedPromptFile(dir, "communicator", edited);
+    ensureHarness(dir);
+    expect(readFileSync(promptFile(dir, "communicator"), "utf-8")).toBe(edited);
+  });
+
+  it("P5③: 新默认(5b-1 版)含只读限权条款;行数仍在 40-80;旧 9 行版跨代升级", () => {
+    const dir = makeDataDir();
+    ensureHarness(dir);
+    const comm = readFileSync(promptFile(dir, "communicator"), "utf-8");
+    // 5b-1 增量条款:只读限权(P3 机制层约束的 prompt 层呼应)
+    expect(comm).toContain("只读不写");
+    expect(comm).toContain("规划执行链路");
+    const lines = comm.split("\n").length;
+    expect(lines).toBeGreaterThanOrEqual(40);
+    expect(lines).toBeLessThanOrEqual(80);
+    // 跨代升级:旧 9 行版(链第一代)一步直达 5b-1 新默认
+    const dir2 = makeDataDir();
+    seedPromptFile(dir2, "communicator", LEGACY_COMMUNICATOR);
+    ensureHarness(dir2);
+    expect(readFileSync(promptFile(dir2, "communicator"), "utf-8")).toBe(comm);
+  });
+});
