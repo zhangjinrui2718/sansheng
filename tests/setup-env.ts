@@ -19,3 +19,9 @@
 process.env.SANSHENG_DECIDE_LLM = process.env.SANSHENG_DECIDE_LLM ?? "0";
 process.env.SANSHENG_SEDIMENT = process.env.SANSHENG_SEDIMENT ?? "0";
 
+
+// 批次 6 收尾(主会话):真实家目录里不应被测试建出空目录 —— 「用真 HOME 且无
+// settings.json」的既有测试首次 load 会触发默认工作目录自动创建。默认关掉建目录,
+// 需要验证该行为的测试文件显式置 "0"(与 DECIDE_LLM/SEDIMENT 闸门同款形态)。
+process.env.SANSHENG_SKIP_WORKSPACE_MKDIR =
+  process.env.SANSHENG_SKIP_WORKSPACE_MKDIR ?? "1";

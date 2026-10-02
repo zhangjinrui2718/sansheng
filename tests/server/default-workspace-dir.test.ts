@@ -52,6 +52,9 @@ beforeEach(() => {
   keyring = new Keyring(join(dataDir, ".keyring"));
   savedHome = process.env.HOME;
   process.env.HOME = home;
+  // 本文件要验证「默认工作目录自动创建」,所以显式打开该闸门(HOME 已指向临时目录,
+  // 故创建行为只发生在 mkdtemp 内);其余测试文件由全局 setup 默认关掉。
+  process.env.SANSHENG_SKIP_WORKSPACE_MKDIR = "0";
   vi.restoreAllMocks();
 });
 
@@ -59,6 +62,7 @@ afterEach(() => {
   vi.restoreAllMocks();
   if (savedHome === undefined) delete process.env.HOME;
   else process.env.HOME = savedHome;
+  delete process.env.SANSHENG_SKIP_WORKSPACE_MKDIR;
   rmSync(root, { recursive: true, force: true });
 });
 
@@ -226,5 +230,20 @@ describe("批次 6 P1 · 默认目录创建失败不崩(降级 log.warn)", () =>
 
     expect(s.cwd).toBe(join(fakeHomeFile, "sansheng-workspace"));
     expect(readCwdOnDisk()).toBe(join(fakeHomeFile, "sansheng-workspace"));
+  });
+});
+
+/**
+ * 闸门行为(批次 6 收尾):SANSHENG_SKIP_WORKSPACE_MKDIR=1 时,即便 HOME 指向的
+ * 默认工作目录不存在也不得创建 —— 这是「测试不在用户真实家目录留痕」的守护。
+ * 闸门在 tests/setup-env.ts 全局默认开启,本文件的其它用例显式置 "0" 打开建目录。
+ */
+describe("SANSHENG_SKIP_WORKSPACE_MKDIR 闸门", () => {
+  it("=1 时不创建默认工作目录(cwd 值照常生效)", () => {
+    process.env.SANSHENG_SKIP_WORKSPACE_MKDIR = "1";
+    const store = new SettingsStore(dataDir, () => keyring);
+    const s = store.load();
+    expect(s.cwd).toBe(defaultWorkspaceDir());
+    expect(existsSync(defaultWorkspaceDir())).toBe(false);
   });
 });

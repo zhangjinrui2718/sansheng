@@ -241,6 +241,10 @@ export class SettingsStore {
    */
   private ensureDefaultWorkspaceDir(cwd: string): void {
     if (cwd !== defaultWorkspaceDir()) return;
+    // 测试卫生闸门:全局 vitest setup 默认置 1,避免「用真 HOME 且无 settings.json」的
+    // 既有测试在用户真实家目录里 mkdir 出空目录(本项目铁律:测试只碰 mkdtemp)。
+    // 需要验证建目录行为的测试显式置 "0" 打开(见 tests/server/default-workspace-dir.test.ts)。
+    if (process.env.SANSHENG_SKIP_WORKSPACE_MKDIR === "1") return;
     if (existsSync(cwd)) return;
     try {
       mkdirSync(cwd, { recursive: true });
