@@ -39,14 +39,18 @@ import {
   type HarnessNotifyUserFn,
 } from "./harnessManager.js";
 
-/** decideFn 只需要 kernel 的模型解析口(避免整 kernel 依赖,测试易桩)。 */
+/**
+ * decideFn 只需要 kernel 的模型解析口(避免整 kernel 依赖,测试易桩)。
+ * getApiKey:B6(审查 §B6)同款 —— 显式把 key 交给 completeSimple,不进 process.env。
+ */
 export interface HarnessBootKernel {
   getModel(): Model<any> | null;
+  getApiKey?(): string | undefined;
 }
 
 export interface HarnessBootOptions {
   storage: Storage;
-  kernel: Pick<AgentKernel, "getModel">;
+  kernel: Pick<AgentKernel, "getModel" | "getModelApiKey">;
   /** 覆盖 harness system prompt;默认 FALLBACK_HARNESS_PROMPT(内置精简版)。 */
   systemPrompt?: string;
   /** DI seam(测试注入);不传 → 生产 completeSimple(kernel.getModel())。 */
@@ -124,6 +128,7 @@ export function makeProductionHarnessDecideFn(
     if (!model) {
       throw new Error("harness decide: no resolved model (kernel not started?)");
     }
+    const apiKey = kernel.getApiKey?.();
     const result = await completeSimple(
       model as Parameters<typeof completeSimple>[0],
       {
@@ -132,6 +137,7 @@ export function makeProductionHarnessDecideFn(
           { role: "user", content: buildHarnessDecidePrompt(input), timestamp: Date.now() },
         ],
       },
+      apiKey ? { apiKey } : undefined,
     );
     if (result.stopReason === "error" || result.errorMessage) {
       throw new Error(result.errorMessage ?? "completeSimple error");

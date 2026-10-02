@@ -131,9 +131,17 @@ describe("B6 · 明文 key 不再进 process.env", () => {
     expect(process.env.DEEPSEEK_API_KEY).toBe(API_KEY);
   });
 
-  it("空 apiKey / 无 env 映射的 provider 不写 env(不产生空串噪声)", () => {
+  it("无 env 映射的 provider 接管后,上一家的明文 key 同样被清掉", () => {
     syncActiveProviderApiKeyEnv(PROVIDER, API_KEY);
-    syncActiveProviderApiKeyEnv("github-copilot", "whatever");
     expect(process.env.DEEPSEEK_API_KEY).toBe(API_KEY);
+    // github-copilot 走 OAuth / headers,不在 PROVIDER_ENV_KEY 表里 →
+    // 此刻 env 里不该还留着 deepseek 的明文 key(它已经不是 active provider)
+    syncActiveProviderApiKeyEnv("github-copilot", "whatever");
+    expect(process.env.DEEPSEEK_API_KEY).toBeUndefined();
+  });
+
+  it("空 apiKey → 不写空串噪声", () => {
+    syncActiveProviderApiKeyEnv(PROVIDER, "");
+    expect(process.env.DEEPSEEK_API_KEY).toBeUndefined();
   });
 });

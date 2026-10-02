@@ -18,7 +18,7 @@
 import { createAgentSession, type AgentSession } from "@earendil-works/pi-coding-agent";
 import type { Model } from "@earendil-works/pi-ai";
 import { nanoid } from "nanoid";
-import { resolveModel } from "../providers/registry.js";
+import { resolveModel, syncActiveProviderApiKeyEnv } from "../providers/registry.js";
 import { log } from "../../shared/log.js";
 import type { RoleKind, AgentRunSummary, RoleId } from "@shared/types/agents";
 import type { MessageBus } from "./messageBus.js";
@@ -88,6 +88,9 @@ export class AgentRunner {
         `AgentRunner(${this.role}): cannot resolve model ${this.settings.provider}/${this.settings.modelId}`,
       );
     }
+    // B6(审查 §B6):同 communicator.ensureSession —— 建 Pi session 前一次性
+    // 同步 active provider 的 env(resolveModel 已是纯函数)。
+    syncActiveProviderApiKeyEnv(this.settings.provider, this.settings.apiKey);
     const result = await createAgentSession({
       model: model as Model<string>,
       agentDir: this.agentDir,

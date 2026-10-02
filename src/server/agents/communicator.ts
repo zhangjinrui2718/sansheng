@@ -27,7 +27,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { completeSimple } from "@earendil-works/pi-ai/compat";
 import type { Model } from "@earendil-works/pi-ai";
-import { resolveModel } from "../providers/registry.js";
+import { resolveModel, syncActiveProviderApiKeyEnv } from "../providers/registry.js";
 import type { RunnerSettings } from "./runner.js";
 import type {
   BusMessage,
@@ -124,6 +124,13 @@ const DECIDE_HISTORY_CHARS = 80;
 export interface LlmDecideDeps {
   /** 返回当前 resolved Model;null → 无模型 → 降级正则(不触网)。 */
   getModel: () => Model<any> | null;
+  /**
+   * B6(审查 §B6):active provider 的明文 apiKey,显式传给 completeSimple。
+   * 旧实现在 resolveModel 里把它写进 process.env,任何解析模型的动作(包括
+   * 这条 decide 单轮补全)都会让明文 key 留在进程 env 里;现在 decide 走显式
+   * 传参(kernel.getModelApiKey() 注入),env 只在 Pi session 建之前同步一次。
+   */
+  getApiKey?: () => string | undefined;
   /**
    * DI seam(测试注入):替换默认的 completeSimple 调用。注入时绕过模型/开关闸门
    * (显式注入 = 显式测试意图)。生产不传 → 走 completeSimple(getModel())。
@@ -239,10 +246,11 @@ export function makeLlmCommunicatorDecide(deps: LlmDecideDeps): CommunicatorDeci
   }): Promise<string> => {
     const model = deps.getModel();
     if (!model) throw new Error("decide: no resolved model");
+    const apiKey = deps.getApiKey?.();
     const result = await completeSimple(model as Parameters<typeof completeSimple>[0], {
       systemPrompt: input.systemPrompt,
       messages: [{ role: "user", content: input.userPrompt, timestamp: Date.now() }],
-    }, { maxTokens: DECIDE_LLM_MAX_TOKENS });
+    }, { maxTokens: DECIDE_LLM_MAX_TOKENS, ...(apiKey ? { apiKey } : {}) });
     if (result.stopReason === "error" || result.errorMessage) {
       throw new Error(result.errorMessage ?? "completeSimple error");
     }
@@ -539,6 +547,10 @@ export class Communicator {
       log.warn("Communicator: no model resolved, falling back to non-LLM mode");
       return null;
     }
+    // B6(审查 §B6):resolveModel 已改成不碰 process.env 的纯函数,凡是建 Pi
+    // session 的调用方都要显式同步一次 active provider 的 env(见
+    // registry.ts syncActiveProviderApiKeyEnv 注释与 kernel.createPiSession)。
+    syncActiveProviderApiKeyEnv(this.opts.settings.provider, this.opts.settings.apiKey);
     this.model = model as Model<string>;
     // 注入 user-customized systemPrompt:用户 ~/.sansheng/system_prompts/communicator.md
     // 覆盖或 DEFAULT_PROMPTS.communicator fallback(undefined → loader 用默认 AGENTS.md)

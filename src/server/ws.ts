@@ -85,10 +85,20 @@ function makeLlmCall(kernel: AgentKernel): PlannerLlmCall & ExecutorLlmCall {
     if (!model) {
       throw new Error("makeLlmCall: kernel has no resolved model (start kernel first)");
     }
-    const result = await completeSimple(model as Parameters<typeof completeSimple>[0], {
-      systemPrompt: input.systemPrompt,
-      messages: [{ role: "user", content: input.userPrompt, timestamp: Date.now() }],
-    });
+    // B6(审查 §B6「明文 key 进 process.env」):key 显式传给 completeSimple。
+    // 旧链路依赖 resolveModel 事先把 key 写进 process.env,Pi compat 的
+    // withEnvApiKey 再从 env 兜底 —— 意味着 Planner/Executor 每跑一轮,进程的
+    // env 里就长期留着一份明文 provider key(且子进程继承)。pi-ai compat 的
+    // withEnvApiKey 只在 `options.apiKey` 缺失时才回落 env,显式传参优先级更高。
+    const apiKey = kernel.getModelApiKey();
+    const result = await completeSimple(
+      model as Parameters<typeof completeSimple>[0],
+      {
+        systemPrompt: input.systemPrompt,
+        messages: [{ role: "user", content: input.userPrompt, timestamp: Date.now() }],
+      },
+      apiKey ? { apiKey } : undefined,
+    );
     if (result.stopReason === "error" || result.errorMessage) {
       throw new Error(`makeLlmCall: ${result.errorMessage ?? "unknown error"}`);
     }

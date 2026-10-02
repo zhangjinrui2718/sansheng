@@ -28,7 +28,7 @@ import { appendBusMessage, loadBusMessages } from "../agents/busPersister.js";
 
 /** 本文件用到 BusMessage 类型 */
 type BusMessage = BusMessageFromTypes;
-import { resolveModel } from "../providers/registry.js";
+import { resolveModel, syncActiveProviderApiKeyEnv } from "../providers/registry.js";
 import { artifactBus, makeArtifact } from "../bus/index.js";
 import { upsertArtifact } from "../storage/index.js";
 import {
@@ -276,6 +276,25 @@ export class AgentKernel {
   }
 
   /**
+   * 批次 4b B6(审查 §B6「明文 key 进 process.env」):当前 active provider 的
+   * 明文 apiKey。
+   *
+   * 存在的理由:resolveModel 改成纯函数之后,凡是**不经 Pi session** 的 LLM 调用
+   * (ws.ts makeLlmCall / decide 分类 / 回合后沉淀 / harness decide)都必须显式把
+   * key 交给 `completeSimple(model, ctx, { apiKey })` —— pi-ai compat 的
+   * withEnvApiKey 只在 options.apiKey 缺失时才回落 env,显式传参优先级更高。
+   * 这些调用方统一经 kernel.getModel() 拿模型,配套经本方法拿 key,
+   * 两处同源于 `activeProvider()`,不可能配错 provider。
+   */
+  getModelApiKey(): string | undefined {
+    try {
+      return this.settingsStore.activeProvider()?.apiKey || undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
    * 使当前 session 失效(不重建)。用于 settings 变更后:
    * 下一次 ensureStarted/prompt 会用新的 active provider 重新 start()。
    */
@@ -342,6 +361,8 @@ export class AgentKernel {
       // 消歧「继续/再跑一次」类省略句;延迟代价可忽略。
       decideFn: makeLlmCommunicatorDecide({
         getModel: () => this.getModel(),
+        // B6:显式传 apiKey 给 completeSimple,不再依赖 process.env 回落。
+        getApiKey: () => this.getModelApiKey(),
         ...(this.opts.decideLlmCall ? { llmCall: this.opts.decideLlmCall } : {}),
         recentHistory: (conversationId) => {
           try {
@@ -820,6 +841,14 @@ export class AgentKernel {
     // dataDir 派生与 ensureCommunicator()/replayBus() 同一表达式
     const dataDir = process.env.SANSHENG_DATA ?? this.agentDir.replace(/\/pi$/, "");
     const harnessPrompt = loadHarness(dataDir).systemPrompts.communicator;
+    // B6(审查 §B6「明文 key 进 process.env」):这是全仓**唯一**需要把 active
+    // provider 的 key 写进 process.env 的地方 —— Pi SDK 的 ModelRuntime 在
+    // Sansheng 的配置形态下(不写 agentDir/auth.json)从 env 取凭据,而且
+    // session 的工具执行会 spawn 子进程并继承 env。旧实现在 resolveModel 里
+    // 无条件写 env,导致每次解析模型(连 decide / 沉淀这种单轮补全都算)都往
+    // env 里塞一份,而且切 provider 之后旧 key 永不删除。
+    // 现在收敛成「建 session 前一次性同步 active provider + 清掉上一次的」。
+    syncActiveProviderApiKeyEnv(active.provider, active.apiKey);
     const createPromise = (async () => {
       let resourceLoader: DefaultResourceLoader | undefined;
       if (harnessPrompt.trim()) {
@@ -1571,6 +1600,8 @@ export class AgentKernel {
     void sedimentTurn(
       {
         getModel: () => this.getModel(),
+        // B6:显式传 apiKey 给 completeSimple,不再依赖 process.env 回落。
+        getApiKey: () => this.getModelApiKey(),
         ...(this.opts.sedimentLlmCall ? { llmCall: this.opts.sedimentLlmCall } : {}),
       },
       this.storage,

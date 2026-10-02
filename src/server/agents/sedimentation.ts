@@ -101,6 +101,12 @@ export interface SedimentLlmDeps {
   /** 返回当前 resolved Model;null → 无模型 → 跳过(不触网)。 */
   getModel: () => Model<any> | null;
   /**
+   * B6(审查 §B6):active provider 的明文 apiKey,显式传给 completeSimple
+   * (同 decide 的理由 —— 沉淀是 fire-and-forget 的单轮补全,绝不该因为它
+   * 而让明文 key 进 process.env)。
+   */
+  getApiKey?: () => string | undefined;
+  /**
    * DI seam(测试注入):替换默认的 completeSimple 调用。注入时绕过 env/模型
    * 闸门(显式注入 = 显式测试意图,makeLlmCommunicatorDecide 同款语义)。
    */
@@ -226,10 +232,11 @@ export async function sedimentTurn(
   }): Promise<string> => {
     const model = deps.getModel();
     if (!model) throw new Error("sediment: no resolved model");
+    const apiKey = deps.getApiKey?.();
     const result = await completeSimple(model as Parameters<typeof completeSimple>[0], {
       systemPrompt: callInput.systemPrompt,
       messages: [{ role: "user", content: callInput.userPrompt, timestamp: Date.now() }],
-    }, { maxTokens: deps.maxTokens ?? SEDIMENT_LLM_MAX_TOKENS });
+    }, { maxTokens: deps.maxTokens ?? SEDIMENT_LLM_MAX_TOKENS, ...(apiKey ? { apiKey } : {}) });
     if (result.stopReason === "error" || result.errorMessage) {
       throw new Error(result.errorMessage ?? "completeSimple error");
     }
