@@ -23,6 +23,15 @@ import {
   type ToolName,
 } from "../tools.js";
 
+/**
+ * 批次 7-O:工具集合的「改动生效时机」。**只写一份**,describe 的 detail 与
+ * detail() 的 payload 共用 —— 同一件事说两遍,迟早有一处忘了改。
+ * 依据:orchestrator.ts:421(每次 plan 构造时 loadHarness().toolSets[role].allowed)
+ * 与 agentKernel.ts:1071(每次 createPiSession 读 toolSets.communicator)。
+ */
+const TOOLS_APPLY_NOTE =
+  "下一次该角色构造时读盘 —— planner/executor 每次 plan(orchestrator 构造),communicator 下次建 session(需 kernel.invalidate())。不用重启 server。";
+
 export const toolsFacet: HarnessFacet = {
   id: "tools",
   title: "工具集合",
@@ -49,8 +58,7 @@ export const toolsFacet: HarnessFacet = {
           // 批次 7-O:集合文件改动后什么时候被重新读到 —— 取自真实消费点
           // (orchestrator.ts:421 每次 plan 构造 / agentKernel.ts:1071 每次建 session),
           // 不是 UI 上一句「保存即生效」的安慰话。
-          apply:
-            "下一次该角色构造时读盘 —— planner/executor 每次 plan(orchestrator 构造),communicator 下次建 session(需 kernel.invalidate())。不用重启 server。",
+          apply: TOOLS_APPLY_NOTE,
           enforced: s.enforced,
         },
       };
@@ -86,8 +94,7 @@ export const toolsFacet: HarnessFacet = {
         factory: factoryToolSet(id),
         enforced: set.enforced,
         basis: set.enforceBasis,
-        apply:
-          "下一次该角色构造时读盘 —— planner/executor 每次 plan(orchestrator 构造),communicator 下次建 session(需 kernel.invalidate())。不用重启 server。",
+        apply: TOOLS_APPLY_NOTE,
         ceiling,
         catalog: names.map((n) => ({
           name: n,
