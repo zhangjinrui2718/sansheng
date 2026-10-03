@@ -17,10 +17,14 @@
  *   · **「为什么这个系统长成这样」回到本文件头**。以下四件事属于这一类,页面上
  *     不再重复,但一条都没丢:
  *     1. 「生效时机」描述的是**系统事实**(磁盘上的 prompt 改了,代码什么时候重新读到),
- *        不是本页提供的功能:本页只读、**仓库当前没有任何 harness 写接口**
- *        (src/server/http.ts:255 明写「本批只读」,HarnessManager v0 = 只读 preview
- *        生成器,D15)。没有这条信息,改了 prompt 发现没反应会被直接判定成产品坏了;
- *        现在每张卡的「改动生效」行仍然给出结论,依据在该行的 `title=` 里。
+ *        不是 UI 自己编的一句「保存即生效」。没有这条信息,改了 prompt 发现没反应
+ *        会被直接判定成产品坏了;现在每张卡的「改动生效」行仍然给出结论,依据在该行
+ *        的 `title=` 里。
+ *        ⚠️ 批次 7-O 之后这句话**多了一层**:写入成功 ≠ 当场生效 —— 沟通员的 Pi
+ *        session 被 kernel 缓存,要 invalidate() 才读得到新值,而 invalidate() 会 abort
+ *        在飞回合。所以编辑器上「写完立即重建会话」默认**不勾**,由用户自己决定。
+ *        (HarnessManager v0 仍是只读 preview 生成器,D15 —— 它的写面不走本节接口,
+ *        也不在本页出现。)
  *     2. proposals / previews 为什么**结构上**永远是空的(见下面 §反造假第 1 条);
  *        页面只留一句「暂无提案与实现预览(proposals 0 · previews 0)」。
  *     3. 配置两项为什么标「仅声明未强制」、以及**系统里真实存在的约束在哪**:
@@ -31,7 +35,31 @@
  *        用编译进代码的常量;仅声明未强制 = 展示了但代码里没有任何执行点。这三句现在
  *        是三个徽章各自的 `title=`,页面上只留徽章本身。
  *
- * ── 数据源:唯一 `GET /api/harness`(src/server/http.ts:258,只读)──────────────
+ * ── 批次 7-O:本页多了一面 —— 写面(编辑入口,不改动只读视图)───────────────
+ *   本页从此**不再是纯只读页**,但只读视图本身一行没改:手册卡 / 工具集合 / 配置 /
+ *   notes / 三档徽章仍是同一份 `GET /api/harness` 渲染出来的。编辑是**叠加**在其上
+ *   的入口,收起时页面上一个多余的像素都没有。
+ *
+ *   入口与端点(实现见 components/harness/*,后端见 src/server/http/harnessRoutes.ts):
+ *     手册卡 → 「编辑手册」→ components/harness/PromptEditor.tsx
+ *       GET  /api/harness/facets/prompts/entries/:id        点开才拉,总表不带全文
+ *       PUT  /api/harness/facets/prompts/entries/:id        { content, invalidate? }
+ *     工具集合行 → 「编辑」→ components/harness/ToolsEditor.tsx
+ *       GET  /api/harness/facets/tools/entries/:id
+ *       PUT  /api/harness/facets/tools/entries/:id          { allow, deny, invalidate? }
+ *     两者共用 POST /api/harness/facets/:facet/entries/:id/reset { confirm: "reset" }
+ *
+ *   四条不能省的纪律:
+ *     1. **失败原样上屏**。后端 message 里已经说了人话(哪些工具名不认识 / 超限多少
+ *        字符 / 角色不在注册表内),前端不翻译不截断(见 facetClient.FacetApiError)。
+ *     2. **报成功 = 报真话**。changed=false 就说「未写盘」;backupPath / warnings
+ *        一个不折;enforced=false 的条目照写「改了不会有任何效果」。
+ *     3. **上界外的工具画不成能勾的框**。inCeiling=false 的复选框 disabled + 名字
+ *        划线 + 一句「勾了也不会生效」—— 架构裁决不能被一个 UI 控件稀释掉。
+ *     4. **deny 原样回传**。本 UI 不编辑 deny,但绝不在保存时把它吞掉(吞掉等于
+ *        保存一次就清空用户的拒绝名单)。
+ *
+ * ── 数据源:读面唯一 `GET /api/harness`(src/server/http.ts;写面在上面三条路由)──
  *   manager  : { running, stats{received,processed,failed,skippedSeen,skippedStorageDedup,
  *                             skippedInFlight,seenSize,inFlightSize},
  *                decideSource: "production-llm"|"injected"|null, startedAt|null }
@@ -68,7 +96,11 @@
  *      未接线」—— 它们走 completeSimple 单轮补全,没有工具循环);redLines / budget
  *      仍一律标「仅声明未强制」。集合被上界拒绝的条目要显式画出来(划线 pill),
  *      不让用户以为「我写进去就生效了」。
- *   3. **不承诺本页没有的功能**:见上面 §1,本页只读。
+ *   3. **不承诺本页没有的功能**:见上面 §2(写面)。7-O 之后本页**能写**的只有
+ *        prompts / tools 两个面,而且写出去的是磁盘上的配置,不是「运行中的行为」——
+ *        「生效中」永远由 enforced / ROLE_CEILING / invalidate 三件事共同决定。
+ *        编辑器面板上三行事实(生效时机 / contract 风险 / 零消费方)常驻,就是为了
+ *        不让「保存成功」被读成「已经生效」。
  *   4. **徽章由数据推导,不是写死**:state==="empty" → 实际回退的是模块内置 stub
  *      (planner.ts:176 / executor.ts:124)或 SDK 默认,那就标「硬编码兜底」而不是
  *      「生效中」;prompt 摘要缺失时**不给档位**(无从判定就不猜)。
@@ -93,6 +125,8 @@ import {
   StatStrip,
   type Tone,
 } from "@/components/ui/primitives";
+import { PromptEditor } from "@/components/harness/PromptEditor";
+import { ToolsEditor } from "@/components/harness/ToolsEditor";
 
 interface HarnessPromptInfo {
   role: string;
@@ -380,6 +414,8 @@ interface CardModel {
   toolsTitle: string;
   apply: string;
   applyTitle: string;
+  /** 批次 7-O:叠加在只读卡上的编辑入口(不展开时页面上不存在) */
+  editor?: ReactNode;
 }
 
 function ManualCard({ card }: { card: CardModel }) {
@@ -424,6 +460,9 @@ function ManualCard({ card }: { card: CardModel }) {
         />
         <KV label="改动生效" value={<span title={card.applyTitle}>{card.apply}</span>} />
       </div>
+
+      {/* 批次 7-O:编辑入口叠加在只读卡之下,收起时不渲染任何东西。 */}
+      {card.editor}
     </article>
   );
 }
@@ -457,6 +496,14 @@ export function HarnessPage() {
   }, []);
 
   useEffect(() => {
+    void load();
+  }, [load]);
+
+  // 批次 7-O:写成功后的整页刷新。两个编辑器共用这一个回调 —— 写完必须重拉
+  // GET /api/harness,否则卡片上的 state pill / 划线 pill 会停在写之前的样子,
+  // 用户会以为「保存了但没生效」。用 useCallback 固定住引用,免得每次渲染都
+  // 把编辑器里的编辑态冲掉。
+  const refresh = useCallback(() => {
     void load();
   }, [load]);
 
@@ -533,6 +580,9 @@ export function HarnessPage() {
           meta.toolsNote + (toolSet && !toolSet.enforced ? ` · 未接线:${toolSet.enforceBasis}` : ""),
         apply: meta.apply,
         applyTitle: `依据:${meta.applyBasis}`,
+        // 批次 7-O:每张手册卡一个提示词编辑入口。unitId 就是 role ——
+        // prompts 面的条目 id 即 PROMPT_UNITS 里的单元 id(后端注册表,不是前端编的)。
+        editor: <PromptEditor unitId={meta.role} onSaved={refresh} />,
       };
     }),
     {
@@ -558,6 +608,10 @@ export function HarnessPage() {
           : ""),
       apply: MANAGER_META.apply,
       applyTitle: `依据:${MANAGER_META.applyBasis}`,
+      // 工装顾问的 system prompt 也是真的受管单元(7-G 起 system_prompts/harness_manager.md
+      // 进了版本链),所以同样给编辑入口;它「不可编辑」的那部分是 HarnessManager 自己的
+      // 实现预览(v0 只读),不是这份手册。
+      editor: <PromptEditor unitId={MANAGER_META.role} onSaved={refresh} />,
     },
   ];
 
@@ -576,8 +630,8 @@ export function HarnessPage() {
     <div className="ss-page">
       <PageHeader
         title="Harness"
-        hint="每个 agent 读的是哪份手册 · 真的生效了吗"
-        hintTitle="本页只读:仓库当前没有任何 harness 写接口,徽章只陈述代码里的事实。"
+        hint="每个 agent 读的是哪份手册 · 真的生效了吗 · 7-O 起可原地编辑"
+        hintTitle="徽章只陈述代码里的事实。7-O 起本页可编辑提示词与工具集合:写的是磁盘配置,「生效中」仍由 enforced / 上界 / 是否 invalidate 共同决定。"
         aside={
           <>
             <Pill tone={manager.running ? "jade" : "mute"}>
@@ -624,33 +678,38 @@ export function HarnessPage() {
             <EmptyState>server 未返回任何角色的工具集合。</EmptyState>
           ) : (
             toolSets.map((t, i) => (
-              <div
-                key={t.role}
-                className="flex flex-wrap items-center gap-x-2 gap-y-1 py-1"
-                style={i > 0 ? { borderTop: "1px solid var(--ink-3)" } : undefined}
-              >
-                <span className="ss-meta" style={{ minWidth: 104 }}>
-                  {t.role}
-                </span>
-                <Pill
-                  tone={t.source === "factory" ? "mute" : "cyan"}
-                  title={
-                    t.source === "factory"
-                      ? "集合文件内容等于当前出厂默认,升级时会安全覆盖"
-                      : "用户手笔:ensure 不会覆盖,新出厂默认需手动合并"
-                  }
+              // 批次 7-O:外层多包一层 grid,让展开后的勾选矩阵占满整行 ——
+              // 编辑器是块级面板,塞在 flex 行里会被挤成一条。
+              <div key={t.role} className="grid gap-1">
+                <div
+                  className="flex flex-wrap items-center gap-x-2 gap-y-1 py-1"
+                  style={i > 0 ? { borderTop: "1px solid var(--ink-3)" } : undefined}
                 >
-                  {t.source === "factory" ? "出厂默认" : "用户手笔"}
-                </Pill>
-                <EffectBadge tier={t.enforced ? "live" : "declared"} title={t.enforceBasis} />
-                <span className="flex flex-wrap items-center gap-1.5">
-                  <ToolChips set={t} />
-                </span>
-                {t.warnings.map((w) => (
-                  <Flag key={w} tone="amber">
-                    <span className="ss-note">{w}</span>
-                  </Flag>
-                ))}
+                  <span className="ss-meta" style={{ minWidth: 104 }}>
+                    {t.role}
+                  </span>
+                  <Pill
+                    tone={t.source === "factory" ? "mute" : "cyan"}
+                    title={
+                      t.source === "factory"
+                        ? "集合文件内容等于当前出厂默认,升级时会安全覆盖"
+                        : "用户手笔:ensure 不会覆盖,新出厂默认需手动合并"
+                    }
+                  >
+                    {t.source === "factory" ? "出厂默认" : "用户手笔"}
+                  </Pill>
+                  <EffectBadge tier={t.enforced ? "live" : "declared"} title={t.enforceBasis} />
+                  <span className="flex flex-wrap items-center gap-1.5">
+                    <ToolChips set={t} />
+                  </span>
+                  {t.warnings.map((w) => (
+                    <Flag key={w} tone="amber">
+                      <span className="ss-note">{w}</span>
+                    </Flag>
+                  ))}
+                </div>
+                {/* 编辑器放在行外:它是块级面板,塞进 flex 行会被挤成一条。 */}
+                <ToolsEditor role={t.role} onSaved={refresh} />
               </div>
             ))
           )}
