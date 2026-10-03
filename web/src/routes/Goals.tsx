@@ -74,6 +74,23 @@ export function GoalsPage({ conversationId }: Props) {
       .sort((a, b) => b.intent.createdAt - a.intent.createdAt);
   }, [artifacts]);
 
+  /**
+   * 挂不到任何目标名下的待办(`parentIntent` 没写,或指向本会话不存在的 intent)。
+   *
+   * 这一段是本批新加的。此前本页只 `filter(kind === "intent")`,于是这类待办
+   * **被静默丢掉**:页面只说「本会话暂无目标」,而实际上有 N 个待办躺在
+   * blackboard 上没人管。Agent 页早就为同一件事专门开了一块「未归属意图的
+   * 待办」(还写明了「以免丢数据」),本页却装作没有 —— 同一份数据,两个页面
+   * 两种说法。工件页也早有同一条纪律(§4 表末行:「不给它们建组就等于把真实
+   * 数据藏起来」,反造假:宁可多一组,不静默丢数据)。
+   */
+  const orphanTodos = useMemo(() => {
+    const ids = new Set(goals.map((g) => g.intent.id));
+    return artifacts.filter(
+      (a) => a.kind === "todo" && (!isString(a.parentIntent) || !ids.has(a.parentIntent)),
+    );
+  }, [artifacts, goals]);
+
   const settled = goals.filter((g) => g.intent.status === "resolved" || g.intent.status === "failed");
 
   return (
@@ -112,9 +129,19 @@ export function GoalsPage({ conversationId }: Props) {
         <EmptyState>加载中…</EmptyState>
       ) : !error && goals.length === 0 ? (
         <EmptyState>
-          {/* 「发送 /plan 你的目标」读起来像要照抄的字面量,照抄后规划员会去规划
-              「你的目标」这四个字(ChatSurface 判的是 startsWith("/plan "))。 */}
-          本会话暂无目标。在「对话」里以 <code>/plan</code> 开头发一条,后面跟你的目标。
+          {orphanTodos.length > 0 ? (
+            /* 有待办却没有目标 —— 此时说「本会话暂无目标」等于**把 N 个待办藏起来**。
+               用户看到的是一个空页,实际上 blackboard 上有活。 */
+            <>
+              本会话有 {orphanTodos.length} 个待办没有归属到任何目标下(目标工件为空),
+              规划员还没落意图。在「Agent 工作面」页能看到它们。
+            </>
+          ) : (
+            <>
+              本会话暂无目标 —— 普通的聊天不会产生目标。
+              {PLAN_HOWTO}
+            </>
+          )}
         </EmptyState>
       ) : (
         <div className="grid gap-2">
@@ -191,6 +218,40 @@ export function GoalsPage({ conversationId }: Props) {
               </article>
             );
           })}
+
+          {/* 部分归属的情况:有目标,也有几个待办不属于任何一个。同样不藏。 */}
+          {orphanTodos.length > 0 && (
+            <div className="sansheng-card p-3">
+              <div className="flex items-baseline gap-2 mb-1.5">
+                <span className="ss-section" style={{ fontSize: 12 }}>
+                  未归属的待办
+                </span>
+                <span className="ss-meta">{orphanTodos.length}</span>
+              </div>
+              <ul className="grid gap-1">
+                {orphanTodos.map((t) => (
+                  <li key={t.id} className="flex items-center gap-2">
+                    <span
+                      title={statusLabel(t.status)}
+                      style={{
+                        width: 6,
+                        height: 6,
+                        borderRadius: 2,
+                        flex: "0 0 auto",
+                        background: toneColor(statusTone(t.status)),
+                      }}
+                    />
+                    <span className="truncate ss-body" style={{ color: "var(--bone-dim)" }}>
+                      {t.title}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+              <div className="ss-note mt-1.5">
+                parentIntent 没写,或指向本会话不存在的目标工件。
+              </div>
+            </div>
+          )}
         </div>
       )}
     </div>

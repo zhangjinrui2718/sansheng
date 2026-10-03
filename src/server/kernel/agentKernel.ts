@@ -1553,23 +1553,42 @@ export class AgentKernel {
           }
           case "message_update": {
             const update = event.assistantMessageEvent;
-            const text = update?.delta ?? update?.text ?? "";
-            // assistantMessageEvent.type: "text" | "thinking" | "tool_use"
-            if (update?.type === "thinking" || update?.thinking) {
-              if (this.buf) this.buf.thinkingDeltas.push(update.thinking ?? text);
+            // ── 批次 7-I(A):推理泄漏成正式回复的根因修复 ────────────────
+            // 旧代码:`if (update?.type === "thinking" || update?.thinking)`。
+            // **这个类型名是错的。** pi-ai 的 `AssistantMessageEvent` 真实取值是
+            // (node_modules/@earendil-works/pi-ai/dist/types.d.ts:470+):
+            //   start | text_start | text_delta | text_end
+            //   | thinking_start | thinking_delta | thinking_end
+            //   | toolcall_start | toolcall_delta | toolcall_end | done | error
+            // —— 没有 "thinking" 这个值,增量事件叫 **"thinking_delta"**,文本在
+            // `delta` 字段上(没有 `thinking` / `text` 字段)。于是判断恒为 false,
+            // **所有 thinking 增量都掉进 else 分支进了 textDeltas** → 落进
+            // messages.content → 当成正式回复展示给用户。
+            //
+            // 现场证据(会话 conv_murnhpls_oha6,2026-10-03):12 条消息的 `thinking`
+            // 列长度**全是 0**,而两条 1853 / 908 字符的纯内部推理躺在 content 里,
+            // 零 tool_calls。这条缺陷与 provider 无关 —— 任何会发 thinking_delta 的
+            // 模型都会中招;minimax-cn/MiniMax-M3(thinkingLevel=medium)只是让它
+            // 显眼了而已。
+            //
+            // 顺带修掉第二个问题:旧 else 分支对**所有**非 thinking 事件都推文本,
+            // 包括 start / *_start / *_end / toolcall_*(它们没有 delta,推的是空串,
+            // 属无害噪声,但语义上不该走「文本增量」这条路)。
+            if (update?.type === "thinking_delta") {
+              if (this.buf) this.buf.thinkingDeltas.push(update.delta);
               sink({
                 type: "thinking_delta",
                 conversationId: this.conversationId,
                 messageId: this.currentMessageId ?? "m",
-                text: update.thinking ?? text,
+                text: update.delta,
               });
-            } else {
-              if (this.buf) this.buf.textDeltas.push(text);
+            } else if (update?.type === "text_delta") {
+              if (this.buf) this.buf.textDeltas.push(update.delta);
               sink({
                 type: "delta",
                 conversationId: this.conversationId,
                 messageId: this.currentMessageId ?? "m",
-                text,
+                text: update.delta,
               });
             }
             break;

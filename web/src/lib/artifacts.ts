@@ -202,6 +202,21 @@ export const kindLabel = (k: string): string => KIND_LABEL[k] ?? k;
 export const kindTone = (k: string): Tone => KIND_TONE[k] ?? "bone";
 export const statusLabel = (s: string): string => STATUS_LABEL[s] ?? s;
 export const statusTone = (s: string): Tone => STATUS_TONE[s] ?? "mute";
+
+/**
+ * 「为什么会空 + 下一步该做什么」—— 三页共用一份文案。
+ *
+ * 收在一处的原因:这三个页面读的是**同一个端点的同一批数据**,所以「为什么空」
+ * 的答案也是同一个。此前各写各的,已经漂成三种说法
+ * (Agents 说「发送 /plan 你的目标」/ Artifacts 说「发一次 /plan」/
+ * Goals 说「发送 /plan 你的目标 触发规划后」),其中两种还把占位符写成了
+ * 看起来要照抄的字面量 —— 照抄进去 `goal` 就真的是「你的目标」四个字。
+ *
+ * 句式是刻意的:**只有 `/plan` 是字面量**,后面跟的内容由句法说明它是用户自己
+ * 填的。不写成「发送 /plan <你的目标>」是因为尖括号在正文里会被读成标签;
+ * 写成「以 /plan 开头发一条,后面跟你的目标」就没有这个歧义。
+ */
+export const PLAN_HOWTO = "以 /plan 开头发一条,后面跟你的目标。";
 export const authorLabel = (a: string): string => AUTHOR_LABEL[a] ?? a;
 
 // ───────────────────────────── 展示工具 ─────────────────────────────

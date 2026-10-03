@@ -87,7 +87,11 @@ vi.mock("@earendil-works/pi-coding-agent", () => {
       fire({ type: "message_start", message: { role: "assistant", id: mid } });
       fire({
         type: "message_update",
-        assistantMessageEvent: { type: "text", delta: `echo:${tail}`, text: `echo:${tail}` },
+        // 真实形状:pi-ai 的 AssistantMessageEvent 增量事件叫 **text_delta**
+        // (types.d.ts:470+),文本在 delta 上,没有 "text" 这个 type、也没有 text 字段。
+        // 旧形状是拍脑袋编的,靠 kernel 宽松的 else 分支才跑得通 —— 7-I(A) 修掉
+        // 那个宽松 else 后它就露馅了。
+        assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: `echo:${tail}` },
       });
       fire({ type: "message_end", message: { id: mid, usage: { input: 3, output: 4 } } });
       fire({ type: "agent_end" });
