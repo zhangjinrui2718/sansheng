@@ -381,17 +381,27 @@ harness_manager 压根没有文件,用的是代码里写死的那份」。
 
 没有这张表,用户改完 prompt 发现没反应,会直接判定产品坏了。
 
-**③ 编辑(future)** —— 技术上很轻:每个角色一个 `PUT /api/harness/system_prompts/:role` →
-写 `~/.sansheng/harness/system_prompts/{role}.md`(仓库里目前**没有任何 harness 写接口**,
-`http.ts:254-257` 明确写了「本批只读」)。另外 `harness_manager` 需要**进版本链**(补一个
-`harness_manager.md`,让 `FALLBACK_HARNESS_PROMPT` 退化为兜底而非唯一来源),
- communicator 实例那条还需要编辑后触发 `kernel.invalidate()`。
-写接口会动用户自己的 prompt 文件,属于需要单独确认的改动,**不放在 P0/P1**。
+**③ 编辑(批次 7-O 已落地)** —— 当时判断「技术上很轻,写接口会动用户自己的 prompt 文件,
+属于需要单独确认的改动,不放在 P0/P1」;7-O 把它做成了**独立的写面**,形状与当时的设想有几处
+刻意不同(以代码为准,本节只记决策差异):
+- **路径不是 `PUT /api/harness/system_prompts/:role`**,而是统一的
+  `PUT /api/harness/facets/:facet/entries/:id`(prompts / tools 两个面共用一条),
+  外加 `GET` 同形取详情、`POST .../reset` 恢复出厂;
+- **每次覆盖前自动备份**到 `harness/backups/<facet>/<id>.<时间戳>.bak`(留最近 10 份),
+  「恢复出厂」还要显式 `confirm` —— 当时担心的「动用户文件」正是备份+确认要解决的;
+- **communicator 的 `kernel.invalidate()` 做成了显式开关**(`body.invalidate: true`,默认不调),
+  因为 invalidate 会 abort 在飞回合,保存配置不该顺手掐掉用户正在进行的对话;
+- `harness_manager` 进版本链那条**仍未做**:它至今没有自己的 md 文件,仍是编译内置兜底
+  (`FALLBACK_HARNESS_PROMPT`),这一条要等 5c,不属 7-O 范围。
 
 **④ 自我改进提案区** —— 保留,但如实标注「尚未触发」**并写明原因**
 (§6.3 的 kind 不匹配)。修它很小:executor 阻塞时若 `callbackReason === "harness_proposal"`,
 就额外发一条 `kind: "harness_proposal"` 的工件(或让 manager 也接受
 `kind==="hypothesis" && metadata.callbackReason==="harness_proposal"`),manager 第一次真的会活过来。
+
+> 7-O 补一句边界:④ 说的 manager 提案区**没有**因为 7-O 变成能自动落盘的东西。
+> 7-O 的写面只服务**用户**在 Harness 页的手动编辑;HarnessManager 仍是 v0 只读 preview 生成器
+> (D15),它生成的实现预览不会自动 apply。
 
 ### 6.1 `enabledTools` / `redLines` / `budget`:等 harness 设计完成就消失了吗?
 

@@ -76,7 +76,7 @@ export const MAX_PROMPT_CHARS = 128 * 1024;
 /** 每个条目保留的备份份数。够回退最近 10 次,又不会把 dataDir 撑爆。 */
 const BACKUP_KEEP = 10;
 
-/* ── module-level type guards(项目纪律:不许 as any)─────────────────────── */
+/* ── module-level type guards(项目纪律:禁止 any 类型断言)──────────────────── */
 
 /** 导出给 facet 层做收窄(apply 成功即证明 id 合法,facet 仍需自己收窄才能拿到 `PromptUnitId`)。 */
 export function isPromptUnitId(v: string): v is PromptUnitId {
