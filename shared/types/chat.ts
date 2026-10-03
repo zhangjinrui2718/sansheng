@@ -44,6 +44,39 @@ export interface DeliveryItem {
 }
 
 /**
+ * 批次 8-C · 计划卡(plan)
+ *
+ * **B 缺陷的正面解**:用户抱怨「计划不可见、跑飞的 plan 停不下来」。此前 plan 拆解
+ * 只存在于 blackboard(工件页事后能翻),对话流里从拆解到完成是**一片空白** ——
+ * 用户既看不见「正在做哪一步」,也**没有任何按钮能叫停**。
+ *
+ * 这里是前端侧对 plan_planned / plan_todo_update 的累积态:
+ *   - todos      一次性来自 plan_planned,之后按 todoId **逐行**更新(整份计划不重发);
+ *   - terminal   plan_done / plan_failed 之后写一次,计划卡进入终态(不再有增量);
+ *   - abortRequested  用户点了「中止」且命令已发出 —— **不可撤销**,UI 据此立刻
+ *     锁死按钮,避免重复点击(服务端 abort 掉在飞 executor 后只回 plan_failed)。
+ */
+export interface PlanTodo {
+  id: string;
+  title: string;
+  /** 与工件状态同一套(ArtifactStatus) */
+  status: import("./blackboard.js").ArtifactStatus;
+  /** 依赖的 todo id;非空时 UI 标一行「依赖前一步」 */
+  dependsOn: string[];
+  /** 失败原因(仅 status === "failed" 时有值) */
+  reason: string | null;
+}
+
+export interface PlanBlockData {
+  intentId: string;
+  todos: PlanTodo[];
+  /** 用户已点「中止」,命令已发出 */
+  abortRequested: boolean;
+  /** 终态(null = 还在跑) */
+  terminal: { kind: "done" | "failed"; text: string } | null;
+}
+
+/**
  * Sansheng UI · 一个 turn 内的逻辑块
  * M3a: shared 化,让 pi → blocks 工具可以写在 server 端。
  */
@@ -51,7 +84,8 @@ export type Block =
   | { kind: "thinking"; text: string }
   | { kind: "text"; text: string }
   | { kind: "tool"; tool: ToolCallInfo }
-  | { kind: "delivery"; items: DeliveryItem[] };
+  | { kind: "delivery"; items: DeliveryItem[] }
+  | { kind: "plan"; plan: PlanBlockData };
 
 export interface MessageChunk {
   type: "delta" | "tool_call" | "tool_result" | "thinking" | "done" | "error" | "node" | "heartbeat";

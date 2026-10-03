@@ -99,6 +99,33 @@ export type ServerEvent =
       conversationId: string;
       intentId?: string;
       message: string;
+    }
+  // 批次 8-C:计划与进度上屏。
+  // ⚠️ 镜像关系:server 侧真身在 src/server/kernel/agentKernel.ts 的 ServerEvent
+  // (server 端不能 value-import @shared/*,两边各自定义)—— 字段形状必须逐字一致。
+  // 消费方:web/src/stores/chat.ts applyEvent(plan_planned → 追加一张计划卡;
+  // plan_todo_update → 只改那一行)。
+  | {
+      type: "plan_planned";
+      conversationId: string;
+      intentId: string;
+      todos: Array<{
+        id: string;
+        title: string;
+        /** 与工件状态同一套(ArtifactStatus):open | in_progress | waiting_for_decision
+         *  | resolved | superseded | failed */
+        status: import("./blackboard.js").ArtifactStatus;
+        dependsOn: string[];
+      }>;
+    }
+  /** 某个 todo 的状态变化。**不重发整份计划** —— 计划可能有十几个 todo, */
+  | {
+      type: "plan_todo_update";
+      conversationId: string;
+      todoId: string;
+      status: import("./blackboard.js").ArtifactStatus;
+      /** 失败原因(todo_failed 时有;其它状态为 null) */
+      reason: string | null;
     };
 
 export type ClientCommand =

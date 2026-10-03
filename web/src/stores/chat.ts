@@ -5,7 +5,7 @@
  */
 import { create } from "zustand";
 import type { ServerEvent } from "@shared/types/ws";
-import type { Block } from "@shared/types/chat";
+import type { Block, PlanBlockData } from "@shared/types/chat";
 
 export type Role = "user" | "assistant" | "system";
 
@@ -70,6 +70,12 @@ export interface ChatState {
   sendCancelQuestion(questionId: string): void;
   /** 批次 UI U2(C10-1):Esc 中断 —— 发 { type: "interrupt" } 给 server 的 kernel.abort() */
   sendInterrupt(): void;
+  /**
+   * 批次 8-C:中止当前 plan —— 发 { type: "abort_plan" }。**不可撤销**
+   * (server 会 abort 掉在飞的 executor),故先把计划卡按钮锁死再发命令。
+   * 计划卡「中止」按钮的唯一出口。
+   */
+  sendAbortPlan(): void;
   /** M3c: 设置 Timeline 输入框对某 question 的草稿 */
   setAnswerDraft(questionId: string, text: string): void;
   /** 新建对话:调后端 + 清本地状态 */
@@ -115,6 +121,52 @@ const newTurn = (id: string, role: Role): Turn => ({
   startedAt: Date.now(),
   isStreaming: false,
 });
+
+/**
+ * 批次 8-C:就地改「最后一张计划卡」。没找到就原样返回同一个数组引用
+ * (诚实渲染:不凭空造卡 —— 计划卡只在真的收到 plan_planned 时存在)。
+ *
+ * 为什么只替换一个 turn:MessageList 的 TurnView 走 React.memo,未变的 turn
+ * 保持同一对象引用即不会重渲染。plan_todo_update 每次只碰一行,整卡重渲染会闪。
+ */
+function withLastPlan(turns: Turn[], fn: (plan: PlanBlockData) => PlanBlockData): Turn[] {
+  for (let i = turns.length - 1; i >= 0; i--) {
+    const turn = turns[i];
+    if (!turn) continue;
+    const blocks = turn.blocks;
+    for (let j = blocks.length - 1; j >= 0; j--) {
+      const b = blocks[j];
+      if (!b || b.kind !== "plan") continue;
+      const plan = fn(b.plan);
+      if (plan === b.plan) return turns;
+      const nextBlocks = blocks.slice();
+      nextBlocks[j] = { kind: "plan", plan };
+      const next = turns.slice();
+      next[i] = { ...turn, blocks: nextBlocks };
+      return next;
+    }
+  }
+  return turns;
+}
+
+/**
+ * 批次 8-C:计划卡终态那一行。**所有数字都来自这张卡自己的 todos**
+ * (resolved/superseded 计入完成、failed 计入失败),不引用 plan_done.summary ——
+ * summary 回答「做出了什么」,这里回答「这份拆解走到哪了」。
+ */
+function planDoneLine(plan: PlanBlockData): string {
+  const done = plan.todos.filter((t) => t.status === "resolved" || t.status === "superseded").length;
+  const failed = plan.todos.filter((t) => t.status === "failed").length;
+  const parts = [`${done}/${plan.todos.length} 步完成`];
+  if (failed > 0) parts.push(`${failed} 步失败`);
+  if (plan.abortRequested) parts.push("已请求中止");
+  return parts.join(" · ");
+}
+
+/** 批次 8-C:点过中止才叫「已中止」,否则叫「已失败」—— 两种收场不混着说。 */
+function planFailedLine(plan: PlanBlockData, message: string): string {
+  return `${plan.abortRequested ? "已中止" : "已失败"} · ${message}`;
+}
 
 export const useChatStore = create<ChatState>((set, get) => ({
   conversationId: null,
@@ -179,6 +231,22 @@ export const useChatStore = create<ChatState>((set, get) => ({
     // 这里补上唯一的命令出口,ChatComposer 的 Escape 键经它下发。
     const socket = get().socket as { send(cmd: unknown): void } | null;
     socket?.send({ type: "interrupt" });
+  },
+  sendAbortPlan() {
+    // 批次 8-C:中止是**不可撤销**动作 —— server 侧 abort_plan 分支会
+    // orchestrator.abort()(退订 bus + abort 在飞 executor),没有撤销路径。
+    // 顺序:先锁按钮(abortRequested)再发命令,同帧生效,防住连点。
+    // 无 socket 时**不改** abortRequested:按钮还亮着,用户可以在重连后再点。
+    // 假称「已发送中止」而命令根本没出去,比多点一次糟糕得多。
+    const socket = get().socket as { send(cmd: unknown): void } | null;
+    if (!socket) return;
+    set((s) => ({
+      turns: withLastPlan(
+        s.turns,
+        (p) => (p.abortRequested || p.terminal ? p : { ...p, abortRequested: true }),
+      ),
+    }));
+    socket.send({ type: "abort_plan" });
   },
   setAnswerDraft(questionId: string, text: string) {
     set((s) => {
@@ -523,6 +591,40 @@ export const useChatStore = create<ChatState>((set, get) => ({
           ],
         }));
         return;
+      case "plan_planned": {
+        // 批次 8-C:计划一拆出来就上屏。**此前 orchestrator 一直在发 todos_planned,
+        // ws.ts 的 progress 回调却是 default: break 直接丢掉**(见 src/server/ws.ts
+        // runPlan)—— 用户交办一件事,直到跑完才第一次看见结果,中间全靠猜。
+        // 自成一张 assistant turn(与 plan_done 总结卡同一区域、同一形态):
+        // /plan 路径本来就没有 turn_start,挂 currentTurn 会被流式文本打散。
+        const t = newTurn(`plan_${Date.now().toString(36)}`, "assistant");
+        const plan: PlanBlockData = {
+          intentId: e.intentId,
+          // reason 初始恒 null:失败原因只来自 plan_todo_update(todo_failed),
+          // plan_planned 这一刻还没有任何一步失败过 —— 不预填。
+          todos: e.todos.map((td) => ({ ...td, reason: null })),
+          abortRequested: false,
+          terminal: null,
+        };
+        set((s) => ({ turns: [...s.turns, { ...t, blocks: [{ kind: "plan", plan }] }] }));
+        return;
+      }
+      case "plan_todo_update": {
+        // 批次 8-C:**只改那一行**。map 出的新数组里,没变的 todo 保持同一对象引用,
+        // memo 化的 TodoRow 因此不重渲染(整卡重渲染会让正在滚动的聊天闪)。
+        const turns = withLastPlan(get().turns, (p) => {
+          const idx = p.todos.findIndex((td) => td.id === e.todoId);
+          // 契约外的 todoId:原样返回,不多造一行(未知状态不编)。
+          if (idx < 0) return p;
+          const prev = p.todos[idx];
+          if (!prev) return p;
+          const todos = p.todos.slice();
+          todos[idx] = { ...prev, status: e.status, reason: e.reason };
+          return { ...p, todos };
+        });
+        if (turns !== get().turns) set({ turns });
+        return;
+      }
       case "plan_done": {
         // B10-5:server 一直在发 plan_done(ws.ts runPlan),但旧版 shared/types/ws.ts
         // 的 ServerEvent union 缺这个成员 → 前端静默丢弃,/plan 完成用户零反馈。
@@ -538,7 +640,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
             : [];
         set((s) => ({
           turns: [
-            ...s.turns,
+            // 批次 8-C:顺手把上面那张计划卡收进终态(隐藏「中止」按钮 + 写终态行)。
+            // 终态只写一次:迟到的 plan_done 不会覆盖已经写下的 plan_failed。
+            ...withLastPlan(s.turns, (p) =>
+              p.terminal ? p : { ...p, terminal: { kind: "done", text: planDoneLine(p) } },
+            ),
             { ...t, blocks: [{ kind: "text", text: e.summary }, ...deliveryBlocks], endedAt: Date.now() },
           ],
           status: "idle",
@@ -553,7 +659,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
         const t = newTurn(`plan_failed_${Date.now().toString(36)}`, "assistant");
         set((s) => ({
           turns: [
-            ...s.turns,
+            // 批次 8-C:这张事件也是**用户点了「中止」之后**唯一会回来的收场
+            // (server: abort → run() reject → 走这里),所以计划卡在这里同样进终态。
+            ...withLastPlan(s.turns, (p) =>
+              p.terminal ? p : { ...p, terminal: { kind: "failed", text: planFailedLine(p, e.message) } },
+            ),
             {
               ...t,
               blocks: [{ kind: "text", text: `计划失败:${e.message}` }],
