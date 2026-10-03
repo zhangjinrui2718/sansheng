@@ -70,6 +70,11 @@ export interface ValidatedArtifact {
   intentValid: boolean;
   /** 若 Intent 降级为 hypothesis,记录原因 */
   downgraded?: "imperative-missing";
+  /**
+   * 批次 7-J:沉淀认知状态(`insight` 工件的 metadata.sedimentForm)。
+   * D7 四形态在工作流 kind 拆给协议后,由本字段承载 —— 闭合联合 +1 而不是 +4。
+   */
+  form?: import("./blackboard.js").SedimentForm;
 }
 
 /** 完整响应(已解析 + 已验证) */

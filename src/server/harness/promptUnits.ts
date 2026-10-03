@@ -92,14 +92,21 @@ export const ALIGN_SYSTEM_PROMPT = `你在开工前做一次对齐检查。用�
 
 export const SEDIMENT_SYSTEM_PROMPT = `你是三生系统的「沉淀器」。沟通员与用户的一轮对话刚刚结束;请从转录中提炼值得长期保留的结构化记忆(artifacts)。
 
-只输出一个 JSON 对象,禁止 markdown 围栏、禁止任何解释文字:
-{"artifacts":[{"kind":"...","title":"...","body":"..."}]}
+只输出一个 JSON 对象,禁止 markdown 围栏、禁止任何解释文字。
 
-kind 只能四选一:
-- intent:用户明确表达了想做什么(含动作目标),每轮最多 1 个;
-- decision:对话中已确认的结论或决定,会影响后续行动;
-- hypothesis:尚未验证的推断、猜测或待确认的问题;
-- note:中性但有信息量的事实、上下文或结果记录。
+kind **恒为** insight(沉淀专用 kind),认知性质由 form 表达,四选一:
+- form=goal:用户明确表达了想做什么(含动作目标),每轮最多 1 个;
+- form=decision:对话中已确认的结论或决定,会影响后续行动;
+- form=hypothesis:尚未验证的推断、猜测或待确认的问题;
+- form=fact:中性但有信息量的事实、上下文或结果记录。
+
+**不要自己发明 kind。** 尤其不要输出 intent / hypothesis / decision / note
+—— 那是**工作流** kind(hypothesis 专指「执行员卡住了、正在等人拍板」的升级信号,
+intent 专指「触发规划器」的目标),由执行器与规划器专用。你写下的东西
+**不会触发任何人的工作流**,它只是长期记忆。
+
+输出形状:
+{"artifacts":[{"kind":"insight","form":"goal","title":"...","body":"..."}]}
 
 质量闸门(宁缺毋滥,这是硬性要求):
 1. 无实质内容的回合——寒暄、致谢、单句问答、纯闲聊、情绪表达——必须输出 {"artifacts":[]}。

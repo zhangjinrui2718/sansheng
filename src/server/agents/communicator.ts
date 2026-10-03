@@ -56,6 +56,7 @@ import {
   type ExecutorCallbackEvent,
 } from "../../../shared/types/bus.js";
 import { artifactBus, makeArtifact } from "../bus/index.js";
+import { isSedimentForm, type SedimentForm } from "../../../shared/types/blackboard.js";
 
 export type CommunicatorSink = (e: CommunicatorEvent) => void;
 
@@ -894,6 +895,21 @@ export function fallbackToNote(
  * 注意沉淀路径对 parseError 的处置与本文件的 respond 管道不同:沉淀检查
  * parseError 即整轮跳过(宁缺毋滥),**不采用** fallbackToNote 降级产物。
  */
+/**
+ * 批次 7-J:旧 D7 四形态 → `SedimentForm` 的兼容映射。
+ *
+ * 沉淀提示词换版后模型应该发 `{"kind":"insight","form":...}`;但提示词下发是
+ * **异步**的(有的会话用的是缓存文件、有的模型在途),所以解析层必须容忍旧形状 ——
+ * 直接丢弃会导致升级窗口内沉淀静默归零,那比「多一个字段」糟糕得多。
+ * 这张表让旧输出**无损**落到新词汇上。
+ */
+const LEGACY_SEDIMENT_FORM: Partial<Record<ArtifactKind, SedimentForm>> = {
+  intent: "goal",
+  decision: "decision",
+  hypothesis: "hypothesis",
+  note: "fact",
+};
+
 export function parseStructuredOutput(raw: string): ParsedCommunicatorResponse {
   const trimmed = raw.trim();
   if (!trimmed) return fallbackToNote("empty output");
@@ -946,14 +962,32 @@ export function parseStructuredOutput(raw: string): ParsedCommunicatorResponse {
       ? a.refs.filter((r): r is string => typeof r === "string")
       : undefined;
 
+    // ── 批次 7-J:沉淀认知状态与工作流 kind 拆开 ──────────────────────────
+    // 模型发 `{"kind":"insight","form":"goal"}` → 直接用。
+    // 模型仍在发旧四形态(intent/decision/hypothesis/note)→ **映射**而不是丢弃:
+    // 沉淀是 fire-and-forget 的单轮调用,提示词换新到模型跟上是**异步**的,
+    // 直接丢会让升级期间的所有沉淀归零(拿不到新 prompt 的在途模型就哑了)。
+    // 映射后一律落 `insight`,认知状态进 form。
     let finalKind = kind;
     let downgraded: "imperative-missing" | undefined;
-    if (kind === "intent") {
+    let form: SedimentForm | undefined;
+    if (kind === "insight") {
+      form = isSedimentForm(a.form) ? a.form : "fact";
+    } else {
+      const mapped = LEGACY_SEDIMENT_FORM[kind];
+      if (mapped !== undefined) {
+        finalKind = "insight";
+        form = mapped;
+      }
+    }
+    // 旧语义保留:「声称是目标(旧 intent)但标题没有动作词、也没挂 refs」
+    // → 不是真目标,降级成「推测」。7-J 之后作用于 form=goal 的 insight。
+    if (form === "goal") {
       const title = typeof a.title === "string" ? a.title : "";
       const verbOk = hasImperativeVerb(title);
       const refsOk = !!(refs && refs.length > 0);
       if (!verbOk && !refsOk) {
-        finalKind = "hypothesis";
+        form = "hypothesis";
         downgraded = "imperative-missing";
       }
     }
@@ -989,8 +1023,9 @@ export function parseStructuredOutput(raw: string): ParsedCommunicatorResponse {
 
     artifacts.push({
       artifact,
-      intentValid: kind === "intent" ? !downgraded : true,
+      intentValid: (kind === "intent" || form === "goal") ? !downgraded : true,
       downgraded,
+      form,
     });
   }
 

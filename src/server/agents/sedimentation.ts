@@ -66,12 +66,20 @@ export const SEDIMENT_TITLE_MAX = 60;
 /** body 上限(字)。D7 schema:< 200 字 → 截断后最长 199。 */
 export const SEDIMENT_BODY_MAX = 199;
 /** kind 白名单:D7 沉淀四形态。其余(todo/evidence/harness_proposal…)一律丢弃。 */
-export const SEDIMENT_ALLOWED_KINDS: ReadonlySet<ArtifactKind> = new Set<ArtifactKind>([
-  "intent",
-  "hypothesis",
-  "note",
-  "decision",
-]);
+/**
+ * 批次 7-J:沉淀**只**产出 `insight`。
+ *
+ * 此前是 `intent / hypothesis / note / decision` 四选 —— 那四个 kind 在工作流里
+ * 已有确定含义(hypothesis 是 executor 的阻塞升级信号、intent 触发 Planner、
+ * decision 具约束力),被沉淀复用后产生的是一批**永远没人消费的工件**:
+ * 升级流程由 `executor_callback` 事件 + 父 todo 的 `waiting_for_decision` 驱动,
+ * 全库没有任何代码按 kind 扫它们。
+ *
+ * D7 四形态的**认知状态**(这条提炼是什么性质)改由 `metadata.sedimentForm` 承载
+ * (goal / decision / hypothesis / fact),kind 层面不再复用工作流词汇。
+ * 单值集合:模型若仍输出旧 kind,门禁直接丢弃(见下方 normalize 前的强校验)。
+ */
+export const SEDIMENT_ALLOWED_KINDS: ReadonlySet<ArtifactKind> = new Set<ArtifactKind>(["insight"]);
 /** 转录截断:user raw / assistant 回复 / 前文单条 / 前文条数。 */
 const TRANSCRIPT_USER_MAX = 1_000;
 const TRANSCRIPT_ASSISTANT_MAX = 2_000;
@@ -326,6 +334,8 @@ export async function sedimentTurn(
         metadata: {
           ...(candidate.metadata ?? {}),
           source: "sedimentation",
+          // 批次 7-J:认知状态从 kind 搬进 metadata(kind 恒为 insight)
+          ...(v.form !== undefined ? { sedimentForm: v.form } : {}),
           ...(input.assistantMessageId ? { sedimentedFrom: input.assistantMessageId } : {}),
           ...(v.downgraded ? { downgraded: v.downgraded } : {}),
         },

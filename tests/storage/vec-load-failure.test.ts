@@ -63,7 +63,7 @@ describe("B3 · vec 扩展加载失败 → 降级不崩 boot", () => {
           version: number;
         }>
       ).map((r) => r.version);
-      expect(versions).toEqual([1, 3, 4, 5]);
+      expect(versions).toEqual([1, 3, 4, 5, 6]);
       expect(isVecAvailable(s.db)).toBe(false);
       // 常规 CRUD 可用
       upsertConversation(s.db, { id: "c-novec", cwd: "/tmp", modelId: "m", provider: "p" });

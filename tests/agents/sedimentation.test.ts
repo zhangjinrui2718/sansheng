@@ -109,7 +109,10 @@ describe("batch5b-2 T1 · sedimentation 服务(单元)", () => {
     expect(result.status).toBe("stored");
     expect(result.artifacts).toHaveLength(1);
     const art = result.artifacts[0]!;
-    expect(art.kind).toBe("decision");
+    // 批次 7-J:沉淀只产 insight。这里假 LLM 发的是**旧** kind(decision)——
+    // 走兼容映射,认知状态落到 metadata.sedimentForm,不留任何工作流 kind。
+    expect(art.kind).toBe("insight");
+    expect(art.metadata?.sedimentForm).toBe("decision");
     expect(art.scope).toBe("conversation");
     expect(art.conversationId).toBe(CONV);
     expect(art.author).toBe("communicator");
@@ -125,6 +128,60 @@ describe("batch5b-2 T1 · sedimentation 服务(单元)", () => {
     expect(captured!.systemPrompt).toContain("宁缺毋滥");
     expect(captured!.userPrompt).toContain("蓝绿部署");
     expect(captured!.userPrompt).toContain("已记录");
+  });
+
+  it("S1b: 新形状 {kind:insight, form} 原样落库(不经过旧 kind 映射)", async () => {
+    const deps = depsWith(async () =>
+      JSON.stringify({
+        artifacts: [
+          { kind: "insight", form: "goal", title: "重构 认证模块", body: "统一到新 token 方案", author: "communicator" },
+        ],
+      }),
+    );
+    const result = await sedimentTurn(deps, storage, baseInput());
+    expect(result.status).toBe("stored");
+    const art = result.artifacts[0]!;
+    expect(art.kind).toBe("insight");
+    expect(art.metadata?.sedimentForm).toBe("goal");
+  });
+
+  it("S1c: 沉淀**永不**产出工作流 kind(7-J 的核心不变量)", async () => {
+    // 四种旧形状逐个喂进去,都不得原样落成工作流 kind
+    for (const legacy of ["intent", "hypothesis", "decision", "note"] as const) {
+      const deps = depsWith(async () =>
+        JSON.stringify({
+          artifacts: [
+            { kind: legacy, title: "整理若干信息", body: "some body text", author: "communicator" },
+          ],
+        }),
+      );
+      const r = await sedimentTurn(deps, storage, baseInput());
+      if (r.status !== "stored") continue;
+      for (const a of r.artifacts) {
+        expect(
+          ["intent", "hypothesis", "decision", "note"],
+          `沉淀产出了工作流 kind=${a.kind}(输入 ${legacy})`,
+        ).not.toContain(a.kind);
+        expect(a.kind).toBe("insight");
+        expect(a.metadata?.source).toBe("sedimentation");
+      }
+    }
+  });
+
+  it("S1d: 沉淀产出不会被任何工作流路由(它不是阻塞信号)", async () => {
+    const deps = depsWith(async () =>
+      JSON.stringify({
+        artifacts: [
+          { kind: "insight", form: "hypothesis", title: "可能需要换模型", body: "延迟偏高", author: "communicator" },
+        ],
+      }),
+    );
+    const r = await sedimentTurn(deps, storage, baseInput());
+    expect(r.status).toBe("stored");
+    expect(r.artifacts[0]?.status).toBe("open");
+    // 没有 relatedArtifacts、没有 callbackReason —— 即「不会被 executor_callback 链路捞起」
+    expect(r.artifacts[0]?.metadata?.relatedArtifacts).toBeUndefined();
+    expect(r.artifacts[0]?.metadata?.callbackReason).toBeUndefined();
   });
 
   it("S2: 寒暄回合(模型输出空数组)→ status=empty,不落库不广播", async () => {

@@ -178,8 +178,12 @@ const AGENT_PROMPT_SOURCE: Record<RealAgent, string> = {
 /** DAG 节点下挂的结果工件种类(设计文档 §3②「evidence / hypothesis / failure」)。 */
 const OUTPUT_KINDS: ArtifactKind[] = ["evidence", "hypothesis", "note"];
 
-/** 沉淀区:事后活下来的 kind。 */
-const SETTLED_KINDS: ArtifactKind[] = ["decision", "note", "reflection"];
+/**
+ * 沉淀区:事后活下来的 kind。
+ * 7-J 起 `insight` 是沉淀器的**唯一**产出 kind —— 缺了它,沟通员沉淀出来的
+ * 长期记忆在 Agents 页会掉出「已沉淀」区(和工件页的串味同一类问题)。
+ */
+const SETTLED_KINDS: ArtifactKind[] = ["decision", "note", "reflection", "insight"];
 
 /** orchestrator.ts:207-208 的默认 escalationMs / failMs(实配值 UI 读不到,页面上注明)。 */
 const ESCALATION_MS = 5 * 60 * 1000;

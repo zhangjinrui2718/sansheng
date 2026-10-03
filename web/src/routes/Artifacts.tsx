@@ -134,7 +134,7 @@ const GROUPS: ReadonlyArray<GroupDef> = [
   {
     key: "pending",
     label: "待决",
-    desc: "卡住等人拍板的工作 —— 执行员提的假设,状态到「等决策」的最需要先看。",
+    desc: "卡住等人拍板的工作 —— 执行员提的**协议假设**(会真的触发向你提问),状态到「等决策」的最需要先看。沉淀的推测不在这里(它们是 insight)。",
     kinds: ["hypothesis"],
     urgent: true,
   },
@@ -152,9 +152,9 @@ const GROUPS: ReadonlyArray<GroupDef> = [
   },
   {
     key: "evidence",
-    label: "证据",
-    desc: "执行员的观察产出。",
-    kinds: ["evidence"],
+    label: "执行产出",
+    desc: "执行员的工作产出:观察到的证据,或没做成时的失败说明。",
+    kinds: ["evidence", "note"],
   },
   {
     key: "critique",
@@ -165,8 +165,8 @@ const GROUPS: ReadonlyArray<GroupDef> = [
   {
     key: "sediment",
     label: "沉淀",
-    desc: "跑完之后活下来的长期记忆(笔记 / 反思)。",
-    kinds: ["note", "reflection"],
+    desc: "沉淀器从对话里提炼的长期记忆(7-J 起 kind 恒为 insight),以及反思总结。这些**不会触发任何人的工作流**。",
+    kinds: ["insight", "reflection"],
   },
 ];
 
@@ -176,6 +176,9 @@ const GROUPS: ReadonlyArray<GroupDef> = [
  * 徽章与列表共用这一个谓词 —— 两处各算一套就会出现「写 N 条、点进去 0 条」。
  */
 function isPendingRelay(a: Artifact): boolean {
+  // 批次 7-J:这个谓词之所以成立,靠的是 author==="executor" **且** kind 是工作流 kind。
+  // 沉淀器产的 insight 两条都不满足(author=communicator、kind=insight)—— 语义串味
+  // 的根因被移除后,这里天然只命中「真的会触发提问」的那些。
   return (
     (a.author === "executor" && (a.kind === "hypothesis" || a.kind === "decision")) ||
     a.status === "waiting_for_decision"

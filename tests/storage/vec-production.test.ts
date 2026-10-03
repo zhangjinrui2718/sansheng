@@ -87,7 +87,7 @@ describe("B3 · sqlite-vec 生产加载(Storage 构造路径,非测试注入)", 
     const storage = new Storage(tmpDbPath());
     try {
       // RED(修复前):002 被 skip → [1,3,4,5](审查实证「applied migrations 1,3,4,5」)
-      expect(appliedVersions(storage.db)).toEqual([1, 2, 3, 4, 5]);
+      expect(appliedVersions(storage.db)).toEqual([1, 2, 3, 4, 5, 6]);
       // RED(修复前):fragments_vec 不存在 → false
       expect(isVecAvailable(storage.db)).toBe(true);
       // RED(修复前):构造器从不加载扩展 → vecLoaded 属性不存在(undefined)
@@ -131,7 +131,7 @@ describe("B3 · sqlite-vec 生产加载(Storage 构造路径,非测试注入)", 
       const r1 = runMigrations(raw);
       expect(r1.applied).not.toContain(2);
       expect(r1.skipped).toHaveLength(1);
-      expect(appliedVersions(raw)).toEqual([1, 3, 4, 5]); // MAX(version)=5
+      expect(appliedVersions(raw)).toEqual([1, 3, 4, 5, 6]); // MAX(version)=5
     } finally {
       raw.close();
     }
@@ -139,7 +139,7 @@ describe("B3 · sqlite-vec 生产加载(Storage 构造路径,非测试注入)", 
     // RED(修复前):currentVersion=MAX=5 → 002 ≤ 5 永不重跑 → isVecAvailable=false
     const storage = new Storage(dbPath);
     try {
-      expect(appliedVersions(storage.db)).toEqual([1, 2, 3, 4, 5]);
+      expect(appliedVersions(storage.db)).toEqual([1, 2, 3, 4, 5, 6]);
       expect(isVecAvailable(storage.db)).toBe(true);
       // 自愈后向量链路立即可用
       insertFragment(storage.db, mkFragment("f-heal", "自愈后的片段", 0.5));
