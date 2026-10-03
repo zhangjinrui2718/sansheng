@@ -133,9 +133,12 @@ buildToolContext(deps: RuntimeDeps, agentId: string, projectId: string): ToolRun
 
 ---
 
-## 5. 必须补的欠账(接线时一并做,不许拖)
+## 5. 必须补的欠账
 
-### 5.1 `client.*` 的传输面还没建
+> **进度更新(2026-10-03)**:§5.1 与 §5.2 已在本批次完成,§5.3 待定。
+> 完成状态见各节末尾。
+
+### 5.1 `client.*` 的传输面还没建 ✅ 已完成
 
 设计 2 里「只有业务经理能跟甲方说话」由 `ROLE_SPECS.clientFacing` 保证,但
 `ask_client` / `tell_client` 两个工具**还没有实现**(它们需要 WS 传输:
@@ -146,7 +149,14 @@ buildToolContext(deps: RuntimeDeps, agentId: string, projectId: string): ToolRun
 但**在接线之前必须补上**,否则接完线业务经理会发现自己的核心职责缺一块,而
 系统不会崩 —— 只会静默降级。那是最难发现的一类问题。
 
-### 5.2 「谁被卡住了」没有注入面
+**完成方式**:与 `MemoryPort` 同一个模式的 `ClientChannel` 端口
+(`src/platform/client/port.ts`)+ 两个工具(`src/platform/tools/client.ts`)。
+传输层实现端口,测试注入假通道 —— 于是这两个工具的行为可以在没有任何网络的
+情况下被完整验证。另附 `resolveClientQuestion()`:用户答复走**与问答同一条
+落库路径**(建 decision 工件 + `rel=answers` 关联 + 提问转 accepted)。
+测试 `tests/platform/client.test.ts` 22 个,含 R1 的逐角色验证。
+
+### 5.2 「谁被卡住了」没有注入面 ✅ 已完成
 
 `asks` 有 `askedByMeOpen`,meetings 有 `pendingMeetingsFor`,但**没有任何机制
 把它们送进 agent 的回合**。旧系统靠 watchdog + 事件推送。
@@ -158,6 +168,14 @@ buildToolContext(deps: RuntimeDeps, agentId: string, projectId: string): ToolRun
 **这是接线前必须解决的第二件事**,形态可以是:会话启动时把待办注入 system
 prompt,或每轮检查一次。
 
+**完成方式**:`src/platform/runtime/pendingWork.ts` —— `collectPendingWork` 收集
+(等我的提问 / 待表态会议 / 待评审变更 / 我自己卡着的 / 已超时 / 未解决阻塞),
+`renderPendingWork` 渲染成可注入文本。渲染与 `hasActionableWork` **刻意分开**:
+前者答「有什么话要说」,后者答「要不要打断你」—— 合并会两头不讨好(只按
+actionable 渲染则阻塞信息渲不出来;只按有内容唤醒则每轮因老阻塞白占 context)。
+测试 `tests/platform/pending-work.test.ts` 18 个,含「worker 提问后项目经理
+不必主动查就知道有东西在等它」的端到端断言。
+
 ### 5.3 调度器缺席
 
 `listOverdueAsks` / `expireAsk` 有了,但没有东西周期性调用它们。设计 1 §12
@@ -165,6 +183,10 @@ prompt,或每轮检查一次。
 
 **本阶段可以不做**,但必须在文档里明确:**没有调度器时,超时机制是不生效的** ——
 即一个提问者可能永久停在 blocked。这属于「如实标注未接线」,不是遗漏。
+
+**当前处置**:`renderPendingWork` 在超时段落里**对 agent 明说**「当前没有调度器
+周期性处置超时,请自行判断是否催办或改走升级」。这样即便没有调度器,链路也不
+会静默死掉 —— 知情的一方可以自己动。
 
 ---
 

@@ -548,8 +548,8 @@ describe("BC2 工具 · 走派发器的完整链路", () => {
     // 里根本没有 collab.escalate —— 它是链路顶端,升级出口是 client.ask
     expect(e.code).toBe("denied");
     expect(e.message).toContain("架构上界");
-    // 而且它的 ceiling 里确实有 client.ask 作为出口
-    expect(TOOL_INDEX.has("ask_client")).toBe(false); // 甲方接口属后续批次
+    // 而它的 ceiling 里确实有 client.ask 作为出口,且那个工具已实现
+    expect(TOOL_INDEX.has("ask_client")).toBe(true);
   });
 
   it("ask_list toMeOnly 是「有什么在等我答」", () => {

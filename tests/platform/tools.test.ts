@@ -122,28 +122,16 @@ describe("注册表 · 声明与能力必须一致(7-E 那个坑的机器防线)
     expect(s.notYetBuilt.length).toBeLessThan(s.totalInTable - s.implemented);
   });
 
-  it("未实现的工具如实列出(BC2/BC7 已落地 → 只剩甲方接口)", () => {
-    const missing = notYetBuiltToolNames();
-    expect(missing, "BC2 协作已落地").not.toContain("ask_role");
-    expect(missing).not.toContain("convene");
-    expect(missing, "BC7 记忆已落地").not.toContain("memory_search");
-    expect(missing).not.toContain("memory_remember");
-    // 尚未落地的是面向甲方的两个(属传输/执行批次)
-    expect(missing).toContain("ask_client");
-    expect(missing).toContain("tell_client");
-    expect(missing).not.toContain("board_write");
+  it("工具表里的平台工具**全部已实现**(BC0–BC7 与甲方接口都已落地)", () => {
+    // 剩下的 7 个是 SDK 内置(read/grep/find/ls/edit/write/bash),不算「未建」
+    expect(notYetBuiltToolNames()).toEqual([]);
   });
 
-  it("未覆盖的能力如实列出(且排除 SDK 内置那几族,否则缺口清单永远消不掉)", () => {
+  it("**没有任何未覆盖能力** —— 33 条全部有工具(排除 SDK 内置那几族后的净缺口为 0)", () => {
     const gap = capabilitiesWithoutTools();
-    expect(gap, "collab.* 已落地").not.toContain("collab.ask");
-    expect(gap, "memory.* 已落地").not.toContain("memory.read");
-    expect(gap).not.toContain("memory.write");
-    expect(gap).toContain("client.ask");
-    expect(gap).not.toContain("blackboard.write");
-    // code.* 的工具是 SDK 内置的,平台无需实现 —— 算进缺口会让清单一直挂着
-    // 几条永远消不掉的项,久而久之没人再看它
-    expect(gap, "code.* 不该算缺口").not.toContain("code.read");
+    expect(gap).toEqual([]);
+    // 回归守卫:code.* 的工具是 SDK 内置的,永远不该被算成缺口
+    expect(gap).not.toContain("code.read");
     expect(gap).not.toContain("code.exec");
   });
 
@@ -166,11 +154,14 @@ describe("派发器 · 四道拦截", () => {
     expect(e.alternatives).toContain("project_open");
   });
 
-  it("工具表里有但未实现 → 明确说「还没建」,不假装能用", () => {
-    // tell_client 属甲方接口,尚未落地
-    const e = errOf(call(ids.bm, "tell_client", { text: "x" }));
-    expect(e.code).toBe("not_found");
-    expect(e.message).toContain("还没建实现");
+  it("「还没建」分支保留给将来往工具表加条目(当前走不到)", () => {
+    // dispatch 里有这条分支:工具在 ALL_TOOLS 里但不在 TOOL_INDEX 里 → 明确说
+    // 「还没建实现」,而不是让模型以为工具坏了。它是防止「工具表加了名字但忘了
+    // 写实现」的守卫 —— 8-A 那次「集合文件声称 13 个、循环里只有 6 个」的同族。
+    //
+    // 现在 33 条能力全部有实现,所以这条分支走不到。这里断言的是**这个事实**,
+    // 而不是删掉测试 —— 将来加工具时它会立刻重新变红提醒。
+    expect(notYetBuiltToolNames()).toEqual([]);
   });
 
   it("角色 ceiling 不含该能力 → denied(即便工具存在)", () => {

@@ -282,12 +282,13 @@ describe("BC7 工具", () => {
     expect(missing).not.toContain("memory_remember");
   });
 
-  it("memory.write 已覆盖 —— 真缺口只剩 client.*", () => {
+  it("memory.* 已覆盖,且能力面已完整(净缺口为 0)", () => {
     const gap = capabilitiesWithoutTools();
     expect(gap).not.toContain("memory.read");
     expect(gap).not.toContain("memory.write");
-    expect(gap).toContain("client.ask");
-    expect(gap).toContain("client.message");
+    // client.* 在本次一并落地 → 缺口清零
+    expect(gap).not.toContain("client.ask");
+    expect(gap).toEqual([]);
   });
 
   it("memory_remember → memory_search 闭环(业务经理写,worker 也能读)", async () => {
