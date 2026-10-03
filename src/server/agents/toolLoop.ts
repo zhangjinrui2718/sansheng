@@ -152,6 +152,8 @@ export async function runWithTools(opts: {
   const byName = new Map(tools.map((t) => [t.name, t]));
   const systemPrompt = opts.systemPrompt + renderToolProtocol(tools, maxToolTurns);
   const calls: ToolLoopCall[] = [];
+  /** 已发生的工具轮**按顺序全部保留**。见下方 2026-10-03 事故注释。 */
+  const exchanges: string[] = [];
   let transcript = opts.userPrompt;
 
   for (let turn = 0; turn <= maxToolTurns; turn++) {
@@ -180,9 +182,30 @@ export async function runWithTools(opts: {
       }
     }
     calls.push({ name: call.name, args: call.args, ok: okFlag, ...(okFlag ? {} : { error: resultText.slice(0, 200) }) });
+    // ── 2026-10-03 真实事故(conv_murpu3ml_cged / todo-1,note `exec-err-TVj9oQwe`)──
+    //
+    // 这一行原来是**从 opts.userPrompt 重新拼**,于是每一轮喂给模型的只有
+    // 「原始 prompt + 上一轮的工具结果」,**再往前的工具轮全部消失**。实测(3 连发
+    // tool_call 的探针):第 2 次调用看得到第 1 轮,第 3 次只看得到第 2 轮 —— 模型
+    // 每轮都从零开始,永远记不住自己已经查过什么。
+    //
+    // 后果正是那次事故:todo-1 是「调研 Omni 在外呼场景的能力边界与延迟」这种需要
+    // 连查多份资料才能作答的活,模型每轮失忆 → 要么重复同一个调用、要么原地打转,
+    // 6 轮上限用尽仍不收敛 → todo failed → 级联带走 todo-4。**6 轮不是不够,是
+    // 前 5 轮白跑了**。变量叫 transcript 却只装一轮,名副其实的「假 transcript」。
+    //
+    // 修法:把每一轮都 push 进 exchanges,再整体拼给模型。
+    //
+    // 上下文会不会因此涨爆?不会到不可用的程度:单条工具结果的上限由 sandbox 的
+    // policy.maxBytes 兜底(fs 侧默认 30KB,见 tools/fs.ts),6 轮最坏 ~180KB。
+    // 这里**不再加第二道上限** —— toolBridge.ts 明确写了「sandbox 侧已截断,这里
+    // 不再二次加工(避免两处上限打架)」,两道上限互相盖住比一道更难排查。
+    exchanges.push(
+      `## 第 ${turn + 1} 次工具调用\n请求:${JSON.stringify(call)}\n结果:${resultText}`,
+    );
     transcript =
-      `${opts.userPrompt}\n\n## 第 ${turn + 1} 次工具调用\n请求:${JSON.stringify(call)}\n` +
-      `结果:${resultText}\n\n请据此继续(还需要事实就再发一次 tool_call,否则直接给最终答案)。`;
+      `${opts.userPrompt}\n\n${exchanges.join("\n\n")}\n\n` +
+      `请据此继续(还需要事实就再发一次 tool_call,否则直接给最终答案)。`;
   }
 
   // 循环正常走完不可能到这里(maxToolTurns 的两个出口都 return),留作兜底。

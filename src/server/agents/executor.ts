@@ -245,6 +245,7 @@ export class Executor {
           new Error(
             `executor: 工具调用 ${loop.toolTurns} 轮后仍未给出最终答案(上限内未收敛),已中止以免产出半成品`,
           ),
+          loop.calls,
         );
         return { todoId: todo.id, executorSessionId: this.sessionId, outcome: "failed", artifactIds: [] };
       }
@@ -633,17 +634,30 @@ export class Executor {
     });
   }
 
-  private async handleLlmFailure(todo: BlackboardArtifact, err: unknown): Promise<void> {
+  private async handleLlmFailure(
+    todo: BlackboardArtifact,
+    err: unknown,
+    calls?: ToolLoopCall[],
+  ): Promise<void> {
     const ts = this.now();
     const msg = err instanceof Error ? err.message : String(err);
     const noteId = `exec-err-${nanoid(8)}`;
+    // 工具调用留痕(2026-10-03 加)。此前失败 note 只有一句「未收敛」,**没有任何
+    // 现场**,所以 todo-1 那次 6 轮不收敛当时完全查不出模型到底在干什么 —— 根因
+    // (transcript 每轮只保留上一轮)是靠另写探针才复现的。有取证就不必再猜。
+    const trace = calls && calls.length > 0
+      ? "\n\n## 工具调用记录(" + calls.length + " 次)\n" +
+        calls
+          .map((c, i) => `${i + 1}. ${c.name}${c.ok ? "" : "  ← 失败"}` + ` args=${JSON.stringify(c.args).slice(0, 200)}` + (c.error ? `\n   ${c.error}` : ""))
+          .join("\n")
+      : "";
     const note = makeArtifact({
       id: noteId,
       scope: todo.scope,
       conversationId: todo.conversationId,
       kind: "note",
       title: `Executor · LLM failed for ${todo.id.slice(0, 8)}`,
-      body: `LLM call threw: ${msg}`,
+      body: `LLM call threw: ${msg}${trace}`,
       author: "executor",
       status: "resolved",
       parentIntent: todo.parentIntent,

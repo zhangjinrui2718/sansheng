@@ -23,7 +23,7 @@ import { join } from "node:path";
 import { runWithTools, renderToolProtocol, type LoopTool } from "../../src/server/agents/toolLoop.js";
 import { buildNativeTools, buildNativeLoopTools } from "../../src/server/harness/nativeTools.js";
 import { Storage } from "../../src/server/storage/db.js";
-import { upsertArtifact } from "../../src/server/storage/repo/blackboards.js";
+import { upsertArtifact, listArtifacts } from "../../src/server/storage/repo/blackboards.js";
 import { upsertConversation } from "../../src/server/storage/repo/conversations.js";
 import { insertFragment } from "../../src/server/storage/repo/fragments.js";
 import { makeArtifact } from "../../src/server/bus/index.js";
@@ -235,6 +235,78 @@ describe("7-H 工具循环 · 语义", () => {
 
   it("renderToolProtocol 对空工具返回空串(不注入无意义段)", () => {
     expect(renderToolProtocol([], 3)).toBe("");
+  });
+
+  // ──────────────────────────────────────────────────────────────────
+  // 2026-10-03 真实事故 · 工具轮上下文**每轮只保留上一轮**(conv_murpu3ml_cged /
+  // todo-1,note `exec-err-TVj9oQwe`)。
+  //
+  // transcript 原来是「opts.userPrompt + 上一轮结果」**重新拼**的,再往前的工具轮
+  // 全部丢失。探针实测(模型连发 3 次 tool_call):第 3 次调用只看得到第 2 轮。
+  // 模型每轮失忆 → 记不住自己查过什么 → 6 轮用尽仍不收敛 → 级联带走 todo-4。
+  // 6 轮不是不够,是前 5 轮白跑了。
+  // ──────────────────────────────────────────────────────────────────
+  it("多轮工具调用:第 3 轮仍能看到第 1 轮(上下文必须累积,不能只留上一轮)", async () => {
+    const seen: string[] = [];
+    let n = 0;
+    const llmCall = vi.fn(async (i: { systemPrompt: string; userPrompt: string }) => {
+      seen.push(i.userPrompt);
+      n += 1;
+      if (n <= 3) return `{"tool_call":{"name":"grep","arguments":{"q":"第${n}次"}}}`;
+      return '{"outcome":"evidence","evidence":{"title":"t","body":"b"}}';
+    });
+    await runWithTools({ llmCall, systemPrompt: "S", userPrompt: "U", tools: [echo("grep")] });
+
+    expect(llmCall).toHaveBeenCalledTimes(4);
+    // 修复前:seen[2] 只有「第2次」,seen[3] 只有「第3次」
+    expect(seen[2]).toContain("第1次");
+    expect(seen[2]).toContain("第2次");
+    expect(seen[3]).toContain("第1次");
+    expect(seen[3]).toContain("第2次");
+    expect(seen[3]).toContain("第3次");
+  });
+
+  it("工具失败的那一轮同样进上下文(不能因为失败就被丢掉)", async () => {
+    const seen: string[] = [];
+    let n = 0;
+    const llmCall = vi.fn(async (i: { systemPrompt: string; userPrompt: string }) => {
+      seen.push(i.userPrompt);
+      n += 1;
+      if (n === 1) return '{"tool_call":{"name":"nope","arguments":{}}}';
+      if (n === 2) return '{"tool_call":{"name":"grep","arguments":{"q":"x"}}}';
+      return '{"outcome":"evidence","evidence":{"title":"t","body":"b"}}';
+    });
+    const r = await runWithTools({ llmCall, systemPrompt: "S", userPrompt: "U", tools: [echo("grep")] });
+    expect(r.calls[0]?.ok).toBe(false);
+    // 第 3 次调用里,失败那轮的错误仍在、后面那轮的结果也在
+    expect(seen[2]).toContain("没有名为");
+    expect(seen[2]).toContain("ran grep");
+  });
+
+  it("未收敛 → 失败 note 带上工具调用记录(可取证,不再是一句「未收敛」)", async () => {
+    const failing = vi.fn(async () => '{"tool_call":{"name":"board_list","arguments":{"k":"v"}}}');
+    const ex = new Executor({
+      storage,
+      llmCall: failing,
+      systemPrompt: "S",
+      tools: [echo("board_list")],
+      allowedTools: ["board_list"],
+    });
+    const todo = makeArtifact({
+      id: "todo-noconverge", scope: "conversation", conversationId: CONV,
+      kind: "todo", title: "调研", body: "y", author: "planner", status: "open",
+    });
+    upsertArtifact(storage.db, todo);
+    const res = await ex.execute(todo);
+    expect(res.outcome).toBe("failed");
+
+    const note = listArtifacts(storage.db, { scope: "conversation", conversationId: CONV })
+      .find((a) => a.kind === "note");
+    expect(note?.body).toContain("未收敛");
+    // 取证:调用次数、工具名、参数都要在 note 里
+    expect(note?.body).toContain("工具调用记录");
+    expect(note?.body).toContain("board_list");
+    expect(note?.body).toContain('"k":"v"');
   });
 });
 
