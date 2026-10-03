@@ -303,6 +303,96 @@ export class AgentKernel {
    *  makeLlmCall 用它直接 prompt 而不走 kernel.prompt(避免 Communicator 递归)。
    *  返回 null 时表示 session 还没启动(Orchestrator 应抛错或 defer)。
    */
+  /**
+   * 批次 8-B:以沟通员身份发一条**非 Pi 轮**的正式回复(终态播报)。
+   *
+   * 为什么需要它:终态播报发生在 plan settle 之后,那时**没有活跃的 Pi 轮**,
+   * kernel.prompt 走不通(会重开一轮对话、还会触发一次 decide)。所以这里自己合成
+   * 一个 turn —— 事件序列与 5b-1 P2 的「确认文本」路径逐字同款
+   * (agent_start → turn_start → message_start → delta → message_end → agent_end),
+   * 前端渲染路径因此完全一致,不需要为播报加任何特判。
+   *
+   * 落库与总线留痕都在这里做:
+   *  · insertMessage 保证刷新后这句话还在(「像没说过」比「没说过」更糟);
+   *  · bus.broadcast 走 kernel 已有的 bus 订阅,会自动多播 bus_event 进时间线。
+   *
+   * **不抛**:播报是锦上添花,不能把已经成功的 plan 拖成失败。
+   */
+  sayAsCommunicator(text: string, opts?: { source?: string }): void {
+    const content = text.trim();
+    if (!content) return;
+    const conversationId = this.conversationId;
+    const messageId = `rep_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
+    // FK → conversations:播报可能发生在还没跑过任何一轮的会话里
+    try {
+      const active = this.settingsStore.activeProvider();
+      upsertConversation(this.storage.db, {
+        id: conversationId,
+        cwd: this.cwd,
+        modelId: this.model?.id ?? active?.modelId ?? null,
+        provider: this.model?.provider ?? active?.provider ?? null,
+      });
+    } catch (err) {
+      log.warn("sayAsCommunicator: upsertConversation failed:", err);
+    }
+    const turnIndex = this.currentTurnIndex + 1;
+    this.currentTurnIndex = turnIndex;
+    const ts = Date.now();
+    try {
+      this.emit({ type: "agent_start", conversationId, ts });
+      this.emit({ type: "turn_start", conversationId, turnIndex, ts });
+      this.emit({
+        type: "message_start",
+        conversationId,
+        message: { role: "assistant", id: messageId },
+      });
+      this.emit({ type: "delta", conversationId, messageId, text: content });
+      this.emit({
+        type: "message_end",
+        conversationId,
+        messageId,
+        usage: { input: 0, output: 0 },
+      });
+      this.emit({
+        type: "agent_end",
+        conversationId,
+        ts: Date.now(),
+        usage: { input: 0, output: 0, costUsd: 0 },
+      });
+    } catch (err) {
+      log.warn("sayAsCommunicator: emit failed:", err);
+    }
+    try {
+      insertMessage(this.storage.db, {
+        id: messageId,
+        conversationId,
+        turnIndex,
+        role: "assistant",
+        content,
+        toolCalls: null,
+        thinking: null,
+        usageInput: 0,
+        usageOutput: 0,
+        costUsd: 0,
+        createdAt: Date.now(),
+      });
+      recordMessageUsage(this.storage.db, conversationId, 0, 0, 0);
+    } catch (err) {
+      log.warn("sayAsCommunicator: insertMessage failed:", err);
+    }
+    try {
+      this.bus.broadcast({
+        fromRole: "communicator",
+        toRole: "user",
+        conversationId,
+        payload: content,
+        context: { source: opts?.source ?? "run_report" },
+      });
+    } catch (err) {
+      log.warn("sayAsCommunicator: bus.broadcast failed:", err);
+    }
+  }
+
   getSession(): AgentSession | null {
     return this.session;
   }

@@ -100,6 +100,30 @@ export const ALIGN_SYSTEM_PROMPT = `你在开工前做一次对齐检查。用�
  * 本单元是那次自查的**真正实现**:沟通员拿到执行者的 hypothesis 全文 +
  * 已经与用户对齐过的对话,先自己判一轮,能答就答,答不了才升级用户。
  */
+/**
+ * 批次 8-B:plan 终态播报。**这是沟通员「Observer 身份」的执行点** ——
+ * 该身份此前只写在 communicator 主提示词的「三重身份」里,代码侧
+ * startObserver/enableObserver 从无调用方(死接线,核查见
+ * docs/AGENT-AUDIT-2026-10-03.md §1.1 第 5 条)。
+ *
+ * 硬约束(**故意写得很死**,因为这句话是说给用户听的):
+ *   · 只在**终态**播报一次,中间态不打扰(与主提示词的 Observer 最小噪音原则同源);
+ *   · 失败/取消也要说,而且要说清「哪一步没成」,不许粉饰;
+ *   · **不许编造**输入里没有的事实(执行者写了什么就是什么);
+ *   · 纯文本一句话到两句,不要 markdown、不要标题、不要罗列 todo。
+ */
+export const REPORT_SYSTEM_PROMPT = `你是三生系统的沟通员。刚刚有一个任务到达终态,系统会把**事实清单**发给你(目标、各步状态、交付物标题、失败原因),请你用**中文向用户播报一句话**(最多两句)。
+
+规则:
+1. 先说结论(做完了 / 没做完 + 卡在哪),再说最关键的那个结果。
+2. **只用清单里出现的事实**。清单里没有的结论不要编,不确定就不说。
+3. 有交付物时,用一句话点出最要紧的那个成果,不要罗列全部。
+4. 失败了就说清是哪一步失败、失败原因(清单里有 reason 就如实转述)。
+5. 纯文本,不要 markdown、不要标题、不要编号、不要表情,不要复述整个清单。
+6. 一次任务只播报这一次,不要寒暄、不要问「还需要我做什么吗」。
+
+现在把清单理解为:用户刚交给你一件事,你正在还他一个结果。`;
+
 export const WORKER_ASK_SYSTEM_PROMPT = `你是三生系统的沟通员。执行者(worker)在一个 todo 上卡住了,把你当**唯一**的求助对象发来一个假设(hypothesis)。用户此刻什么都不知道,也没有在等任何人。
 
 你的职责:先自己判断一轮,能答就答,答不了才去问用户。
@@ -441,11 +465,12 @@ benchmark 数字」。那条约束现在有了正解:**先查,再写。**
  * 用点号表达层级 —— 与工具侧的命名空间(`fs.readFile` → `canvas_read`)同一思路。
  */
 export type PromptUnitId =
-  // 沟通员四件套(批次 7-L 加 worker_ask:worker 卡住时先由沟通员自己判一轮)
+  // 沟通员五件套(7-L 加 worker_ask;8-B 加 report:plan 终态由沟通员播报一句话)
   | "communicator"
   | "communicator.decide"
   | "communicator.align"
   | "communicator.worker_ask"
+  | "communicator.report"
   // 规划执行链路
   | "planner"
   | "executor"
@@ -513,6 +538,17 @@ export const PROMPT_UNITS: readonly PromptUnit[] = [
     apply: "下一次 align(同上,构造时读一次)",
     enforced: true,
     sensitivity: "contract",
+  },
+  {
+    // 批次 8-B:补上沟通员「Observer 身份」的执行点。此前该身份只活在主提示词里,
+    // 而 startObserver/enableObserver 挂在 prototype 上**从无调用方**(死接线),
+    // 用户跑完一个 plan 只看到一张卡片,没有任何人说话。
+    id: "communicator.report",
+    owner: "沟通员",
+    consumer: "agents/runReport.ts:makeRunReporter → completeSimple(ws.ts runPlan 终态调用)",
+    apply: "每次 plan 到达终态时读盘(不用重启)",
+    enforced: true,
+    sensitivity: "free",
   },
   {
     id: "communicator.worker_ask",
@@ -607,6 +643,7 @@ export const BUILTIN_PROMPTS: Readonly<Record<PromptUnitId, string>> = {
   "communicator.decide": DECIDE_SYSTEM_PROMPT,
   "communicator.align": ALIGN_SYSTEM_PROMPT,
   "communicator.worker_ask": WORKER_ASK_SYSTEM_PROMPT,
+  "communicator.report": REPORT_SYSTEM_PROMPT,
   planner: ROLE_PROMPTS.planner,
   executor: ROLE_PROMPTS.executor,
   sedimentation: SEDIMENT_SYSTEM_PROMPT,

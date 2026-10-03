@@ -56,6 +56,10 @@ import { completeSimple } from "@earendil-works/pi-ai/compat";
 import { buildPlanSummary } from "./agents/planSummary.js";
 // 批次 7-I(B):从 blackboard 快照里挑出交付物(resolved 的 evidence 正文)
 import { pickDeliveries } from "./agents/deliveries.js";
+// 批次 8-B:终态播报 —— 沟通员 Observer 身份的执行点(此前是死接线)
+import { makeRunReporter, type RunReportInput } from "./agents/runReport.js";
+// 批次 8-B:读 harness 的 communicator.report 提示词(与其它角色同一入口)
+import { loadHarness } from "./harness/loader.js";
 // B4:WS 握手 Origin 校验与 HTTP 安全中间件共用同一 hostname 白名单(单一来源)
 import { isAllowedOriginHeader } from "./http/security.js";
 
@@ -401,12 +405,36 @@ export function attachWebSocket(
         artifacts: finalBb.artifacts ?? [],
         deliveries,
       });
+      // 批次 8-B:终态播报 —— 卡片给的是「系统视角」,这句话给的是「人视角」。
+      // outcome 由工件状态如实推导:有任何 failed → failed,否则 completed。
+      {
+        const arts = finalBb.artifacts ?? [];
+        const reportInput: RunReportInput = {
+          conversationId,
+          goal,
+          outcome: arts.some((a) => a.status === "failed") ? "failed" : "completed",
+          todos: arts
+            .filter((a) => a.kind === "todo")
+            .map((a) => ({ title: a.title, status: a.status })),
+          deliveries: deliveries.map((d) => ({ title: d.title, preview: d.body })),
+        };
+        emitRunReport(reportInput);
+      }
     } catch (err) {
       log.warn("Orchestrator failed:", err);
       broadcast({
         type: "plan_failed",
         conversationId,
         message: (err as Error).message ?? String(err),
+      });
+      // 批次 8-B:失败/中止也要有人说话。「失败了但没人吭声」是最伤用户信心的一种失败。
+      emitRunReport({
+        conversationId,
+        goal,
+        outcome: "aborted",
+        todos: [],
+        deliveries: [],
+        reason: (err as Error).message ?? String(err),
       });
     } finally {
       activeOrchestrator = null;
@@ -424,6 +452,36 @@ export function attachWebSocket(
     }
   }
 
+  /**
+   * 批次 8-B:终态播报 —— 沟通员开口。
+   *
+   * 为什么放在这里而不是复用那套 Observer mixin(communicator.ts:1342 起):终态在这里
+   * 是**已知的同步事实**(run() 已 settle),不需要订阅全局 bus —— 少一个订阅就少一类
+   * 重复播报 / 僵尸订阅。
+   *
+   * 两条纪律:
+   *  · **不 await**:播报失败/超时绝不能把已经跑完的 plan 拖成失败;
+   *  · **只说一句**:合成 turn + 落库 + 总线留痕全在 kernel.sayAsCommunicator 里,
+   *    事件序列与沟通员其它非 Pi 轮发言(确认文本)逐字同款,前端零特判。
+   */
+  function emitRunReport(input: RunReportInput): void {
+    if (!dataDir) return;
+    void (async () => {
+      try {
+        const reporter = makeRunReporter({
+          getModel: () => kernel.getModel(),
+          getApiKey: () => kernel.getModelApiKey(),
+          // harness 的 communicator.report 单元;空文件 → 内置常量回退
+          systemPrompt: loadHarness(dataDir).systemPrompts["communicator.report"],
+        });
+        const { text, source } = await reporter(input);
+        kernel.sayAsCommunicator(text, { source: "run_report" });
+        log.info(`runReport: ${input.outcome} 播报(${source}) — ${text.slice(0, 80)}`);
+      } catch (err) {
+        log.warn("runReport: 播报链路异常(不影响 plan 结果): ", err);
+      }
+    })();
+  }
   // M3+ B4 / C7(S2):setOnTask 在 attach 级只接线一次(幂等,不再被后续连接覆盖)。
   // handler 稳定:runPlan 经 broadcast 发进度 —— 即使触发 task 的连接已关闭,
   // plan 照跑、结果到达所有活连接。setOnTask 会处理 communicator 未就绪的情况
