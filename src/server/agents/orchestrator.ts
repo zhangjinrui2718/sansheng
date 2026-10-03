@@ -41,6 +41,8 @@ import { log } from "../../shared/log.js";
 import { loadHarness } from "../harness/loader.js";
 import { createBridgedLoopTools } from "../harness/toolBridge.js";
 import { createSdkLoopTools } from "../harness/sdkTools.js";
+// 批次 8-F:sansheng 自家工具的参数清单(模型看得见的 API 文档)
+import { TOOL_PARAM_HINTS } from "../harness/toolParams.js";
 import { buildNativeLoopTools } from "../harness/nativeTools.js";
 import type { LoopTool } from "./toolLoop.js";
 import {
@@ -166,7 +168,12 @@ export async function buildOrchestratorTools(storage: Storage, cwd: string): Pro
   const sdk = await createSdkLoopTools(cwd);
   const bridged = await createBridgedLoopTools();
   const native = buildNativeLoopTools(storage);
-  return [...sdk, ...bridged, ...native];
+  // 批次 8-F:给 sansheng 自家的 9 个工具补上参数清单(SDK 那 7 个已从自带 schema 取)。
+  // **集中在这里挂**,是为了让「模型看得见的参数」只有一个出处 —— 散落在三个工厂里
+  // 各写一份,迟早有一处漏改,而漏改的表现正是「工具存在但永远调不对」。
+  const withHints = (tools: LoopTool[]): LoopTool[] =>
+    tools.map((t) => (t.parameters ? t : { ...t, parameters: TOOL_PARAM_HINTS[t.name] }));
+  return [...sdk, ...withHints(bridged), ...withHints(native)];
 }
 
 export class Orchestrator {

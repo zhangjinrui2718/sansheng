@@ -47,13 +47,27 @@
  */
 import { parseJsonLenient } from "../../shared/jsonRepair.js";
 
+/** 一个工具参数的可渲染描述(8-F)。**协议段里必须有它** —— 见下方说明。 */
+export interface LoopToolParam {
+  name: string;
+  required: boolean;
+  description: string;
+}
+
 /** 一个可被循环调用的工具。刻意**不**用 SDK 的 ToolDefinition ——
  *  llmCall 路径没有 Pi session 的 schema 校验层,参数校验由各工具自己负责
- *  (nativeTools / toolBridge 内部都做了 runtime 校验并返回可读错误)。 */
+ *  (nativeTools / toolBridge 内部都做了 runtime 校验并返回可读错误)。
+ *
+ *  **但参数名必须告诉模型**(8-F,实机事故):协议段此前只渲染「名字 — 一句描述」,
+ *  模型只能靠猜。2026-10-03 实机:执行者调 bash 时传了 {"cmd": ...},SDK 的 bash 工具
+ *  拿到 command === undefined,回灌 `/bin/bash: undefined` —— 工具明明在池子里,
+ *  却因为「模型不知道参数叫什么」而完全不可用。**能力给了等于没给。** */
 export interface LoopTool {
   name: string;
   /** 给模型看的一行说明(会被拼进工具协议段) */
   description: string;
+  /** 参数名 / 是否必填 / 一句说明。**必填项标出来**,否则模型会漏。 */
+  parameters?: readonly LoopToolParam[];
   run(args: Record<string, unknown>): Promise<string>;
 }
 
@@ -102,10 +116,21 @@ function parseToolCall(raw: string): { name: string; args: Record<string, unknow
   return { name: name.trim(), args: isRecord(args) ? args : {} };
 }
 
+/** 参数行,如 `参数:`command`(必填,Shell command to execute)。 */
+function renderParams(tool: LoopTool): string {
+  if (!tool.parameters || tool.parameters.length === 0) return "";
+  return (
+    " 参数:" +
+    tool.parameters
+      .map((p) => `\`${p.name}\`(${p.required ? "必填" : "选填"}${p.description ? "," + p.description : ""})`)
+      .join("")
+  );
+}
+
 /** 把可用工具拼成提示词里的协议段。`tools` 为空时返回空串(不注入无意义的段)。 */
 export function renderToolProtocol(tools: LoopTool[], maxToolTurns: number): string {
   if (tools.length === 0) return "";
-  const lines = tools.map((t) => `- \`${t.name}\` — ${t.description}`);
+  const lines = tools.map((t) => `- \`${t.name}\` — ${t.description}${renderParams(t)}`);
   return `
 
 ## 工具(需要事实时先查,不要凭印象写)

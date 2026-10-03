@@ -37,7 +37,7 @@
  */
 import { log } from "../../shared/log.js";
 import { TOOL_CATALOG, type SdkToolName } from "./tools.js";
-import type { LoopTool } from "../agents/toolLoop.js";
+import type { LoopTool, LoopToolParam } from "../agents/toolLoop.js";
 
 /** 本批接进循环的 SDK 工具。`powershell` 刻意不在内(见文件头)。 */
 const LOOP_SDK_TOOLS: readonly SdkToolName[] = [
@@ -64,11 +64,46 @@ function errMessage(err: unknown): string {
 interface SdkToolLike {
   name: string;
   description?: string;
+  /** typebox 参数 schema(SDK 自带)—— 批次 8-F 用来把参数名告诉模型 */
+  parameters?: unknown;
   execute: (
     toolCallId: string,
     params: unknown,
     signal?: AbortSignal,
   ) => Promise<{ content: ReadonlyArray<{ type: string; text?: string }> }>;
+}
+
+/**
+ * 批次 8-F:把 SDK 的 typebox schema 压成协议段能渲染的参数清单。
+ * 只取 properties 的键名 + 必填标记 + 字段自带的 description ——
+ * **不把整个 JSON Schema 塞进 systemPrompt**(每轮膨胀几百 token,不划算)。
+ * schema 缺失或形状不认识时返回 undefined(退化到「无参数提示」,与 8-F 之前同款)。
+ */
+function toParams(schema: unknown): LoopToolParam[] | undefined {
+  if (typeof schema !== "object" || schema === null) return undefined;
+  const s = schema as {
+    properties?: Record<string, { description?: unknown } | undefined>;
+    required?: unknown;
+  };
+  const props = s.properties;
+  if (typeof props !== "object" || props === null) return undefined;
+  const required = new Set(
+    Array.isArray(s.required) ? s.required.filter((k): k is string => typeof k === "string") : [],
+  );
+  const out: LoopToolParam[] = [];
+  for (const [key, def] of Object.entries(props)) {
+    const desc =
+      def && typeof def === "object" && typeof def.description === "string"
+        ? def.description
+        : "";
+    out.push({
+      name: key,
+      required: required.has(key),
+      // SDK 的 description 是英文短句,模型读得懂;只截断防止长篇占提示词
+      description: desc.length > 90 ? desc.slice(0, 90) + "…" : desc,
+    });
+  }
+  return out.length > 0 ? out : undefined;
 }
 
 /**
@@ -155,6 +190,10 @@ export async function createSdkLoopTools(cwd: string): Promise<LoopTool[]> {
       // 描述用 TOOL_CATALOG 的中文一行摘要,不用 SDK 的长 description:
       // renderToolProtocol 会把每条拼进 systemPrompt,SDK 原文动辄两三行 × 7 个工具。
       description: TOOL_CATALOG[name].summary,
+      // 批次 8-F:参数名从 SDK 自带的 typebox schema 取(权威来源,不会与实现漂移)。
+      // 少了这一步,模型只能猜参数名 —— 实机里它给 bash 传了 {"cmd":...},
+      // 于是回灌 `/bin/bash: undefined`,工具等于没有。
+      parameters: toParams(tool.parameters),
       run: async (args: Record<string, unknown>): Promise<string> => {
         try {
           const res = await tool.execute(`loop-${name}-${Date.now().toString(36)}`, args);
