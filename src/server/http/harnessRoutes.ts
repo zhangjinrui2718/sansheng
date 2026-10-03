@@ -97,13 +97,19 @@ export function registerHarnessRoutes(app: Hono, opts: HarnessRoutesOptions): vo
   app.put("/api/harness/facets/:facet/entries/:id", async (c) => {
     const facet = c.req.param("facet");
     const id = c.req.param("id");
-    let body: Record<string, unknown> = {};
+    let body: Record<string, unknown>;
     try {
-      const parsed: unknown = await c.req.json().catch(() => null);
+      const parsed: unknown = await c.req.json();
       body = readBody(parsed);
     } catch (err) {
+      // JSON 解析失败与「body 缺失」在这里是同一件事(Hono 两者都 reject),
+      // 但要分开说:前者是客户端写错了,后者可能是漏传了字段。
       return c.json(
-        { ok: false, error: "invalid_payload", message: `请求体不是合法 JSON:${errMsg(err)}` },
+        {
+          ok: false,
+          error: "invalid_payload",
+          message: `请求体不是合法 JSON(或为空):${errMsg(err)} —— prompts 面要 { content },tools 面要 { allow, deny }`,
+        },
         400,
       );
     }
@@ -125,6 +131,8 @@ export function registerHarnessRoutes(app: Hono, opts: HarnessRoutesOptions): vo
     const id = c.req.param("id");
     const parsed: unknown = await c.req.json().catch(() => null);
     const body = readBody(parsed);
+    // confirm 检查**先于**面 id 检查:「你没确认」比「你指的条目不存在」更贴近
+    // 用户此刻的动作意图(他在点恢复出厂),顺序反了会得到一条莫名其妙的 404。
     if (body["confirm"] !== "reset") {
       return c.json(
         {
