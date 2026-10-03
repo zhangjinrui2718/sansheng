@@ -289,6 +289,16 @@ export class AgentKernel {
     return this.agentDir;
   }
 
+  /**
+   * 批次 8-A:工作根(= settings.cwd,惰性默认值 ~/sansheng-workspace)。
+   * SDK 内置工具(read/write/edit/bash)要按这个根构造,否则 executor
+   * 「能干活」这件事会落在进程 cwd(= 启动目录)上 —— 换个启动方式
+   * 就换个根,是那种事后极难归因的漂移。
+   */
+  getCwd(): string {
+    return this.cwd;
+  }
+
   /** M3+ B1: 暴露底层 Pi session,供 Orchestrator llmCall 注入使用。
    *  makeLlmCall 用它直接 prompt 而不走 kernel.prompt(避免 Communicator 递归)。
    *  返回 null 时表示 session 还没启动(Orchestrator 应抛错或 defer)。

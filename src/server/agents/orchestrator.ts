@@ -40,6 +40,7 @@ import { artifactBus, makeArtifact } from "../bus/index.js";
 import { log } from "../../shared/log.js";
 import { loadHarness } from "../harness/loader.js";
 import { createBridgedLoopTools } from "../harness/toolBridge.js";
+import { createSdkLoopTools } from "../harness/sdkTools.js";
 import { buildNativeLoopTools } from "../harness/nativeTools.js";
 import type { LoopTool } from "./toolLoop.js";
 import {
@@ -100,6 +101,12 @@ export interface OrchestratorOptions {
   tools?: LoopTool[];
   /** 批次 7-H:自定义工具装配(默认 buildOrchestratorTools)。 */
   loadTools?: () => Promise<LoopTool[]>;
+  /**
+   * 批次 8-A:SDK 内置工具的工作根(= settings.cwd)。
+   * 不传 → 回退 `process.cwd()`。生产由 ws.ts 传 `kernel.getCwd()`;
+   * 测试不传也没关系(它们不调 SDK 工具)。
+   */
+  cwd?: string;
   /** 注入 bus(默认全局 artifactBus);测试可注入 mock */
   bus?: typeof artifactBus;
   /** callback 路由 — 默认仅 publish bus event */
@@ -143,16 +150,23 @@ interface WaitingEntry {
 }
 
 /**
- * 批次 7-H:默认工具装配 = SDK sandbox 桥接 6 + sansheng 原生 3。
+ * 默认工具装配 = **SDK 内置 7**(8-A)+ sandbox 桥接 6 + sansheng 原生 3。
  *
- * 两组工具的数据源不同,所以是两个模块:`toolBridge`(ToolRegistry + Sandbox /
- * NetSandbox)与 `nativeTools`(Blackboard / 记忆 storage)。任一组失败都只丢那一组,
- * 不影响另一组 —— 工具面变小好过整个 executor 起不来。
+ * 三组工具的数据源不同,所以是三个模块:
+ *   · `sdkTools`(批次 8-A)—— SDK 的 read/grep/find/ls/edit/write/bash,根 = settings.cwd。
+ *     **8-A 之前这一组根本不存在**,于是 executor 集合文件里那 7 个工具是假的
+ *     (核查实证见 docs/AGENT-AUDIT-2026-10-03.md §1.3)。
+ *   · `toolBridge` —— ToolRegistry + Sandbox / NetSandbox 的 6 个 canvas_/net_ 工具。
+ *   · `nativeTools` —— Blackboard 与记忆的 3 个原生工具。
+ *
+ * 任一组失败都只丢那一组,不影响其余 —— 工具面变小好过整个 executor 起不来。
+ * 装配顺序 = 提示词里的呈现顺序,刻意把 SDK 常用工具排前面。
  */
-async function buildOrchestratorTools(storage: Storage): Promise<LoopTool[]> {
+export async function buildOrchestratorTools(storage: Storage, cwd: string): Promise<LoopTool[]> {
+  const sdk = await createSdkLoopTools(cwd);
   const bridged = await createBridgedLoopTools();
   const native = buildNativeLoopTools(storage);
-  return [...bridged, ...native];
+  return [...sdk, ...bridged, ...native];
 }
 
 export class Orchestrator {
@@ -165,7 +179,7 @@ export class Orchestrator {
   private readonly plannerLlmCall: PlannerLlmCall | undefined;
   private readonly executorLlmCall: ExecutorLlmCall | undefined;
   private readonly plannerSystemPrompt: string | undefined;
-  /** 批次 7-H:工具全集(SDK sandbox 桥接 6 + sansheng 原生 3),构造时组装一次。 */
+  /** 批次 8-A:工具全集(SDK 内置 7 + sandbox 桥接 6 + sansheng 原生 3),构造时组装一次。 */
   private readonly toolsPromise: Promise<LoopTool[]>;
   private readonly executorSystemPrompt: string | undefined;
   private readonly routeCallback: CallbackRouter;
@@ -209,7 +223,10 @@ export class Orchestrator {
     this.storage = opts.storage;
     this.toolsPromise = opts.tools
       ? Promise.resolve(opts.tools)
-      : (opts.loadTools ? opts.loadTools() : buildOrchestratorTools(this.storage));
+      : (opts.loadTools
+          ? opts.loadTools()
+          : // 批次 8-A:SDK 内置工具按 settings.cwd 构造(不传则 process.cwd())
+            buildOrchestratorTools(this.storage, opts.cwd ?? process.cwd()));
     this.dataDir = opts.dataDir;
     this.agentDir = opts.agentDir;
     this.bus = opts.bus ?? artifactBus;

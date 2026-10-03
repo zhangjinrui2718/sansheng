@@ -330,6 +330,8 @@ export function attachWebSocket(
       storage,
       dataDir,
       agentDir: kernel.getAgentDir(),
+      // 批次 8-A:SDK 内置工具的工作根(= settings.cwd),与 Pi session 里同一套。
+      cwd: kernel.getCwd(),
       // M3+ B1: 把 kernel.getModel() 包成 Planner/Executor LLM call
       plannerLlmCall: llmCallFactory(kernel),
       executorLlmCall: llmCallFactory(kernel),
