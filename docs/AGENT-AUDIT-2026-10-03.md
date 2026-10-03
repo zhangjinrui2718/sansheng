@@ -183,11 +183,11 @@
 
 ## 3. gap 汇总(按严重度 = 是否影响用户每次干活)
 
-| 级别 | gap | 后果 | 对应批次 |
-|---|---|---|---|
-| **P0** | G1 执行者 13 个工具里 7 个是假的,且提示词在教它用 | 执行者不能读文件/写文件/跑命令;模型被逼编造「查过」的内容 | 8-A |
-| **P0** | G2 终态没人播报(Observer 死接线) | 干完活只有一张卡片,没有「做完了,结论是…」 | 8-B |
-| **P0** | G3 计划不可见、不可中止 | 用户既看不到拆解,也停不下跑飞的 plan | 8-C |
+| 级别 | gap | 后果 | 对应批次 | 状态 |
+|---|---|---|---|---|
+| **P0** | G1 执行者 13 个工具里 7 个是假的,且提示词在教它用 | 执行者不能读文件/写文件/跑命令;模型被逼编造「查过」的内容 | 8-A | ✅ **已落地** `4f644b6` |
+| **P0** | G2 终态没人播报(Observer 死接线) | 干完活只有一张卡片,没有「做完了,结论是…」 | 8-B | ✅ **已落地** `e7479c6` |
+| **P0** | G3 计划不可见、不可中止 | 用户既看不到拆解,也停不下跑飞的 plan | 8-C | 🚧 服务端已落地(事件已外发 + abort 通路),前端渲染进行中 |
 | **P1** | G4 记忆只写不读 + 不喂干活的人 | 「它记得」只在我叫/我喜欢时成立,执行者永远不知道用户偏好 | 8-D |
 | **P1** | G5 质量把关与自我改进缺位(critic/reflection 零实现、manager 永不触发) | 错误产出没人拦,系统不会从失败里变好 | 8-E(后续) |
 | **P2** | G6 成本无设防 | 单次跑飞可以烧掉真金白银 | 8-F(后续) |
@@ -234,6 +234,34 @@ harness_proposal 补一个真实产出方(executor 连续失败 / 用户明确�
 
 ### 8-G harness UI 覆盖(P2)
 提示词单元一节列全 11 个(orphan 如实标),补齐 decide/align/worker_ask/sedimentation 的编辑入口。
+
+---
+
+## 4.1 落地记录
+
+### 8-A 给执行者真实工具(`4f644b6`)
+- 新增 `src/server/harness/sdkTools.ts`:`createSdkLoopTools(cwd)` 用 SDK 的
+  `createReadOnlyTools` / `createCodingTools` 包出 7 个 `LoopTool`
+  (read / grep / find / ls / edit / write / bash;powershell 刻意不接)。
+- `orchestrator.ts buildOrchestratorTools(storage, cwd)` 三组合并(SDK 7 + 桥接 6 + 原生 3);
+  ws.ts 传 `kernel.getCwd()`(= settings.cwd,默认 `~/sansheng-workspace`)。
+- **实测**:执行者可用工具 6 → **13**;不变量测试 `tests/agents/sdk-loop-tools.test.ts`
+  断言「集合文件声称的工具必须在池子里」+「提示词承诺的能力必须在池子里」——
+  这两条断言就是为了让 7-H 那类「配置说有、执行点没有」再也不可能悄悄回来。
+- **边界没动**:授权仍由 ROLE_CEILING + 集合文件裁决;SDK 工具的工作根仍是 settings.cwd,
+  仍不经 Sansheng Sandbox(7-H 既有裁决,本批只补「缺失」不顺带改「边界」,好让回归可归因)。
+
+### 8-B 终态播报(`e7479c6`)
+- 新增 `src/server/agents/runReport.ts`:`makeRunReporter` 一次轻量补全(8s 超时 / 400 token)
+  把「目标 + 各步状态 + 交付物 + 失败原因」压成**一到两句中文**;
+  **降级文案是确定性的**,且只数输入里的事实(完成几项、第一条交付物标题),
+  失败/中止也各有说法 —— 降级不等于可以含糊。
+- 新增 harness 提示词单元 `communicator.report`(12 个单元),提示词写死了六条:
+  只在终态说、只用清单里的事实、说清哪一步失败、纯文本、不复述清单、不寒暄。
+- `AgentKernel.sayAsCommunicator()` 合成一个 turn(事件序列与「确认文本」路径逐字同款)
+  + 落库 + 总线留痕;ws.ts 在 `plan_done` 与 `plan_failed` 两条终态路径上**不 await** 地调用。
+- **不复用那套死掉的 Observer mixin**:终态在 runPlan 里是已知的同步事实,订阅全局 bus
+  只会多一类重复播报与僵尸订阅。少一个订阅少一类事故,这是本实现与 mixin 的核心差别。
 
 ---
 

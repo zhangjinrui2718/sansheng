@@ -365,11 +365,51 @@ export function attachWebSocket(
         // - completed → 仅记录 intentId;plan_done 在 run() settle 之后发(见下,A1)
         (progress: ProgressEvent) => {
           switch (progress.type) {
+            // 批次 8-C:计划与进度上屏。**此前这一段是 default: break** ——
+            // 用户交办一件事,直到跑完才第一次看见结果,中间发生了什么全靠猜。
+            case "todos_planned":
+              broadcast({
+                type: "plan_planned",
+                conversationId,
+                intentId: progress.todos[0]?.parentIntent ?? "",
+                todos: progress.todos.map((t) => ({
+                  id: t.id,
+                  title: t.title,
+                  status: t.status,
+                  dependsOn: t.dependsOn ?? [],
+                })),
+              });
+              break;
+            case "todo_started":
+              broadcast({
+                type: "plan_todo_update",
+                conversationId,
+                todoId: progress.todo.id,
+                status: progress.todo.status,
+                reason: null,
+              });
+              break;
+            case "todo_resolved":
+              broadcast({
+                type: "plan_todo_update",
+                conversationId,
+                todoId: progress.todo.id,
+                status: progress.todo.status,
+                reason: null,
+              });
+              break;
             case "todo_failed":
               broadcast({
                 type: "error",
                 conversationId,
                 error: { code: "todo_failed", message: `${progress.todo.title}: ${progress.reason}` },
+              });
+              broadcast({
+                type: "plan_todo_update",
+                conversationId,
+                todoId: progress.todo.id,
+                status: "failed",
+                reason: progress.reason,
               });
               break;
             case "completed":

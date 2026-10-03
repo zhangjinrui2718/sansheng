@@ -82,6 +82,36 @@ export type ServerEvent =
   | { type: "conversation_reset"; conversationId: string }
   // M3b: 多 agent Blackboard 流
   | { type: "blackboard_update"; blackboard: import("@shared/types/agents").Blackboard; agents: Record<string, import("@shared/types/agents").AgentRunSummary> }
+  /**
+   * 批次 8-C:计划一拆出来就上屏。**这是「用户看得见自己的任务被怎么拆」的唯一通道** ——
+   * 此前 orchestrator 发了 todos_planned,ws.ts 却明确不外发,用户只能在工件页
+   * 事后翻;核查记录见 docs/AGENT-AUDIT-2026-10-03.md §1.2 第 4 条。
+   * todo 只带展示必需的四个字段(不带 body):黑板快照仍然走 plan_done.artifacts。
+   * 镜像:shared/types/ws.ts(前端联合类型),两端必须同步。
+   */
+  | {
+      type: "plan_planned";
+      conversationId: string;
+      intentId: string;
+      todos: Array<{
+        id: string;
+        title: string;
+        status: import("@shared/types/blackboard.js").ArtifactStatus;
+        dependsOn: string[];
+      }>;
+    }
+  /**
+   * 批次 8-C:某个 todo 的状态变了。**不重发整份计划** —— 计划可能有十几个 todo,
+   * 每变一次全量重发既浪费又会让前端闪。发最小增量即可。
+   */
+  | {
+      type: "plan_todo_update";
+      conversationId: string;
+      todoId: string;
+      status: import("@shared/types/blackboard.js").ArtifactStatus;
+      /** 失败原因(todo_failed 时有;其它状态为 null) */
+      reason: string | null;
+    }
   // M3+ B2:Orchestrator 完成 / 失败(Sansheng front-end 订阅 plan_done 渲染总结卡)。
   // 旧的 Blackboard 字段被废弃 — 新形态用 conversationId + summary + artifacts。
   // 批次 1 B10-5:前端已接线 — shared/types/ws.ts 的 ServerEvent union 有逐字镜像
