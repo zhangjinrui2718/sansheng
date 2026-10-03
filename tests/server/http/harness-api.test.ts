@@ -170,7 +170,7 @@ describe("batch5b-2 T2 · GET /api/harness(真实 createApp 接线)", () => {
     expect(toolsFacet?.implemented).toBe(true);
     expect(toolsFacet?.entries.length).toBe(7); // RoleKind 6 + harness_manager
     expect(promptsFacet?.implemented).toBe(true);
-    expect(promptsFacet?.entries.length).toBe(10); // 6 角色 + decide/align/sedimentation/harness_manager
+    expect(promptsFacet?.entries.length).toBe(11); // 6 角色 + decide/align/worker_ask/sedimentation/harness_manager
     for (const id of ["skills", "rag"]) {
       const f = body.facets.find((x) => x.id === id);
       expect(f?.implemented, `${id} 未实现`).toBe(false);
@@ -180,8 +180,8 @@ describe("batch5b-2 T2 · GET /api/harness(真实 createApp 接线)", () => {
     }
 
     expect(Array.isArray(body.prompts)).toBe(true);
-    // 批次 7-G:6 角色 → **10 个提示词单元**(unit ≠ role)
-    expect(body.prompts.length).toBe(10);
+    // 批次 7-G:6 角色 → 提示词单元(unit ≠ role);批次 7-L 加 worker_ask → 11 个
+    expect(body.prompts.length).toBe(11);
     const ORPHANS = ["critic", "memory", "reflection"];
     for (const p of body.prompts) {
       if (ORPHANS.includes(p.role)) {

@@ -41,8 +41,9 @@ import { log } from "../../shared/log.js";
 import {
   DECIDE_SYSTEM_PROMPT,
   ALIGN_SYSTEM_PROMPT,
+  WORKER_ASK_SYSTEM_PROMPT,
 } from "../harness/promptUnits.js";
-export { DECIDE_SYSTEM_PROMPT, ALIGN_SYSTEM_PROMPT };
+export { DECIDE_SYSTEM_PROMPT, ALIGN_SYSTEM_PROMPT, WORKER_ASK_SYSTEM_PROMPT };
 import { parseJsonLenient } from "../../shared/jsonRepair.js";
 import {
   IMPERATIVE_VERBS,
@@ -456,6 +457,200 @@ function buildAlignUserPrompt(
   return parts.join("\n");
 }
 
+/* ─────────────────────────────────────────────────────────
+ * 批次 7-L · worker 提问的判断轮(总线真正的收件人是沟通员,不是用户)
+ * ───────────────────────────────────────────────────────── */
+
+/** 判断轮输入:执行者递上来的完整求助内容。 */
+export interface WorkerAskInput {
+  /** 执行者写的完整问题(hypothesis 标题 + 正文,不是一句摘要)。 */
+  question: string;
+  /** judgment | harness_proposal —— 决定判断轮用什么口径。 */
+  reason: string;
+  conversationId: string;
+  fromRole: RoleId;
+  todoId?: string;
+}
+
+/**
+ * 判断轮结论。
+ * - `answer`  :沟通员自己答 —— answer 会作为 decision 直接下发给执行者,
+ *               **不惊动用户**。这是 7-L 之后绝大多数提问的归宿。
+ * - `escalate`:沟通员答不了 —— question 是**沟通员自己写的**问法,
+ *               且必须带上 lean(我的倾向)与 ruledOut(我已排除什么)。
+ */
+export type WorkerAskVerdict =
+  | { kind: "answer"; answer: string; basis: string }
+  | { kind: "escalate"; question: string; lean?: string; ruledOut?: string };
+
+export type WorkerAskAdjudicateFn = (input: WorkerAskInput) => Promise<WorkerAskVerdict | null>;
+
+/**
+ * `handleWorkerAsk` 的宿主侧钩子。Communicator 不认识 executorSessionId、
+ * 也不写 Blackboard —— 它只负责「判断」,解阻塞执行者由 kernel 做。
+ */
+export interface WorkerAskHooks {
+  /** 覆盖 `opts.workerAskAdjudicate`(测试可单点注入)。 */
+  adjudicate?: WorkerAskAdjudicateFn | null;
+  /** 升级用户时**先**回调:登记 questionId → executorSessionId。 */
+  onEscalate?: (questionId: string) => void;
+  /** 沟通员自己答完时回调:写 decision artifact + 恢复执行者。 */
+  onAnswer?: (questionId: string, answer: string) => void;
+}
+
+const WORKER_ASK_MAX_TOKENS = 400;
+const WORKER_ASK_TIMEOUT_MS = 8000;
+
+export interface WorkerAskAdjudicateDeps {
+  getModel: () => Model<any> | null;
+  getApiKey?: () => string | undefined;
+  /** DI seam(测试注入):替换 completeSimple。注入时绕过模型/开关闸门。 */
+  llmCall?: (input: { systemPrompt: string; userPrompt: string }) => Promise<string>;
+  /** 批次 7-G:harness `system_prompts/communicator.worker_ask.md`;空 → 内置常量。 */
+  systemPrompt?: string;
+  /**
+   * 最近对话 —— 「已经与用户对齐过的信息」就是判断轮的弹药。
+   * 与 align 闸门同款理由:看不到自己问过什么,就会把同一个问题再问一遍用户。
+   */
+  recentHistory?: (conversationId: string) => Array<{
+    role: "user" | "assistant";
+    content: string;
+  }>;
+  /** 覆盖超时(ms);默认 8000。 */
+  timeoutMs?: number;
+}
+
+/**
+ * 构造判断轮:执行者卡住时,沟通员**先自己判一轮**。
+ *
+ * 失败语义与 align 闸门**故意相反**:
+ * - align 失败 → 放行(宁可开工,别把用户卡在闸门上);
+ * - 判断轮失败 → 返回 null = **照旧升级用户**。
+ *
+ * 理由:升级是 7-L 之前**一直存在**的安全路径(用户至少还能拍板),
+ * 而「沟通员自己答」是新增能力 —— 判不出来时退回旧路径,最坏结果是
+ * 「还是问了用户」,即今天的行为,不会更差。反过来 fail-open 到 answer
+ * 则可能让沟通员在没判断成的情况下替用户拍板,那才是真事故。
+ */
+export function makeWorkerAskAdjudicate(deps: WorkerAskAdjudicateDeps): WorkerAskAdjudicateFn {
+  const timeoutMs = deps.timeoutMs ?? WORKER_ASK_TIMEOUT_MS;
+  return async (input) => {
+    // 卫生闸门(与 SANSHENG_DECIDE_LLM / SANSHENG_ALIGN 同款)
+    if (!deps.llmCall) {
+      if (process.env.SANSHENG_WORKER_ASK === "0") return null;
+      if (!deps.getModel()) return null;
+    }
+
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let raw: string;
+    try {
+      const buildPrompt = () => buildWorkerAskUserPrompt(input, readRecent(deps, input.conversationId));
+      // 批次 7-G:harness 值优先,空则回退编译内置(与 decide / align 同款语义)
+      const sys = deps.systemPrompt?.trim() ? deps.systemPrompt : WORKER_ASK_SYSTEM_PROMPT;
+      const call = async (): Promise<string> => {
+        if (deps.llmCall) return deps.llmCall({ systemPrompt: sys, userPrompt: buildPrompt() });
+        const model = deps.getModel();
+        if (!model) return "";
+        const apiKey = deps.getApiKey?.();
+        const result = await completeSimple(
+          model as Parameters<typeof completeSimple>[0],
+          {
+            systemPrompt: sys,
+            messages: [{ role: "user", content: buildPrompt(), timestamp: Date.now() }],
+          },
+          { maxTokens: WORKER_ASK_MAX_TOKENS, ...(apiKey ? { apiKey } : {}) },
+        );
+        if (result.stopReason === "error" || result.errorMessage) return "";
+        const parts: string[] = [];
+        for (const c of result.content) if (c.type === "text") parts.push(c.text);
+        return parts.join("");
+      };
+
+      // 硬超时:执行者在 waiting_for_decision 上等着,判断轮不能无限期占着
+      raw = await Promise.race([
+        call(),
+        new Promise<string>((resolve) => {
+          timer = setTimeout(() => resolve(""), timeoutMs);
+        }),
+      ]);
+    } catch (err) {
+      log.warn(`worker_ask: 判断轮调用失败(${(err as Error).message ?? err}),退回升级用户`);
+      return null;
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+
+    if (!raw.trim()) return null;
+    return parseWorkerAskVerdict(raw);
+  };
+}
+
+/**
+ * 解析判断轮输出。返回 null = 解析不出来 → 调用方退回升级用户。
+ * 单独导出便于直接单测(不必起一次假 LLM)。
+ */
+export function parseWorkerAskVerdict(raw: string): WorkerAskVerdict | null {
+  const parsed = parseJsonLenient<Record<string, unknown>>(raw);
+  if (!parsed.ok || !parsed.value || typeof parsed.value !== "object") return null;
+  const v = parsed.value;
+  const verdict = String(v["verdict"] ?? "").trim().toLowerCase();
+  if (verdict === "answer") {
+    const answer = String(v["answer"] ?? "").trim();
+    if (!answer) return null;
+    return { kind: "answer", answer, basis: String(v["basis"] ?? "").trim() };
+  }
+  if (verdict === "escalate") {
+    const question = String(v["question"] ?? "").trim();
+    if (!question) return null;
+    const lean = String(v["lean"] ?? "").trim();
+    const ruledOut = String(v["ruledOut"] ?? "").trim();
+    return {
+      kind: "escalate",
+      question,
+      ...(lean ? { lean } : {}),
+      ...(ruledOut ? { ruledOut } : {}),
+    };
+  }
+  return null;
+}
+
+function buildWorkerAskUserPrompt(
+  input: WorkerAskInput,
+  history: Array<{ role: "user" | "assistant"; content: string }> | undefined,
+): string {
+  const parts: string[] = [];
+  if (history && history.length > 0) {
+    parts.push("[最近对话(已与用户对齐过的信息)]");
+    for (const h of history.slice(-DECIDE_HISTORY_MAX)) {
+      const body = (h.content ?? "").replace(/\s+/g, " ").trim().slice(0, DECIDE_HISTORY_CHARS);
+      parts.push(`${h.role}: ${body}`);
+    }
+    parts.push("");
+  }
+  parts.push(`[发起方] ${input.fromRole}`);
+  parts.push(`[理由] ${input.reason}`);
+  parts.push("");
+  parts.push("[执行者的问题(全文)]");
+  parts.push(input.question || "(执行者没写正文)");
+  parts.push("");
+  parts.push("先判断一轮:你能自己拍板就答,只有真的需要用户拍板才升级。");
+  return parts.join("\n");
+}
+
+/**
+ * 把升级结论拼成给用户看的一段话。
+ *
+ * lean / ruledOut 是**必带**的:用户是被叫来拍板的,不是被叫来替沟通员干活的。
+ * 只把执行者的原话转述一遍(7-L 之前的样子),用户既不知道该选什么,
+ * 也不知道你已经替他排除了什么 —— 那不是省事,是把成本原样转嫁。
+ */
+function buildEscalationText(v: Extract<WorkerAskVerdict, { kind: "escalate" }>): string {
+  const parts = [v.question];
+  if (v.lean) parts.push(`我的倾向:${v.lean}`);
+  if (v.ruledOut) parts.push(`我已经排除:${v.ruledOut}`);
+  return parts.join("\n");
+}
+
 /** 读最近对话;读取失败视作没有历史(闸门不能因为取历史失败就失效)。 */
 function readRecent(
   deps: AlignCheckDeps,
@@ -492,6 +687,12 @@ export interface CommunicatorOptions {
    * 返回 null = 不用问,直接开工。不提供则完全跳过该闸门(旧行为)。
    */
   alignmentCheck?: AlignmentCheckFn;
+  /**
+   * 批次 7-L:worker 提问的**判断轮**。执行者卡住时总线上的问题是问沟通员的,
+   * 沟通员先自己判一轮:能答就答(不惊动用户),答不了才升级给用户。
+   * 不提供 = 跳过判断轮,恢复 7-L 之前「一律直接问用户」的行为。
+   */
+  workerAskAdjudicate?: WorkerAskAdjudicateFn | null;
 }
 
 export type AlignmentCheckFn = (input: {
@@ -735,17 +936,29 @@ export class Communicator {
   }
 
   /**
-   * 处理 worker 提问:reply 自己答,或 escalate 给用户。
-   * - knowIt=true:直接 reply(payload)
-   * - knowIt=false:emit pending_question;返回 questionId,等待 ws 层 answer_question 事件调 bus.reply()
+   * 处理 worker 提问 —— 批次 7-L 起,这条链路的收件人是**沟通员**,不是用户。
    *
-   * knowIt 默认由 decideFn 判断;实际产品中可以走 LLM 自查(读代码 / 调工具)。
+   * 三条路径:
+   * 1. `knowIt=true`(显式已知 / 老测试):直接 reply,与 7-L 之前一致;
+   * 2. **判断轮**(`opts.workerAskAdjudicate`):先让沟通员自己判一轮。
+   *    - verdict=answer  → 记一条 comm→worker 的 reply,`hooks.onAnswer` 让 kernel
+   *      写 decision artifact + `executor_resume`。**用户完全不知情,零打扰。**
+   *    - verdict=escalate → 沟通员**自己**重新起一个 `q-comm-*` 问题问用户
+   *      (带 lean / ruledOut),`hooks.onEscalate` 让 kernel 立刻登记
+   *      questionId → executorSessionId;
+   * 3. 没有判断轮 / 判断轮失败:退回 7-L 之前的行为(原样升级)。
+   *
+   * 为什么 escalate 要**换一个新 id**:审计流要如实记录两级交互 ——
+   * `worker→comm` 是执行者问沟通员,`comm→user` 才是沟通员问用户。
+   * 沿用 q-exec-* 会让 timeline 上看起来像执行者直接找用户,那正是本批次
+   * 要修的病。
    */
   async handleWorkerAsk(
     questionMessage: BusMessage,
     knowIt: boolean,
     replyPayload: string,
     sink: CommunicatorSink,
+    hooks?: WorkerAskHooks,
   ): Promise<{ replied: boolean; questionId?: string }> {
     if (questionMessage.kind !== "question") {
       log.warn(`handleWorkerAsk: not a question, got kind=${questionMessage.kind}`);
@@ -760,15 +973,109 @@ export class Communicator {
       if (replyMsg) sink({ type: "bus_event", message: replyMsg });
       return { replied: true };
     }
-    // escalate:自己答不了,问用户
-    const pendingId = questionMessage.id;
+
+    // 批次 7-L:判断轮。先问自己「我能答吗」,再决定要不要惊动用户。
+    const adjudicate = hooks?.adjudicate ?? this.opts.workerAskAdjudicate ?? null;
+    let verdict: WorkerAskVerdict | null = null;
+    if (adjudicate) {
+      try {
+        verdict = await adjudicate({
+          question: questionMessage.payload,
+          reason: String(questionMessage.context?.["reason"] ?? "judgment"),
+          conversationId: questionMessage.conversationId,
+          fromRole: questionMessage.fromRole as RoleId,
+          ...(questionMessage.context?.["todoId"]
+            ? { todoId: String(questionMessage.context["todoId"]) }
+            : {}),
+        });
+      } catch (err) {
+        // 判不出来不是事故 —— 退回升级即可(见 makeWorkerAskAdjudicate 的失败语义)
+        log.warn(`worker_ask: 判断轮抛错(${(err as Error).message ?? err}),退回升级用户`);
+        verdict = null;
+      }
+    }
+
+    // 路径 2-A:沟通员自己答 —— 不打扰用户,直接把决定下发给执行者。
+    if (verdict?.kind === "answer") {
+      const replyMsg = this.recordWorkerReply(questionMessage, verdict.answer);
+      sink({ type: "bus_event", message: replyMsg });
+      try {
+        hooks?.onAnswer?.(questionMessage.id, verdict.answer);
+      } catch (err) {
+        log.warn(`worker_ask: onAnswer threw: ${(err as Error).message ?? err}`);
+      }
+      log.muted(
+        `worker_ask: 沟通员自己答了(${questionMessage.fromRole} 的问题),不惊动用户 (${questionMessage.id.slice(0, 12)})`,
+      );
+      return { replied: true, questionId: questionMessage.id };
+    }
+
+    // 路径 2-B / 3:升级给用户。有判断轮结论就用**沟通员自己写的问法**。
+    const escalate = verdict?.kind === "escalate" ? verdict : null;
+    const pendingId = escalate ? `q-comm-${nanoid(8)}` : questionMessage.id;
+    const payload = escalate ? buildEscalationText(escalate) : questionMessage.payload;
+    if (escalate) {
+      // 记一条 comm→user 的 question:用户看到的是**沟通员在问**,不是执行者在问
+      this.opts.bus.recordExternal({
+        id: pendingId,
+        ts: Date.now(),
+        direction: "comm→user",
+        fromRole: "communicator",
+        toRole: "user",
+        conversationId: questionMessage.conversationId,
+        kind: "question",
+        payload,
+        context: {
+          source: "worker_ask_escalate",
+          workerQuestionId: questionMessage.id,
+          workerRole: questionMessage.fromRole,
+          ...(escalate.lean ? { lean: escalate.lean } : {}),
+          ...(escalate.ruledOut ? { ruledOut: escalate.ruledOut } : {}),
+        },
+      });
+    }
+    // 先登记再通知:用户的回答随时可能到达(ws 与 sink 是异步的),
+    // 顺序反了就会有一小段「问题已发出但 server 端查无此题」的窗口。
+    try {
+      hooks?.onEscalate?.(pendingId);
+    } catch (err) {
+      log.warn(`worker_ask: onEscalate threw: ${(err as Error).message ?? err}`);
+    }
     sink({
       type: "pending_question",
       questionId: pendingId,
-      payload: questionMessage.payload,
-      fromRole: questionMessage.fromRole as RoleId,
+      payload,
+      fromRole: escalate ? "communicator" : (questionMessage.fromRole as RoleId),
     });
+    if (escalate) {
+      log.muted(
+        `worker_ask: 沟通员答不了,已升级用户 (${questionMessage.id.slice(0, 12)} → ${pendingId})`,
+      );
+    }
     return { replied: false, questionId: pendingId };
+  }
+
+  /**
+   * 把「沟通员自己答」记成一条 comm→worker 的 reply。
+   *
+   * 为什么不用 `bus.reply()`:executor 的提问是 kernel 用 `recordExternal`
+   * 记进来的(MessageBus.pending 里**没有**它 —— 那个通道的等待方是
+   * Orchestrator 的 watchdog,不是 bus 的 300s)。所以这里显式造一条 reply
+   * 进流,让 timeline / bus.jsonl 看得见「worker 问 → 沟通员答」这一段,
+   * 而真正解阻塞执行者的是 hooks.onAnswer(kernel 侧写 decision + resume)。
+   */
+  private recordWorkerReply(questionMessage: BusMessage, answer: string): BusMessage {
+    return this.opts.bus.recordExternal({
+      id: nanoid(),
+      ts: Date.now(),
+      direction: "comm→worker",
+      fromRole: "communicator",
+      toRole: questionMessage.fromRole,
+      conversationId: questionMessage.conversationId,
+      kind: "reply",
+      questionId: questionMessage.id,
+      payload: answer,
+    });
   }
 
   /** 直接给一个 pending question(由外层 answer_question 事件驱动)reply,用于测试 + ws 桥接。 */

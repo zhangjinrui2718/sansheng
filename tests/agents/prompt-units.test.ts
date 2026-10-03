@@ -60,9 +60,9 @@ function promptPath(dir: string, unit: string): string {
 }
 
 describe("7-G 提示词注册表 · 自洽性", () => {
-  it("10 个单元,id 唯一,且每个都有非空的内置回退值", () => {
-    expect(PROMPT_UNIT_IDS).toHaveLength(10);
-    expect(new Set(PROMPT_UNIT_IDS).size).toBe(10);
+  it("11 个单元(7-L 加 communicator.worker_ask),id 唯一,且每个都有非空的内置回退值", () => {
+    expect(PROMPT_UNIT_IDS).toHaveLength(11);
+    expect(new Set(PROMPT_UNIT_IDS).size).toBe(11);
     for (const id of PROMPT_UNIT_IDS) {
       const text = BUILTIN_PROMPTS[id];
       expect(text, `${id} 没有内置回退值`).toBeTruthy();
@@ -163,7 +163,7 @@ describe("7-G 反 7-B 死接线守卫 · enforced 声称必须在 src/ 里落地
 });
 
 describe("7-G 落盘 · 出厂文件 === 内置回退值(逐字)", () => {
-  it("ensureHarness 为全部 10 个单元写出厂文件,且内容与 BUILTIN_PROMPTS 逐字相同", () => {
+  it("ensureHarness 为全部 11 个单元写出厂文件,且内容与 BUILTIN_PROMPTS 逐字相同", () => {
     ensureHarness(dataDir);
     for (const id of PROMPT_UNIT_IDS) {
       const p = promptPath(dataDir, id);
@@ -273,7 +273,7 @@ describe("7-G facet 注册表 · 五个面(含两个未实现面)", () => {
       }
     }
     const prompts = snap.find((f) => f.id === "prompts");
-    expect(prompts?.entries.length).toBe(10);
+    expect(prompts?.entries.length).toBe(11);
     const orphan = prompts?.entries.filter((e) => !e.enforced).map((e) => e.id);
     expect(orphan?.sort()).toEqual(["critic", "memory", "reflection"]);
   });

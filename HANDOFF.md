@@ -1,9 +1,18 @@
 # Sansheng 项目交接包
 
-**生成时间**:2026-10-02 22:00 CST · **v7.1**(批次 7-H:各 agent 工具集合落地 + 提示词重写)
-**上一版**:v7.0(批次 7-G:提示词单元化 + HarnessFacet 统一管理面),见下。
+**生成时间**:2026-10-03 CST · **v7.2**(批次 7-L:worker 升级先问沟通员 + 沟通员判断轮)
+**上一版**:v7.1(批次 7-H:各 agent 工具集合落地 + 提示词重写),见下。
 **适用**:下一会话(主对话 / worker)开盒即读
 **配套阅读**:`/root/projects/sansheng/PLAN.md`(v5 集成版),`/root/projects/sansheng/ARCHITECTURE.md`(12 层模块图,v6.4 新增),`/root/.pi/agent/memory/MEMORY.md`(长期偏好 + 教训)
+> **v7.2 · 批次 7-L(2026-10-03,DSH 会话,总线升级问题)**:**worker 升级的对象是沟通员,不是用户;沟通员先自己判一轮**。
+> - **用户原话**(worker 在总线上升级 todo-3 时写的):「总线实际的功能是用于 agent 之间做信息交互的,意思就是沟通员和后面几个干活的 agent 做信息交互,worker 升级了问题,应该要问的是沟通员,而不是用户,如果沟通员解决不了,那么沟通员负责和我沟通,让我判断决策。另外要说的是,不要所有的问题都要我来回答,沟通员需要根据和我对齐的信息,先判断一轮。」
+> - **现场事实(不是感受,是代码)**:7-L 之前 `agentKernel.handleExecutorCallback` **硬编码** `communicator.handleWorkerAsk(msg, knowIt=false, …)` —— 沟通员主提示词里那句「升级用户前先自查」写了三年,**代码里一次都没执行过**(与 7-B 死接线同款病,方向是「提示词在骗人」)。用户每一条升级都亲自接,就是这条硬编码的直接后果。
+> - **三处根因一起修**(缺一个都只是换个姿势继续骗):①**判断轮落地**:`makeWorkerAskAdjudicate` + 新提示词单元 `communicator.worker_ask`(11 个单元),输入 = 执行者 hypothesis 全文 + 最近对话(已对齐信息),输出 `{"verdict":"answer"|"escalate",…}`。answer → 写 decision + `executor_resume`,**用户零打扰**;escalate → 沟通员**自己新起 `q-comm-*`** 问用户,并强制带 `lean` + `ruledOut`。②**提问 payload 带全文**:旧 payload 只有一句 `Executor needs help (judgment) for todo xxx`,判断轮连问题是什么都不知道,只能全推给用户 —— 现由 `buildWorkerQuestionPayload` 读 `getArtifact(hypothesisId)` 拼标题 + 候选方案正文。③**审计流如实两级**:`worker→comm`(执行者问沟通员)与 `comm→user`(沟通员问用户)各记各的,沿用 `q-exec-*` 会让 timeline 看起来像执行者直接找用户。
+> - **失败语义刻意与 align 闸门相反**:判断轮缺席/超时/抛错/解析不出来 → **一律退回升级用户**(fail-safe)。align 是 fail-open(宁可开工别卡住用户),因为错判代价是「多问一句」;判断轮 fail-open 则可能让沟通员在没判断成的情况下**替用户拍板** —— 那是真事故。最坏情况只是回到 7-L 之前的行为,不会更差。
+> - **两个连带修正**:①`handleUserAnswer` 的「写 decision + resume」抽成 `resolveWorkerQuestion`,用户回答与沟通员自答**共用同一条落库路径**(否则审计面会出现「执行者拿到一份没有 decision 工件的指令」);②`onEscalate` 里把 `pendingExecutorCallbacks` **改挂**到 `q-comm-*` 并摘掉 `q-exec-*` —— 否则用户回答完,那条已不成立的执行者问题还留在表里,一次迟到的 cancel 能把已恢复的 executor 再杀一遍。
+> - **提示词与版本链**:`ROLE_PROMPTS.executor` 加「## 4. 卡住时你求助的对象是沟通员」段(自包含 / 给候选项 / 说清要什么),`ROLE_PROMPTS.communicator` 把「升级用户前先自查」从台词改成职责。**两份旧出厂默认都已追加进 `LEGACY_DEFAULTS`**(7-J 踩坑第 4 次的规矩:改出厂默认不入链 = 存量用户文件被永久判成 user_edited,新提示词永远到不了)。
+> - **验证**:typecheck 0(server+web)· `npm test` **679 passed | 1 skipped(81 files)**(+22 = `tests/agents/worker-ask.test.ts` 16 + `tests/server/worker-ask.test.ts` 6)· build OK · `grep -rn "as any" src/` = 0。既有 4 个文件的 11 个断言因新增提示词单元与总线 id 语义变化而更新(单元数 10→11、`q-exec-*`→`q-comm-*`),不是回归。
+> - **USER-side 生效条件**:**重启 2718 server**。`~/.sansheng/harness/system_prompts/communicator.worker_ask.md` 启动时自动写出(全新单元,无历史版本);`executor.md` / `communicator.md` 若等于上一代出厂默认会被**自动升级**,若你手改过则保留并显示 `user_edited`(需手动合并)。
 
 > **v7.0 · 批次 7-E(2026-10-02 晚,DSH 会话)**:**harness 的 tool 部分从「装饰」变成「真配置」**。
 > - **用户现场判断**「harness 层面的东西很薄弱,沟通员只有 read/grep/find/ls,能不能提前给每个 agent 打造各自的工具集合,以后 harness 的持续优化就经由升级这套集合」。查证后确认比描述更糙,三处硬事实:

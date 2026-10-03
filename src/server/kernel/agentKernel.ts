@@ -18,7 +18,9 @@ import {
   Communicator,
   makeLlmCommunicatorDecide,
   makeAlignmentCheck,
+  makeWorkerAskAdjudicate,
   type CommunicatorSink,
+  type WorkerAskAdjudicateFn,
 } from "../agents/communicator.js";
 // 批次 5b-2 T1:回合后异步智能沉淀(chat 回合 message_end → D7 artifacts 落 blackboard)
 import { sedimentTurn } from "../agents/sedimentation.js";
@@ -33,7 +35,7 @@ import { appendBusMessage, loadBusMessages } from "../agents/busPersister.js";
 type BusMessage = BusMessageFromTypes;
 import { resolveModel, syncActiveProviderApiKeyEnv } from "../providers/registry.js";
 import { artifactBus, makeArtifact } from "../bus/index.js";
-import { upsertArtifact } from "../storage/index.js";
+import { upsertArtifact, getArtifact } from "../storage/index.js";
 import {
   Storage,
   embedText,
@@ -165,6 +167,13 @@ export interface AgentKernelOptions {
    */
   alignLlmCall?: (input: { systemPrompt: string; userPrompt: string }) => Promise<string>;
   /**
+   * 批次 7-L:worker 提问判断轮(WORKER_ASK_SYSTEM_PROMPT)的测试注入 seam ——
+   * 与 alignLlmCall 同款 DI 模式。生产不传 → 走 completeSimple(getModel())。
+   * 返回 `{"verdict":"answer","answer":…}` 即「沟通员自己答、不问用户」,
+   * 返回 `{"verdict":"escalate","question":…}` 即「升级用户」。
+   */
+  workerAskLlmCall?: (input: { systemPrompt: string; userPrompt: string }) => Promise<string>;
+  /**
    * 批次 4a C8 测试 seam / 调优项:createAgentSession 硬超时(ms)。
    * 生产不传 → 8000(Pi SDK 在离线/网络慢时 ModelRuntime.refresh 可能长挂,
    * 无超时会拖死 ensureStarted 链)。
@@ -221,6 +230,12 @@ export class AgentKernel {
   private bus: MessageBus = new MessageBus();
   private communicator: Communicator | null = null;
   private pendingQuestions = new Map<string, string>(); // questionId → conversationId
+  /**
+   * 批次 7-L:worker 提问的判断轮,由 ensureCommunicator 构造。
+   * 存在字段上而不是局部变量,是因为 handleExecutorCallback 与 Communicator
+   * 构造处都要用它 —— 前者是每次提问时用,后者是建 Communicator 时注入。
+   */
+  private workerAskAdjudicate: WorkerAskAdjudicateFn | null = null;
   /** M3+ B3/B5: Executor callback(orchestrator.routeCallback 注入此 kernel)。
    *  Synthesized BusMessage questionId → executorSessionId。
    *  user answer 时反查 → publish executor_resume。
@@ -379,6 +394,18 @@ export class AgentKernel {
       modelId: active?.modelId ?? "fake-model",
       thinkingLevel: active?.thinkingLevel ?? "off",
     };
+    // 批次 7-L:判断轮在这里构造(kernel 构造 Communicator 时读一次 harness,
+    // 与 decide / align 同款时机语义)。失败/超时一律返回 null = 退回升级用户。
+    this.workerAskAdjudicate = makeWorkerAskAdjudicate({
+      getModel: () => this.getModel(),
+      getApiKey: () => this.getModelApiKey(),
+      ...(this.opts.workerAskLlmCall ? { llmCall: this.opts.workerAskLlmCall } : {}),
+      // 批次 7-G:harness system_prompts/communicator.worker_ask.md;空 → 内置常量
+      systemPrompt: harness.systemPrompts["communicator.worker_ask"],
+      // 判断轮要看到「已经与用户对齐过的信息」—— 那正是它据以自己拍板的弹药。
+      recentHistory: (conversationId) => this.recentTurns(conversationId),
+    });
+
     const comm = new Communicator({
       bus: this.bus,
       settings,
@@ -416,6 +443,9 @@ export class AgentKernel {
         // 再问一遍,陷入无限澄清循环(7-E 集成测试实测抓到)。
         recentHistory: (conversationId) => this.recentTurns(conversationId),
       }),
+      // 批次 7-L:worker 提问的判断轮。执行者卡住时总线上的问题**是问沟通员的**
+      // —— 沟通员先自己判一轮,能答就答,答不了才升级用户。
+      workerAskAdjudicate: this.workerAskAdjudicate,
     });
     // M3+ B4: 若 ws 层先调 setOnTask(此时 Communicator 尚未构造),
     // pending 引用在这里应用;否则保持 undefined。
@@ -456,16 +486,41 @@ export class AgentKernel {
     conversationId: string,
   ): { replied: boolean; resumed?: { executorSessionId: string; decisionArtifactId: string } } {
     const replied = this.answerPendingQuestion(questionId, payload);
+    const resumed = this.resolveWorkerQuestion(
+      questionId,
+      payload,
+      conversationId,
+      `User decision for ${questionId.slice(0, 8)}`,
+    );
+    return resumed ? { replied, resumed } : { replied };
+  }
+
+  /**
+   * 批次 7-L:「某个 worker 提问已经有结论了」→ 落 decision artifact + 恢复执行者。
+   *
+   * **为什么抽出来**:7-L 之前只有「用户回答」这一条路会解阻塞执行者。
+   * 现在多了一条 ——「沟通员在判断轮里自己答了」。两条路必须写同一种
+   * decision、同一种 resume,否则审计面上会出现「执行者拿到了一份
+   * 没有 decision 工件的指令」,那种问题事后查不出来。
+   *
+   * 落库失败即 fail-closed(批次 UI U4 / 审查 §B8):decision 没进库却广播
+   * artifact_created + executor_resume,Orchestrator 按 id 回查拿不到决定,
+   * 审计面还在撒谎。宁可执行者继续等 watchdog,也不发悬空 id。
+   */
+  private resolveWorkerQuestion(
+    questionId: string,
+    body: string,
+    conversationId: string,
+    title: string,
+  ): { executorSessionId: string; decisionArtifactId: string } | null {
     const executorSessionId = this.pendingExecutorCallbacks.get(questionId);
-    if (!executorSessionId) {
-      return { replied };
-    }
+    if (!executorSessionId) return null;
     this.pendingExecutorCallbacks.delete(questionId);
-    // 写 decision artifact + publish executor_resume
+    this.pendingQuestions.delete(questionId);
     const decision = makeArtifact({
       kind: "decision",
-      title: `User decision for ${questionId.slice(0, 8)}`,
-      body: payload,
+      title,
+      body,
       scope: "conversation",
       conversationId,
       author: "communicator",
@@ -474,15 +529,10 @@ export class AgentKernel {
     try {
       upsertArtifact(this.storage.db, decision);
     } catch (err) {
-      // 批次 UI U4(审查 §B8 遗留,4b 备案未做):落库失败即 fail-closed。
-      // 旧实现只 warn 就继续 publish —— decision 没进库却广播
-      // artifact_created + executor_resume,Orchestrator 按 decisionArtifactId
-      // 回查拿不到用户刚做的决定(§A4 修的正是这条路),审计面还在撒谎
-      // 「这个 decision 存在」。宁可 executor 继续等 watchdog,也不发悬空 id。
       log.warn(
-        `handleUserAnswer: upsertArtifact failed, not publishing executor_resume: ${(err as Error).message ?? err}`,
+        `resolveWorkerQuestion: upsertArtifact failed, not publishing executor_resume: ${(err as Error).message ?? err}`,
       );
-      return { replied };
+      return null;
     }
     artifactBus.publish({ type: "artifact_created", artifact: decision });
     artifactBus.publish({
@@ -490,7 +540,7 @@ export class AgentKernel {
       executorSessionId,
       decisionArtifactId: decision.id,
     });
-    return { replied, resumed: { executorSessionId, decisionArtifactId: decision.id } };
+    return { executorSessionId, decisionArtifactId: decision.id };
   }
 
   /**
@@ -624,9 +674,13 @@ export class AgentKernel {
    *    就绪检查之前** —— 审计流记的是「executor 提了这个问题」这个事实,
    *    不该因为下游 UI 通道没就绪就丢记录)。
    * 1. 合成 BusMessage(kind="question")—— Executor 暂无 bus.ask 路径。
-   * 2. 存 questionId → executorSessionId。
-   * 3. Communicator.handleWorkerAsk(knowIt=false) → 发出 pending_question sink 事件
-   *    (CommunicatorSink → EventSink 翻译:在这里做)。
+   *    批次 7-L:**payload 必须带 hypothesis 全文**。7-L 之前这里只有一句
+   *    `Executor needs help (judgment) for todo xxx` —— 沟通员连问题是什么都
+   *    不知道,判断轮就无从谈起,只能把执行者的活原样推给用户。
+   * 2. Communicator.handleWorkerAsk(knowIt=false + 判断轮钩子) —— 沟通员先自己
+   *    判一轮:答得了就 onAnswer(不惊动用户),答不了才 onEscalate 问用户。
+   * 3. questionId → executorSessionId 的登记**挪进钩子里**:升级时登记的是
+   *    沟通员新起的 `q-comm-*`,不再是执行者的 `q-exec-*`。
    */
   async handleExecutorCallback(
     arg: {
@@ -646,7 +700,9 @@ export class AgentKernel {
       toRole: "communicator",
       conversationId,
       kind: "question",
-      payload: `Executor needs help (${arg.reason}) for todo ${arg.todoId.slice(0, 8)}`,
+      // 批次 7-L:带全文。判断轮拿不到 hypothesis 就只能瞎猜,
+      // 而「瞎猜之后不敢答 → 全部升级用户」正是 7-L 要消灭的行为。
+      payload: this.buildWorkerQuestionPayload(arg),
       context: {
         todoId: arg.todoId,
         hypothesisId: arg.hypothesisId,
@@ -668,12 +724,15 @@ export class AgentKernel {
       log.warn("handleExecutorCallback: communicator not ready, dropping escalation UI");
       return;
     }
+    // 批次 7-L:先按执行者的 q-exec-* 登记 —— 判断轮答得了时,onAnswer 靠这条
+    // 映射把答案写进 decision 并恢复执行者(用户全程不知情)。
     this.pendingExecutorCallbacks.set(id, arg.executorSessionId);
-    // CommunicatorSink → EventSink 翻译(只为 pending_question 感兴趣)。
-    // S1(A7):经 this.emit 多播到当前活连接,不再捕获调用方传入的单连接 sink。
+    // 升级路径上问用户的是**沟通员新起的 q-comm-***,登记会在 onEscalate 里
+    // 改挂到那个新 id 上,并把 q-exec-* 这条摘掉 —— 否则用户回答完之后,
+    // 那条已经不成立的执行者问题还留在表里,一次迟到的 cancel 能把已经
+    // 恢复的 executor 再杀一遍。
     const commSink: CommunicatorSink = (e) => {
       if (e.type === "pending_question") {
-        this.pendingQuestions.set(e.questionId, conversationId);
         this.emit({
           type: "pending_question",
           conversationId,
@@ -685,12 +744,57 @@ export class AgentKernel {
       // 其他 CommunicatorEvent 在 callback 路径下不暴露给 ws(避免噪音)
     };
     try {
-      await this.communicator.handleWorkerAsk(msg, /* knowIt */ false, "", commSink);
+      await this.communicator.handleWorkerAsk(msg, /* knowIt */ false, "", commSink, {
+        adjudicate: this.workerAskAdjudicate,
+        onEscalate: (questionId) => {
+          this.pendingQuestions.set(questionId, conversationId);
+          this.pendingExecutorCallbacks.set(questionId, arg.executorSessionId);
+          if (questionId !== id) this.pendingExecutorCallbacks.delete(id);
+        },
+        onAnswer: (questionId, answer) => {
+          // 沟通员自己答了 —— 同样落 decision + 恢复执行者,用户全程零打扰。
+          this.resolveWorkerQuestion(
+            questionId,
+            answer,
+            conversationId,
+            `Communicator decision for ${questionId.slice(0, 12)}`,
+          );
+        },
+      });
     } catch (err) {
       log.warn(`handleExecutorCallback: handleWorkerAsk threw: ${(err as Error).message ?? err}`);
-      // 出错时清掉 pending,避免悬挂
+      // 出错时清掉登记,避免悬挂(只有升级路径会登记)
       this.pendingExecutorCallbacks.delete(id);
     }
+  }
+
+  /**
+   * 批次 7-L:把执行者的 hypothesis 读出来拼成判断轮看得懂的求助全文。
+   *
+   * 读不到(hypothesis 已删 / context 里的 id 对不上)时退回旧的一句摘要 ——
+   * 宁可让沟通员在信息不足的情况下判断,也不要让整条链路因为一次读失败而哑掉。
+   */
+  private buildWorkerQuestionPayload(arg: {
+    todoId: string;
+    hypothesisId: string;
+    reason: "judgment" | "harness_proposal";
+    executorSessionId: string;
+  }): string {
+    const header = `Executor needs help (${arg.reason}) for todo ${arg.todoId.slice(0, 8)}`;
+    let hyp: ReturnType<typeof getArtifact> = null;
+    try {
+      hyp = getArtifact(this.storage.db, arg.hypothesisId);
+    } catch (err) {
+      log.warn(
+        `buildWorkerQuestionPayload: getArtifact(${arg.hypothesisId}) failed: ${(err as Error).message ?? err}`,
+      );
+    }
+    if (!hyp) return header;
+    const parts = [header, "", `[问题] ${hyp.title}`];
+    if (hyp.body?.trim()) parts.push("", hyp.body.trim());
+    const category = hyp.metadata?.["category"];
+    if (category) parts.push("", `[category] ${String(category)}`);
+    return parts.join("\n");
   }
 
   /** M3c:ws 层调这个从 jsonl 重放 bus 流(给浏览器的 timeline)。 */

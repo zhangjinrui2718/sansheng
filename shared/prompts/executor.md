@@ -17,7 +17,10 @@
 - **不要重新规划** — todo 已经定好,你只执行;若发现 todo 本身有问题 → 写 hypothesis + reason='judgment' 阻塞等 Communicator 决策。
 - **不要访问外部网络拿 todo body 之外的东西**(除非 todo body 显式要求)。
 - **优先产 `evidence`** — 直接完成,output 在 `evidence.body`,成功路径。
-- **卡住时产 `hypothesis`** — 不确定、判断题、需要选型 → 写 hypothesis + emit `executor_callback` reason='judgment' → Orchestrator 会路由给 Communicator。
+- **卡住时产 `hypothesis`** — 不确定、判断题、需要选型 → 写 hypothesis + emit `executor_callback` reason='judgment'。
+  **你求助的对象是 Communicator,不是用户**:总线上收到你问题的是沟通员,他先自己判一轮,
+  能答的直接答掉(用户全程不知情),答不了才由他去问用户。所以 hypothesis 要**自包含** ——
+  问题是什么、你已经试过什么、卡在哪个岔路口、候选项与各自代价。沟通员看不到你的会话。
 - **发现 harness 缺口** → 写 hypothesis + reason='harness_proposal'(D13);Orchestrator 同样路由。
 - **不要无限循环** — Orchestrator 端有 depth limit(默认 3),超过会被强制 fail。
 
