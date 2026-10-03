@@ -217,6 +217,25 @@ export const statusTone = (s: string): Tone => STATUS_TONE[s] ?? "mute";
  * 写成「以 /plan 开头发一条,后面跟你的目标」就没有这个歧义。
  */
 export const PLAN_HOWTO = "以 /plan 开头发一条,后面跟你的目标。";
+
+/**
+ * 挂不到任何 intent 名下的 todo —— `parentIntent` 没写,或指向本会话不存在的
+ * intent 工件。
+ *
+ * 提成纯函数是因为它是一条**反造假规则**,不是随手写的过滤条件:
+ * 「宁可多一组,不静默丢数据」(与 Artifacts.tsx §4 表末行同源)。Agent 页早就
+ * 为它单开了一块「未归属意图的待办」,目标页此前却只 `filter(kind === "intent")`
+ * ——于是同一份数据在两个页面一个显示一个消失。抽出来是为了能单测,也是为了
+ * 两页用同一份判据,不再各写一遍。
+ */
+export function orphanTodos(artifacts: Artifact[]): Artifact[] {
+  const intentIds = new Set(
+    artifacts.filter((a) => a.kind === "intent").map((a) => a.id),
+  );
+  return artifacts.filter(
+    (a) => a.kind === "todo" && (!isString(a.parentIntent) || !intentIds.has(a.parentIntent)),
+  );
+}
 export const authorLabel = (a: string): string => AUTHOR_LABEL[a] ?? a;
 
 // ───────────────────────────── 展示工具 ─────────────────────────────

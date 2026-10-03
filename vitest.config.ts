@@ -6,6 +6,12 @@ const __dirname = import.meta.dirname ?? path.resolve(process.cwd());
 export default defineConfig({
   resolve: {
     alias: {
+      // 与 vite.config.ts 保持一致(`@` → web/src)。tsconfig 的 paths 只喂
+      // typecheck,vitest 走自己的解析 —— 不加这条,测试 import 不到
+      // `web/src/lib/artifacts.ts`(它内部 import `@/stores/chat`)。
+      // 2026-10-02 批次 U4-G:目标页「不静默丢数据」的判据抽成纯函数要单测,
+      // 这条别名是前提。只加不加改,不影响既有 `@shared/*` 解析。
+      "@": path.resolve(__dirname, "web/src"),
       "@shared": path.resolve(__dirname, "shared"),
       "@shared/types/agents": path.resolve(__dirname, "shared/types/agents.ts"),
       "@shared/types/artifacts": path.resolve(__dirname, "shared/types/artifacts.ts"),

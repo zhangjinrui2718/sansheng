@@ -68,6 +68,7 @@ import type { ReactNode } from "react";
 import { ARTIFACT_KINDS } from "@shared/types/blackboard";
 import type { ArtifactKind } from "@shared/types/blackboard";
 import {
+  PLAN_HOWTO,
   STATUS_TURN,
   authorLabel,
   fmtTime,
@@ -473,7 +474,7 @@ export function ArtifactsPage({ conversationId }: Props) {
       ) : !error && filtered.length === 0 ? (
         <EmptyState>
           {artifacts.length === 0
-            ? "本会话暂无工件 —— 普通的聊天不产生工件,以 /plan 开头发一条,规划员落的意图 / 待办会出现在这里。"
+            ? `本会话暂无工件 —— 普通的聊天不产生工件。${PLAN_HOWTO}`
             : emptyHint}
         </EmptyState>
       ) : view === "inbox" ? (

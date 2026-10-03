@@ -39,7 +39,15 @@
  *    app shell 已经拥有 `<main>` 与滚动容器,嵌套 `<main>` 是无效 HTML。
  */
 import { useMemo } from "react";
-import { excerpt, fmtTime, statusLabel, statusTone, useArtifacts } from "@/lib/artifacts";
+import {
+  PLAN_HOWTO,
+  excerpt,
+  fmtTime,
+  orphanTodos,
+  statusLabel,
+  statusTone,
+  useArtifacts,
+} from "@/lib/artifacts";
 import {
   Clamp,
   Disclosure,
@@ -81,15 +89,9 @@ export function GoalsPage({ conversationId }: Props) {
    * **被静默丢掉**:页面只说「本会话暂无目标」,而实际上有 N 个待办躺在
    * blackboard 上没人管。Agent 页早就为同一件事专门开了一块「未归属意图的
    * 待办」(还写明了「以免丢数据」),本页却装作没有 —— 同一份数据,两个页面
-   * 两种说法。工件页也早有同一条纪律(§4 表末行:「不给它们建组就等于把真实
-   * 数据藏起来」,反造假:宁可多一组,不静默丢数据)。
+   * 两种说法。判据抽在 `lib/artifacts.ts` 的 `orphanTodos()`,两页共用一份。
    */
-  const orphanTodos = useMemo(() => {
-    const ids = new Set(goals.map((g) => g.intent.id));
-    return artifacts.filter(
-      (a) => a.kind === "todo" && (!isString(a.parentIntent) || !ids.has(a.parentIntent)),
-    );
-  }, [artifacts, goals]);
+  const orphans = useMemo(() => orphanTodos(artifacts), [artifacts]);
 
   const settled = goals.filter((g) => g.intent.status === "resolved" || g.intent.status === "failed");
 
@@ -129,11 +131,11 @@ export function GoalsPage({ conversationId }: Props) {
         <EmptyState>加载中…</EmptyState>
       ) : !error && goals.length === 0 ? (
         <EmptyState>
-          {orphanTodos.length > 0 ? (
+          {orphans.length > 0 ? (
             /* 有待办却没有目标 —— 此时说「本会话暂无目标」等于**把 N 个待办藏起来**。
                用户看到的是一个空页,实际上 blackboard 上有活。 */
             <>
-              本会话有 {orphanTodos.length} 个待办没有归属到任何目标下(目标工件为空),
+              本会话有 {orphans.length} 个待办没有归属到任何目标下(目标工件为空),
               规划员还没落意图。在「Agent 工作面」页能看到它们。
             </>
           ) : (
@@ -220,16 +222,16 @@ export function GoalsPage({ conversationId }: Props) {
           })}
 
           {/* 部分归属的情况:有目标,也有几个待办不属于任何一个。同样不藏。 */}
-          {orphanTodos.length > 0 && (
+          {orphans.length > 0 && (
             <div className="sansheng-card p-3">
               <div className="flex items-baseline gap-2 mb-1.5">
                 <span className="ss-section" style={{ fontSize: 12 }}>
                   未归属的待办
                 </span>
-                <span className="ss-meta">{orphanTodos.length}</span>
+                <span className="ss-meta">{orphans.length}</span>
               </div>
               <ul className="grid gap-1">
-                {orphanTodos.map((t) => (
+                {orphans.map((t) => (
                   <li key={t.id} className="flex items-center gap-2">
                     <span
                       title={statusLabel(t.status)}

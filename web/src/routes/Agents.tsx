@@ -130,6 +130,7 @@ import type { ReactNode } from "react";
 import type { ArtifactKind } from "@shared/types/blackboard";
 import {
   ALIVE_STATUSES,
+  PLAN_HOWTO,
   TERMINAL_STATUSES,
   authorLabel,
   excerpt,
@@ -784,10 +785,9 @@ export function AgentsPage({ conversationId }: Props) {
           {/* 旧文案写「发送 /plan 你的目标」—— 读起来像**要照抄的字面量**,而
               ChatSurface 判的是 `text.startsWith("/plan ")`,真照抄进去 goal 就是
               「你的目标」四个字,规划员会老老实实去规划「你的目标」。
-              改成「以 /plan 开头发一条,后面跟你的目标」,句式本身说明了只有
-              /plan 是字面量。 */}
-          本会话还没有工件 —— 普通的聊天不会产生工件。在「对话」里以{" "}
-          <code>/plan</code> 开头发一条,后面跟你的目标,意图与待办会出现在这里。
+              句式改成「以 /plan 开头发一条,后面跟你的目标」,句法本身说明了只有
+              /plan 是字面量;三页共用 PLAN_HOWTO,免得又各写一遍漂移。 */}
+          本会话还没有工件 —— 普通的聊天不会产生工件。{PLAN_HOWTO}
         </EmptyState>
       ) : (
         <div className="grid gap-3">
