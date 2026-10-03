@@ -70,6 +70,28 @@ describe("7-G 提示词注册表 · 自洽性", () => {
     }
   });
 
+  /**
+   * 批次 8-E:「改出厂默认必须把旧值追加进 LEGACY_DEFAULTS」的第 5 次复发守护。
+   *
+   * 2026-10-03 实机发现:本机 `~/.sansheng/harness/system_prompts/communicator.md`
+   * 逐字等于 7-H(7d784f2)的出厂默认,却**不在版本链上** —— 于是它被永久判成
+   * `user_edited`,7-L 的「worker 升级先自查」升级**从未到达这台机器**,
+   * 8-E 新加的规则同样到不了。这就是 7-J 教训的复发(AGENTS.md 记过前四次)。
+   *
+   * 本测试把「7-H / 7-L 两版 communicator 出厂默认都在链上」写成断言:
+   * 将来再改 communicator 出厂默认而忘了入链,这里立刻红。
+   */
+  it("communicator 的历史出厂默认(7-H / 7-L)都在升级链上,否则存量用户永远升不到", async () => {
+    const { LEGACY_DEFAULTS } = await import("../../src/server/harness/loader.js");
+    const leg = LEGACY_DEFAULTS["communicator"] ?? [];
+    // 7-H 版:特征句(三重身份 + Observer 段,无 7-L 的 worker 自查段)
+    const sevenH = leg.find((v) => v.includes("## 三重身份") && v.includes("Observer") && !v.includes("先自己判一轮"));
+    expect(sevenH, "7-H 版 communicator 出厂默认不在链上 → 停在 7-H 的用户永远升不了级").toBeTruthy();
+    // 7-L 版:带 worker 自查段
+    const sevenL = leg.find((v) => v.includes("先自己判一轮"));
+    expect(sevenL, "7-L 版 communicator 出厂默认不在链上 → 7-L 的改进从未送达存量用户").toBeTruthy();
+  });
+
   it("enforced=false 的单元必须给 orphanReason(没有理由的 orphan 等于没标注)", () => {
     for (const u of PROMPT_UNITS) {
       if (u.enforced) {
