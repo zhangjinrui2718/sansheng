@@ -2,19 +2,25 @@ import { describe, it, expect, beforeEach } from "vitest";
 import Database from "better-sqlite3";
 import { load as loadSqliteVec } from "sqlite-vec";
 import { runMigrations } from "../../src/server/storage/migrations.js";
+import { allMigrationVersions, latestMigrationVersion } from "./_migrations.js";
 
 describe("storage/migrations", () => {
   it("applies migrations on fresh db", () => {
     const db = new Database(":memory:");
     loadSqliteVec(db); // 让 vec0 真实可用,migration 002 才能 applied
     const result = runMigrations(db);
+    // 推导而非硬编码:断言「目录里每一个迁移都应用了」。
+    // 加 008/009 不再需要动这个测试(原写法把「最新是 6」写死,每加一个迁移红一次)。
+    expect(result.applied.sort((a, b) => a - b)).toEqual(allMigrationVersions());
     expect(result.applied).toContain(1);
-    expect(result.applied).toContain(2);
+    expect(result.applied).toContain(2); // 002 vec(本用例已 loadSqliteVec)
     expect(result.applied).toContain(3); // M3a: agent_states
     expect(result.applied).toContain(4); // M3b: blackboards
     expect(result.applied).toContain(5); // M3+ B1: blackboards.artifacts_json column
+    expect(result.applied).toContain(6); // 7-J: 006_sediment_insight
+    expect(result.applied).toContain(7); // 平台: 007_platform_core
     const version = (db.prepare(`SELECT MAX(version) as v FROM schema_version`).get() as { v: number }).v;
-    expect(version).toBe(6); // 7-J 新增 006_sediment_insight
+    expect(version).toBe(latestMigrationVersion());
     db.close();
   });
 
