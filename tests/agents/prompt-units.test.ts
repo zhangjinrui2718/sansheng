@@ -288,3 +288,22 @@ describe("7-G facet 注册表 · 五个面(含两个未实现面)", () => {
     expect(snap.find((f) => f.id === "prompts")?.entries.every((e) => e.chars === 0)).toBe(true);
   });
 });
+
+describe("7-J 回归 · sedimentation 提示词版本链(我自己踩的第 4 次同款坑)", () => {
+  it("5b-2 出厂默认已入链 —— 否则 7-J 改了提示词后存量用户文件被永久误判为用户手笔", async () => {
+    const { LEGACY_DEFAULTS } = await import("../../src/server/harness/loader.js");
+    const chain = (LEGACY_DEFAULTS as Record<string, string[]>).sedimentation;
+    expect(Array.isArray(chain), "sedimentation 没有版本链").toBe(true);
+    // 5b-2 初版(D7 四形态版)必须在链里
+    const legacy = chain!.find((t) => t.includes("kind 只能四选一"));
+    expect(legacy, "5b-2 出厂默认未入链 —— 存量用户的 sedimentation.md 会卡在 user_edited").toBeTruthy();
+    expect(legacy).toContain("intent");
+  });
+
+  it("7-J 新默认本身不在链里(链只装历史版本,否则升级判定自相矛盾)", async () => {
+    const { LEGACY_DEFAULTS } = await import("../../src/server/harness/loader.js");
+    const { BUILTIN_PROMPTS } = await import("../../src/server/harness/promptUnits.js");
+    const chain = (LEGACY_DEFAULTS as Record<string, string[]>).sedimentation ?? [];
+    expect(chain).not.toContain(BUILTIN_PROMPTS.sedimentation);
+  });
+});
