@@ -116,6 +116,35 @@ function markTruncated(
   return { ...(base ?? {}), truncated: true };
 }
 
+/**
+ * 把被错位套进 `outcome` 里的 payload 信封解到顶层。
+ *
+ * 2026-10-03 真实事故(conv_murpu3ml_cged / todo-2,note `exec-err-7_P6zx5z`):
+ * MiniMax-M3 交出
+ * `{"outcome":{"evidence":{"title":"电话外呼抽象接口行业方案对比与推荐",…}}}`
+ * —— `outcome` 是个**对象**而不是判别式字符串,evidence 完整躺在里面。旧代码里
+ * `explicit !== undefined && explicit !== null && explicit !== ""` 把对象判成
+ * 「非法取值」直接 return null,一份写完的调研报告被当 parse 失败丢掉 → todo
+ * failed → 级联带走 todo-4。
+ *
+ * **同一个 bug 家族的第三次**:批次 7-D 救「缺省」(`{"evidence":{…}}`)、上一轮
+ * 救「空串」(`{"outcome":"",…}`)、这次救「多包一层」。三者本质是同一种偏差 ——
+ * 模型知道自己交的是 evidence,只是把外层包装的位置摆错了;用「解析不出来」
+ * 惩罚它,等于因为信封没贴邮票就把信烧了。
+ *
+ * 只做**解包**,不新增任何猜测:内层认得出的 payload 键(evidence / hypothesis /
+ * note)照常走既有形状推断;解包后仍认不出 → null,与既有「不凭空造产物」一致。
+ * 同名键冲突时**外层优先** —— 外层是模型明确写下的,内层是错位嵌套进来的。
+ *
+ * `outcome` 是字符串 / 空串 / 数组 / null 时原样返回:那些是判别式的写法问题,
+ * 归 `inferOutcome` 管,本函数不插手。
+ */
+function unwrapOutcomeEnvelope(obj: Record<string, unknown>): Record<string, unknown> {
+  const inner = obj["outcome"];
+  if (typeof inner !== "object" || inner === null || Array.isArray(inner)) return obj;
+  return { ...(inner as Record<string, unknown>), ...obj, outcome: undefined };
+}
+
 /* ────────────────────────────────────────────────────────── *
  * Executor class
  * ────────────────────────────────────────────────────────── */
@@ -343,9 +372,20 @@ export class Executor {
         `executor: LLM output was truncated mid-JSON, salvaged partial outcome (raw ${raw.length} chars)`,
       );
     }
-    const obj = parsedRaw.value;
-    if (!obj || typeof obj !== "object") return null;
+    const rawObj = parsedRaw.value;
+    if (!rawObj || typeof rawObj !== "object") return null;
     const truncated = parsedRaw.repaired;
+
+    // 2026-10-03 事故(conv_murpu3ml_cged / todo-2,note `exec-err-7_P6zx5z`):
+    // 模型把 payload **错位套进了 `outcome` 对象**(`{"outcome":{"evidence":{…}}}`),
+    // 而不是写判别式字符串。解包后 `evidence` 才回到顶层,下面的形状推断与
+    // payload 取值才看得见它。留痕以便发现提示词漂移 —— 详见 unwrapOutcomeEnvelope。
+    const obj = unwrapOutcomeEnvelope(rawObj);
+    if (obj !== rawObj) {
+      log.warn(
+        `executor: outcome 键是个对象而非判别式,已解包内层 payload (raw ${raw.length} chars)`,
+      );
+    }
 
     // 批次 7-D:`outcome` 判别式**可缺省**,由 payload 形状反推。
     //

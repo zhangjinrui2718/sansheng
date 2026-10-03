@@ -252,4 +252,169 @@ describe("批次 7-D · 缺 outcome 时按 payload 形状反推", () => {
     }).find((a) => a.kind === "evidence");
     expect(ev?.metadata?.truncated).toBeUndefined();
   });
+
+  // ──────────────────────────────────────────────────────────────────
+  // 2026-10-03 事故 · payload 被错位套进 `outcome` **对象**(信封偏差第三次)
+  //
+  // MiniMax-M3 交出 `{"outcome":{"evidence":{…}}}` —— `outcome` 是个对象而不是
+  // 判别式字符串。旧守卫 `explicit !== undefined && explicit !== null && !==
+  // ""` 把它判成「非法取值」直接 return null,一份写完的调研报告被当 parse 失败
+  // 丢掉 → todo-2 failed → 级联带走 todo-4。
+  //
+  // 同族前两次:7-D 救「缺省」(`{"evidence":{…}}`)、上一轮救「空串」
+  // (`{"outcome":"",…}`)。标题逐字取自 note `exec-err-7_P6zx5z` 的 Raw 段。
+  // ──────────────────────────────────────────────────────────────────
+  const REAL_NESTED_OUTCOME =
+    '{"outcome":{"evidence":{"title":"电话外呼抽象接口行业方案对比与推荐",' +
+    '"body":"# 结论先行\\n针对催收 AI 外呼场景,推荐**「自建 SIP 中台 + FreeSWITCH + ' +
+    'WebRTC 双向网关」**作为主路径,**「云厂商外呼 API(阿里云/腾讯云)」**作为合规先行/小并发兜底。\\n\\n' +
+    'Omni 全模态模型是否还需要 ASR/TTS:**主线需要**,但定位变化——ASR/TTS 从「主链路」降为「兜底通道」。"}}}';
+
+  it("真实事故样本:payload 套在 {outcome:{evidence:{…}}} 里 → evidence 落库 + todo resolved", async () => {
+    const todo = makeTodo("conv-nested-outcome");
+    upsertArtifact(db, todo);
+
+    const exec = new Executor({
+      storage,
+      bus: artifactBus,
+      llmCall: (async () => REAL_NESTED_OUTCOME) as ExecutorLlmCall,
+      now: () => 5000,
+    });
+
+    const result = await exec.execute(todo);
+    // 修复前:outcome === "failed",todo 标 failed → 级联带走 todo-4
+    expect(result.outcome).toBe("evidence");
+    expect(getArtifact(db, todo.id)?.status).toBe("resolved");
+
+    const ev = listArtifacts(db, {
+      scope: "conversation",
+      conversationId: todo.conversationId,
+    }).find((a) => a.kind === "evidence");
+    expect(ev?.title).toBe("电话外呼抽象接口行业方案对比与推荐");
+    expect(ev?.body).toContain("结论先行");
+    expect(ev?.metadata?.truncated).toBeUndefined();
+  });
+
+  it("outcome 套 {hypothesis:{…}} → hypothesis(解包后照常走形状推断)", async () => {
+    const todo = makeTodo("conv-nested-outcome-hyp");
+    upsertArtifact(db, todo);
+    const exec = new Executor({
+      storage,
+      bus: artifactBus,
+      llmCall: (async () =>
+        '{"outcome":{"hypothesis":{"title":"需要你拍板选型","body":"A 还是 B","callbackReason":"judgment"}}}') as ExecutorLlmCall,
+      now: () => 5000,
+    });
+    const result = await exec.execute(todo);
+    expect(result.outcome).toBe("hypothesis");
+    expect(getArtifact(db, todo.id)?.status).toBe("waiting_for_decision");
+  });
+
+  it("outcome 套 {note:{…}} → failed(显式失败语义不丢)", async () => {
+    const todo = makeTodo("conv-nested-outcome-note");
+    upsertArtifact(db, todo);
+    const exec = new Executor({
+      storage,
+      bus: artifactBus,
+      llmCall: (async () =>
+        '{"outcome":{"note":{"title":"调研受阻","body":"外呼网关拿不到测试账号"}}}') as ExecutorLlmCall,
+      now: () => 5000,
+    });
+    const result = await exec.execute(todo);
+    expect(result.outcome).toBe("failed");
+    const note = listArtifacts(db, {
+      scope: "conversation",
+      conversationId: todo.conversationId,
+    }).find((a) => a.kind === "note");
+    expect(note?.title).toBe("调研受阻");
+  });
+
+  it("outcome 套对象但内层认不出 payload 键 → 仍 parse 失败(解包不制造产物)", async () => {
+    const todo = makeTodo("conv-nested-outcome-nothing");
+    upsertArtifact(db, todo);
+    const exec = new Executor({
+      storage,
+      bus: artifactBus,
+      llmCall: (async () => '{"outcome":{"status":"in_progress","progress":0.5}}') as ExecutorLlmCall,
+      now: () => 5000,
+    });
+    const result = await exec.execute(todo);
+    expect(result.outcome).toBe("failed");
+  });
+
+  it("outcome 是数组 → 不解包(数组不是信封),按原逻辑仍 parse 失败", async () => {
+    const todo = makeTodo("conv-outcome-array");
+    upsertArtifact(db, todo);
+    const exec = new Executor({
+      storage,
+      bus: artifactBus,
+      llmCall: (async () => '{"outcome":["evidence"],"status":"in_progress"}') as ExecutorLlmCall,
+      now: () => 5000,
+    });
+    const result = await exec.execute(todo);
+    expect(result.outcome).toBe("failed");
+  });
+
+  it("内外层同名 evidence 冲突 → 外层优先(外层是模型明确写下的)", async () => {
+    const todo = makeTodo("conv-nested-conflict");
+    upsertArtifact(db, todo);
+    const raw =
+      '{"outcome":{"evidence":{"title":"内层(错位嵌套)","body":"x"}},' +
+      '"evidence":{"title":"外层(明确写下)","body":"y"}}';
+    const exec = new Executor({
+      storage,
+      bus: artifactBus,
+      llmCall: (async () => raw) as ExecutorLlmCall,
+      now: () => 5000,
+    });
+    const result = await exec.execute(todo);
+    expect(result.outcome).toBe("evidence");
+    const ev = listArtifacts(db, {
+      scope: "conversation",
+      conversationId: todo.conversationId,
+    }).find((a) => a.kind === "evidence");
+    expect(ev?.title).toBe("外层(明确写下)");
+  });
+
+  it("outcome 套对象 + 正文被 maxTokens 截断 → 仍救回且留痕 truncated(两个 bug 叠加)", async () => {
+    const todo = makeTodo("conv-nested-truncated");
+    upsertArtifact(db, todo);
+    const raw =
+      '{"outcome":{"evidence":{"title":"电话外呼抽象接口行业方案对比与推荐","body":"# 结论先行\\n自建 SIP 中台 + FreeSWITC';
+    const exec = new Executor({
+      storage,
+      bus: artifactBus,
+      llmCall: (async () => raw) as ExecutorLlmCall,
+      now: () => 5000,
+    });
+    const result = await exec.execute(todo);
+    expect(result.outcome).toBe("evidence");
+    const ev = listArtifacts(db, {
+      scope: "conversation",
+      conversationId: todo.conversationId,
+    }).find((a) => a.kind === "evidence");
+    expect(ev?.body).toContain("结论先行");
+    expect(ev?.metadata?.truncated).toBe(true);
+  });
+
+  it("显式 outcome 字符串优先于被套进去的对象(模型明说了就听它的)", async () => {
+    const todo = makeTodo("conv-explicit-beats-nested");
+    upsertArtifact(db, todo);
+    const raw =
+      '{"outcome":"failed","evidence":{"title":"不该被救回","body":"x"},' +
+      '"note":{"title":"模型明说失败","body":"y"}}';
+    const exec = new Executor({
+      storage,
+      bus: artifactBus,
+      llmCall: (async () => raw) as ExecutorLlmCall,
+      now: () => 5000,
+    });
+    const result = await exec.execute(todo);
+    expect(result.outcome).toBe("failed");
+    const note = listArtifacts(db, {
+      scope: "conversation",
+      conversationId: todo.conversationId,
+    }).find((a) => a.kind === "note");
+    expect(note?.title).toBe("模型明说失败");
+  });
 });
