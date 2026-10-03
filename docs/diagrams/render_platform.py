@@ -127,7 +127,7 @@ arrow((50, 20.4), (50, 18.3))
 
 # ── Row 6: Storage ───────────────────────────────────────────────
 band(3.4, 14.9, "通用域 · 持久化", "#7b8794")
-box(11.0, 4.6, 34.0, 9.6, "SQLite · 15 张表",
+box(11.0, 4.6, 34.0, 9.6, "SQLite · 平台表",
     ["agents · projects · works · artifacts", "asks · meetings · blockers · changes"],
     kind="store", fs=9.8, lfs=7.7)
 box(55.0, 4.6, 34.0, 9.6, "文件系统",

@@ -3,3 +3,6 @@ export { openPlatformDb, openPlatformMemoryDb, type OpenPlatformDbOptions } from
 export * from "./repo/agents.js";
 export * from "./repo/projects.js";
 export * from "./repo/works.js";
+export * from "./repo/artifacts.js";
+export * from "./repo/blockers.js";
+export * from "./repo/changes.js";

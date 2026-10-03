@@ -620,6 +620,13 @@ harness/system_prompts/{role}.{unit}.md
 
 ### 8.1 表清单
 
+> **2026-10-03 修订(批次 3 落地时)**:原清单漏了两处多对多关系,已补。
+> ① `blocker_open` 的签名带 `blocksWorkIds[]`,但 blockers 表既没有这个字段
+> 也没有关联表 —— 传进来的 work id **无处可放**。② `change_requests` 的
+> `affected_work_ids_json` 是不可查的 JSON 列。两者都改为关联表:JSON blob
+> 无外键完整性、SQL 层问不出「哪些变更影响了 work X」,而旧
+> `blackboards.artifacts_json` 正是这么烂掉的。
+
 ```sql
 -- BC0 Identity(全局,不随项目变化)
 agents(id PK, role, specialization, display_name, created_at)
@@ -649,9 +656,10 @@ meeting_participants(meeting_id, agent_id, stance, comment, responded_at)
 
 blockers(id PK, project_id, raised_by_agent_id, title, detail, severity, status,
          created_at, resolved_at, resolution)
-change_requests(id PK, project_id, title, rationale, impact_json,
-                affected_work_ids_json, status, decided_by_agent_id,
-                created_at, decided_at)
+blocker_blocks(blocker_id, work_id)               -- ← 修订补入
+change_requests(id PK, project_id, title, rationale, impact_json, status,
+                decided_by_agent_id, created_at, decided_at)
+change_affects(change_id, work_id)                -- ← 修订补入(取代 affected_work_ids_json)
 
 conversations(id PK, project_id, created_at)      -- 对话作为项目的会话
 messages(id PK, conversation_id, agent_id, kind, content, created_at)
