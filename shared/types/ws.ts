@@ -87,6 +87,12 @@ export type ServerEvent =
       intentId: string;
       summary: string;
       artifacts?: import("./blackboard.js").BlackboardArtifact[];
+      /**
+       * 批次 7-I(B):交付物子集 —— resolved 的 evidence 正文。
+       * 与 `artifacts`(整块 blackboard,工件 tab 用)分开:**交付物是给人看的产物**,
+       * artifacts 是给人查的系统状态。两者不互相替代。
+       */
+      deliveries?: import("./chat.js").DeliveryItem[];
     }
   | {
       type: "plan_failed";

@@ -90,6 +90,13 @@ export type ServerEvent =
       intentId: string;
       summary: string;
       artifacts?: import("@shared/types/blackboard.js").BlackboardArtifact[];
+      /**
+       * 批次 7-I(B):交付物子集 —— resolved 的 evidence 正文。
+       * 与 `artifacts`(整块 blackboard)分开:交付物是**给人看的产物**,
+       * artifacts 是给人查的系统状态。定义镜像自 shared/types/ws.ts(同款镜像
+       * 关系:server 端不能 value-import @shared/*,两边各自定义)。
+       */
+      deliveries?: import("@shared/types/chat.js").DeliveryItem[];
     }
   | {
       type: "plan_failed";

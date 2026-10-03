@@ -54,6 +54,8 @@ import { artifactBus } from "./bus/index.js";
 import { completeSimple } from "@earendil-works/pi-ai/compat";
 // M3+ B2(批次 1 提取):plan_done 的 summary 拼装,与 e2e-blockers.test.ts 共用同一实现
 import { buildPlanSummary } from "./agents/planSummary.js";
+// 批次 7-I(B):从 blackboard 快照里挑出交付物(resolved 的 evidence 正文)
+import { pickDeliveries } from "./agents/deliveries.js";
 // B4:WS 握手 Origin 校验与 HTTP 安全中间件共用同一 hostname 白名单(单一来源)
 import { isAllowedOriginHeader } from "./http/security.js";
 
@@ -379,12 +381,23 @@ export function attachWebSocket(
         completedIntentId ??
         (finalBb.artifacts ?? []).filter((a) => a.kind === "intent").at(-1)?.id ??
         "";
+      // 批次 7-I(B):交付物 —— 执行者真正做出来的东西,进对话。
+      // 与 artifacts(整块 blackboard,工件 tab 用)并存,职责不同:交付物是
+      // 「给人看的产物」,artifacts 是「给人查的系统状态」。
+      const deliveries = pickDeliveries(finalBb.artifacts ?? []);
+      if (deliveries.length > 0) {
+        log.info(
+          `plan_done: ${deliveries.length} 条交付物 ` +
+            `(${[...deliveries].map((d) => `${d.id}(${d.body.length}字)`).join(", ")})`,
+        );
+      }
       broadcast({
         type: "plan_done",
         conversationId,
         intentId,
         summary,
         artifacts: finalBb.artifacts ?? [],
+        deliveries,
       });
     } catch (err) {
       log.warn("Orchestrator failed:", err);

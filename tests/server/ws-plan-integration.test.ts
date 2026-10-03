@@ -237,6 +237,15 @@ describe("ws /plan integration (real attachWebSocket + runPlan + Orchestrator + 
       expect(
         (done.artifacts ?? []).some((a) => a.id === "it1-t1" && a.status === "resolved"),
       ).toBe(true);
+      // 批次 7-I(B):plan_done 必须带交付物 —— executor 做出来的东西要能到用户眼前。
+      // 此前协议就带着 artifacts,但前端只渲染 summary,产物只躺在 blackboard 里。
+      expect(Array.isArray(done.deliveries)).toBe(true);
+      expect((done.deliveries ?? []).length).toBeGreaterThan(0);
+      for (const d of done.deliveries ?? []) {
+        expect(d.kind).toBe("evidence");
+        expect(d.body.length).toBeGreaterThan(0);
+        expect(d.title.length).toBeGreaterThan(0);
+      }
     } finally {
       await abortActivePlan(c);
       await c.close();

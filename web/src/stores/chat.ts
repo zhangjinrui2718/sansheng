@@ -529,10 +529,17 @@ export const useChatStore = create<ChatState>((set, get) => ({
         // 最小接线:summary 作为一条可见 assistant 消息追加到当前会话(总结卡渲染
         // 属批次 3 的 UI 范围,这里先保证「完成有反馈」)。
         const t = newTurn(`plan_done_${Date.now().toString(36)}`, "assistant");
+        // 批次 7-I(B):summary 是「做完了吗」,deliveries 是「做出来的是什么」。
+        // 7-I 之前只渲染 summary —— 协议上早就带着 artifacts,前端却丢了,
+        // 于是产物只躺在 blackboard 里,要用户自己去「工件」tab 翻。
+        const deliveryBlocks: Block[] =
+          e.deliveries && e.deliveries.length > 0
+            ? [{ kind: "delivery", items: e.deliveries }]
+            : [];
         set((s) => ({
           turns: [
             ...s.turns,
-            { ...t, blocks: [{ kind: "text", text: e.summary }], endedAt: Date.now() },
+            { ...t, blocks: [{ kind: "text", text: e.summary }, ...deliveryBlocks], endedAt: Date.now() },
           ],
           status: "idle",
           error: null,

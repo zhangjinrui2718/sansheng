@@ -12,6 +12,7 @@
 import { useEffect, useRef } from "react";
 import { useChatStore, type Turn } from "@/stores/chat";
 import { ThinkingBlock } from "./ThinkingBlock";
+import { DeliveryBlock } from "./DeliveryBlock.js";
 import { ToolCallCard } from "./ToolCallCard";
 
 export function MessageList() {
@@ -139,6 +140,10 @@ function TurnView({ turn, streaming = false }: { turn: Turn; streaming?: boolean
           }
           if (b.kind === "tool") {
             return <ToolCallCard key={i} block={b} />;
+          }
+          // 批次 7-I(B):交付物 —— 执行者真正做出来的东西,默认折叠、正文可展开
+          if (b.kind === "delivery") {
+            return <DeliveryBlock key={i} items={b.items} />;
           }
           return null;
         })}
