@@ -661,8 +661,10 @@ change_requests(id PK, project_id, title, rationale, impact_json, status,
                 decided_by_agent_id, created_at, decided_at)
 change_affects(change_id, work_id)                -- ← 修订补入(取代 affected_work_ids_json)
 
-conversations(id PK, project_id, created_at)      -- 对话作为项目的会话
-messages(id PK, conversation_id, agent_id, kind, content, created_at)
+-- ⚠️ 表名**不能**叫 conversations / messages:001 已占用这两个名字,而
+--    CREATE TABLE IF NOT EXISTS 撞名时静默无操作(见批次 5 报告)
+project_sessions(id PK, project_id, created_at)
+session_messages(id PK, session_id, agent_id, kind, content, created_at)
 
 -- BC7 Memory:本设计只定契约,存储形态可替换(见 §8.3)
 fragments(id PK, kind, content, importance, decay_factor, access_count,

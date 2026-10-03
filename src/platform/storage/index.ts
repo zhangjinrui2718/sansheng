@@ -6,3 +6,6 @@ export * from "./repo/works.js";
 export * from "./repo/artifacts.js";
 export * from "./repo/blockers.js";
 export * from "./repo/changes.js";
+export * from "./repo/asks.js";
+export * from "./repo/meetings.js";
+export * from "./repo/sessions.js";

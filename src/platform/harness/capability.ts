@@ -179,6 +179,11 @@ function isSdkTool(t: string): t is SdkToolName {
   return SDK_TOOL_SET.has(t);
 }
 
+/** 这个工具名是否由 Pi SDK 提供(平台不需要自己实现)。 */
+export function isSdkToolName(t: string): t is SdkToolName {
+  return SDK_TOOL_SET.has(t);
+}
+
 /** 全部平台自有工具名(不含 SDK 内置)。 */
 export const PLATFORM_TOOLS: readonly PlatformToolName[] = Object.values(CAPABILITY_TOOLS)
   .flat()

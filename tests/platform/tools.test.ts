@@ -112,25 +112,37 @@ describe("注册表 · 声明与能力必须一致(7-E 那个坑的机器防线)
     }
   });
 
-  it("registrySnapshot 如实报告未实现的工具", () => {
+  it("registrySnapshot 如实报告未实现的工具(SDK 内置不算「未建」)", () => {
     const s = registrySnapshot();
     expect(s.problems).toEqual([]);
     expect(s.implemented).toBe(ALL_PLATFORM_TOOLS.length);
-    expect(s.notYetBuilt.length).toBe(s.totalInTable - s.implemented);
+    // 未建 = 工具表里既没实现、也不是 SDK 提供的
+    expect(s.notYetBuilt).not.toContain("read");
+    expect(s.notYetBuilt).not.toContain("bash");
+    expect(s.notYetBuilt.length).toBeLessThan(s.totalInTable - s.implemented);
   });
 
-  it("未实现的工具应当是协作与记忆那一批(BC2/BC7)", () => {
+  it("未实现的工具如实列出(BC2 已落地 → 只剩记忆与甲方接口)", () => {
     const missing = notYetBuiltToolNames();
-    expect(missing).toContain("ask_role");
+    // BC2 协作工具在批次 5 落地了
+    expect(missing, "ask_role 已实现").not.toContain("ask_role");
+    expect(missing).not.toContain("convene");
+    // 尚未落地的是 BC7 记忆与面向甲方的两个(它们属执行/传输批次)
     expect(missing).toContain("memory_search");
+    expect(missing).toContain("memory_remember");
     expect(missing).not.toContain("board_write");
   });
 
-  it("未覆盖的能力如实列出", () => {
+  it("未覆盖的能力如实列出(且排除 SDK 内置那几族,否则缺口清单永远消不掉)", () => {
     const gap = capabilitiesWithoutTools();
-    expect(gap).toContain("collab.ask");
+    expect(gap, "collab.* 已落地").not.toContain("collab.ask");
     expect(gap).toContain("memory.read");
+    expect(gap).toContain("memory.write");
     expect(gap).not.toContain("blackboard.write");
+    // code.* 的工具是 SDK 内置的,平台无需实现 —— 算进缺口会让清单一直挂着
+    // 几条永远消不掉的项,久而久之没人再看它
+    expect(gap, "code.* 不该算缺口").not.toContain("code.read");
+    expect(gap).not.toContain("code.exec");
   });
 
   it("角色工具建成状态:已实现 + 未实现 = 出厂工具集", () => {
@@ -153,7 +165,8 @@ describe("派发器 · 四道拦截", () => {
   });
 
   it("工具表里有但未实现 → 明确说「还没建」,不假装能用", () => {
-    const e = errOf(call(ids.bm, "ask_role", { targetRole: "worker" }));
+    // memory_search 属 BC7,批次 5 之后仍未实现
+    const e = errOf(call(ids.bm, "memory_search", { query: "x" }));
     expect(e.code).toBe("not_found");
     expect(e.message).toContain("还没建实现");
   });

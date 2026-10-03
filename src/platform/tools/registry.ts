@@ -21,6 +21,8 @@ import { ROLE_SPECS, factoryToolset, type ProjectRole } from "../identity/role.j
 import {
   ALL_TOOLS,
   CAPABILITIES,
+  CAPABILITY_TOOLS,
+  isSdkToolName,
   isToolName,
   type Capability,
   type ToolName,
@@ -28,6 +30,7 @@ import {
 import { PROJECT_WORK_TOOLS } from "./project.js";
 import { BLACKBOARD_TOOLS } from "./blackboard.js";
 import { CONTROL_TOOLS } from "./control.js";
+import { COLLAB_TOOLS } from "./collab.js";
 import { fail, type PlatformTool, type ToolResult, type ToolRunContext } from "./types.js";
 
 /** 已实现的全部平台工具。BC2 / BC7 的工具在各自批次落地后并入这里。 */
@@ -35,6 +38,7 @@ export const ALL_PLATFORM_TOOLS: readonly PlatformTool[] = [
   ...PROJECT_WORK_TOOLS,
   ...BLACKBOARD_TOOLS,
   ...CONTROL_TOOLS,
+  ...COLLAB_TOOLS,
 ];
 
 /** 工具名 → 工具定义 */
@@ -42,9 +46,15 @@ export const TOOL_INDEX: ReadonlyMap<ToolName, PlatformTool> = new Map(
   ALL_PLATFORM_TOOLS.map((t) => [t.name, t]),
 );
 
-/** 工具表里有、但当前批次还没建实现的工具名 */
+/**
+ * **平台需要自己实现、但目前还没建**的工具名。
+ *
+ * 排除 SDK 内置那 7 个(read/grep/find/ls/edit/write/bash)—— 它们由 Pi SDK
+ * 提供,本来就不该出现在平台的工具注册表里。把它们算成「未建」会让这份清单
+ * 永远挂着 7 条消不掉的项,和 capabilitiesWithoutTools 是同一个错。
+ */
 export function notYetBuiltToolNames(): ToolName[] {
-  return ALL_TOOLS.filter((t) => !TOOL_INDEX.has(t));
+  return ALL_TOOLS.filter((t) => !TOOL_INDEX.has(t) && !isSdkToolName(t));
 }
 
 /**
@@ -181,12 +191,22 @@ export function registrySnapshot(): {
 }
 
 /**
- * 未被任何工具实现覆盖的能力。
+ * **需要平台自己实现、但目前还没实现**的能力。
  *
- * BC2(协作)与 BC7(记忆)的工具尚未落地,所以现在必然有若干条在这里 ——
- * **这是如实反映进度,不是缺陷**。GUI 应据此标注「已就位/未实现」。
+ * 注意排除两类,否则报出来的「缺口」是假的:
+ *   1. 已有平台工具实现的
+ *   2. 工具全部由 Pi SDK 提供的(`code.read/write/exec` → read/grep/bash/…)——
+ *      这几个**永远不会有平台实现**,不是缺口。把它们算进缺口会让这份清单
+ *      一直挂着几条永远消不掉的项,久而久之没人再看它。
+ *
+ * 剩下的是真缺口:BC7 记忆、面向甲方的 client.*(属执行/传输批次)。
  */
 export function capabilitiesWithoutTools(): Capability[] {
   const covered = new Set(ALL_PLATFORM_TOOLS.map((t) => t.capability));
-  return CAPABILITIES.filter((c) => !covered.has(c));
+  return CAPABILITIES.filter((c) => {
+    if (covered.has(c)) return false;
+    const tools = CAPABILITY_TOOLS[c];
+    // 工具全是 SDK 内置 → 平台无需实现,不算缺口
+    return !tools.every((t) => isSdkToolName(t));
+  });
 }
