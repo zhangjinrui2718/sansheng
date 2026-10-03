@@ -333,26 +333,33 @@ export type Scope =
 
 ### 4.2 授权求解
 
-给定一个全局 `Agent` 与它当前所处的项目,其有效工具集:
+给定一个全局 `Agent` 与它当前所处的项目,其有效工具集。
+
+**求解分两个阶段**,因为它们依赖的输入不同:
 
 ```
+── 求解期(装配工具集时)────────────────────────────────────────
 effective = Solve(agent, project, userToolSet)
 
-其中:
-  1. spec      = ROLE_SPECS[agent.role]                  // 代码内,全局,不可变
-  2. ceiling   = spec.ceiling                            // 架构上界
-  3. requested = userToolSet.allow \ userToolSet.deny    // 用户可编辑的集合
-  4. inCeiling = requested ∩ ceiling                     // 越界项进 blockedByCeiling
-  5. scoped    = inCeiling ∩ ScopeGate(capability, agent, project)
-                                                     // ← 第二维
-  6. kinded    = scoped ∩ WriteKindGate(capability, spec)
-                                                     // ← 第三维,见 §4.4
-  7. tools     = Expand(kinded) 绑定到具体 projectId
+  1. spec         = ROLE_SPECS[agent.role]          代码内,全局,不可变
+  2. ceilingTools = Expand(spec.ceiling)            架构上界,展开成工具
+  3. requested    = userToolSet.allow \ userToolSet.deny   (未给 → ceilingTools)
+  4. inCeiling    = requested ∩ ceilingTools        越界项进 blockedByCeiling
+  5. tools        = inCeiling ∩ ScopeGate(cap, agent, project)
+                                                    越界项进 blockedByScope
+
+── 调用期(模型真正发起调用时)──────────────────────────────────
+  6. WriteKindGate(cap, params.kind, spec)          ← 第三维,见 §4.4
+  7. 目标门(collab.ask / collab.escalate 的 target 须在本项目内)
 ```
 
-**注意第 1 步用的是 `agent.role` 而不是「项目成员记录」。** 角色全局化之后,求解的输入是两个稳定量(全局角色、项目参与关系),中间没有可变数据能篡改角色属性。
+**粒度是工具级,不是能力级。** 集合文件列的是工具名,而 `blackboard.read` 这类能力展开成多个工具(`board_list` + `board_read`)。若按能力粒度授权,用户只写 `allow: ["board_list"]`(只想让它看列表)就会连带拿到 `board_read`(按 id 读任意工件正文)—— **那是用户没要的权限**。所以有效工具面是工具的集合,能力集只是由它反推出来的**报告字段**。
 
-`WriteKindGate` 的形状:即使 `blackboard.write` 能力已授予,工具**运行时**仍要校验本次调用的 `kind` 参数落在该角色的 `writeKinds` 内:
+**第 6/7 步必须在调用期**,因为 `kind` 与 `target` 都是**调用参数** —— 求解期根本不知道模型要写哪种 kind、要问谁。把它们塞进求解期会得到一个「假装校验过了」的假门。
+
+**第 1 步用的是 `agent.role` 而不是「项目成员记录」。** 角色全局化之后,求解的输入是两个稳定量(全局角色、项目参与关系),中间没有可变数据能篡改角色属性。
+
+**第三道门在调用期**:即便 `board_write` 这个工具已经在手,模型每次调用时仍要校验 `kind` 参数落在该角色的 `writeKinds` 内 —— 手里有工具 ≠ 什么都能写:
 
 ```ts
 function WriteKindGate(cap: Capability, spec: RoleSpec, call: ToolCall): GateResult {
@@ -770,22 +777,40 @@ AgentRuntime
 
 ## 10. 迁移路线
 
-数据重置,故无回填、双写、兼容层。每阶段独立可回滚。
+### 10.1 测试策略(先定,因为它决定排序理由)
 
-| # | 阶段 | 产出 | 风险 |
-|---|---|---|---|
-| 0 | 设计定稿 | 设计 1 + 设计 2 + ADR | 无 |
-| 1 | Schema 重置 | migration 001~006 废弃,新 `001_core.sql` 起;删向量与 MessageBus | 低(数据已弃) |
-| 2 | BC0 + BC1 | agents / projects / project_assignments / works | 低 |
-| 3 | BC3 + BC4 | artifacts / blockers / change_requests | 中 |
-| 4 | **BC5 Harness 升维** | `Record<Role,ToolName[]>` → `RoleSpec + ScopeGate` | **高 · 单独评审** |
-| 5 | BC2 Collaboration | asks / meetings,含 7-L 升级链迁移 | 中高 |
-| 6 | BC6 Execution | 工具循环接新工具集;`board_write` 取代 outcome 硬编码解析 | 中高 |
-| 7 | 删旧路径 | conversation scope、`_Inner` 串行链简化、死代码清理 | 低 |
+**旧测试随其模块一起删除,不改造、不保留。** 它们是旧契约的编码,移植到新架构只会把旧设计的假设带进来。
 
-**阶段 4 是整个升级的枢轴**,也是唯一需要单独设计评审的一步 —— 它改动的是 7-E / 7-H / 7-O 三批已经验证过的裁决的形状。建议届时单独出一份 ADR。
+**但新模块必须配新测试** —— 这不是「保住旧的」,而是「新代码怎么知道没写错」。没有这一条,重构期间「有没有写坏」就没有答案。
 
-**阶段 6 有个必须验证的前提**:现有 740 个测试中,与 executor outcome 解析相关的部分(`executor-missing-outcome` 420 行等)在 `board_write` 取代硬编码解析后需要重写。这不是回归,是设计变更 —— 应在阶段 6 开工前先把它们标为 `it.skip` 并记录原因。
+两者合起来的意思是:**安全网不是继承来的,是每写一个模块现织的。**
+
+### 10.2 为什么要并行建新,而不是原地重置
+
+既然数据已弃、旧测试也不要了,原地重置看起来更省事。但有一条独立于测试的理由:
+
+**过渡期始终要有一个能跑的产品。** 原地重置会让整套系统在数周内处于「编译不过 / 跑不起来」的状态,而每个阶段的验证只能等到全部完成 —— 一旦中途发现设计问题,你面对的是一个半成品,而不是一个可回滚的提交。
+
+所以:新模块建在新目录,旧模块保持可用;每完成一个 BC,就把它对应的旧模块与旧测试一起删掉。最后一步是删除残留。
+
+### 10.3 阶段
+
+| # | 阶段 | 产出 | 旧系统动作 | 风险 |
+|---|---|---|---|---|
+| **1** | **BC0 + BC5 求解器** | `RoleSpec` 常量 + 三重门控纯函数 | 不动 | **低** ← 纯逻辑,无 DB/无 LLM/无 HTTP |
+| 2 | Schema 落地 | 新表(新名字,与旧表并存);BC0 的 `agents` | 不动 | 低 |
+| 3 | BC1 ProjectManagement | `projects` / `project_assignments` / `works` + repo | 不动 | 低 |
+| 4 | BC3 + BC4 | `artifacts` / `blockers` / `change_requests` | 不动 | 中 |
+| 5 | **BC5 接线** | 工具展开 + `createAgentSession({customTools})` | 动 `harness/tools.ts` | **高 · 单独评审** |
+| 6 | BC2 Collaboration | `asks` / `meetings`,含 7-L 升级链迁移 | 删 `MessageBus` | 中高 |
+| 7 | BC6 Execution | 工具循环接新工具集 | `board_write` 取代 outcome 硬编码解析 | 中高 |
+| 8 | 清场 | — | DROP 旧表;删旧模块与它们的测试 | 低 |
+
+**阶段 1 故意选成纯逻辑**,因为它零依赖、可穷举测试,且是整个设计的支点(§4)。把它先做扎实,后面每一步都站在一个已验证的授权模型上。
+
+**阶段 5 是枢轴**,改动的是 7-E / 7-H / 7-O 三批已验证裁决的形状,必须单独出 ADR 评审。
+
+**旧测试的删除时机**:每个阶段完成时,连同它替代掉的旧模块一起删。不提前删(留着看旧行为有参考价值),不滞后删(避免僵尸测试拖慢 CI)。
 
 ---
 

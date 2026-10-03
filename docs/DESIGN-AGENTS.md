@@ -106,11 +106,14 @@
     "memory_search", "memory_remember",
     "ask_client", "tell_client"
   ],
-  "deny": []
+  "deny": ["work_create", "work_update", "work_assign", "work_list", "work_read",
+           "report", "read", "grep", "find", "ls", "edit", "write", "bash"]
 }
 ```
 
 **25 个工具。** 注意 `clientFacing: true` 是它能拿到最后两个的唯一原因 —— `ScopeGate` 规则 1。
+
+`deny` 列出它的两条边界:**不拆解工作**(`work.*` 全族)与**不碰代码**(SDK 七件)。业务经理收敛诉求,不排期也不干活。
 
 业务经理是唯一持有 `project_update` / `project_close` 的角色,也是唯一能 `meeting_conclude` 之外还能 `convene` 的**两个**角色之一。
 

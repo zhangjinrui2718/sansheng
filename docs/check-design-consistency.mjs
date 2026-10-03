@@ -26,6 +26,11 @@
  * 退出码:0 全部通过;1 存在错误
  */
 import { readFileSync } from "node:fs";
+import {
+  parseCapabilityUnion, parseToolTable, parseMatrix, parseFactorySets,
+  parseArtifactKinds, parseProtocolKinds, parseWriteKinds,
+  parseCeilings, parseInlineWriteKinds, parseClaimedCounts,
+} from "./design-parse.mjs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -50,110 +55,7 @@ try {
   process.exit(1);
 }
 
-/** 按行号定位一个偏移量,用于报错时给 file:line */
-const lineOf = (text, index) => text.slice(0, index).split("\n").length;
-
-// ── E1 能力联合 ──────────────────────────────────────────────────
-function parseCapabilityUnion(md) {
-  const m = md.match(/export type Capability =([\s\S]*?)\n```/);
-  if (!m) return null;
-  const caps = new Map();
-  for (const line of m[1].split("\n")) {
-    const hit = line.match(/"([a-z]+(?:\.[a-z]+)+)"/);
-    if (hit) caps.set(hit[1], lineOf(md, m.index) + m[1].slice(0, m[1].indexOf(line)).split("\n").length - 1);
-  }
-  return caps;
-}
-
-// ── E1 工具展开表 ────────────────────────────────────────────────
-function parseToolTable(md) {
-  const m = md.match(/\| Capability \| 工具名 \| 参数 \| 返回 \|\n\|[-\s|]+\|\n([\s\S]*?)\n\n/);
-  if (!m) return null;
-  const map = new Map(); // capability -> [tools]
-  for (const line of m[1].split("\n")) {
-    if (!line.startsWith("|")) continue;
-    const cols = line.split("|").slice(1, -1).map((c) => c.trim());
-    const cap = (cols[0].match(/`([a-z]+(?:\.[a-z]+)+)`/) || [])[1];
-    if (!cap) continue;
-    const tools = [...cols[1].matchAll(/`([a-z_]+)`/g)].map((x) => x[1]);
-    map.set(cap, tools);
-  }
-  return map;
-}
-
-// ── E2/E5 角色矩阵 ───────────────────────────────────────────────
-function parseMatrix(md) {
-  const m = md.match(/## 7\. Capability × 角色 总矩阵\n\n(\|[\s\S]*?)\n\n\*\*/);
-  if (!m) return null;
-  const rows = m[1].split("\n").filter((l) => l.trim().startsWith("|"));
-  const header = rows[0].split("|").slice(1, -1).map((c) => c.trim());
-  const roles = header.slice(1); // 第一列是 Capability
-  const granted = new Map(); // role -> Set(capability)
-  for (const r of roles) granted.set(r, new Set());
-  for (const line of rows.slice(2)) {
-    const cols = line.split("|").slice(1, -1).map((c) => c.trim());
-    const caps = [...(cols[0] || "").matchAll(/`([a-z]+(?:\.[a-z]+)+)`/g)].map((x) => x[1]);
-    if (!caps.length) continue;
-    roles.forEach((role, i) => {
-      if ((cols[i + 1] || "").includes("✅")) for (const c of caps) granted.get(role).add(c);
-    });
-  }
-  return { roles, granted };
-}
-
-// ── E5 出厂工具集合 JSON ─────────────────────────────────────────
-// 标题形如 `## 2. 业务经理 \`business_manager\``:取显示名(与矩阵表头一致)
-function parseFactorySets(md) {
-  const out = [];
-  const heads = [...md.matchAll(/^## \d+\.\s+(\S+)\s+`([a-z_]+)`/gm)];
-  const blocks = [...md.matchAll(/```json\n([\s\S]*?)```/g)];
-  for (const h of heads) {
-    const after = blocks.find((b) => b.index > h.index);
-    if (!after) continue;
-    let parsed;
-    try {
-      parsed = JSON.parse(after[1]);
-    } catch (e) {
-      E("E5", `${h[1]} 的出厂集合 JSON 无法解析:${e.message}`);
-      continue;
-    }
-    out.push({
-      role: h[1],
-      code: h[2],
-      allow: new Set(parsed.allow ?? []),
-      deny: new Set(parsed.deny ?? []),
-    });
-  }
-  return out;
-}
-
-// ── E8/E9 writeKinds 与 ArtifactKind ────────────────────────────
-function parseArtifactKinds(md) {
-  const m = md.match(/export type ArtifactKind =([\s\S]*?)\n```/);
-  if (!m) return null;
-  return new Set([...m[1].matchAll(/"([a-z_]+)"/g)].map((x) => x[1]));
-}
-
-function parseProtocolKinds(md) {
-  const m = md.match(/\*\*协议工具自动创建\*\* \|([^|]*)\|/);
-  if (!m) return null;
-  return new Set([...m[1].matchAll(/`([a-z_]+)`/g)].map((x) => x[1]));
-}
-
-function parseWriteKinds(md) {
-  const m = md.match(/## 8\. 写面权限\(writeKinds\)\n\n(\|[\s\S]*?)\n\n/);
-  if (!m) return null;
-  const map = new Map();
-  for (const line of m[1].split("\n")) {
-    if (!line.startsWith("|")) continue;
-    const cols = line.split("|").slice(1, -1).map((c) => c.trim());
-    if (!cols[0] || cols[0] === "角色" || /^-+$/.test(cols[0])) continue;
-    map.set(cols[0], new Set([...(cols[1] || "").matchAll(/`([a-z_]+)`/g)].map((x) => x[1])));
-  }
-  return map;
-}
-
-// ── 解析 ─────────────────────────────────────────────────────────
+// ── 解析(实现在 docs/design-parse.mjs,与 conformance 测试共用)──
 const caps = parseCapabilityUnion(p1);
 const toolTable = parseToolTable(p1);
 const matrix = parseMatrix(p2);
@@ -255,23 +157,6 @@ for (const md of [p1, p2]) {
   }
 }
 
-// ── E13 各角色内联 writeKinds ↔ §8 汇总表 ──────────────────────
-// writeKinds 也写在两个地方:每个角色段内的 `**writeKinds**:[...]` 与 §8 汇总表。
-// 只校验汇总表会漏掉内联声明(反向测试 6 就是这么漏过去的)。
-function parseInlineWriteKinds(md) {
-  const out = new Map();
-  const secs = [...md.matchAll(/^## \d+\.\s+(\S+)\s+`([a-z_]+)`/gm)];
-  for (let i = 0; i < secs.length; i++) {
-    const start = secs[i].index;
-    const end = i + 1 < secs.length ? secs[i + 1].index : md.length;
-    const body = md.slice(start, end);
-    const m = body.match(/\*\*writeKinds\*\*:`\[([^\]]*)\]`/);
-    if (!m) continue;
-    out.set(secs[i][1], new Set([...m[1].matchAll(/"([a-z_]+)"/g)].map((x) => x[1])));
-  }
-  return out;
-}
-
 const inlineWK = parseInlineWriteKinds(p2);
 if (inlineWK.size !== writeKinds.size) {
   E("E13", `解析到 ${inlineWK.size} 个内联 writeKinds,§8 汇总表有 ${writeKinds.size} 个角色`);
@@ -285,30 +170,6 @@ for (const [role, kinds] of inlineWK) {
   }
   for (const k of kinds) if (!summary.has(k)) E("E13", `${role}:内联 writeKinds 有 \`${k}\`,§8 汇总表没有`);
   for (const k of summary) if (!kinds.has(k)) E("E13", `${role}:§8 汇总表有 \`${k}\`,内联 writeKinds 漏了`);
-}
-
-// ── E12 各角色 Capability Ceiling ↔ 矩阵 ────────────────────────
-// Ceiling 行是实现者照抄的规范列表,却从来没被机器校验过。兼容两种写法:
-// 表格式(业务经理)与行内 `a` · `b` 列表式(其余三个)。
-function parseCeilings(md) {
-  const out = new Map(); // display name -> Set(capability)
-  const secs = [...md.matchAll(/^## \d+\.\s+(\S+)\s+`([a-z_]+)`/gm)];
-  for (let i = 0; i < secs.length; i++) {
-    const start = secs[i].index;
-    const end = i + 1 < secs.length ? secs[i + 1].index : md.length;
-    const body = md.slice(start, end);
-    const cm = body.match(/### [\d.]+ Capability Ceiling\n([\s\S]*?)(?=\n### |\n## |$)/);
-    if (!cm) continue;
-    let block = cm[1];
-    // 只取规范列表本身:遇到引用块(说明性文字)或 writeKinds 就截断
-    const cut = block.search(/^\s*(?:>|\*\*writeKinds\*\*)/m);
-    if (cut >= 0) block = block.slice(0, cut);
-    const caps = new Set(
-      [...block.matchAll(/`([a-z]+(?:\.[a-z]+)+)`/g)].map((x) => x[1]),
-    );
-    if (caps.size) out.set(secs[i][1], caps);
-  }
-  return out;
 }
 
 const ceilings = parseCeilings(p2);
