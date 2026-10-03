@@ -21,12 +21,12 @@
 import { Type } from "@sinclair/typebox";
 import {
   insertAsk, getAsk, listAsks, answerAsk, escalateAsk, cancelAsk,
-  askChain, askedByMeOpen, listOverdueAsks, ASK_STATUSES,
+  askChain, askedByMeOpen, ASK_STATUSES,
   type AskRow,
 } from "../storage/repo/asks.js";
 import {
   insertMeeting, getMeeting, listMeetings, listParticipants, respondToMeeting,
-  concludeMeeting, pendingMeetingsFor, stanceTally,
+  concludeMeeting, stanceTally,
   MEETING_STATUSES, STANCES, isStance,
   type MeetingRow, type Stance,
 } from "../storage/repo/meetings.js";
@@ -578,12 +578,13 @@ const meetingConclude: PlatformTool = {
   },
 };
 
-// ── 巡检辅助(供调度器/注入用)──────────────────────────────────
-
 export const COLLAB_TOOLS: readonly PlatformTool[] = [
   askRole, answer, askList, askRead, escalate,
   convene, meetingRead, meetingRespond, meetingConclude,
 ];
 
-export { listOverdueAsks, pendingMeetingsFor };
-export type { MeetingRow };
+// 注意:**这里刻意不 re-export `pendingMeetingsFor` / `listOverdueAsks`**。
+// 它们是给「平台把待办注入 agent 回合」与「调度器巡检超时」用的,而那两件事
+// 目前都还没有实现(见 docs/ADR-001-harness-wiring.md §5.2 / §5.3)。
+// 在这里转发一次会让它们看起来像「已接线」,而实际调用方为零 —— 那正是本
+// 项目反复栽过的「声称有、实际没有」。要用的人直接去 storage/repo 取。
