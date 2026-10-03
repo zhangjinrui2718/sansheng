@@ -754,13 +754,17 @@ export function AgentsPage({ conversationId }: Props) {
     <div className="ss-page">
       <PageHeader
         title="Agent 工作面"
-        hint="本会话的 blackboard"
+        // 空页不挂 hint:「本会话的 blackboard」这类说明,在下面就写着「还没有工件」
+        // 时是纯噪声;而且 blackboard 是内部术语,不是用户会用的词。
+        hint={artifacts.length > 0 ? "本会话的 agent 产出" : undefined}
         hintTitle={
           kindSummary
             ? `${kindSummary} —— 本页只读本会话的工件(GET /api/artifacts,limit=200),实时性靠 WS 的工件事件触发回查,不轮询。`
             : "本页只读本会话的工件(GET /api/artifacts,limit=200),实时性靠 WS 的工件事件触发回查,不轮询。"
         }
-        aside={<StatStrip items={headerStats} />}
+        // 同理,空页不摆一排 0。那五个 0 在没有数据时不是「测出来的 0」,
+        // 只是「还没查 / 查了是空」—— 摆出来等于拿计数冒充事实。
+        aside={artifacts.length > 0 ? <StatStrip items={headerStats} /> : undefined}
       />
 
       {error && (
@@ -777,7 +781,13 @@ export function AgentsPage({ conversationId }: Props) {
         <EmptyState>加载中…</EmptyState>
       ) : artifacts.length === 0 ? (
         <EmptyState>
-          本会话还没有工件。发送 <code>/plan 你的目标</code> 后,意图与待办会出现在这里。
+          {/* 旧文案写「发送 /plan 你的目标」—— 读起来像**要照抄的字面量**,而
+              ChatSurface 判的是 `text.startsWith("/plan ")`,真照抄进去 goal 就是
+              「你的目标」四个字,规划员会老老实实去规划「你的目标」。
+              改成「以 /plan 开头发一条,后面跟你的目标」,句式本身说明了只有
+              /plan 是字面量。 */}
+          本会话还没有工件 —— 普通的聊天不会产生工件。在「对话」里以{" "}
+          <code>/plan</code> 开头发一条,后面跟你的目标,意图与待办会出现在这里。
         </EmptyState>
       ) : (
         <div className="grid gap-3">

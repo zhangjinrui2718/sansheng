@@ -467,11 +467,13 @@ export function ArtifactsPage({ conversationId }: Props) {
       )}
 
       {!conversationId ? (
-        <EmptyState>先在「对话」选一个会话,再回到「工件」查看该会话的 blackboard 工件。</EmptyState>
-      ) : !error && !loading && filtered.length === 0 ? (
+        <EmptyState>先在「对话」里选一个会话。</EmptyState>
+      ) : loading && artifacts.length === 0 ? (
+        <EmptyState>加载中…</EmptyState>
+      ) : !error && filtered.length === 0 ? (
         <EmptyState>
           {artifacts.length === 0
-            ? "本会话暂无工件 —— 发一次 /plan,Planner 的意图 / 待办就会落在这里。"
+            ? "本会话暂无工件 —— 普通的聊天不产生工件,以 /plan 开头发一条,规划员落的意图 / 待办会出现在这里。"
             : emptyHint}
         </EmptyState>
       ) : view === "inbox" ? (

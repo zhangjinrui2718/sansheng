@@ -80,16 +80,19 @@ export function GoalsPage({ conversationId }: Props) {
     <div className="ss-page">
       <PageHeader
         title="目标"
-        hint="本会话的 intent 投影"
+        // 空页不挂 hint,也不摆一排 0 —— 那两个 0 在没有数据时不是「测出来的 0」。
+        hint={goals.length > 0 ? "本会话表达过的目标" : undefined}
         hintTitle="数据来源:本会话的 intent 工件(沟通员 / 用户表达过的目标)+ 其名下 todo 的真实状态。M7 Goals 子系统尚未实现,当前为投影视图,不是独立的 goals 存储。"
         aside={
-          <StatStrip
-            items={[
-              { label: "目标", value: goals.length },
-              { label: "已收口", value: settled.length, tone: settled.length > 0 ? "bamboo" : undefined },
-              ...(loading && artifacts.length > 0 ? [{ label: "状态", value: "刷新中" }] : []),
-            ]}
-          />
+          goals.length > 0 ? (
+            <StatStrip
+              items={[
+                { label: "目标", value: goals.length },
+                { label: "已收口", value: settled.length, tone: settled.length > 0 ? "bamboo" : undefined },
+                ...(loading && artifacts.length > 0 ? [{ label: "状态", value: "刷新中" }] : []),
+              ]}
+            />
+          ) : undefined
         }
       />
 
@@ -102,10 +105,16 @@ export function GoalsPage({ conversationId }: Props) {
       )}
 
       {!conversationId ? (
-        <EmptyState>先在「对话」选一个会话,再切换到「目标」查看该会话表达过的目标。</EmptyState>
-      ) : !error && !loading && goals.length === 0 ? (
+        <EmptyState>先在「对话」里选一个会话。</EmptyState>
+      ) : loading && goals.length === 0 ? (
+        // 此前这一档不存在:加载中直接落到下面的 `goals.map`,页面上什么都不渲染。
+        // 空白比「加载中…」难判断得多(用户会以为这页坏了)。
+        <EmptyState>加载中…</EmptyState>
+      ) : !error && goals.length === 0 ? (
         <EmptyState>
-          本会话暂无目标。发送 <code>/plan 你的目标</code> 触发规划后,目标会出现在这里。
+          {/* 「发送 /plan 你的目标」读起来像要照抄的字面量,照抄后规划员会去规划
+              「你的目标」这四个字(ChatSurface 判的是 startsWith("/plan "))。 */}
+          本会话暂无目标。在「对话」里以 <code>/plan</code> 开头发一条,后面跟你的目标。
         </EmptyState>
       ) : (
         <div className="grid gap-2">

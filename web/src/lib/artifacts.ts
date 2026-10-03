@@ -62,7 +62,19 @@ export function useArtifacts(options?: { pollMs?: number }): {
   const artifactRevision = useChatStore((s) => s.artifactRevision);
   const pollMs = options?.pollMs ?? 0;
   const [artifacts, setArtifacts] = useState<Artifact[]>([]);
-  const [loading, setLoading] = useState(false);
+  /**
+   * 初始 `true` 而不是 `false` —— 这是**说真话**的问题,不是风格问题。
+   *
+   * 改这一层之前这里是 `useState(false)`,于是页面首帧(hook 还没跑、fetch 还没
+   * 发出去)拿到的是 `{loading:false, artifacts:[]}`,三个页面都按「空」渲染,
+   * 于是**先闪一句「本会话还没有工件」,再闪「加载中…」,最后才是真实结果**。
+   * 那句「还没有」是在**还没问过服务器**时替用户下的结论 —— 界面在说假话,
+   * 而且是每次切到该页必现的确定性闪烁,不是偶发。
+   *
+   * 正确做法:「还没查过」不等于「查过了,是空」。`conversationId` 为空时调用方
+   * 先走「先选会话」分支,所以这里无条件 `true` 是安全的,不会造成永久转圈。
+   */
+  const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(async () => {

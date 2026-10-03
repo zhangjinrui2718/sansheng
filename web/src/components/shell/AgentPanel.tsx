@@ -61,7 +61,7 @@ function aggregateRole(author: string, artifacts: { author: string; status: stri
 }
 
 export function AgentPanel() {
-  const { artifacts, error } = useArtifacts({ pollMs: 5000 });
+  const { artifacts, loading, error } = useArtifacts({ pollMs: 5000 });
 
   const goal = useMemo(() => {
     const intents = artifacts.filter((a) => a.kind === "intent");
@@ -117,8 +117,12 @@ export function AgentPanel() {
           <div className="ss-empty" style={{ color: "var(--cinnabar)" }}>
             加载失败:{error}
           </div>
+        ) : loading && artifacts.length === 0 ? (
+          /* 此前这里没有 loading 档:首次挂载直接跳到「还没有工件」,同样是在
+             还没问过服务器时下结论。与 Agents / 工件 / 目标 三页对齐。 */
+          <EmptyState>加载中…</EmptyState>
         ) : artifacts.length === 0 ? (
-          <EmptyState>还没有工件。发一条 /plan 目标,这里会显示各角色的产出。</EmptyState>
+          <EmptyState>还没有工件。以 /plan 开头发一条,这里会显示各角色的产出。</EmptyState>
         ) : (
           <div className="flex flex-col gap-1.5">
             {goal && (
