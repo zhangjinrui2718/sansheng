@@ -35,6 +35,8 @@ import {
   type CreateToolRegistryOptions,
 } from "./tools/integration.js";
 import { registerBlackboardArtifactRoutes } from "./http/blackboardRoutes.js";
+// 批次 7-O:Harness 写面(条目详情 / 写入 / 恢复出厂)
+import { registerHarnessRoutes } from "./http/harnessRoutes.js";
 import { createSecurityMiddleware } from "./http/security.js";
 // 批次 5b-2 T2:Harness 状态 API(manager 运行态 + prompts 摘要 + proposals/previews)
 import { loadHarness, describePrompts, describeToolSets } from "./harness/loader.js";
@@ -249,13 +251,22 @@ export async function createApp(opts: AppOptions): Promise<Hono> {
   // —— M3+ B1: BlackboardArtifact v3 路由(extracted to blackboardRoutes.ts) ——
   registerBlackboardArtifactRoutes(app, opts.storage);
 
-  // —— 批次 5b-2 T2:Harness 状态(只读;UI Harness tab 数据源)——
+  // —— 批次 7-O:Harness 写面(extracted to harnessRoutes.ts)——
+  // invalidateKernel 传 kernel.invalidate 的引用;harnessRoutes 只在 body 里
+  // 显式 { invalidate: true } 时才调它 —— 保存配置不该顺手 abort 用户在飞的回合。
+  registerHarnessRoutes(app, {
+    dataDir: opts.dataDir,
+    invalidateKernel: () => opts.kernel.invalidate(),
+  });
+
+  // —— 批次 5b-2 T2:Harness 状态(UI Harness tab 数据源)——
   // 自动落在 B4 安全中间件之后:createApp 顶部 app.use("*", createSecurityMiddleware())
   // 最先注册(Hono 按注册顺序执行)→ 本路由先过 Host 校验(evil Host → 421);
   // GET 豁免 Origin 校验(§B4 既有语义,与其它 /api/* GET 一致)。
-  // 本批**只读**:无 POST /api/harness —— manager v0 无 apply 语义(D15:v0=只读
-  // preview 生成器),无可安全暴露的 mutation;preview 生成由 bus 事件驱动
-  // (artifact_created),不是 HTTP 面。apply/mutation 留给后续批次论证。
+  // 7-O 起本端点**不再只是只读**:写面在 harnessRoutes.ts
+  // (GET/PUT/POST /api/harness/facets/:facet/entries/:id[ /reset ]),
+  // 同样自动落在安全守卫之后 —— 本地单用户服务被任意网页改掉 agent 提示词,
+  // 是一句提示词就能完成的提权,所以写路由绝不豁免 Origin。
   app.get("/api/harness", (c) => {
     try {
       const mgr = getHarnessManager();
@@ -276,7 +287,7 @@ export async function createApp(opts: AppOptions): Promise<Hono> {
       });
       const notes = [
         "manager received/processed 等计数器为内存态(重启清零);proposals/previews 持久化于 blackboard storage(scope=global)",
-        "本端点只读:无 apply/mutation(HarnessManager v0 = 只读 preview 生成器,D15;真 apply 属后续批次)",
+        "本端点(GET /api/harness)只读;写面在 7-O 独立成面 —— PUT /api/harness/facets/:facet/entries/:id 与 POST .../reset(备份 + 显式确认,实现见 src/server/harness/apply.ts)。HarnessManager 自身仍是 v0 只读 preview 生成器(D15):它提出的实现预览不会自动落盘。",
       ];
       if (proposals.length === 0) {
         notes.push(

@@ -325,13 +325,21 @@ kind 只能四选一:
  * 批次 5b-1 P5:LEGACY_DEFAULTS[role] 由单串升级为**版本链数组**,支持多代出厂
  * 默认(旧 9 行版 → 5a 44 行版)全部自动升级到当前新默认;三分支结构不变。
  */
+/**
+ * 批次 7-O:某提示词单元的文件绝对路径。**读(ensure/load)与写(apply)共用这一个出处** ——
+ * 路径拼法一旦分叉成两处,「写到了 A 文件、读的是 B 文件」就是下一次静默失效的起点。
+ */
+export function promptFilePath(dataDir: string, unit: PromptUnitId): string {
+  return join(dataDir, "harness", "system_prompts", `${unit}.md`);
+}
+
 export function ensureHarness(dataDir: string): void {
   const harnessDir = join(dataDir, "harness");
   const promptsDir = join(harnessDir, "system_prompts");
   if (!existsSync(promptsDir)) mkdirSync(promptsDir, { recursive: true });
   for (const unit of PROMPT_UNIT_IDS) {
     const content = BUILTIN_PROMPTS[unit];
-    const p = join(promptsDir, `${unit}.md`);
+    const p = promptFilePath(dataDir, unit);
     if (!existsSync(p)) {
       writeFileSync(p, content, "utf-8");
       continue;
@@ -379,7 +387,7 @@ export function loadHarness(dataDir: string): HarnessConfig {
     toolSets: loadToolSets(dataDir),
   };
   for (const unit of PROMPT_UNIT_IDS) {
-    const p = join(harnessDir, "system_prompts", `${unit}.md`);
+    const p = promptFilePath(dataDir, unit);
     config.systemPrompts[unit] = "";
     if (existsSync(p)) {
       try {

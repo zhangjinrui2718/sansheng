@@ -354,6 +354,29 @@ function serializeToolSetFile(file: ToolSetFile): string {
   return `${JSON.stringify({ allow: file.allow, deny: file.deny }, null, 2)}\n`;
 }
 
+/**
+ * 批次 7-O:「恢复出厂」要写回的**出厂集合**(结构化)。调用方拿到的是副本,
+ * 改它不会污染 FACTORY_SETS。写回用的字节串请用 factoryToolSetFileContent() ——
+ * 必须与 ensureToolSets 写出的完全一致,否则 source 判定会漂。
+ */
+export function factoryToolSet(role: ToolRole): ToolSetFile {
+  return { allow: [...FACTORY_SETS[role].allow], deny: [...FACTORY_SETS[role].deny] };
+}
+
+/** 「恢复出厂」写盘用的字节串(= serializeToolSetFile(FACTORY_SETS[role]))。 */
+export function factoryToolSetFileContent(role: ToolRole): string {
+  return serializeToolSetFile(FACTORY_SETS[role]);
+}
+
+/**
+ * 批次 7-O:把一份集合文件结构序列化成**规范字节**。写面(apply.ts)写盘必须走它 ——
+ * 手搓 JSON.stringify 会漏掉末尾换行,而末尾换行正是 source 判定
+ * (「文件内容 === 出厂字节串 → factory」)的依据,差一个 \n 就把 factory 判成 user。
+ */
+export function toolSetFileContent(file: ToolSetFile): string {
+  return serializeToolSetFile(file);
+}
+
 function isToolName(v: string): v is ToolName {
   return (TOOL_NAMES as readonly string[]).includes(v);
 }

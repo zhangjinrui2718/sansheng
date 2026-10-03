@@ -25,18 +25,45 @@
  *    并把原因写进 `entry.warnings` —— 与 tools 的 fail-closed、prompts 的
  *    「空 → 内置常量」是同一个原则的两种形态(权限面收紧,内容面回退)。
  *
- * 3. **`apply()` 不在 v1。** 「让 UI 改 harness」等于开一个写权限的攻击面,
- *    且会与「绝不覆盖用户手笔」的三分支语义正面冲突(写入 = 用户手笔,而
- *    三分支恰恰靠「内容是否命中出厂串」判断用户有没有编辑过)。**先把只读
- *    面做对、把「在生效」变成可验证的断言,再谈写。** 真要写,应该是独立的
- *    `applyFacet()` + 备份 + 显式确认,不是给 describe 顺带加个 setter。
+ * 3. **`apply()` 已于批次 7-O 落地,但形态就是当初写下的那一句。** 7-G 说
+ *    「让 UI 改 harness」等于开一个写权限的攻击面,且会与「绝不覆盖用户手笔」的
+ *    三分支语义正面冲突(写入 = 用户手笔,而三分支恰恰靠「内容是否命中出厂串」
+ *    判断用户有没有编辑过)。7-O 兑现的前置条件是**「在生效」已经变成可验证的
+ *    断言**:每条 entry 都带 enforced / basis / apply,orphan 与 empty 分开报,
+ *    blockedByCeiling 画在脸上 —— 也就是说,现在能诚实地回答「改完什么时候生效、
+ *    这条现在生效吗」,才有资格开写。
+ *
+ *    落地形态照旧是那三个字:**独立的** `applyFacet()`(不是给 describe 顺带加
+ *    setter)+ **备份**(写前覆盖到 harness/backups/)+ **显式确认**(reset 与
+ *    写入是两条独立动作,UI 上是两个按钮)。冲突本身是这样解的:写入的内容就是
+ *    「用户手笔」,state 如实变 user_edited(ensureHarness 永不覆盖它);
+ *    「想回到出厂」不需要另一套语义,恢复出厂写回的就是出厂字节串,
+ *    state 随之变回 default / factory —— 与读路径的判定同源,不需要第二套真相。
+ *
+ *    写面的实现全部在 ./apply.ts(备份 / 原子写 / id 白名单 / fail-closed 校验),
+ *    本文件只做分发:面没实现 apply → 如实回 not_implemented,不给假实现。
  */
-import type { HarnessEntry } from "./facetTypes.js";
+import { log } from "../../shared/log.js";
+import type {
+  HarnessApplyInput,
+  HarnessApplyResult,
+  HarnessDetailResult,
+  HarnessEntry,
+  HarnessEntryDetail,
+  HarnessFacetId,
+} from "./facetTypes.js";
 
-export type { HarnessEntry };
+export type {
+  HarnessEntry,
+  HarnessEntryDetail,
+  HarnessApplyInput,
+  HarnessApplyResult,
+  HarnessDetailResult,
+};
 
-/** 五个受管面。**闭合 union** —— 加面要显式扩这里,不能靠字符串糊过去。 */
-export type HarnessFacetId = "tools" | "prompts" | "skills" | "rag";
+/** 五个受管面。**闭合 union** 定义在 facetTypes.ts(写面类型要与它同处一文件),
+ * 这里转出去,调用方仍从 facet.js 拿。 */
+export type { HarnessFacetId } from "./facetTypes.js";
 
 export interface HarnessFacet {
   id: HarnessFacetId;
@@ -49,6 +76,21 @@ export interface HarnessFacet {
   ensure(dataDir: string): void;
   /** 只读全量条目。读盘出错必须退回内置默认 + warnings,不得抛 */
   describe(dataDir: string): HarnessEntry[];
+  /**
+   * 批次 7-O:写面。**刻意是可选的** —— 7-E 的教训是「给没有执行点的角色写一份
+   * 非空名单 = 换个姿势继续撒谎」,同一个道理:没实现的写面不写一个假的空实现,
+   * 而是让 applyFacet 如实回 not_implemented。当前只有 tools / prompts 两面有。
+   *
+   * 契约:不抛。成功返回 HarnessApplyOk(带写完后的 entry 快照),
+   * 失败返回 HarnessApplyErr({ error, message })。
+   */
+  apply?(dataDir: string, input: HarnessApplyInput): HarnessApplyResult;
+  /**
+   * 批次 7-O:单条目完整内容(编辑器初值)。可选:skills / rag 还没有可编辑内容,
+   * 就没有这一项,describeFacetEntry 会回 unknown_entry 而不是给一份空壳。
+   * 返回 null = 面里有这个 id,但本面不提供详情(而不是 404 —— id 是真的)。
+   */
+  detail?(dataDir: string, id: string): HarnessEntryDetail | null;
 }
 
 import { toolsFacet } from "./facets/tools.js";
@@ -74,6 +116,83 @@ export function getFacet(id: HarnessFacetId): HarnessFacet {
   const f = FACET_INDEX.get(id);
   if (!f) throw new Error(`unknown harness facet: ${id}`);
   return f;
+}
+
+/**
+ * 批次 7-O:单条目详情(编辑器初值)。与 applyFacet 同一套错误语义:
+ * 面不存在 → unknown_facet;面里没这个 id(或该面不提供详情)→ unknown_entry。
+ *
+ * entry 复用 describe() 的结果 —— **详情与总表不可能对不上**,因为它们
+ * 是同一次读盘算出来的。UI 打开编辑器时不必担心「详情里的 state 和列表里不一样」。
+ */
+export function describeFacetEntry(
+  id: HarnessFacetId,
+  dataDir: string,
+  entryId: string,
+): HarnessDetailResult {
+  const facet = FACET_INDEX.get(id);
+  if (!facet) {
+    return { ok: false, error: "unknown_facet", message: `未知的受管面「${id}」` };
+  }
+  if (!facet.detail) {
+    return {
+      ok: false,
+      error: "unknown_entry",
+      message: `「${facet.title}」面不提供条目详情${facet.notImplementedNote ? `(${facet.notImplementedNote})` : ""}`,
+    };
+  }
+  let detail: HarnessEntryDetail | null;
+  try {
+    detail = facet.detail(dataDir, entryId);
+  } catch (err) {
+    log.error(`harness: ${id}/${entryId} 详情读取抛异常:`, err);
+    return { ok: false, error: "unknown_entry", message: `读取 ${entryId} 详情失败` };
+  }
+  if (!detail) {
+    return { ok: false, error: "unknown_entry", message: `「${facet.title}」面里没有条目「${entryId}」` };
+  }
+  return { ok: true, facet: id, id: entryId, detail };
+}
+
+/**
+ * 批次 7-O:写面唯一入口。**不抛** —— HTTP 层要把错误码翻译成 4xx/5xx,
+ * 一个抛到 handler 外面就变成 500 + 失去语义。
+ *
+ * 三种失败,三种错误码,各有各的理由,绝不含糊:
+ *   - `unknown_facet`  面 id 不在注册表(404)
+ *   - `not_implemented` 面在,但没有实现 apply —— 当前是 skills / rag(409)
+ *   - 别的由各面自己的 apply 决定(unknown_entry 404 / invalid_payload 400 /
+ *     io_error 500)
+ *
+ * 「面崩了」也不该让整个管理面 500:各面 apply 的契约是不抛,但真抛了
+ * (实现方 bug)→ 兜成 io_error 并记日志,语义仍然是「没写成」。
+ */
+export function applyFacet(
+  id: HarnessFacetId,
+  dataDir: string,
+  input: HarnessApplyInput,
+): HarnessApplyResult {
+  const facet = FACET_INDEX.get(id);
+  if (!facet) {
+    return { ok: false, error: "unknown_facet", message: `未知的受管面「${id}」` };
+  }
+  if (!facet.apply) {
+    return {
+      ok: false,
+      error: "not_implemented",
+      message: `「${facet.title}」面没有写接口${facet.notImplementedNote ? `(${facet.notImplementedNote})` : ""}`,
+    };
+  }
+  try {
+    return facet.apply(dataDir, input);
+  } catch (err) {
+    log.error(`harness: ${id} 面 apply 抛异常(实现方 bug,未改动任何文件):`, err);
+    return {
+      ok: false,
+      error: "io_error",
+      message: `${facet.title} 面写入失败:${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
 }
 
 /** 一个面的完整快照(UI / API / diagnose 共用同一形状)。 */
