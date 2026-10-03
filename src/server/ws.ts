@@ -46,7 +46,7 @@ export type ClientCommand =
 
 import type { AgentKernel, ServerEvent } from "./kernel/agentKernel.js";
 import { SettingsStore } from "./settings/store.js";
-import { Storage } from "./storage/index.js";
+import { Storage, listProfile, searchFragmentsByText } from "./storage/index.js";
 import { Orchestrator, type ProgressEvent } from "./agents/orchestrator.js";
 import type { PlannerLlmCall } from "./agents/planner.js";
 import type { ExecutorLlmCall } from "./agents/executor.js";
@@ -58,6 +58,8 @@ import { buildPlanSummary } from "./agents/planSummary.js";
 import { pickDeliveries } from "./agents/deliveries.js";
 // 批次 8-B:终态播报 —— 沟通员 Observer 身份的执行点(此前是死接线)
 import { makeRunReporter, type RunReportInput } from "./agents/runReport.js";
+// 批次 8-D:记忆块(检索 + 拼装 + 进 prompt 的方式)统一在 agents/workerMemory.ts
+import { buildContextBlock, buildWorkerMemoryBlock, composeWithMemory } from "./agents/workerMemory.js";
 // 批次 8-B:读 harness 的 communicator.report 提示词(与其它角色同一入口)
 import { loadHarness } from "./harness/loader.js";
 // B4:WS 握手 Origin 校验与 HTTP 安全中间件共用同一 hostname 白名单(单一来源)
@@ -152,27 +154,9 @@ export function startWsHeartbeat(
   };
 }
 
-/**
- * 把 user message 包成含历史 context 的 prompt
- * M3a: 简单 LIKE 匹配 fragments + profile 注入
- */
-function buildContextBlock(fragments: Array<{ kind: string; content: string }>, profile: Array<{ key: string; value: string; confidence?: number }>): string {
-  if (fragments.length === 0 && profile.length === 0) return "";
-  const parts: string[] = [];
-  if (profile.length > 0) {
-    parts.push("# User Profile");
-    for (const p of profile) {
-      parts.push(`- ${p.key}: ${p.value}${p.confidence !== undefined ? ` (confidence: ${p.confidence.toFixed(2)})` : ""}`);
-    }
-  }
-  if (fragments.length > 0) {
-    parts.push("\n# Relevant Memories");
-    for (const f of fragments) {
-      parts.push(`- [${f.kind}] ${f.content}`);
-    }
-  }
-  return parts.join("\n");
-}
+// 批次 8-D(M3):记忆块拼装与「怎么进 prompt」都搬去了 ./agents/workerMemory.ts ——
+// 沟通员 chat 路径与 planner/executor 路径**共用同一份实现与同一个函数**(两处各写
+// 一份的必然结局是两边看到的记忆格式不一样)。这里只保留 chat 路径的调用点。
 
 /**
  * M3+ B1: 把 kernel 的 resolved Model 包装成 PlannerLlmCall/ExecutorLlmCall。
@@ -182,8 +166,16 @@ function buildContextBlock(fragments: Array<{ kind: string; content: string }>, 
  * 实现:用 pi-ai/compat 的 completeSimple() 跑一次单轮对话,
  * 把 AssistantMessage 的 text blocks 拼成 raw string 返回(Planner/Executor 后续自行 parse)。
  */
-function makeLlmCall(kernel: AgentKernel): PlannerLlmCall & ExecutorLlmCall {
+function makeLlmCall(
+  kernel: AgentKernel,
+  opts?: { memoryBlock?: (userPrompt: string) => string | undefined },
+): PlannerLlmCall & ExecutorLlmCall {
   return async (input: { systemPrompt: string; userPrompt: string }) => {
+    // 批次 8-D(M3):**干活的人也该知道用户是谁**。此前记忆只喂给沟通员
+    // (ws.ts 的 send 路径),planner / executor 走这里时是**零记忆**的 ——
+    // 用户说过「回答用中文」「别碰我的项目目录」,规划与执行全都看不见。
+    // 记忆块失败一律降级为「不注入」,绝不能因为记忆把整条 plan 拖垮。
+    const userPrompt = composeWithMemory(input.userPrompt, opts?.memoryBlock?.(input.userPrompt));
     const model = kernel.getModel();
     if (!model) {
       throw new Error("makeLlmCall: kernel has no resolved model (start kernel first)");
@@ -198,7 +190,7 @@ function makeLlmCall(kernel: AgentKernel): PlannerLlmCall & ExecutorLlmCall {
       model as Parameters<typeof completeSimple>[0],
       {
         systemPrompt: input.systemPrompt,
-        messages: [{ role: "user", content: input.userPrompt, timestamp: Date.now() }],
+        messages: [{ role: "user", content: userPrompt, timestamp: Date.now() }],
       },
       {
         ...(apiKey ? { apiKey } : {}),
@@ -328,8 +320,17 @@ export function attachWebSocket(
       });
       return;
     }
-    // DI seam:生产默认 makeLlmCall(kernel);集成测试可注入 fake(见 AttachOptions.llmCallFactory)
-    const llmCallFactory = opts.llmCallFactory ?? makeLlmCall;
+    // DI seam:生产默认 makeLlmCall(kernel, { memoryBlock });集成测试可注入 fake
+    // (见 AttachOptions.llmCallFactory)
+    //
+    // 批次 8-D(M3):记忆块与 chat 路径**同源** —— 同一个 buildContextBlock、
+    // 同一次 searchFragmentsByText + listProfile,只是接的模型不同。
+    // 「沟通员记得、干活的不知道」是记忆面最刺眼的不一致,两处必须一起改。
+    const memoryBlock = storage
+      ? (userPrompt: string): string | undefined => buildWorkerMemoryBlock(storage, userPrompt)
+      : undefined;
+    const llmCallFactory =
+      opts.llmCallFactory ?? ((k: AgentKernel) => makeLlmCall(k, { memoryBlock }));
     const orchestrator = new Orchestrator({
       storage,
       dataDir,

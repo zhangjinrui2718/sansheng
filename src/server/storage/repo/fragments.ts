@@ -168,6 +168,37 @@ export function recordFragmentAccess(db: Database.Database, id: string): void {
  *   显式传空数组 = 不过滤(保持旧语义)。
  * - limit:返回数量上限
  */
+/**
+ * 查询分词(批次 8-D / 审计 M2)。
+ *
+ * **旧实现是坏的,而且注释在撒谎**:`/[\u4e00-\u9fa5]{2,}/g` 是**贪婪整段**匹配,
+ * 注释却写「中文按字拆」。于是查询「我叫什么名字」只产生一个 token「我叫什么名字」,
+ * 而库里存的是「用户名字:小明」—— LIKE '%我叫什么名字%' 永远匹配不上。
+ * 后果:用户说「记住:我叫小明」,下一轮问「我叫什么名字」,**记忆对用户等于不存在**。
+ *
+ * 现在按 CJK 惯例切 **bigram(相邻二字)**:「我叫什么名字」→ 我叫 / 叫什 / 什么 / 么名 / 名字。
+ * 无词典、无分词器、纯字符串运算,却把「同义不同形」压到可接受:命中靠共享的二字组
+ * (「名字」两侧都有),而不是整句相等。单字查询额外补一个字本身,否则 bigram 一个都产不出来。
+ * 英文沿用原样(≥2 字母的小写词);数字与符号不参与匹配。
+ */
+function tokenizeQuery(query: string): string[] {
+  const words: string[] = [];
+  for (const tok of query.split(/\s+/)) {
+    if (!tok) continue;
+    const en = tok.match(/[a-zA-Z]{2,}/g);
+    if (en) words.push(...en.map((w) => w.toLowerCase()));
+    const zh = tok.match(/[\u4e00-\u9fa5]+/g);
+    if (!zh) continue;
+    for (const run of zh) {
+      if (run.length === 1) {
+        words.push(run);
+        continue;
+      }
+      for (let i = 0; i + 1 < run.length; i++) words.push(run.slice(i, i + 2));
+    }
+  }
+  return words;
+}
 export function searchFragmentsByText(
   db: Database.Database,
   query: string,
@@ -175,17 +206,7 @@ export function searchFragmentsByText(
 ): FragmentRow[] {
   const limit = opts.limit ?? 5;
   const kinds = opts.kinds ?? (["fact", "preference", "project", "context"] as FragmentRow["kind"][]);
-  // 简单 tokenize:中文 char-by-char + 英文 word
-  const words: string[] = [];
-  for (const tok of query.split(/\s+/)) {
-    if (!tok) continue;
-    // 英文 word
-    const en = tok.match(/[a-zA-Z]{2,}/g);
-    if (en) words.push(...en.map((w) => w.toLowerCase()));
-    // 中文按字拆(2+ chars)
-    const zh = tok.match(/[\u4e00-\u9fa5]{2,}/g);
-    if (zh) words.push(...zh);
-  }
+  const words = tokenizeQuery(query);
   // 去重
   const tokens = Array.from(new Set(words));
   if (tokens.length === 0) return [];
