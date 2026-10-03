@@ -1,10 +1,21 @@
 # Sansheng 项目交接包
 
-**生成时间**:2026-10-03 CST · **v7.2**(批次 7-L:worker 升级先问沟通员 + 沟通员判断轮)
-**上一版**:v7.1(批次 7-H:各 agent 工具集合落地 + 提示词重写),见下。
+**生成时间**:2026-10-03 CST · **v8.0**(批次 7-O harness 写面 + 8-A/8-B/8-C/8-D 角色职能核查迭代)
+**上一版**:v7.2(批次 7-L:worker 升级先问沟通员 + 沟通员判断轮),见下。
 **适用**:下一会话(主对话 / worker)开盒即读
 **配套阅读**:`/root/projects/sansheng/PLAN.md`(v5 集成版),`/root/projects/sansheng/ARCHITECTURE.md`(12 层模块图,v6.4 新增),`/root/.pi/agent/memory/MEMORY.md`(长期偏好 + 教训)
-> **v7.2 · 批次 7-L(2026-10-03,DSH 会话,总线升级问题)**:**worker 升级的对象是沟通员,不是用户;沟通员先自己判一轮**。
+> **v8.0 · 批次 7-O + 8(2026-10-03 晚,DSH 会话,用户两连问)**:**第一问「在 harness 中能对每个 agent 的 prompt 和 tools 做管理」,第二问「按每个 agent 的角色职能做 checklist,查期望与代码的 gap,做一次大的技术迭代」。**
+> - **7-O harness 写面**:`src/server/harness/apply.ts`(唯一写盘点:备份 → 原子写 → 回读)+ facet 的可选 `apply?`/`detail?` + `http/harnessRoutes.ts`(GET 详情 / PUT 写入 / POST reset 需 confirm)+ Harness 页编辑器。测试 `tests/server/harness-apply.test.ts` 31 个。
+> - **核查报告**:`docs/AGENT-AUDIT-2026-10-03.md` —— 逐角色 checklist(9 个角色 + 横向 6 项)、可复现实证脚本、gap 汇总、批次 8 方案。**主结论:最会说话的 agent 工具是真的,最该动手干活的 agent 工具是假的。**
+> - **8-A(`4f644b6`)执行者真工具**:`harness/sdkTools.ts` 把 SDK 内置 7 工具(read/grep/find/ls/edit/write/bash)包成 LoopTool 接进 `buildOrchestratorTools`。**此前集合文件说 13 个、工具循环里真的只有 6 个**,而出厂提示词正教模型用那 7 个不存在的 → 调用失败 → 纪律压力下编造。不变量测试 `tests/agents/sdk-loop-tools.test.ts`(5 个)钉死「集合文件声称的工具必须在池子里」。**边界未动**:SDK 工具根 = `settings.cwd`(默认 `~/sansheng-workspace`),不经 Sansheng Sandbox(7-H 既有裁决,本批只补「缺失」不顺带改「边界」,好让回归可归因)。
+> - **8-B(`e7479c6`)终态播报**:沟通员「Observer 身份」此前是**死接线**(`startObserver` 挂在 prototype 上从无调用方)。新增 `agents/runReport.ts`(8s 超时 / 400 token,失败降级为确定性文案)+ harness 单元 `communicator.report` + `kernel.sayAsCommunicator()`(合成 turn + 落库 + 总线留痕),ws.ts 在 plan_done / plan_failed 两条终态路径上**不 await** 调用。**不复用那套 mixin**:终态在 runPlan 里是同步已知事实,订阅全局 bus 只会多一类重复播报与僵尸。
+> - **8-C(`83d5e5e`)计划可见可中止**:`todos_planned` / `todo_started` / `todo_resolved` 此前被 ws.ts **显式不外发**(用户跑到结束才第一次看见结果),现新增 `plan_planned` / `plan_todo_update` 两个 ServerEvent;前端计划卡 +「中止」按钮(发既有的 `abort_plan`)由子任务落地。
+> - **8-D(`fbd4d8d`)记忆闭环**:**M2** 中文分词改 bigram(旧正则贪婪整段而注释自称按字拆,「我叫什么名字」永远召不回「用户名字:小明」);**M3** 记忆块注入 planner/executor(此前 `makeLlmCall` 零记忆),抽 `agents/workerMemory.ts` 与 chat 路径共用一份实现。测试 `tests/storage/memory-recall.test.ts` 8 个。
+> - **未做(审计已列,留后续)**:M1 向量检索生产零调用(每条 fragment 仍在发 embedding 却从不读)、M4 fragments 无上限/去重、M5 两套记忆割裂 + 死字段、G5 critic/reflection 零实现、harness_manager 永不触发、G6 成本无设防、G7 harness UI 只覆盖 4/12 提示词单元。
+> - **验证**:typecheck 0(server+web)· `npm test` **731 passed | 1 skipped(85 files)** · build:server OK · `grep 'as any' src/` = 0 · 独立端口 boot smoke(临时 dataDir)全绿。
+> - **USER-side 生效条件**:**重启 2718 server**(8-A 的 SDK 工具、8-B 的播报、8-C 的计划事件都要新进程加载)。重启后 `~/.sansheng/harness/system_prompts/communicator.report.md` 自动写出(全新单元);executor 的工具集合文件不用改(出厂 13 个现在**真的**有了)。
+> - **⚠️ 需要你亲自验的(浏览器)**:计划卡与「中止」按钮、终态播报那句话在聊天流里的观感;以及执行者第一次真的 read/write/bash 之后产出质量的变化(这是本轮迭代的核心目的)。
+> > **v7.2 · 批次 7-L(2026-10-03,DSH 会话,总线升级问题)**:**worker 升级的对象是沟通员,不是用户;沟通员先自己判一轮**。
 > - **用户原话**(worker 在总线上升级 todo-3 时写的):「总线实际的功能是用于 agent 之间做信息交互的,意思就是沟通员和后面几个干活的 agent 做信息交互,worker 升级了问题,应该要问的是沟通员,而不是用户,如果沟通员解决不了,那么沟通员负责和我沟通,让我判断决策。另外要说的是,不要所有的问题都要我来回答,沟通员需要根据和我对齐的信息,先判断一轮。」
 > - **现场事实(不是感受,是代码)**:7-L 之前 `agentKernel.handleExecutorCallback` **硬编码** `communicator.handleWorkerAsk(msg, knowIt=false, …)` —— 沟通员主提示词里那句「升级用户前先自查」写了三年,**代码里一次都没执行过**(与 7-B 死接线同款病,方向是「提示词在骗人」)。用户每一条升级都亲自接,就是这条硬编码的直接后果。
 > - **三处根因一起修**(缺一个都只是换个姿势继续骗):①**判断轮落地**:`makeWorkerAskAdjudicate` + 新提示词单元 `communicator.worker_ask`(11 个单元),输入 = 执行者 hypothesis 全文 + 最近对话(已对齐信息),输出 `{"verdict":"answer"|"escalate",…}`。answer → 写 decision + `executor_resume`,**用户零打扰**;escalate → 沟通员**自己新起 `q-comm-*`** 问用户,并强制带 `lean` + `ruledOut`。②**提问 payload 带全文**:旧 payload 只有一句 `Executor needs help (judgment) for todo xxx`,判断轮连问题是什么都不知道,只能全推给用户 —— 现由 `buildWorkerQuestionPayload` 读 `getArtifact(hypothesisId)` 拼标题 + 候选方案正文。③**审计流如实两级**:`worker→comm`(执行者问沟通员)与 `comm→user`(沟通员问用户)各记各的,沿用 `q-exec-*` 会让 timeline 看起来像执行者直接找用户。
