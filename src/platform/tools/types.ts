@@ -21,6 +21,7 @@
  */
 import type Database from "better-sqlite3";
 import type { Agent, Project } from "../harness/authorize.js";
+import type { MemoryPort } from "../memory/port.js";
 import type { Capability, ToolName } from "../harness/capability.js";
 import type { TSchema } from "@sinclair/typebox";
 
@@ -35,6 +36,12 @@ export interface ToolRunContext {
   readonly now: () => number;
   /** id 生成注入:`newId("wk")` → "wk_xxx" */
   readonly newId: (prefix: string) => string;
+  /**
+   * 记忆后端。**可选**,因为不是每一次工具调用都需要记忆 —— 而且它的后端是
+   * 可替换的(设计 1 §8.3)。缺省时 `memory_*` 工具会如实报「装配错误」,
+   * 而不是假装成功或静默返回空。
+   */
+  readonly memory?: MemoryPort;
 }
 
 export type ToolErrorCode =

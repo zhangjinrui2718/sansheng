@@ -122,22 +122,24 @@ describe("注册表 · 声明与能力必须一致(7-E 那个坑的机器防线)
     expect(s.notYetBuilt.length).toBeLessThan(s.totalInTable - s.implemented);
   });
 
-  it("未实现的工具如实列出(BC2 已落地 → 只剩记忆与甲方接口)", () => {
+  it("未实现的工具如实列出(BC2/BC7 已落地 → 只剩甲方接口)", () => {
     const missing = notYetBuiltToolNames();
-    // BC2 协作工具在批次 5 落地了
-    expect(missing, "ask_role 已实现").not.toContain("ask_role");
+    expect(missing, "BC2 协作已落地").not.toContain("ask_role");
     expect(missing).not.toContain("convene");
-    // 尚未落地的是 BC7 记忆与面向甲方的两个(它们属执行/传输批次)
-    expect(missing).toContain("memory_search");
-    expect(missing).toContain("memory_remember");
+    expect(missing, "BC7 记忆已落地").not.toContain("memory_search");
+    expect(missing).not.toContain("memory_remember");
+    // 尚未落地的是面向甲方的两个(属传输/执行批次)
+    expect(missing).toContain("ask_client");
+    expect(missing).toContain("tell_client");
     expect(missing).not.toContain("board_write");
   });
 
   it("未覆盖的能力如实列出(且排除 SDK 内置那几族,否则缺口清单永远消不掉)", () => {
     const gap = capabilitiesWithoutTools();
     expect(gap, "collab.* 已落地").not.toContain("collab.ask");
-    expect(gap).toContain("memory.read");
-    expect(gap).toContain("memory.write");
+    expect(gap, "memory.* 已落地").not.toContain("memory.read");
+    expect(gap).not.toContain("memory.write");
+    expect(gap).toContain("client.ask");
     expect(gap).not.toContain("blackboard.write");
     // code.* 的工具是 SDK 内置的,平台无需实现 —— 算进缺口会让清单一直挂着
     // 几条永远消不掉的项,久而久之没人再看它
@@ -165,8 +167,8 @@ describe("派发器 · 四道拦截", () => {
   });
 
   it("工具表里有但未实现 → 明确说「还没建」,不假装能用", () => {
-    // memory_search 属 BC7,批次 5 之后仍未实现
-    const e = errOf(call(ids.bm, "memory_search", { query: "x" }));
+    // tell_client 属甲方接口,尚未落地
+    const e = errOf(call(ids.bm, "tell_client", { text: "x" }));
     expect(e.code).toBe("not_found");
     expect(e.message).toContain("还没建实现");
   });

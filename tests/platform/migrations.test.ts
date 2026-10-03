@@ -28,11 +28,25 @@ const FILES = allMigrations(MIGRATIONS_DIR).map((m) => ({
   sql: readFileSync(join(MIGRATIONS_DIR, `${String(m.version).padStart(3, "0")}_${m.name}.sql`), "utf8"),
 }));
 
-/** 提取一个迁移里 CREATE TABLE 的表名 */
+/**
+ * 去掉 SQL 注释。
+ *
+ * **必须先剥注释再解析** —— 这几个迁移的注释里就写着
+ * 「CREATE TABLE IF NOT EXISTS 撞名时静默无操作」这句话。不剥的话,解析器会
+ * 把那句话当真的 DDL,而且正则回溯时会把 `IF` 当成表名,报出一个
+ * 「IF ← 009 + 010」的假撞名。
+ */
+function stripSqlComments(sql: string): string {
+  return sql.replace(/--[^\n]*/g, "").replace(/\/\*[\s\S]*?\*\//g, "");
+}
+
+/** 提取一个迁移里 CREATE TABLE 的表名(已剥注释) */
 function createdTables(sql: string): string[] {
-  return [...sql.matchAll(/CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?([a-z_][a-z0-9_]*)/gi)]
+  const body = stripSqlComments(sql);
+  return [...body.matchAll(/CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?([a-z_][a-z0-9_]*)/gi)]
     .map((m) => m[1]!)
-    .filter(Boolean);
+    // 兜底:即便可选组没匹配上,也不能把 SQL 关键字当成表名
+    .filter((t) => !/^(if|not|exists)$/i.test(t));
 }
 
 describe("迁移文件名与编号", () => {
@@ -99,7 +113,7 @@ describe("迁移引用的表必须先存在", () => {
       // 先看这个迁移自己建了什么
       const own = createdTables(f.sql);
       // 检查索引目标
-      for (const m of f.sql.matchAll(/CREATE\s+(?:UNIQUE\s+)?INDEX\s+(?:IF\s+NOT\s+EXISTS\s+)?[a-z_0-9]+\s+ON\s+([a-z_][a-z0-9_]*)/gi)) {
+      for (const m of stripSqlComments(f.sql).matchAll(/CREATE\s+(?:UNIQUE\s+)?INDEX\s+(?:IF\s+NOT\s+EXISTS\s+)?[a-z_0-9]+\s+ON\s+([a-z_][a-z0-9_]*)/gi)) {
         const target = m[1]!;
         if (!known.has(target) && !own.includes(target)) {
           problems.push(`${f.file}: 索引目标表 ${target} 尚不存在`);
@@ -114,7 +128,7 @@ describe("迁移引用的表必须先存在", () => {
     const known = new Set<string>();
     const problems: string[] = [];
     for (const f of FILES) {
-      for (const m of f.sql.matchAll(/ALTER\s+TABLE\s+([a-z_][a-z0-9_]*)/gi)) {
+      for (const m of stripSqlComments(f.sql).matchAll(/ALTER\s+TABLE\s+([a-z_][a-z0-9_]*)/gi)) {
         const target = m[1]!;
         if (!known.has(target)) problems.push(`${f.file}: ALTER TABLE ${target} 尚不存在`);
       }

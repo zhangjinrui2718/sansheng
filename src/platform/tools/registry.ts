@@ -31,6 +31,7 @@ import { PROJECT_WORK_TOOLS } from "./project.js";
 import { BLACKBOARD_TOOLS } from "./blackboard.js";
 import { CONTROL_TOOLS } from "./control.js";
 import { COLLAB_TOOLS } from "./collab.js";
+import { MEMORY_TOOLS } from "./memory.js";
 import { fail, type PlatformTool, type ToolResult, type ToolRunContext } from "./types.js";
 
 /** 已实现的全部平台工具。BC2 / BC7 的工具在各自批次落地后并入这里。 */
@@ -39,6 +40,7 @@ export const ALL_PLATFORM_TOOLS: readonly PlatformTool[] = [
   ...BLACKBOARD_TOOLS,
   ...CONTROL_TOOLS,
   ...COLLAB_TOOLS,
+  ...MEMORY_TOOLS,
 ];
 
 /** 工具名 → 工具定义 */
