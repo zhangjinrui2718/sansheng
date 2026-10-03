@@ -156,6 +156,37 @@ export function listAssignments(db: Database.Database, projectId: string): Proje
   }));
 }
 
+export interface ProjectMemberRow {
+  id: string;
+  role: string;
+  specialization: string | null;
+  displayName: string;
+}
+
+/**
+ * 项目的**活跃成员**花名册(带角色与细分)。
+ *
+ * 工具解析 `{role, spec?}` → agent_id 时要用它。放在这里而不是 tools 层,
+ * 是因为它纯粹是「参与关系 × agents 表」的 join —— 属于查询,不属于业务。
+ */
+export function loadProjectRoster(db: Database.Database, projectId: string): ProjectMemberRow[] {
+  const rows = db
+    .prepare(
+      `SELECT a.id, a.role, a.specialization, a.display_name
+       FROM project_assignments pa
+       JOIN agents a ON a.id = pa.agent_id
+       WHERE pa.project_id = ? AND pa.removed_at IS NULL
+       ORDER BY a.role, a.specialization, a.display_name`,
+    )
+    .all(projectId) as Array<{ id: string; role: string; specialization: string | null; display_name: string }>;
+  return rows.map((r) => ({
+    id: r.id,
+    role: r.role,
+    specialization: r.specialization,
+    displayName: r.display_name,
+  }));
+}
+
 /**
  * 拼出授权求解器要的 `Project`(状态 + 参与关系),一次查询完成。
  *

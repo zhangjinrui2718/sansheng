@@ -30,6 +30,7 @@ import {
 } from "./capability.js";
 import {
   ROLE_SPECS,
+  ARTIFACT_KINDS,
   isArtifactKind,
   type ArtifactKind,
   type ProjectRole,
@@ -83,6 +84,16 @@ export interface Denial {
   readonly subject: string;
   /** 对用户可见的理由(7-E 纪律:提权失败必须可见,不许静默丢弃) */
   readonly reason: string;
+  /**
+   * 这个拒绝是因为「给的值根本不存在」,而不是「无权做这件事」。
+   *
+   * 为什么必须区分:两者的**下一步动作完全不同** ——
+   *   值不存在   → 模型记错了参数名,回灌合法值**全集**即可自纠
+   *   存在但无权 → 模型越权,回灌**该角色**的合法值,换一个值也没用
+   * 派发器据此选更贴切的错误码(参数错 vs 权限错)。合成一个会让模型的下一步
+   * 失去依据 —— 而它只能靠错误信息决定下一步。
+   */
+  readonly invalidValue?: boolean;
   /** 结构化补充。`writeKind` 拒绝时回灌合法 kind 列表 —— 8-F 教训:
    *  「传错参数」的表现形式往往是编造,必须告诉模型合法值是什么。 */
   readonly alternatives?: readonly string[];
@@ -315,20 +326,23 @@ export function authorizeCall(
 ): CallVerdict {
   const spec = ROLE_SPECS[ctx.agent.role];
 
-  // ── 第三道门:writeKind ──
+  // ── 第三道门:writeKind(两级判定,见 Denial.invalidValue)──
   if (capability === "blackboard.write") {
     const kind = params["kind"];
+    // 第一级:这个 kind 存在吗?不存在 → 参数错,回灌**全集**
     if (!isArtifactKind(kind)) {
       return {
         ok: false,
         denial: {
           code: "writeKind",
           subject: String(kind ?? "(缺失)"),
-          reason: `writeKind 不是合法工件 kind`,
-          alternatives: [...spec.writeKinds],
+          reason: `「${String(kind ?? "(缺失)")}」不是合法工件 kind`,
+          alternatives: [...ARTIFACT_KINDS],
+          invalidValue: true,
         },
       };
     }
+    // 第二级:存在但本角色不能写 → 权限错,回灌**该角色**的合法值
     if (!spec.writeKinds.includes(kind)) {
       return {
         ok: false,
