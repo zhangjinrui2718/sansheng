@@ -253,8 +253,11 @@ describe("批次 7-E · 对齐闸门", () => {
     expect(secondDecide).toContain("百万级外呼");
     // 并且真的开工了
     expect(__cap.plannerCalls.length).toBeGreaterThan(0);
-    // 闸门只问了两次(每轮各一次),没有反复追问
-    expect(askCount).toBe(2);
+    // 批次 8-E(E2):闸门**只问一次**。旧断言是 askCount === 2 —— 那等于把
+    // 「同一个问题换措辞再问一遍」当成了期望行为,而实机事故(conv_murrw192_wxbg)
+    // 里用户就是被这么问烦的(「你上下文清空了吗?」)。现在去重在代码层:
+    // pendingTask 存在就不再进闸门,不靠模型自觉。
+    expect(askCount).toBe(1);
   });
 
   it("闸门说 NONE → 直接开工,不打扰用户", async () => {

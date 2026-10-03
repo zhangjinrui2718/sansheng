@@ -78,8 +78,32 @@ export type CommunicatorEvent =
   | { type: "artifact_created"; artifact: BlackboardArtifact };
 
 export interface CommunicatorDecideFn {
-  (input: { userText: string; conversationId: string }): Promise<CommunicatorDecision>;
+  (input: {
+    userText: string;
+    conversationId: string;
+    /**
+     * 批次 8-E:「用户正在回答一个对齐问题」的状态位。
+     *
+     * 存在的理由是一次**实机事故**(2026-10-03,conv_murrw192_wxbg):
+     * 闸门问了「C 端还是 B 端?」,用户答「C 端个人逾期用户」,decide 却判了 chat ——
+     * 因为这句话本身没有任何指令性动词,四选一里天然偏向 chat。于是系统**永远等不到
+     * 那句「开始吧」**,用户只能眼看着「需求已交接给规划链路」的承诺落空(全程 0 工件)。
+     * 把状态显式喂给 decide,让它知道「这不是一句闲聊,这是对我上一个问题的回答」。
+     */
+    alignment?: { question: string; goal: string };
+  }): Promise<CommunicatorDecision>;
 }
+
+/**
+ * 批次 8-E:用户「收回」对齐回答的关键词。
+ *
+ * 这是「答完即开工」的**逃生舱**:闸门问过之后,绝大多数回答都该直接开工;
+ * 但用户也可能说「算了,先不做了」。没有这个舱,强制开工会变成另一种骚扰。
+ * 刻意收得很窄 —— 只认明确的放弃语义,「停一下/等等」这种半途改主意的话不在内,
+ * 因为它们更可能是「补一句条件」而不是「取消任务」。
+ */
+const DECLINE_ANSWER_RE =
+  /(?:算了|不做了|先不做(?:了)?|先不搞了|不搞了|放弃(?:了)?|取消(?:任务|计划)?|这个不做了|不需要了)/;
 
 /**
  * 降级兜底 decide(正则启发式):闲聊 = chat,含动作关键词 = task,自我披露 = feedback。
@@ -224,6 +248,7 @@ function parseDecide(
 function buildDecideUserPrompt(
   userText: string,
   history: Array<{ role: "user" | "assistant"; content: string }> | undefined,
+  alignment?: { question: string; goal: string },
 ): string {
   const parts: string[] = [];
   const hist = (history ?? []).slice(-DECIDE_HISTORY_MAX);
@@ -233,6 +258,16 @@ function buildDecideUserPrompt(
       const body = (h.content ?? "").replace(/\s+/g, " ").trim().slice(0, DECIDE_HISTORY_CHARS);
       parts.push(`${h.role}: ${body}`);
     }
+    parts.push("");
+  }
+  if (alignment) {
+    // 批次 8-E:把「这是在回答我的问题」这件事写进 decide 的输入。
+    // 放在[当前消息]之前 —— decide 是四选一分类器,不给它这个前提,
+    // 「C 端个人逾期用户」这种纯答案必然被判成 chat(实机事故,见 CommunicatorDecideFn.alignment)。
+    parts.push("[当前状态] 你上一轮为了开工前对齐,问了用户一个问题。");
+    parts.push("你问的:" + alignment.question);
+    parts.push("用户正在回答这个问题。");
+    parts.push("除非用户的回答明确表示「不做了 / 算了 / 取消」,否则这一轮应判为 task。");
     parts.push("");
   }
   parts.push("[当前消息]");
@@ -281,7 +316,11 @@ export function makeLlmCommunicatorDecide(deps: LlmDecideDeps): CommunicatorDeci
     return out.join("");
   };
 
-  return async (input: { userText: string; conversationId: string }): Promise<CommunicatorDecision> => {
+  return async (input: {
+    userText: string;
+    conversationId: string;
+    alignment?: { question: string; goal: string };
+  }): Promise<CommunicatorDecision> => {
     const t = input.userText.trim();
     if (!t) return { kind: "chat", reply: "（空消息）" };
 
@@ -300,7 +339,7 @@ export function makeLlmCommunicatorDecide(deps: LlmDecideDeps): CommunicatorDeci
         history = undefined;
       }
     }
-    const userPrompt = buildDecideUserPrompt(input.userText, history);
+    const userPrompt = buildDecideUserPrompt(input.userText, history, input.alignment);
     const call = injected ?? productionCall;
 
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -768,13 +807,42 @@ export class Communicator {
       // 批次 7-E:若上一轮刚问过对齐问题而用户在回答,把原 goal 和这句补充
       // 拼起来再 decide —— 否则「是,面向百万级外呼」这种回答会被判成 chat,
       // 任务凭空消失。落库/回显仍用 userText 原文,拼接过的东西不污染消息。
-      const carried =
+      const pending =
         this.pendingTask && this.pendingTask.conversationId === conversationId
-          ? this.pendingTask.goal
+          ? this.pendingTask
           : null;
+      const carried = pending ? pending.goal : null;
       const decideText = carried ? `${carried}\n\n【用户补充】${userText}` : userText;
 
-      const decision = await this.decideFn({ userText: decideText, conversationId });
+      // 批次 8-E:把「用户正在回答我刚问的对齐问题」这件事**显式**喂给 decide。
+      // 7-E 只做了「把原 goal 拼进 decideText」,于是 decide 看到的是一句
+      // 「C 端个人逾期用户」—— 纯答案、无指令动词,四选一里必然落到 chat,
+      // 系统永远等不到那句「开始吧」(实机事故:conv_murrw192_wxbg 全程 0 工件)。
+      let decision = await this.decideFn({
+        userText: decideText,
+        conversationId,
+        ...(pending ? { alignment: { question: pending.question, goal: pending.goal } } : {}),
+      });
+
+      // 批次 8-E(E1):答完即开工。decide 仍然说话(逃生舱在下面),但**用户既然回答了
+      // 我问的问题,就不该让任务原地消失** —— 除非他明确说不要了。
+      // 这条规则是确定性兜底,不依赖模型「这次应该判对了」。
+      if (pending && DECLINE_ANSWER_RE.test(userText)) {
+        // 逃生舱:用户**明说不要了** → 无条件不开工,连 decide 说什么都不听。
+        // 「算了」之后还把活派出去,比多问一句恶劣得多。reply 留空 = 不 sink,
+        // 由 Pi 直答(与既有 chat 语义一致)。
+        log.muted("decide: 用户收回了对齐回答,不开工");
+        this.pendingTask = null;
+        decision = { kind: "chat", reply: "" };
+      } else if (pending && decision.kind !== "task") {
+        log.muted(
+          `decide: 用户正在回答对齐问题(${decision.kind}→task 强制),goal=${pending.goal.slice(0, 40)}`,
+        );
+        decision = {
+          kind: "task",
+          goal: `${pending.goal}\n\n【用户对齐回答】${userText}`,
+        };
+      }
 
       if (decision.kind === "chat") {
         // B2 修复(批次 5a,docs/CODE-REVIEW-2026-10-01.md §B2):
@@ -835,7 +903,10 @@ export class Communicator {
         // 闸门自身任何失败都放行(见 makeAlignmentCheck),不能因为闸门出错
         // 把用户的任务卡死;这里再兜一层 catch 防御注入方抛错。
         let question: string | null = null;
-        if (this.opts.alignmentCheck) {
+        // 批次 8-E(E2):**已经问过就不问第二次**。这是代码层去重,不靠模型自觉 ——
+        // 实机事故里同一个问题被换了个措辞又问了一遍(用户当场质问「上下文清空了吗」)。
+        // ALIGN_SYSTEM_PROMPT 里那条「已经问过就别再问」对人有效、对模型不可靠。
+        if (this.opts.alignmentCheck && !pending) {
           try {
             question = await this.opts.alignmentCheck({
               goal: decision.goal,
