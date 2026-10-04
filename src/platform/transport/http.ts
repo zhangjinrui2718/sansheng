@@ -623,9 +623,6 @@ export function memberConversations(
   );
 
   const groups: MemberConversationView[] = [];
-  // 名字解析与 `/messages` 同判据(agentNameCache 未导出,这里内联同一件事):
-  // 查得到用 displayName,查不到回 id —— **不回空串**,空串在界面上看不出是缺失。
-  const name = (id: string): string => getAgent(db, id)?.displayName ?? id;
   // 顺序固定(agentId 字典序、NULL 最后)—— 呈现顺序是页面的事,但接口不能
   // 每次返回不同顺序,否则「同一份数据两次请求不一样」无法比对。
   const agentIds = [...agg.keys()].sort((a, b) => {
@@ -637,6 +634,14 @@ export function memberConversations(
   for (const agentId of agentIds) {
     const c = agg.get(agentId);
     if (c === undefined) continue;
+    // `agents.role` / 显示名的读时解析(角色只在库里存一处 —— 与 `MemberView.role` 同源;
+    // `getAgent` 在角色越界时抛错,所以拿到的已经是 `ProjectRole`)。
+    // **每组只查一次**:一组里的每一行都是同一个 agent(`views.ts` 的
+    // `agentNameCache` 是为同一件事而存在的),逐条查是把「几十次」变成「几百次」。
+    const agent = agentId === null ? null : getAgent(db, agentId);
+    // 查不到就回 id —— **不回空串**,空串在界面上看不出是缺失。
+    const agentName = agentId === null ? null : (agent?.displayName ?? agentId);
+    const nameOfGroup = (): string => agentName ?? "";
     const rows = msgStmt.all(projectId, agentId, limit) as Array<{
       id: string; session_id: string; agent_id: string | null;
       kind: string; content: string; created_at: number;
@@ -649,14 +654,11 @@ export function memberConversations(
         id: r.id, sessionId: r.session_id, agentId: r.agent_id,
         kind: r.kind, content: r.content, createdAt: r.created_at,
       };
-      return toMessageView(row, name, projectId);
+      return toMessageView(row, nameOfGroup, projectId);
     });
-    // `agents.role` 的读时解析(角色只在库里存一处 —— 与 `MemberView.role` 同源)。
-    // `getAgent` 在角色越界时抛错,所以这里拿到的已经是 `ProjectRole`。
-    const agent = agentId === null ? null : getAgent(db, agentId);
     groups.push({
       agentId,
-      agentName: agentId === null ? null : name(agentId),
+      agentName,
       role: agent === null ? null : agent.role,
       total: c.total,
       byKind: c.byKind,
