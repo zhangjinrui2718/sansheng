@@ -90,6 +90,7 @@ const askClient: PlatformTool = {
     try {
       await channel.ask({
         questionId: id,
+        projectId: ctx.project.id,
         question: question.value,
         ...(options.length > 0 ? { options } : {}),
         ...(lean !== undefined ? { lean } : {}),
@@ -128,7 +129,7 @@ const tellClient: PlatformTool = {
     const text = requireString(args, "text");
     if (!text.ok) return text.result;
     try {
-      await channel.tell(text.value);
+      await channel.tell({ projectId: ctx.project.id, message: text.value });
     } catch (err) {
       return fail("internal", `播报失败:${err instanceof Error ? err.message : String(err)}`);
     }

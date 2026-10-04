@@ -43,8 +43,10 @@ function recordingChannel(): RecordingChannel {
       if (ch.failNextAsk) throw ch.failNextAsk;
       ch.asked.push(q);
     },
-    async tell(m) {
-      ch.told.push(m);
+    async tell(input) {
+      // 签名带 projectId —— 播报必须知道属于哪个项目(按项目分组呈现)
+      if (input.projectId === undefined) throw new Error("tell 缺 projectId");
+      ch.told.push(input.message);
     },
   };
   return ch;

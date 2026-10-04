@@ -29,17 +29,27 @@ export interface ClientQuestion {
   lean?: string;
 }
 
-/** 传输层实现这个接口。`ask` 之后的环节(推送、等待)全在实现里。 */
+/**
+ * 传输层实现这个接口。`ask` 之后的环节(推送、等待)全在实现里。
+ *
+ * ── `projectId` 为什么是必填 ────────────────────────────────────
+ *
+ * 第一版没有它,于是 `tell()` 无处安放播报 —— 消息必须落进某个项目的会话,
+ * 否则用户切项目时就看不见它。
+ *
+ * 而「按项目分组呈现」是经校准的裁决(2026-10-04,p=0.82):项目即上下文容器。
+ * 所以传输层的每一条出站内容都必须带着它属于哪个项目。
+ */
 export interface ClientChannel {
   /**
    * 向甲方提问。**不阻塞工具调用** —— 它只负责把问题投出去,
    * 「提问者进入 blocked」这个状态由 `client_question` 工件的 open 状态表达,
    * 不靠挂起一个 Promise(旧 MessageBus 的阻塞模型就是这么失效的)。
    */
-  ask(input: ClientQuestion & { questionId: string }): Promise<void>;
+  ask(input: ClientQuestion & { questionId: string; projectId: string }): Promise<void>;
 
   /** 向甲方播报。不等待、不产生待答状态。 */
-  tell(message: string): Promise<void>;
+  tell(input: { projectId: string; message: string }): Promise<void>;
 }
 
 /**
@@ -52,15 +62,15 @@ export function createLoggingClientChannel(
   log: (line: string) => void,
 ): ClientChannel {
   return {
-    async ask({ questionId, question, options, lean }) {
+    async ask({ questionId, projectId, question, options, lean }) {
       log(
-        `[client.ask ${questionId}] ${question}` +
+        `[client.ask ${questionId} @${projectId}] ${question}` +
           (options !== undefined && options.length > 0 ? `\n  候选:${options.join(" | ")}` : "") +
           (lean !== undefined ? `\n  倾向:${lean}` : ""),
       );
     },
-    async tell(message) {
-      log(`[client.tell] ${message}`);
+    async tell({ projectId, message }) {
+      log(`[client.tell @${projectId}] ${message}`);
     },
   };
 }

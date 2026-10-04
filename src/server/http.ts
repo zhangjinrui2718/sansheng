@@ -13,6 +13,7 @@ import { fileURLToPath } from "node:url";
 import type { Server } from "node:http";
 import { log } from "../shared/log.js";
 import { SettingsStore, genProviderId, isMaskedApiKey, type ProviderConfig, type ThinkingLevel } from "./settings/store.js";
+import { maskApiKey } from "./storage/keyring.js";
 import { listProviders } from "./providers/registry.js";
 import type { AgentKernel } from "./kernel/agentKernel.js";
 import { attachWebSocket } from "./ws.js";
@@ -614,10 +615,4 @@ export async function createApp(opts: AppOptions): Promise<Hono> {
   });
 
   return app;
-}
-
-function maskApiKey(k: string): string {
-  if (!k) return "";
-  if (k.length <= 8) return "****";
-  return `${k.slice(0, 4)}****${k.slice(-4)}`;
 }

@@ -241,6 +241,30 @@ export function listLinks(
   return rows.map((r) => r.t);
 }
 
+/**
+ * 出边的**完整形态**(rel + target)。
+ *
+ * `listLinks` 只给 target id —— 那是给"有没有关联"这类判断用的。要画边、
+ * 要在 UI 上区分 `answers` 与 `depends_on`,需要 rel 一起取出来。
+ */
+export function listLinkEdges(
+  db: Database.Database,
+  artifactId: string,
+): Array<{ rel: ArtifactLinkRel; targetId: string }> {
+  const rows = db
+    .prepare(
+      `SELECT rel, target_artifact_id AS t FROM artifact_links
+       WHERE artifact_id = ? ORDER BY rel, target_artifact_id`,
+    )
+    .all(artifactId) as Array<{ rel: string; t: string }>;
+  const out: Array<{ rel: ArtifactLinkRel; targetId: string }> = [];
+  for (const r of rows) {
+    if (!isArtifactLinkRel(r.rel)) continue; // 坏数据跳过,不让整个接口 500
+    out.push({ rel: r.rel, targetId: r.t });
+  }
+  return out;
+}
+
 /** 入边:谁指向这条工件(例如「哪些 decision 回答了这个提问」) */
 export function listBackLinks(
   db: Database.Database,

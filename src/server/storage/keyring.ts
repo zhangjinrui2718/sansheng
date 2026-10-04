@@ -140,6 +140,19 @@ export function isEncrypted(s: string): boolean {
 }
 
 /** 检测是否是 masked placeholder(如 "sk-***" 或 "****"),不能拿来加密 */
+/**
+ * 把真 key 转成可展示的掩码。
+ *
+ * 与 `isMaskedApiKey` 是一对(一个造掩码、一个认掩码),所以放在一起。
+ * 原先是 `src/server/http.ts` 里的局部函数 —— 新平台的 settings 路由也要用它,
+ * 复制一份必然会漂(掩码格式不一致时,「用户没改 key」的判定就会失效)。
+ */
+export function maskApiKey(k: string): string {
+  if (!k) return "";
+  if (k.length <= 8) return "****";
+  return `${k.slice(0, 4)}****${k.slice(-4)}`;
+}
+
 export function isMaskedApiKey(s: string): boolean {
   if (!s) return false;
   if (s.includes("***") || s.includes("****")) return true;

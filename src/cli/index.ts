@@ -7,6 +7,7 @@ import { Command } from "commander";
 import { runStart, runStop, runStatus, runLogs, runReset, dataDir } from "./commands.js";
 import { runPlatformSmoke, parseRole } from "../platform/cli/smoke.js";
 import { runPlatformRun } from "../platform/cli/run.js";
+import { runPlatformServe } from "../platform/host/serve.js";
 import { PROJECT_ROLES } from "../platform/identity/role.js";
 
 const program = new Command();
@@ -119,6 +120,28 @@ program
       timeoutMs: Number(opts.timeout) || 300_000,
     });
     process.exitCode = ok ? 0 : 1;
+  });
+
+program
+  .command("platform-serve")
+  .description(
+    "起平台服务(HTTP + WS + 托管前端)。这是新架构的常驻宿主 —— " +
+      "界面能用、client.* 闭环、调度器有地方待,三件事都依赖它。",
+  )
+  .option("--host <host>", "绑定地址", "127.0.0.1")
+  .option("-p, --port <port>", "端口", "2719")
+  .option("--cwd <path>", "会话工作目录(代码工具的根)")
+  .option("--data <path>", "数据目录(默认 ~/.sansheng)")
+  .option("--open", "起好后打开浏览器", false)
+  .action(async (opts: { host: string; port: string; cwd?: string; data?: string; open: boolean }) => {
+    await runPlatformServe({
+      dataDir: opts.data ?? dataDir(),
+      host: opts.host,
+      port: Number(opts.port) || 2719,
+      ...(opts.cwd !== undefined ? { cwd: opts.cwd } : {}),
+      version: "0.1.0",
+      open: opts.open,
+    });
   });
 
 // default: sansheng (no args) → start in foreground

@@ -23,7 +23,8 @@ import type Database from "better-sqlite3";
 import { bootPlatform, type BootedPlatform } from "../runtime/boot.js";
 import { createPlatformSession } from "../runtime/session.js";
 import { runWorkItem, renderExecutionReport } from "../runtime/execution.js";
-import { insertAgent, getAgent, listAgents, type AgentRow } from "../storage/repo/agents.js";
+import { getAgent, listAgents } from "../storage/repo/agents.js";
+import { ORG, ensureOrg, pickWorker } from "../runtime/org.js";
 import { insertProject, addMember, getProjectRow } from "../storage/repo/projects.js";
 import { insertWork, type WorkRow } from "../storage/repo/works.js";
 import type { Specialization } from "../identity/role.js";
@@ -44,35 +45,6 @@ const out = (s = "") => process.stdout.write(`${s}\n`);
 const rule = (t: string) => out(`\n── ${t} ${"─".repeat(Math.max(0, 56 - t.length))}`);
 
 /** 新平台的固定组织:四个角色各一人。**幂等**。 */
-const ORG: ReadonlyArray<{
-  id: string;
-  role: "business_manager" | "project_manager" | "worker" | "quality_reviewer";
-  spec: Specialization | null;
-  name: string;
-}> = [
-  { id: "bm", role: "business_manager", spec: null, name: "业务经理" },
-  { id: "pm", role: "project_manager", spec: null, name: "项目经理" },
-  { id: "wk", role: "worker", spec: "engineering", name: "工程师" },
-  { id: "qa", role: "quality_reviewer", spec: null, name: "质检" },
-];
-
-/** 按需播种组织。返回本次**新建**了哪些 —— 幂等但不静默。 */
-export function ensureOrg(db: Database.Database, at: number): string[] {
-  const created: string[] = [];
-  for (const m of ORG) {
-    if (getAgent(db, m.id) !== null) continue;
-    insertAgent(db, {
-      id: m.id,
-      role: m.role,
-      specialization: m.spec,
-      displayName: m.name,
-      createdAt: at,
-    });
-    created.push(`${m.id}(${m.name}/${m.role})`);
-  }
-  return created;
-}
-
 export async function runPlatformRun(opts: PlatformRunOptions): Promise<boolean> {
   const booted = bootPlatform({ dataDir: opts.dataDir, clientLog: (l) => out(`  [client] ${l}`) });
   let session: Awaited<ReturnType<typeof createPlatformSession>> | null = null;
@@ -216,13 +188,6 @@ export async function runPlatformRun(opts: PlatformRunOptions): Promise<boolean>
   }
 }
 
-function pickWorker(db: Database.Database, wanted?: string): AgentRow | null {
-  if (wanted !== undefined) {
-    const a = getAgent(db, wanted);
-    return a !== null && a.role === "worker" ? a : null;
-  }
-  return listAgents(db).find((a) => a.role === "worker") ?? null;
-}
 
 function readActiveTools(session: { getActiveToolNames?: unknown }): string[] | null {
   const fn = session.getActiveToolNames;
