@@ -184,6 +184,331 @@ Blocker        open → acknowledged → resolved | deferred | rejected
 | `RoleSpec` | 一个 baseRole 的 ceiling + 默认集合 + 写面 kind 白名单 + 提示词单元 | 沿用 7-E 的 `ROLE_CEILING` 概念,升维 |
 | `WriteKindPolicy` | `{ capability: "blackboard.write", allowedKinds: ArtifactKind[] }` | 见 §4.4 第三道门 |
 
+### 2.4 领域模型总表:实体 / 投影 / 值对象 · 基数 · 谁维护(2026-10-04 补做)
+
+> **为什么补在 §2 里,而不是新开 §13。** 两条理由。①**语义**:本文 §2 的标题就是「DDD 领域划分」,而对它的意见正是「DDD 没做好」—— 把答案写在别处,这一节的标题就变成了一句不成立的话。②**机械**:`docs/DESIGN-AGENTS.md` 与 `docs/ADR-001-harness-wiring.md` 按**编号**引用本文的 §3.3 / §4.3 / §6.2 / §7 / §8.3 / §10.3 / §12,插入一个新的大节会把它们**全部错位**;而 `check:design` 的 E14 只校验「引用指得着」,不校验「还指原来那一段」—— 编号漂移它抓不住。所以这里只增小节、不动编号。
+>
+> **与 §2.2 的关系**:§2.2 写的是**迁移前的目标模型**(2026-10-03),有几处与落地后的代码不符(`Artifact` 画了一个代码里不存在的 `links` 字段,`Project` 画了内嵌的 `works` / `changes` 数组)。**本节以代码为准**;§2.2 作为意图记录保留不改。
+
+#### 2.4.1 先定判据
+
+| 类别 | 判据 | 反面 |
+|---|---|---|
+| **实体** | 有自己的 `id` 主键;**被别的记录按 id 引用**;状态可变 | 只出现在查询结果里 → 投影 |
+| **投影(读模型)** | **没有自己的表**;同一时刻可由一条纯查询从实体重算;重启不需要补写任何东西 | 有自己的表 + 自己的状态 → 实体或机制 |
+| **值对象** | 无身份,靠内容相等;改了就是换一个;入库时降级成 CHECK 里的字符串 | 有自己的行 → 实体 |
+| **技术机制** | 有表,但记录的是**平台怎么工作**(调度 / 限流 / outbox),不是业务发生了什么 | 业务语义依赖它 → 实体 |
+
+**一句话**:本系统的领域层只有**实体 + 值对象 + 值型的边**;**唯一的投影是「待办」**;`dispatch_events` / `dispatch_attempts` 是**技术机制**,不是领域概念。
+
+#### 2.4.2 总表
+
+| 概念 | 类别 | 载体 | 基数 | 谁维护(写口) |
+|---|---|---|---|---|
+| `Agent` | 实体(BC0,全局) | `agents` | 1 Agent — N ProjectAssignment | 平台 `ensureOrg`(代码内固定的四个角色);**没有 agent 工具能建人** |
+| `Project` | 实体 · 聚合根 | `projects` | 1 Project — N(Work / Artifact / Ask / Meeting / Blocker / ChangeRequest / Session) | **两条路并存**:agent `project_open`(`tools/project.ts`)· 平台 `POST /api/projects`(`transport/http.ts:125`) |
+| `ProjectAssignment` | 实体(关联) | `project_assignments` | **M:N**(Project × Agent),`PRIMARY KEY(project_id, agent_id)` | `project_open` 的 `ensureProjectOrg` + `POST /api/projects`;**`removeMember` 零生产调用方**(`repo/projects.ts:134`) |
+| `Work` | 实体 · 聚合根 | `works` | 1 Work — N 子 Work(`parent_work_id`);**N:1** 负责人(`assignee_agent_id`);**M:N** 依赖 | agent:`work_create`(`tools/project.ts:242`)/ `work_update`(`:319`)/ `work_assign`(`:342`)/ `report`(`:451`);状态的唯一写口是 `repo/works.ts:174` 的 `updateWorkStatus` |
+| `WorkDep` | 实体(边) | `work_deps` | **M:N**,DAG(自环 + 多跳环都由 `addDep` 拦) | **只有 `work_create` 能写**(`:296`);`removeDep`(`repo/works.ts:322`)**零生产调用方** |
+| `Artifact` | 实体 | `artifacts` | 1 Artifact — **1** Project(必填);1 Artifact — N ArtifactLink | **三条路**:模型 `board_write`(`tools/blackboard.ts:122`)· 协议工具原子创建(`collab.ts` / `client.ts`)· 平台 `POST /api/client-questions/:id/answer`(`http.ts:249`) |
+| `ArtifactLink` | 实体(边) | `artifact_links` | **M:N**(Artifact × Artifact),`rel ∈ parent \| depends_on \| answers` | `board_write` 的 `links` 参数;协议工具 |
+| `Ask` | 实体 | `asks` | **N:1** from / **N:1** to;自引用 `parent_ask_id` = 升级链(**一条链上同时只有一条活问**) | `ask_role` / `answer` / `escalate` |
+| `Meeting` + 参会记录 | 实体 + 关联 | `meetings` / `meeting_participants` | 1 Meeting — **M:N** Agent(`PRIMARY KEY(meeting_id, agent_id)`) | `convene` / `meeting_respond` / `meeting_conclude` |
+| `Blocker` + 命中记录 | 实体 + 边 | `blockers` / `blocker_blocks` | 1 Blocker — **M:N** Work | `blocker_open` / `blocker_update` |
+| `ChangeRequest` + 影响记录 | 实体 + 边 | `change_requests` / `change_affects` | 1 Change — **M:N** Work | `change_propose` / `change_review` |
+| `ProjectSession` / `SessionMessage` | 实体 | `project_sessions` / `session_messages` | 1 Project — **1:N** Session(结构允许 N);1 Session — N Message | 平台(建会话、落消息)。`project_id IS NULL` 的那一条 = **接待会话**,全局唯一(§9.3) |
+| 记忆 | 实体(跨项目) | `memory_fragments` / `memory_profile` | **不挂项目** | `memory_remember`;只有业务经理持 `memory.write`(设计 2 §10.4) |
+| **待办 Todo** | **投影(读模型)** | **无表** | 每次 tick 现算 | **平台代码**:`collectTodos`(`runtime/dispatcher.ts:186`) |
+| `WorkStatus` / `ReviewState` / `ArtifactStatus` / `AskStatus` / … | 值对象 | TS 闭合联合 + SQL CHECK | — | 代码评审(改它 = 一次显式评审) |
+| `Capability` / `Scope` / `ToolSetFile` / `RoleSpec` / `WriteKindPolicy` | 值对象 | 代码内常量 | — | 代码评审(§7.1) |
+| `dispatch_events` | **技术机制 · outbox** | `dispatch_events` | 1 Project — N Event | 平台:`updateWorkStatus`(`repo/works.ts:194`)等;消费在 `consumePendingDispatchEvents`(`repo/dispatch.ts:116`) |
+| `dispatch_attempts` | **技术机制 · 限流账本** | `dispatch_attempts` | 1 `(project_id, todo_key)` — 1 行 | 平台:`bumpAttempt` / `pruneAttempts`(`repo/dispatch.ts`) |
+
+**从这张表能读出的三件事**:
+
+1. **基数只有两种形状**:「1 实体 — N 实体」的容器关系(`project_id` / `parent_work_id`),和「M:N 关联表」(4 张:`project_assignments` / `blocker_blocks` / `change_affects` / `meeting_participants`)。**没有 1:1 的业务关系**;唯一的「一对一」是 `dispatch_attempts` 的主键,而它是技术机制。
+2. **「谁维护」不是一个角色,是四条互斥的路径**(见 2.4.3)。把它说成「agent 维护」会漏掉平台那条路 —— 而平台那条路正是真机事故的来源(§2.9)。
+3. **唯一的投影是待办**(§2.5);唯一的「技术机制」是 outbox 与限流账本(§2.5 末)。
+
+#### 2.4.3 四条写口(「谁维护」的精确答案)
+
+| 写口 | 是什么 | 受不受三道门约束 | 例子 |
+|---|---|---|---|
+| **① 模型经工具** | 模型显式调一个平台工具 | **受**(ceiling × scope × writeKind) | `work_create` · `board_write` |
+| **② 协议工具原子写** | 工具的语义本身就是一次通信,记录与动作**同事务落库** | 受(工具自身已授权) | `ask_client` 落 `client_question`(§6.2) |
+| **③ 平台代码** | 状态机维护、接待会话落库、HTTP 面 | **不受** —— 它没有「调用者角色」 | `updateWorkStatus` 维护 `review_state` · `POST /api/projects` |
+| **④ 平台不提供** | 构造函数存在但零生产调用方 → **事实上没有写路径** | — | `removeMember`(`repo/projects.ts:134`)· `removeDep`(`repo/works.ts:322`)· `deleteWork`(`repo/works.ts:267`) |
+
+> **判据(写给以后加表的人)**:**每张业务表都要能指出唯一写口。** 现在 `works.status` 有(`updateWorkStatus`),`work_deps` **没有** —— 它有两个写口:repo 的 `addDep`(`repo/works.ts:308`)和 `work_create` 里为回滚写的裸 SQL(`tools/project.ts:299`)。写口分裂的地方,「这条不变量由谁保证」就没有答案。
+
+### 2.5 「待办」是投影 —— 它是正式模型的一部分,不是驱动循环的私事
+
+**定义**:**待办 = 一个 `(agent, 此刻可执行的动作)` 对。它在库里没有行,由 `collectTodos` 一次纯查询算出。**
+
+这个定义不是文字游戏,它有三个可验证的后果:
+
+| 后果 | 判据(可验) |
+|---|---|
+| 重启不需要「补写待办」 | `collectTodos` 的入参只有 `(db, projectId, now, 预算上限)`,不读任何进程内状态(`runtime/dispatcher.ts:186`) |
+| 同一时刻可以从库重算 | 全部 8 个判据都是 SQL / repo 查询(下表) |
+| 「刚才发生了什么」不能参与判定 | `NUDGE_CAPABILITIES`(`dispatcher.ts:152`)只敲门铃,不携带状态 |
+
+| TodoKind | 判据从哪来(载体) | 载体是实体还是机制 |
+|---|---|---|
+| `answer_ask` | `asks` WHERE to_agent=我 AND status=open | 实体 |
+| `attend_meeting` | `meeting_participants` WHERE agent=我 AND stance IS NULL | 实体 |
+| `review_change` | `change_requests` 非终态 × 我持 `change.review` | 实体 |
+| `fix_work_assignment` | `works` 非终态 AND 负责人不存在/非 worker(`dispatcher.ts:210`) | 实体 |
+| `decompose_project` | 该项目 `works` **零行** AND project active | **空集判据** |
+| `execute_work` | `works` 分派给我 AND `depsSatisfied`(`works.ts:396`) | 实体 |
+| `review_work` | `works.status='done' AND review_state='pending'`(`works.ts:223`) | 实体 |
+| `report_downstream` | `dispatch_events` WHERE consumed_at IS NULL(`dispatcher.ts:280`) | **技术机制** |
+
+**8 个 kind 里 7 个直接站在实体上,只有 `report_downstream` 站在机制表上** —— 这不是缺陷(它的信息「下游发生了什么还没交代」本来就是平台的事实),但它解释了为什么 §2.9 那件事(要不要唤醒业务经理)只能在这里改,而改不动「实体上的判据」。
+
+#### 命名:领域层、机制层分开写
+
+用户的意见(「`dispatch_events` / `dispatch_attempts` 不该与领域概念混名」)**成立,但要修正一处**:代码里的注释其实分得很清(`repo/dispatch.ts` 头注释写着「本模块只做读写,不做判定」)。缺的是**文档层的正式命名**。三个混在一起的名字:
+
+```
+DriverTodo          领域概念(「谁手上有可执行的活」)—— 但类型名里的 Driver 是技术词
+dispatch_events     技术机制(outbox:下游发生了什么、还没交代)
+dispatch_attempts   技术机制(限流账本:叫醒过几次)
+```
+
+| 层 | 建议名 | 现状名 | 处置 |
+|---|---|---|---|
+| 领域 | **待办 `Todo`** / `TodoKind` | `DriverTodo`(`dispatcher.ts:102`) | **只改类型名**(`DriverTodo` → `Todo`)。驱动者是运行时的词,它不是领域里的东西 |
+| 机制 | **outbox(待交代事件)** | `dispatch_events` / `DispatchEventKind` | **表名不改**(理由见下);改的是措辞:文档与类型里一律叫「outbox / 待交代事件」 |
+| 机制 | **限流账本** | `dispatch_attempts` / `AttemptRow` | 同上 |
+
+> **为什么建议不改表名。** 改名在 SQLite 上等于**重建表**(012 那条路,它的注释里记着这条路会静默删数据),还要同步索引、`INTENTIONAL_REBUILDS` 登记(`tests/platform/migrations.test.ts:42`)与真机库。**收益是措辞,成本是一次数据迁移** —— 不对等。所以结论是**分层命名,不动表名**:领域层用 `Todo`,机制层在文档与类型上叫 outbox / 账本。
+
+### 2.6 缺口 ①:工件与工作项之间没有边(成立,且比描述的更严重)
+
+**现状**:`artifacts` 没有 `work_id`(`migrations/008_blackboard_change.sql` 的 `artifacts` 表;`src/platform/storage/repo/artifacts.ts` 里 grep 不到 `work_id`)。
+
+「这条工作项产出了什么」今天是**项目级集合差**算出来的:
+
+```
+回合前   artifactsBefore = set(listArtifacts(db, projectId))        ← 整个项目
+回合后   差集                                                        ← 就是「产出」
+```
+落点 `runtime/execution.ts:143` 与 `:161`。
+
+**这比「靠作者 + 时间接近猜」更弱 —— 它连作者都不看。** 后果:同一项目里两个回合交叠时,**两边都会把对方的工件算成自己的产出**。今天的宿主有 per-project 忙闩(`host/serve.ts` 的 `hub.isBusy`),所以只有「常驻宿主 + `platform-run` CLI 同时跑同一项目」才会撞上;**判据本身是错的,只是暂时没有触发面。**
+
+质检那一侧同样断: `review_work` 待办的 `refs` 是 work id(`dispatcher.ts:292`),而 `listArtifacts` 的过滤器只有 kind / status / author / parentOf(`repo/artifacts.ts:119`)—— **从 work id 查不到它的产出。**
+
+#### 方案对比(带实测)
+
+| 方案 | 结论 | 依据 |
+|---|---|---|
+| **A. `artifacts` 加 `work_id`(可空)** | ✅ **采用** | 可空列 + 部分索引,纯加法,不动任何现有约束 |
+| **B. `artifact_links.rel` 加一个 `produces` 取值** | ❌ **结构上不成立** | 见下 |
+
+**方案 B 不成立的三条实测证据**(本次对着真实迁移链跑的探针,SQLite 3.53.4):
+
+1. `artifact_links` 的**两端都是工件**:`artifact_id REFERENCES artifacts(id)`、`target_artifact_id REFERENCES artifacts(id)`(`migrations/008`)。要表达的边是「工件 ← **工作项**」,一端根本不在 `artifacts` 里 → 写入被 `FOREIGN KEY constraint failed` 拒绝。
+2. `rel` 的 CHECK 闭集不放 `produces` → 写入被 `CHECK constraint failed: rel IN ('parent', 'depends_on', 'answers')` 拒绝。
+3. 想放宽这个闭集**只能重建表**:`ALTER TABLE artifact_links DROP COLUMN rel` 被拒(`cannot drop PRIMARY KEY column: "rel"`);`ALTER TABLE ... ADD CONSTRAINT ... CHECK (rel IN (..., 'produces'))` **会被接受、也真的生效,但只能收紧不能放宽**(CHECK 之间是 AND 关系)—— 加完之后 `rel='produces'` **依然写不进去**。
+
+> ⚠️ **第 3 条是一个新踩到的静默陷阱,写进这里给以后的人。** 「加一条 CHECK 来放宽闭集」这条迁移会**无错应用**,而约束一点没放宽;失败出现在很远的下游(某次插入的 CHECK 错误)。这与 AGENTS.md 的「三类静默失败」同一族,只是第 4 例:**看起来成功的 ALTER 什么也没放宽。**
+
+结论:**边加在 `artifacts` 上(方案 A)。**
+
+#### 这条边的基数与语义
+
+- **N:1**(N 个工件由 1 条工作项产出),**可空**。`NULL` = 不是任何工作项的执行产出:立项书、会议纪要、变更记录、甲方问答、质检意见。
+- 它**只表达「产出(provenance)」**,不表达「这条工件**关于**哪条工作项」—— 后者才是 M:N,是另一件事,列入未决(§12 #7)。
+- **谁维护**:`board_write` 增加**可选** `workId` 参数(模型显式指名),平台在写入时校验「存在且同项目」。不用会话级的「当前工作项」默认值 —— 一条会话会连续跑多个工作项(`execution.ts:118` 的注释),`ToolRunContext` 是建会话时构造一次的(`runtime/assembly.ts:137`),放了默认值它会**过期**。
+
+#### migration 草案 `014_artifact_work.sql`(草案 · 未落地)
+
+```sql
+-- 014 · 工件 → 工作项的产出边(DRAFT)
+--
+-- 纯加法:一个可空列 + 一条部分索引。没有 DROP、没有重建、没有 NOT NULL。
+-- ⚠️ 不建表 —— 因此没有 `CREATE TABLE IF NOT EXISTS` 撞名的面(AGENTS.md 静默失败 #1)。
+ALTER TABLE artifacts ADD COLUMN work_id TEXT REFERENCES works(id) ON DELETE SET NULL;
+
+-- 「这条工作项产出了什么」和质检那条判定都走这条部分索引
+CREATE INDEX IF NOT EXISTS idx_artifacts_work
+  ON artifacts(work_id) WHERE work_id IS NOT NULL;
+```
+
+**实测结论**(对着 001→013 的真实迁移链跑,已含正负样本):
+
+| 检查 | 结果 |
+|---|---|
+| 014 之前 `artifacts` 有 `work_id` 吗(负样本) | `false` ✅ |
+| 014 之后有吗(正样本) | `true` ✅ |
+| 既有行是否被破坏 | `[{"id":"a0","work_id":null}]` ✅ |
+| 带 `work_id` 的插入 | 成功 ✅ |
+| **悬空 `work_id`(负样本)** | `FOREIGN KEY constraint failed` ✅ 外键是真在拦 |
+| 删掉对应 work 之后 | 工件**仍在**、`work_id` 变 `null` ✅ |
+| 部分索引 | `true` ✅ |
+| `foreign_key_check` | `[]` ✅ |
+
+**四条设计选择,各有理由**:
+
+1. **`ON DELETE SET NULL` 而不是 `CASCADE`** —— 删掉一条工作项**不该删掉它的产出**:工件是审计面(设计 2 §10.2 的判据:工件不衰减、必须比产生它的东西活得久)。用 CASCADE 就是 012 那条静默删数据的路,只不过删的是工件。
+2. **不能加 `UNIQUE`** —— SQLite 拒绝 `Cannot add a UNIQUE column`(实测),而「N 个产出」本来就该允许。
+3. **可空、不给 `DEFAULT`** —— `ADD COLUMN` 带 `REFERENCES` 时默认值必须是常量;可空天然满足,而且「这条工件没有产出工作项」是真事实,不该被一个占位值掩盖。
+4. **部分索引 `WHERE work_id IS NOT NULL`** —— 现有多数工件(`client_question` / `meeting_note` / `change_record`)的 `work_id` 都是 `NULL`,不该进索引。
+
+### 2.7 状态机的合法性:现在只有闭集,没有迁移规则
+
+**现状**:`works.status` 是 CHECK 闭集(`migrations/007`: `open | in_progress | blocked | done | failed | cancelled`),写口只有一个(`repo/works.ts:174`)。但 `updateWorkStatus` **不校验迁移合法性** —— 它接受闭集里的任意值,而 `work_update` 与 `report` 两个工具都能传任意值(`tools/project.ts:337` 与 `:472`)。
+
+所以「状态机」今天只是**一个闭集 + 一个写口**;`work_update` 的 description 里那句 `open → in_progress → (blocked) → done|failed|cancelled` **是文档,不是机制**(与 §1.3 里「写在提示词里的规则会失效」同款病,只是这次写在工具描述里)。
+
+**实际可达的迁移与它们的后果**(逐条对代码,不凭记忆):
+
+| 迁移 | 今天允许吗 | 触发它的路径 | 平台顺手维护什么 |
+|---|---|---|---|
+| `open → in_progress` | ✅ | `runWorkItem` 自动写(`execution.ts:139`) | — |
+| `in_progress ⇄ blocked` | ✅ | 模型调 `work_update` | 迁入 `blocked` → 写一条 outbox 事件(`works.ts:204`) |
+| 任意 → `done` | ✅ | 模型调 `work_update` / `report` | `review_state = 'pending'`;**outbox `work_done`**;迁出 `done` 时 `review_state` 清成 `none`(`works.ts:181`) |
+| 任意 → `failed` | ✅ | 同上 | outbox `work_failed` |
+| 任意 → `cancelled` | ✅ | 同上 | **什么也不写**(`EVENT_KIND` 里没有它,`works.ts:204`) |
+| `done → in_progress`(退回) | **也允许** | 同上 | `review_state` 被清成 `none` —— 但**已经消费掉的 outbox 事件不会撤回** |
+| `cancelled → 任意`(复活) | **也允许** | 同上 | 「终态」只在 `isTerminalWorkStatus`(`works.ts:44`)与 `checkRunnable`(`execution.ts:82`)里体现,**不在写口** |
+
+**建议**:把迁移表落成数据(一个 module-level `WORK_TRANSITIONS`),在**唯一写口** `updateWorkStatus` 里判定;非法迁移返回结构化原因 + 回灌该状态可达的下一跳(沿用 §4.4 writeKind 门「回灌合法值」的形态)。落点在写口而不是两个工具里 —— 否则第三个调用方出现时又会漏。
+
+**未定的那一半**:`done → in_progress`(退回重做)到底算不算合法。它的语义代价很具体 —— `review_state` 清了、但 outbox 事件不撤,于是「已向甲方交代」与「其实还没做完」可以同时成立。这一条列入未决(§12 #9)。
+
+### 2.8 `cancelled` 的关系语义:取消不是失败
+
+**定义**:
+
+> **`cancelled` = 这块范围不要了。** 它不是「这条活没做成」,而是「不需要有人做了」。
+> 因此它在**依赖关系上不构成阻塞**;但在**可见性上必须出现**。
+
+| 前置的状态 | 阻塞下游吗 | 下游的语义 | 必须可见吗 |
+|---|---|---|---|
+| `done` | 否 | 前置满足 | 否 |
+| **`cancelled`** | **否** | **按「范围已缩」开工,输入少了一块** | **是** |
+| `failed` | **是** | 真的失败了 —— **这条才需要人介入** | 是(已可见) |
+| `in_progress` / `open` / `blocked` | 是 | 等得起 | 是(已可见) |
+| 指向的工作项不存在 | 是 | 数据损坏 | 是(已可见) |
+
+代码落点:`DepState` 是**五态**而不是布尔(`repo/works.ts:353`),`depsSatisfied` 只在 `failed` / `pending` / `missing` 非空时为假(`works.ts:396`)。
+
+**「必须可见」落在三处**(不是一处):
+
+| 落点 | 渲染什么 | 位置 |
+|---|---|---|
+| `work_read` | 五种前置状态逐条列出,含「已取消(不阻塞,但你该知道)」 | `tools/project.ts:440` |
+| worker 的待办注入 | 单独一段「⚠️ 可开工,但前置里有被取消的」+ 「这不是阻塞」 | `runtime/pendingWork.ts:267` |
+| 待办字段 | `myWorksWithCancelledDeps` | `pendingWork.ts:73` |
+
+> **一处脆弱的耦合(记下来,不必现在改)**:`renderPendingWork` 的 `hasAnything` 门(`pendingWork.ts:218`)**没有**列 `myWorksWithCancelledDeps`。今天不影响结果 —— 那个字段非空时 `myOpenWorks` 必然也非空(两者同一次循环里 push,`pendingWork.ts:117`),所以那一段照样渲染。但这段可见性是**搭在别人的非空上**的;哪天 `myOpenWorks` 的判据改动,这段会**静默消失**。
+
+#### 「取消 + 新建」该不该重定向依赖边
+
+**结论:平台不重定向。** 三条理由:
+
+1. 「新建一份同名项」**不是一次改名**。库里没有「后继」这个字段(`works` 只有 `parent_work_id`,是树,不是版本链),平台只能靠标题相似度猜 —— 而猜测会**静默改写用户显式画的那张图**。
+2. 真机数据里那两份工作项**不是等价的**。实测(用户自己的 `~/.sansheng/sansheng.db`):
+
+   ```
+   旧的「三段式 vs omni 综合对比与替代路径分析」 = cancelled,它有 2 条前置
+   新的「三段式 vs omni 综合对比与替代路径分析」 = open,它有 4 条前置,与旧的只有 1 条重合
+   新的「调研报告整合与撰写」 = open,它有一条前置指向**旧的、已取消的那一份**
+   ```
+   重定向必须先回答「哪几条边跟着走、哪几条不跟」—— **那是人的判断,不是平台的。**
+3. 依赖图是**人画的**。平台代改边,等于把「谁依赖谁」从可审计的数据变成一次平台推断 —— 与 §4.4 三道门「只减不增、且必须留痕可见」同源。
+
+**该谁负责**:
+
+| 谁 | 负责什么 |
+|---|---|
+| **项目经理** | 它画的边它负责。取消一条**仍有后继依赖**的工作项时,它应当先改边再取消(见下面的缺口) |
+| **平台** | 只负责让悬空的边**可见**,不负责猜。已在做的:`work_read` 五态渲染 + worker 待办标注 |
+
+**真正的缺口比「要不要重定向」更靠前 —— 这条建议优先于 §2.6**:
+
+> `work_update` **没有 `dependsOn` 参数**(`tools/project.ts:319` 的参数只有 `workId` / `status`),`removeDep` **零生产调用方**(`repo/works.ts:322`)。
+
+也就是说:**一条已有工作项的依赖边改不了。** 「取消 + 新建」不是项目经理的偏好,而是它**唯一的重做路径** —— 真机数据正是这条路径的产物。
+
+**建议**:给 `work_update` 加可选 `dependsOn`(**整体替换**语义,内部走 `addDep` / `removeDep` 同一套环检测,不做第二套);并把「取消一条有后继依赖的工作项」变成一条**非阻塞警告**(结构化返回 + 列出后继 id),**不是拒绝** —— 拒绝会把合法的「这块不要了」也一起挡住。
+
+**另一条立即该补的**:`cancelled` **不写任何 outbox 事件**(`works.ts:204` 的 `EVENT_KIND` 只有 done / failed / blocked)。于是「一条工作项被取消」这件事业务经理与质检**都不知道** —— 而它恰恰是下游悬空的来源。补它要给 `dispatch_events.kind` 的 CHECK 闭集加一个取值,那需要**重建表**(理由同 §2.6 的实测第 3 条)。这张表没有子表引用、只有一条部分索引,重建成本低,但**它是一次真迁移**,列入未决(§12 #10)。
+
+### 2.9 谁决定甲方可见性
+
+**用户的判断**:业务经理干了太多事,立项之后**执行细节**不该再一条条同步给甲方。
+
+**复核结论:问题成立,但归因要改一处。**
+
+#### 归因:不是「没有判据」,是「判据不可证伪」
+
+提示词里其实**有**判据(`harness/system_prompts/business_manager.core.md`):
+
+| 行 | 原文 | 性质 |
+|---|---|---|
+| `:44` | 「值得让他知道的 → `tell_client` **主动**播报。**这是你的职责,不是可选项**」 | **硬职责** |
+| `:46` | 「**不值得打扰他的,就不要播。**」 | 克制,无判据 |
+| `:52` | 「**判据很简单**:如果甲方读到你这条消息会想「这个我确实需要知道」,就播;如果他会想「哦」,就别播」 | **判据在,但它要求模型预测甲方的反应** |
+
+所以准确的诊断是:**一条硬职责 + 一条正确但不可证伪的克制**。`:52` 那条判据没有可操作的输入(模型看不到甲方此刻在做什么、上一次被告知了什么),它只能退化成「看起来挺重要」。用户说的「后者永远输」在效果上对,在原因上是**判据不可执行**,不是**没有判据**。
+
+#### 触发侧:唤醒频率确实不该由「单条 work 迁移」决定
+
+现状精确形态(不是「每完成一条就播报」,但效果接近):
+
+- `updateWorkStatus` 在迁入 `done` / `failed` / `blocked` 时各写一行 outbox(`repo/works.ts:194`);
+- `collectTodos` 只要有**一条**未消费事件,就给业务经理生成 `report_downstream` 待办(`dispatcher.ts:280`);
+- 它优先级最低(`PRIORITY` = 7,`dispatcher.ts:99`),所以一条 `work_done` 的事件**总会在某个 tick 把业务经理叫醒一次**。
+
+结论:**唤醒频率由「单条状态迁移」决定**,而业务经理没有「这一条不值得叫醒我」的选项 —— 它只能被叫醒之后再决定播不播。**唤醒即成本**:一次唤醒 = 一次完整回合的 token,而且它在会话里留下一条回复(那就是用户看到的「一长串」的来源之一)。
+
+#### `report_downstream` 去留:**保留,改触发条件**
+
+**不取消**,理由具体:outbox 就是「工作项做完了却没有人向甲方汇报」那次真机事故的修复(批次 21;`runtime/dispatcher.ts:13` 与 `repo/dispatch.ts:10` 都记着它的现场;另见 §9.4)。取消它 = 把那类事故放回来。
+
+**改的是判据**:`report_downstream` 从「有未消费事件」收紧为「有未消费的**可打扰**事件」。判据是**机械的**,只用现有列:
+
+| 事件 | 可打扰判据 | 该不该打扰甲方 |
+|---|---|---|
+| 某条**根工作项**终态 | `works.parent_work_id IS NULL` | **是** |
+| 一个**里程碑**:某个根工作项的全部后代都终态 | 沿 `parent_work_id` 聚合 | **是** |
+| `work_failed` | 事件 `kind` | **是** —— 影响时间表,甲方要能重新决策 |
+| `work_blocked` / `blocker_opened` 且 `severity ∈ {high, critical}` | join `blockers.severity` | **是** |
+| `blocker_opened` 且 `severity ∈ {low, medium}` | 同上 | 否(团队内部可消化) |
+| 中间工作项终态(非根、非里程碑) | — | **否** ← 这就是用户抱怨的那一长串 |
+
+两条实施路线,选一条:
+
+- **方案甲(推荐):收紧写入侧。** `updateWorkStatus` 只在「根工作项终态 / 里程碑 / severity ≥ high」时写 outbox。**理由**:它把「要不要打扰甲方」从一个**模型的自述**变成**库里的一个事实** —— 可测、可审计、可复现,与 §9.4「判定永远重新查库」同源。
+  **代价(如实记)**:outbox 从「下游事件流水」缩成「待交代队列」,`renderDownstream`(`dispatcher.ts:403`)给业务经理的现场会变窄。
+- **方案乙(不推荐):只在判定侧收窄。** 保留完整流水,只在 `collectTodos` 过滤。**为什么不行**:消费是**全量**的 —— `consumePendingDispatchEvents(db, projectId, ...)` 无差别标记该项目**全部**未消费事件(`repo/dispatch.ts:118`)。一次「可打扰」事件会把一串「不可打扰」事件一起标记为已交代,于是 `consumed_at` 这个字段开始撒谎。
+
+#### 「谁判断」:平台定候选,业务经理定措辞
+
+```
+平台      机械判据 → 决定「哪些事进了候选队列」      ← 可测、可复现
+业务经理  在候选内决定「播 / 不播 / 怎么说」        ← 它见过甲方,也只有它持 client.message
+```
+
+**为什么不是「项目经理判断、业务经理转述」**(用户的倾向),三条理由:
+
+1. **项目经理看不到甲方**:它不持 `client.*`(`identity/role.ts` 的 ceiling),也不写用户记忆 —— `memory.write` 只有业务经理(DESIGN-AGENTS §10.4)。让它判断「甲方该不该知道」,等于让它对一份**它读不到的上下文**做判断。
+2. **要走这条路必须新增一条边**(项目经理 → 业务经理的「请播报」)。而那条边的语义是「请你播」—— 于是业务经理从「判断 + 措辞」降级成「只有措辞」,**唯一见过甲方的角色失去了否决权**。这正是「一长串」的另一种成因,不是解法。
+3. 用户要的是**少打扰**,不是**换一个人决定**。把判据机械化(上表)直接拿到「少打扰」,不需要动角色权限 —— 而动权限要走 §4 的能力/ceiling 评审,代价大得多。
+
+#### 业务经理的可操作播报判据(替换「值得就播」)
+
+> **三个二值问题,全部为「是」才播**:
+> 1. 它会改变甲方**已经知道的东西**吗(时间 / 范围 / 验收判据 / 花的钱)?
+> 2. 甲方**此刻能对它做点什么**吗(决定 / 确认 / 提供输入)?什么都做不了 → 那是日志,不是播报。
+> 3. 它**下周还成立**吗?不成立 → 那是过程噪音。
+
+**「不播」也必须是一次决定,不是一次遗漏**:业务经理的回复文本本来就会落成 `assistant` 会话消息 —— 让它在那条回复里**点名说自己评估了哪几条、为什么判断不必播**。零新增机制,而且事后查得出「当时是判断过还是漏了」(AGENTS.md 教训 4:见不到的现场等于没有现场)。
+
 ---
 
 ## 3. 能力模型(Capability)
@@ -683,11 +1008,17 @@ project_sessions(id PK, project_id NULL, created_at)
 session_messages(id PK, session_id, agent_id, kind, content, created_at)
 
 -- BC7 Memory:本设计只定契约,存储形态可替换(见 §8.3)
-fragments(id PK, kind, content, importance, decay_factor, access_count,
-          last_accessed_at, created_at, source_project_id)
-user_profile(id PK, payload_json, updated_at)
-agent_states(agent_id PK, state_json, updated_at)
+memory_fragments(id PK, kind, content, importance, decay_factor, access_count,
+                 last_accessed_at, created_at, source_project_id)
+memory_profile(id PK, payload_json, updated_at)
 ```
+
+> **2026-10-04 顺手修正**:上面这三行原写作 `fragments` / `user_profile` / `agent_states` —— 那是**旧系统的表名**,已由 `migrations/011_drop_legacy.sql` DROP,现名是 `memory_fragments` / `memory_profile`(`migrations/010_memory.sql:29` 与 `:52`);`agent_states` 在新架构里没有对应物(角色是全局的人,没有运行态)。
+
+> **§2.6 提议的一列还没有出现在上面的清单里**:`artifacts.work_id`(工件 → 工作项的产出边)是**草案**,migration `014` 尚未落地。清单写的是**现行** schema,所以这里不预先写进去 —— 落地之后要回来改这一行。
+
+> **`artifacts.conversation_id` 是一个恒空列,建议删。** 008 的注释写着「BC2 落地时补 `REFERENCES`」,而 BC2(009)落地时**没补**,理由也写下了:「工件必须比会话活得久」。于是它今天是:① 无外键;② **所有生产写入者的实参都是 `null`**(`tools/blackboard.ts:184` · `tools/collab.ts:177` 与 `:562` · `tools/client.ts:71` 与 `:182`);③ 没有任何读方按它过滤(§3.2 的签名变更把作用域从对话改成了项目)。这与 §8.2 点名批评的 `blackboards.goal` / `plan_json` / `todos_json` 是同一形态:**一个留着会被当成「还有用」的空列**。
+> **实测**:它不在任何索引或 CHECK 里,`ALTER TABLE artifacts DROP COLUMN conversation_id` **成功**(SQLite 3.53.4)。所以删它是一条纯减法,但**它是一次真迁移**,且要先确认没有外部消费者 —— 列入未决(§12 #11)。
 
 **外键一律指向 `agent_id`,不再存 `role` 字符串。** 这样角色的属性只有一处真相(BC0 的 `agents` 表 + 代码内 `ROLE_SPECS`),工件与工作的作者/负责人不会因为字符串拼错而出现「幽灵角色」。
 
@@ -1020,3 +1351,13 @@ AgentRuntime
 **3. 横向沟通的留痕密度?** `ask_role` 横向畅通,但同级之间聊了什么是否需要默认落库?留痕太密会淹没审计面,太疏则横向协调变成黑箱。(与设计 2 §11 第 5 条同题)
 
 **6. 调度器的巡检策略**(2026-10-04 新增)。`listOverdueAsks` / `expireAsk` 已实现但无调用方。超时之后该做什么有几种选择:只surface 给知情方(当前注入文本的处置)、自动升级给上一级、还是标记为失效。7-L 的 fail-safe 原则(「判断轮缺席/超时/解析失败一律退回升级」)倾向于自动升级,但那会产生噪音。**前置依赖:阶段 12 的宿主进程** —— 没有长驻进程时这题连实验都做不了。
+
+**7. `artifacts.work_id` 只表达「产出」,那「关于」这条边要不要建?**(2026-10-04 新增,§2.6)。已定的是 **N:1 的 provenance**(这条工件是哪条工作项跑出来的)。未定的是 **M:N 的「这条工件是关于哪条工作项的」** —— 一份决策可能同时关乎三条工作项,一份质检意见天然覆盖多条。今天用 `metadata_json` 记,不可查(与 §8.1 修订里 `affected_work_ids_json` 被换掉的理由完全同型)。**建议:先看真实用量**;`provenance` 落地并跑了若干项目之后,如果「按工作项找相关工件」这条查询真的被反复需要,再建 `work_artifacts(work_id, artifact_id, rel)`。不要现在就建 —— 没有读方的边表就是下一个 `fragments_vec`。
+
+**8. 人员移出项目时,他手上在办的工作项怎么办?**(2026-10-04 新增,§2.4.3)。`removeMember`(`repo/projects.ts:134`)与 `deleteWork`(`repo/works.ts:267`)**都零生产调用方**,所以这条规则今天触发不了 —— 它是**潜伏的**而不是活的。但两条已有的机制边界已经画出来了,值得先定规则再开路径:① 负责人**不存在或不是 worker** 时,`dispatcher.ts:210` 会把项目经理叫醒来处置(`fix_work_assignment`);② 负责人**仍存在、角色仍是 worker,但已不在本项目**时,**没有任何判据会命中** —— `myOpenWorks` 按花名册算(`dispatcher.ts:192`),被移出的人不在花名册里,于是那条工作项**静默停在原地**。**建议:先定「移出时其未终态工作项必须改派」为规则,再开 `removeMember` 的路径**;顺序反了会先制造出一批静默停住的工作项。
+
+**9. `done → in_progress`(审查后退回重做)算不算合法迁移?**(2026-10-04 新增,§2.7)。它今天**是允许的**(写口不校验迁移),代价是 `review_state` 被清成 `none` 而**已消费的 outbox 事件不撤回** —— 于是「已向甲方交代」与「其实还没做完」可以同时成立,`consumed_at` 这个字段开始撒谎。两条出路:(a) 判定为非法,退回重做走「新建一条工作项并 `supersedes` 旧的」;(b) 判定为合法,但要求退回时**写一条新的 outbox 事件**(让甲方知道先前那次交代作废)。(b) 更贴合真实工作流,但它要求 `dispatch_events.kind` 再加取值 —— 与 #10 是同一笔迁移。
+
+**10. `cancelled` 要不要写 outbox 事件?**(2026-10-04 新增,§2.8)。今天**不写**(`repo/works.ts:204` 的 `EVENT_KIND` 只有 done / failed / blocked),于是「一条工作项被取消」业务经理与质检都不知道 —— 而它正是下游依赖悬空的来源(真机事故的起点)。要补就得给 `dispatch_events.kind` 的 CHECK 闭集加取值,而**闭集只能通过重建表放宽**(实测见 §2.6:`ADD CONSTRAINT` 只能收紧)。成本评估:`dispatch_events` 没有子表引用,只有一条部分索引 `idx_dispatch_events_pending`,重建可以照 012 的备份→重建→灌回→**重建索引**四步走,并登记进 `tests/platform/migrations.test.ts` 的 `INTENTIONAL_REBUILDS`。**建议:做** —— 「取消」是关系语义里的一等事件(§2.8),它不该是唯一一个对下游不可见的状态迁移。
+
+**11. `artifacts.conversation_id` 删还是补?**(2026-10-04 新增,§8.1 修订)。它是 008 留的悬空列,BC2(009)落地时刻意没补外键。今天它**恒为 `null`**(五个生产写入点全部写 `null`)、无读方、不在任何索引或 CHECK 里 —— `ALTER TABLE artifacts DROP COLUMN conversation_id` **实测成功**(SQLite 3.53.4)。**建议:删。** 未定的只是顺序:它要与「真机库上跑一次迁移」一起做,而现有一份真机库(`~/.sansheng/sansheng.db`)在跑 —— 删列会让**旧版进程读新库时读不到这一列**,而 `rowToArtifact`(`repo/artifacts.ts:89`)是显式读列的。所以这条要么等一个明确的停机窗口,要么与 #10 那次重建合并成一次迁移。**不要**在没有停机窗口时单独发它。
