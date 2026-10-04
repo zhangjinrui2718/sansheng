@@ -1,0 +1,161 @@
+/**
+ * 平台运行时 · SDK 适配壳(ADR-001 §2 Q2)
+ *
+ * ── 这层壳的全部职责就是「不做任何事」────────────────────────────
+ *
+ * 它把 `PlatformTool`(纯函数,依赖显式注入)包成 SDK 的 `ToolDefinition`
+ * (execute 带一个只有 Pi session 里才有的 `ExtensionContext`)。
+ *
+ * **壳里不许有:参数校验、错误兜底、值转换、逻辑分支。** 一旦需要,说明逻辑
+ * 漏进了壳里,应该退回纯函数那一侧。这是 7-H 教训的直接应用:
+ *
+ *   「不要把 SDK ToolDefinition 适配成 LoopTool —— 它的 execute 签名要求第 5 个
+ *    参数 ctx: ExtensionContext(非可选),而 llmCall 路径根本没有 session 上下文,
+ *     适配就得上宽类型断言。正确做法是把实现抽成纯函数,两条路径各自包一层薄壳。」
+ *
+ * 不变式:**本文件不含任何宽类型断言**(窄化一律写 guard)。这条由
+ * `tests/platform/sdk-adapter.test.ts` 机器检查,不靠人肉眼 grep —— 连注释里
+ * 都不能出现那种字面量,否则项目既有的「宽断言为零」检查会被自己误伤。
+ *
+ * ── 两个必须照抄的既有做法(来自 src/server/harness/nativeTools.ts)──────
+ *
+ * ① **type-only import SDK 类型**。
+ *    本仓有多处测试对 SDK 做窄 mock(只桩 `createAgentSession`)。工具模块一旦
+ *    在**运行时** import 一个它们没覆盖的导出,那些测试会在加载期整体炸掉 ——
+ *    7-H 已经踩过一次(缺 SDK 的那个类型标记助手 → 33 个失败,其中一个测试
+ *    文件甚至没能加载)。
+ *    `import type` 会在编译期被抹掉,所以它是安全的。
+ *
+ * ② **用本地恒等函数做类型标记,不用 SDK 那个同名助手**。
+ *    SDK 的助手运行时零校验(它只是类型层的同一性标记),但 import 它会引入
+ *    上面那条加载期依赖。所以本地写一个 `sdkTool<T>(t: T): T { return t; }`。
+ *
+ * 「字面量到底能不能用」由端到端测试证明,不由类型证明。
+ */
+import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
+import type { PlatformTool, ToolResult } from "../tools/types.js";
+import { isSdkToolName, type SdkToolName, type ToolName } from "../harness/capability.js";
+import { TOOL_INDEX } from "../tools/registry.js";
+
+/** 本地恒等标记 —— 与 nativeTools.ts 同一个理由(见文件头 ②)。 */
+function sdkTool<T extends ToolDefinition>(t: T): T {
+  return t;
+}
+
+/**
+ * 工具结果 → SDK 的结果形状。
+ *
+ * `details: null` 是刻意的:调用方是模型,给它的只有文本;恒为 null 也就绕开了
+ * typebox 泛型「从第一个 return 反推 TDetails」那个坑(与 nativeTools.ts 同)。
+ */
+function toAgentToolResult(r: ToolResult): {
+  content: { type: "text"; text: string }[];
+  details: null;
+} {
+  const text = r.ok
+    ? r.text
+    : // 失败也要变成**文本**交给模型 —— 它需要读错误信息才能自纠。
+      // 把失败变成抛异常会让整轮对话崩掉,而模型本可以换个参数重试。
+      `[工具失败:${r.code}] ${r.message}` +
+      (r.alternatives !== undefined && r.alternatives.length > 0
+        ? `\n合法取值:${r.alternatives.join(" | ")}`
+        : "");
+  return { content: [{ type: "text", text }], details: null };
+}
+
+/** 单条工具描述 → SDK 工具名(给模型看的标签用描述首句,避免再维护一份文案)。 */
+function labelOf(t: PlatformTool): string {
+  const first = t.description.split(/[。;:：\n]/)[0] ?? t.name;
+  return first.length > 40 ? `${first.slice(0, 40)}…` : first;
+}
+
+/**
+ * 把一批平台工具包成 SDK 的 `customTools`。
+ *
+ * `dispatchOne` 是注入的派发函数 —— 它**每次调用现取上下文**(而不是预先捕获
+ * 一个快照),这样项目状态(active→paused 之类)在长会话里也能反映到调用期门上。
+ * 传快照会让「会话开着但项目已被暂停」的那段时间里工具照样可用。
+ *
+ * 注意本函数**不接收上下文** —— 它只管把元数据搬过去。上下文是 `dispatchOne`
+ * 的事,这层壳因此保持零逻辑。
+ */
+export function toSdkTools(
+  tools: readonly PlatformTool[],
+  dispatchOne: (
+    tool: PlatformTool,
+    args: Readonly<Record<string, unknown>>,
+  ) => ToolResult | Promise<ToolResult>,
+): ToolDefinition[] {
+  return tools.map((tool) =>
+    sdkTool({
+      name: tool.name,
+      label: labelOf(tool),
+      description: tool.description,
+      // promptSnippet 决定它是否出现在默认系统提示的「Available tools」段 ——
+      // 8-F 的教训是「工具协议段必须渲染参数清单」,所以 snippet 带上参数名。
+      promptSnippet: `${tool.name}(${paramNames(tool)}) — ${labelOf(tool)}`,
+      parameters: tool.parameters,
+      executionMode: "parallel",
+      execute: async (
+        _toolCallId: string,
+        args: Record<string, unknown>,
+      ) => toAgentToolResult(await dispatchOne(tool, args)),
+    }),
+  );
+}
+
+/**
+ * 从 typebox schema 里取参数名清单。
+ *
+ * typebox 的 `Type.Object({...})` 在运行期就是 `{ type:"object", properties:{...} }`,
+ * 所以直接读 `properties` 的键即可 —— 不需要解析 schema。
+ */
+export function paramNames(tool: PlatformTool): string {
+  const schema = tool.parameters as { properties?: Record<string, unknown> };
+  const props = schema.properties;
+  if (props === undefined) return "";
+  return Object.keys(props).join(", ");
+}
+
+/** 适配壳产出的工具名集合(不变式测试用)。 */
+export function adapterToolNames(tools: readonly PlatformTool[]): ToolName[] {
+  return tools.map((t) => t.name);
+}
+
+// ── 两条通道的分界 ──────────────────────────────────────────────
+
+export interface SdkTooling {
+  /** 交给 `createAgentSession({ tools })` 的 allowlist —— SDK 内置工具 */
+  readonly builtinAllowlist: readonly SdkToolName[];
+  /** 交给 `createAgentSession({ customTools })` 的平台工具(已解析好定义) */
+  readonly platformTools: readonly PlatformTool[];
+  /**
+   * 求解结果里有、但两个通道都放不进去的工具。
+   * **必须为空** —— 非空意味着「工具面声称有,实际交不出去」,正是 8-A 的形态。
+   */
+  readonly unplaceable: readonly ToolName[];
+}
+
+/**
+ * 把求解出的工具面拆成两条通道。
+ *
+ * 这是**唯一**该做这个判断的地方 —— 会话工厂按名字自己猜(「read 大概是内置吧」)
+ * 是这类 bug 的温床:SDK 的工具名是闭合集,而平台的也是,猜错的那个会静默失踪。
+ */
+export function splitToolset(tools: readonly ToolName[]): SdkTooling {
+  const builtinAllowlist: SdkToolName[] = [];
+  const platformTools: PlatformTool[] = [];
+  const unplaceable: ToolName[] = [];
+
+  for (const t of tools) {
+    if (isSdkToolName(t)) {
+      builtinAllowlist.push(t);
+      continue;
+    }
+    const def = TOOL_INDEX.get(t);
+    if (def !== undefined) platformTools.push(def);
+    else unplaceable.push(t);
+  }
+
+  return { builtinAllowlist, platformTools, unplaceable };
+}
