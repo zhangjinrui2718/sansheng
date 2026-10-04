@@ -11,7 +11,7 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { randomBytes } from "node:crypto";
 import { log } from "../../shared/log.js";
-import { Keyring, isEncrypted } from "../storage/index.js";
+import { Keyring, isEncrypted } from "./keyring.js";
 
 /**
  * 批次 4b C5(审查 §C5「settings.json 写盘非原子」):同目录 tmp + rename。

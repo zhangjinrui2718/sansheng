@@ -42,6 +42,7 @@ import {
   toWorkView,
 } from "./views.js";
 import type { HarnessView, PromptUnitView, RoleHarnessView } from "@shared/types/platform.js";
+import type { ResetReport } from "../host/reset.js";
 
 export interface HttpDeps {
   readonly db: Database.Database;
@@ -56,6 +57,8 @@ export interface HttpDeps {
   /** 注入时钟 / id(测试可控) */
   readonly now: () => number;
   readonly newId: (prefix: string) => string;
+  /** 清空平台数据(宿主注入 —— 它还要顺带丢掉常驻会话) */
+  readonly reset: () => ResetReport;
   /** 设置读写(复用旧 store —— 它是基础设施,不是旧系统的领域逻辑) */
   readonly settings: {
     read: () => unknown;
@@ -247,6 +250,26 @@ export function createPlatformApp(deps: HttpDeps): Hono {
   // ── harness(只读)────────────────────────────────────────────
 
   app.get("/api/harness", (c) => c.json(buildHarnessView(db, deps.dataDir)));
+
+  // ── 重置(维护端点)────────────────────────────────────────────
+  //
+  // 按最新的设计实现:**清数据**,不是删文件。旧系统删 .db 文件是因为它的
+  // kernel/storage/ws 生命周期纠缠在一起、关连接重开比清表更容易写对;
+  // 新架构没有这个理由(仓储是纯函数,schema 由 migration 拥有)。
+  // 所以这里不关连接、不重建宿主、WebSocket 不断。
+  //
+  // `confirm` 约定保留 —— 那是防误触,**不是兼容性**。
+  app.post("/api/reset", async (c) => {
+    const body = (await c.req.json().catch(() => null)) as { confirm?: unknown } | null;
+    if (body?.confirm !== "reset") {
+      return c.json(
+        err("confirmation_required", '需要确认:请求体传 {"confirm":"reset"}').body,
+        400,
+      );
+    }
+    const report = deps.reset();
+    return c.json({ ok: true, cleared: report.cleared, totalRows: report.totalRows });
+  });
 
   // ── 记忆 ──────────────────────────────────────────────────────
 

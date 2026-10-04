@@ -39,14 +39,15 @@ import { ORG, ensureOrg, orgReady } from "../runtime/org.js";
 import { createPlatformApp } from "../transport/http.js";
 import { attachHub, ensureSession, PlatformHub } from "../transport/hub.js";
 import { startScheduler, type Scheduler } from "./scheduler.js";
+import { resetPlatformData } from "./reset.js";
 import { appendSessionMessage } from "../storage/repo/sessions.js";
 import { resolveClientQuestion } from "../tools/client.js";
 import { listProjectSummaries } from "../transport/views.js";
 import { getProjectRow } from "../storage/repo/projects.js";
 import { getAgent } from "../storage/repo/agents.js";
 import { log } from "../../shared/log.js";
-import { applySettingsPatch, toPublicSettings } from "../../server/settings/apply.js";
-import { listProviders, resolveModel, syncActiveProviderApiKeyEnv } from "../../server/providers/registry.js";
+import { applySettingsPatch, toPublicSettings } from "../infra/settingsApply.js";
+import { listProviders, resolveModel, syncActiveProviderApiKeyEnv } from "../infra/providers.js";
 import type { ServerEvent } from "@shared/types/platform.js";
 
 export interface ServeOptions {
@@ -300,6 +301,21 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
         return { ok: true as const, settings: toPublicSettings(r.settings) };
       },
       providers: () => listProviders(),
+    },
+    reset: () => {
+      // 常驻会话必须丢掉:它们绑着已被删掉的项目,继续用会往空项目里写消息
+      for (const [pid, sess] of sessions) {
+        try {
+          sess.dispose();
+        } catch {
+          /* dispose 失败不影响数据已清空这个事实 */
+        }
+        sessions.delete(pid);
+        log.muted(`platform: 重置,已丢弃项目 ${pid} 的常驻会话`);
+      }
+      const report = resetPlatformData(db);
+      log.ok(`platform: 数据已重置,清空 ${report.totalRows} 行(${report.cleared.length} 张表)`);
+      return report;
     },
   });
 

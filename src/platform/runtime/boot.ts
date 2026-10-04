@@ -19,9 +19,9 @@
  * 阶段时整体搬过来,搬迁时机由**编译失败**提醒,不靠人记得。
  */
 import { join } from "node:path";
-import { Keyring } from "../../server/storage/keyring.js";
-import { SettingsStore, type ProviderConfig, type Settings } from "../../server/settings/store.js";
-import { resolveModel, syncActiveProviderApiKeyEnv } from "../../server/providers/registry.js";
+import { Keyring } from "../infra/keyring.js";
+import { SettingsStore, type ProviderConfig, type Settings } from "../infra/settings.js";
+import { resolveModel, syncActiveProviderApiKeyEnv } from "../infra/providers.js";
 import { openPlatformDb } from "../storage/db.js";
 import { SqliteMemory } from "../memory/sqliteMemory.js";
 import { createLoggingClientChannel } from "../client/port.js";

@@ -22,8 +22,8 @@
 import {
   genProviderId, isMaskedApiKey,
   type ProviderConfig, type Settings, type SettingsStore, type ThinkingLevel,
-} from "./store.js";
-import { maskApiKey } from "../storage/keyring.js";
+} from "./settings.js";
+import { maskApiKey } from "./keyring.js";
 import type { SettingsPublic } from "@shared/types/settings.js";
 
 /** PUT /api/settings 的请求体形态(所有字段可选,局部更新)。 */

@@ -13,7 +13,7 @@
  */
 import Database from "better-sqlite3";
 import { load as loadSqliteVec } from "sqlite-vec";
-import { runMigrations } from "../../server/storage/migrations.js";
+import { runMigrations } from "../infra/migrations.js";
 
 export interface OpenPlatformDbOptions {
   /** 覆盖 migrations 目录(测试 seam)。缺省 = 仓库根的 migrations/ */
