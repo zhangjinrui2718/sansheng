@@ -224,6 +224,11 @@ export function renderPendingWork(db: Database.Database, w: PendingWork): string
     w.openBlockers.length > 0 ||
     w.myOpenWorks.length > 0 ||
     w.myWaitingWorks.length > 0 ||
+    // ⚠️ 必须列进来。它今天**必然**与 `myOpenWorks` 同时非空(收集时就在那个分支里),
+    // 所以漏掉它不影响结果 —— 但这正是危险处:哪天 `myOpenWorks` 的判据一改,
+    // 下面那段「前置被取消」的警告会**静默消失**,没人会发现。
+    // (并行 subagent 复核时指出:这段可见性一直搭在别人的非空上。)
+    w.myWorksWithCancelledDeps.length > 0 ||
     w.needsDecomposition;
   if (!hasAnything) return "";
   const lines: string[] = ["## 当前待办"];
