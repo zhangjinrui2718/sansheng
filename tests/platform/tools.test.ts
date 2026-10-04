@@ -261,12 +261,32 @@ describe("BC1 工具 · work_*", () => {
     expect(getWork(db, wid!)?.assigneeAgentId).toBe(ids.wkAlgo);
   });
 
-  it("work_create 角色不存在 → not_found,并列出项目里实际有的角色", () => {
-    const e = errOf(call(ids.pm, "work_create", {
-      title: "x", goal: "y", assigneeRole: "nonexistent",
+  it("work_create 只有 worker 能当负责人 —— 别的角色在调用期被拒(结构化 + 回灌合法值)", () => {
+    // 批次 21:真机现场是「项目经理把活派给了 business_manager,那条工作项至今 open」——
+    // 平台只为 worker 执行工作项(`runWorkItem.checkRunnable` 拒绝别的角色)。
+    // 所以负责人不再是自由字符串,而是一个**只允许 worker** 的约束。
+    for (const role of ["business_manager", "project_manager", "quality_reviewer", "nonexistent"]) {
+      const e = errOf(call(ids.pm, "work_create", { title: "x", goal: "y", assigneeRole: role }));
+      expect(e.code, `角色 ${role} 不该被接受为负责人`).toBe("invalid_args");
+      expect(e.message).toContain("worker");
+      // 8-F:拒绝必须让模型能据此自纠
+      expect(e.alternatives).toEqual(["worker"]);
+    }
+    // 合法的那一个还是要能跑通
+    expect(okText(call(ids.pm, "work_create", {
+      title: "x", goal: "y", assigneeRole: "worker", assigneeSpec: "algorithm",
+    }))).toContain("已创建");
+  });
+
+  it("work_assign 也不能把工作项改派给非 worker(改派与分派走同一条解析路径)", () => {
+    const t = okText(call(ids.pm, "work_create", {
+      title: "A", goal: "g", assigneeRole: "worker", assigneeSpec: "algorithm",
     }));
-    expect(e.code).toBe("not_found");
-    expect(e.alternatives).toContain("worker");
+    const w = t.match(/已创建 (\S+?)「/)![1]!;
+    const e = errOf(call(ids.pm, "work_assign", { workId: w, assigneeRole: "business_manager" }));
+    expect(e.code).toBe("invalid_args");
+    expect(e.alternatives).toEqual(["worker"]);
+    expect(getWork(db, w)?.assigneeAgentId, "被拒的改派不该改库").toBe(ids.wkAlgo);
   });
 
   it("work_create 同角色多人且未给 spec → 报歧义,迫使明确", () => {
@@ -721,5 +741,65 @@ describe("派发器 · 接待会话(project === null)", () => {
       if (r instanceof Promise) throw new Error(`${tool} 意外是异步的`);
       expect(r.ok, `${tool} 在接待模式下应当被拒`).toBe(false);
     }
+  });
+});
+
+// ── 状态迁移的门铃(排空器的触发点之一)─────────────────────────
+
+describe("派发器 · 门铃(nudge)", () => {
+  function okOf(r: ToolResult): Extract<ToolResult, { ok: true }> {
+    if (!r.ok) throw new Error(`期望成功,实际失败[${r.code}] ${r.message}`);
+    return r;
+  }
+
+  it("会改变流水线状态的工具**成功后**敲门", () => {
+    let rings = 0;
+    const ctx: ToolRunContext = { ...ctxFor(ids.pm), nudge: () => { rings++; } };
+    const r = dispatch("work_create", {
+      title: "A", goal: "g", assigneeRole: "worker", assigneeSpec: "algorithm",
+    }, ctx);
+    if (r instanceof Promise) throw new Error("work_create 是同步的");
+    okOf(r);
+    expect(rings).toBe(1);
+  });
+
+  it("只读工具不敲门(门铃只为状态迁移响)", () => {
+    let rings = 0;
+    const ctx: ToolRunContext = { ...ctxFor(ids.pm), nudge: () => { rings++; } };
+    const r = dispatch("work_list", {}, ctx);
+    if (r instanceof Promise) throw new Error("work_list 是同步的");
+    okOf(r);
+    expect(rings).toBe(0);
+  });
+
+  it("失败的调用不敲门(没发生的事不该叫醒任何人)", () => {
+    let rings = 0;
+    const ctx: ToolRunContext = { ...ctxFor(ids.pm), nudge: () => { rings++; } };
+    const r = dispatch("work_create", {
+      title: "A", goal: "g", assigneeRole: "business_manager",
+    }, ctx);
+    if (r instanceof Promise) throw new Error("work_create 是同步的");
+    expect(r.ok).toBe(false);
+    expect(rings).toBe(0);
+  });
+
+  it("门铃自己抛错不影响工具结果(定时器兜底)", () => {
+    const ctx: ToolRunContext = {
+      ...ctxFor(ids.pm),
+      nudge: () => { throw new Error("宿主炸了"); },
+    };
+    const r = dispatch("work_create", {
+      title: "A", goal: "g", assigneeRole: "worker", assigneeSpec: "algorithm",
+    }, ctx);
+    if (r instanceof Promise) throw new Error("work_create 是同步的");
+    expect(r.ok).toBe(true);
+  });
+
+  it("没注入门铃(纯工具单测)时什么都不发生", () => {
+    const r = dispatch("work_create", {
+      title: "A", goal: "g", assigneeRole: "worker", assigneeSpec: "algorithm",
+    }, ctxFor(ids.pm));
+    if (r instanceof Promise) throw new Error("work_create 是同步的");
+    expect(r.ok).toBe(true);
   });
 });

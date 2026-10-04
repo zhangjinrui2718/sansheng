@@ -11,6 +11,7 @@
  * 恰好是业务经理对甲方汇报时最需要查的一屏。
  */
 import type Database from "better-sqlite3";
+import { insertDispatchEvent } from "./dispatch.js";
 
 export type BlockerStatus = "open" | "acknowledged" | "resolved" | "deferred" | "rejected";
 export type BlockerSeverity = "low" | "medium" | "high" | "critical";
@@ -109,6 +110,15 @@ export function insertBlocker(
     row.id, row.projectId, row.raisedByAgentId, row.title, row.detail, row.severity,
     row.status, row.createdAt, row.resolvedAt ?? null, row.resolution ?? null,
   );
+  // 新阻塞是一件**该让甲方知道**的下游事件 —— 记进 outbox,于是业务经理的待办
+  // 是一条查询,而不是级联在内存里观察到的事件(批次 20 的洞:撞上界就丢)。
+  insertDispatchEvent(db, {
+    projectId: row.projectId,
+    kind: "blocker_opened",
+    subjectId: row.id,
+    summary: `${row.title}[${row.severity}]`,
+    createdAt: row.createdAt,
+  });
 }
 
 export function getBlocker(db: Database.Database, id: string): BlockerRow | null {

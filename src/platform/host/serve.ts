@@ -38,12 +38,12 @@ import { runTurn, type TurnResult, type ToolCallRecord } from "../runtime/turn.j
 import { runWorkItem } from "../runtime/execution.js";
 import { ORG, ensureOrg, orgReady } from "../runtime/org.js";
 import {
-  createMemoryStallStore, emptyCascadeState, peekTodos, runCascade,
-  type CascadeResult, type CascadeState, type CascadeTurnReport, type CascadeWorkReport,
-} from "../runtime/driver.js";
+  drainProject,
+  type DrainResult, type DrainTurnReport, type DrainWorkReport,
+} from "../runtime/dispatcher.js";
 import { createPlatformApp } from "../transport/http.js";
 import { attachHub, ensureSession, PlatformHub } from "../transport/hub.js";
-import { startScheduler, type Scheduler } from "./scheduler.js";
+import { startFixedDelay, startScheduler, type FixedDelayLoop, type Scheduler } from "./scheduler.js";
 import { resetPlatformData } from "./reset.js";
 import { appendSessionMessage } from "../storage/repo/sessions.js";
 import { resolveClientQuestion } from "../tools/client.js";
@@ -75,10 +75,18 @@ export interface ServeOptions {
   /**
    * 调度器扫描间隔(毫秒)。默认 60 秒。
    *
-   * 它同时是**驱动者循环周期入口**的间隔 —— 链子在上界处停下之后剩下的待办,
-   * 由它捡回来。测试里调小它,就能在合理时间内观察到那一刻。
+   * 它是**超时提问**那条周期的间隔,与排空器无关(排空的兜底有自己的
+   * `dispatchIntervalMs`)。测试里调小它,就能在合理时间内观察到超时提示。
    */
   readonly schedulerIntervalMs?: number;
+  /**
+   * **排空器兜底定时器的间隔(毫秒)**。默认 10 秒,fixed-delay 语义
+   * (上一轮排空跑完再等这么久,所以两轮永不重叠)。
+   *
+   * 它的职责是兜底:重启恢复、事件 nudge 漏掉的、以及外部直接改库的场合。
+   * 调小它 = 兜底更及时、空转更频繁;调大它 = 更省,但状态迁移后要等更久。
+   */
+  readonly dispatchIntervalMs?: number;
   /**
    * **执行类回合**的超时上限(毫秒)。缺省交给 `runTurn` 自己的默认值(5 分钟)。
    *
@@ -101,6 +109,8 @@ export interface PlatformHost {
   readonly hub: PlatformHub;
   readonly booted: BootedPlatform;
   readonly scheduler: Scheduler;
+  /** 排空器的兜底触发(fixed-delay) */
+  readonly dispatchTimer: FixedDelayLoop;
   /** 关掉所有常驻会话与库 */
   close(): void;
   /** 当前常驻会话数(诊断用) */
@@ -304,8 +314,8 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
     // 2. 拿(或建)业务经理的常驻会话,跑一个回合,事件桥到前端
     const bm = ORG.find((m) => m.role === "business_manager")!;
     let openedProjectIds: readonly string[] = [];
-    /** 级联要跑哪个项目。`null` = 这次不跑(见下面「为什么接待会话不级联」)。 */
-    let cascadeTarget: string | null = null;
+    /** 这一回合结束后要不要敲一下门铃(排空哪个项目)。`null` = 不敲。 */
+    let nudgeTarget: string | null = null;
 
     hub.setBusy(projectId, true);
     try {
@@ -348,9 +358,9 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
         }
       }
 
-      // 4. 用户消息的回合结束后 → 链式往下跑(驱动者循环)。
+      // 4. 用户消息的回合结束后 → **敲一下门铃**(排空器的触发点之一)。
       //
-      // ── 为什么**只在项目内**级联,接待会话的这次立项不级联 ──────────────
+      // ── 为什么**只在项目内**敲,接待会话里那次立项不敲 ──────────────────
       //
       // 接待会话里立起项目,用户此刻刚被切进那个新项目:他还没看过目标对不对,
       // 系统的第一个动作却已经是「项目经理拆解 + worker 开工 + 质检 + 业务经理
@@ -358,14 +368,16 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
       // 之后紧接着一串流式输出,前端会在用户还没读完切换动作时就开始滚屏。
       //
       // 代价是明的:那一次立项之后,项目经理的「还没拆解」要等到用户下一次说话、
-      // 或调度器下一次 tick 才被捡起来。这两条路都在,不是漏掉。
-      if (projectId !== null) cascadeTarget = projectId;
+      // 或定时器下一次 fire 才被捡起来。这两条路都在,不是漏掉。
+      if (projectId !== null) nudgeTarget = projectId;
     } finally {
       hub.setBusy(projectId, false);
       inflight.delete(projectId);
     }
 
-    if (cascadeTarget !== null) await runCascadeWithBusy(cascadeTarget);
+    // 门铃**不 await**:排空是平台自己的循环,用户那条消息的回合到这儿就结束了。
+    // 同一个项目的排空由 `drainOne` 的 busy 闩挡住重叠(这里 busy 刚放开)。
+    if (nudgeTarget !== null) nudge();
   }
 
   // ── 会话池(上下文 + agent)──────────────────────────────────
@@ -402,6 +414,17 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
    *
    * **必须用 hub 的 channel**,不能用 `booted.deps` 里那个日志通道 —— 后者只打
    * 日志,问题到不了用户(真机验证时就是这样:工具跑了、工件建了、投递去了 stdout)。
+   *
+   * ── 为什么**接待会话不装门铃**(真机 E2E 抓到的洞)────────────────
+   *
+   * 门铃挂在工具调用上,而门铃一响 `drainAll` 会扫**全部活跃项目**。接待会话里
+   * `project_open` 刚把项目建出来的那一刻,新项目就已经是 active —— 于是门铃
+   * 会在用户**还没看过项目目标**之前就叫醒项目经理去拆解、worker 去开工。
+   * 这正是批次 20 明确定为**不该发生**的事(在他确认之前花他的 token)。
+   *
+   * 修法在**装配层**:接待会话的会话不带门铃(`projectId === null`)。项目内的
+   * 迁移照旧敲门 —— 那里用户已经在项目里了。用户被切进新项目之后的第一句话
+   * (`handleUserMessage` 末尾的 nudge)才是那条流水线的起点。
    */
   async function getOrCreateSession(
     projectId: string | null,
@@ -414,7 +437,15 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
       return { ok: false, code: "no_model", message: "没有可用的 provider —— 先在设置里配一个" };
     }
     const created = await createPlatformSession(
-      { ...booted.deps, client: hub.clientChannel },
+      // `onStateChange` = 门铃:任何**可能改变流水线状态**的工具调用成功后,
+      // 平台立刻去查一次「现在该谁动」(见 runtime/dispatcher.ts)。
+      // 它不携带状态,判定永远重新查库 —— 所以这里给一个无参回调就够了。
+      // **接待会话不装**(理由见本函数上面那一段):否则立项当场就把组织叫起来了。
+      {
+        ...booted.deps,
+        client: hub.clientChannel,
+        ...(projectId !== null ? { onStateChange: () => nudge() } : {}),
+      },
       agentId, projectId, {
         cwd,
         agentDir: booted.settings.agentDir ?? join(opts.dataDir, "agent"),
@@ -577,7 +608,7 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
     projectId: string,
     agentId: string,
     workId: string,
-  ): Promise<CascadeWorkReport> {
+  ): Promise<DrainWorkReport> {
     const before = getWork(db, workId);
     const title = before?.title ?? workId;
     const got = await getOrCreateSession(projectId, agentId);
@@ -664,70 +695,139 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
     }
   }
 
-  // ── 驱动者循环(②:两个入口共用同一段)──────────────────────
+  // ── 排空器接线(判定在 runtime/dispatcher.ts)─────────────────
+  //
+  // 这里**只有接线**:两个触发点(门铃 / 定时器)都不携带状态,判定与排空
+  // 全在 `drainProject`。宿主**不再持有任何跨排空的状态** —— 批次 20 的
+  // `stallStore` 与 `cascadeStates` 整块消失:它们要挡的两件事(「同一个待办
+  // 被反复叫醒」与「撞上界时下游结果不丢」)现在分别由库里的尝试预算
+  // (`dispatch_attempts`)与 outbox(`dispatch_events`)承担。
 
+  let draining = false;
   /**
-   * 级联的无进展记忆。**宿主级、进程内** —— 重启即忘。
+   * 「排空进行中有人敲过门」。
    *
-   * 为什么必须跨级联:周期扫描每 60 秒看一眼,而「同一个待办在同一个项目状态下
-   * 没有产生任何变化」这件事**不会自己消失**。只靠级联内的比较,扫描会每 60 秒
-   * 把同一个待办重叫一次 —— 那是烧 token 的正解形态,而且日志里长得像正常工作。
+   * 这不是「刚才发生了什么」的记忆 —— 它不参与任何判定(`collectTodos` 永远
+   * 重新查库)。它只是门铃的打点:排空跑到「没有待办」为止,所以门铃在忙碌期间
+   * 响过就再跑一遍外层循环,免得刚查完那一刻落地的状态要等下一次定时器。
    */
-  const stallStore = createMemoryStallStore();
+  let nudgedWhileBusy = false;
 
-  /**
-   * 每个项目的级联状态(下游结果 / 待审队列)。**宿主级、进程内、跨级联复用。**
-   *
-   * 为什么必须跨级联:一次级联撞上 `maxRounds` 停下时,若这两样东西只活在
-   * 那一次调用里,「工作项做完了但业务经理永远不汇报」「产出做完但质检永远
-   * 不看」就会静默发生 —— 日志里只有一句「已达上限,已停下」。
-   * 真机跑出来过:上限设 1 时,`wk_sched1` 做完之后没有任何人向甲方交代。
-   *
-   * 条目在项目不再 active 时不会再被读到(扫描只看 active 项目),量级是
-   * 项目数,不值得为它加一套淘汰。
-   */
-  const cascadeStates = new Map<string, CascadeState>();
-
-  function cascadeStateFor(projectId: string): CascadeState {
-    const existing = cascadeStates.get(projectId);
-    if (existing !== undefined) return existing;
-    const fresh = emptyCascadeState();
-    cascadeStates.set(projectId, fresh);
-    return fresh;
+  /** 门铃:状态迁移后敲一下。**不携带任何状态**,只说「现在去查一下」。 */
+  function nudge(): void {
+    if (draining) {
+      nudgedWhileBusy = true;
+      return;
+    }
+    void drainAll("nudge").catch((err: unknown) => {
+      log.error(`platform: 排空失败 —— ${err instanceof Error ? err.message : String(err)}`);
+    });
   }
 
-  async function runCascadeWithBusy(projectId: string): Promise<CascadeResult | null> {
+  /**
+   * 扫一遍全部活跃项目,每个排空到没有待办为止。
+   *
+   * `source` 只用于**留痕**(门铃 / 定时器)—— 两个触发点的行为完全一样,
+   * 判定与排空都不因它改变。没有这一行,事后就无法回答「这一步是谁触发的」,
+   * 而「哪条路径在工作」正是这次重构最需要能看见的事(7-N:见不到的现场等于没有现场)。
+   *
+   * ⚠️ **一条待办都没跑的时候不打日志。** 定时器是 10 秒一次,而绝大多数 tick
+   * 都是「没有待办」—— 每次都打一行「排空开始/结束」会在几小时里刷满日志,
+   * 把真正有信息量的行淹掉(与超时扫描「只在集合变化时广播」同一条理由)。
+   * 有回合数才留痕:`排空收尾(触发=… · N 回合 · 路径 …)`。
+   */
+  async function drainAll(source: "nudge" | "timer"): Promise<void> {
+    if (draining) {
+      nudgedWhileBusy = true;
+      return;
+    }
+    draining = true;
+    let projects = 0;
+    let rounds = 0;
+    let path: string[] = [];
+    let deliberateStop = false;
+    try {
+      do {
+        nudgedWhileBusy = false;
+        projects = 0;
+        rounds = 0;
+        path = [];
+        deliberateStop = false;
+        for (const p of listProjects(db, "active")) {
+          projects++;
+          const r = await drainOne(p.id);
+          if (r === null) continue;
+          rounds += r.rounds;
+          path.push(...r.visited.map((v) => v.agentId));
+          if (r.stopReason === "max_rounds" || r.stopReason === "no_progress") {
+            deliberateStop = true;
+          }
+        }
+        /**
+         * ── 重跑一次的条件(真机跑出来的一个洞)──────────────────────────
+         *
+         * 「排空进行中有人敲过门」时再查一遍:否则刚查完那一刻落地的状态要等
+         * 下一次定时器。**但不许绕过硬上界**:排空自己跑出来的工具门铃
+         * (`work_update` / `work_create` …)也会把 `nudgedWhileBusy` 置真,
+         * 于是一次 `maxRounds=1` 的排空会「1 回合 → 重跑 → 1 回合 → 重跑 …」
+         * 一直跑下去 —— `maxRounds` 从「单次排空的上界」退化成「每趟的上界」,
+         * 而它唯一的用途就是**烧 token 的闸**(真机实测:设 1 之后仍然一路跑完
+         * 了 wk → qa → bm)。
+         *
+         * 所以:**故意停下(max_rounds / 预算用尽)就不再重跑**。该等下一次
+         * 定时器 —— 那是它存在的理由(兜底),而不是把上界让给门铃。
+         */
+      } while (nudgedWhileBusy && !deliberateStop);
+    } finally {
+      draining = false;
+      if (rounds > 0) {
+        log.muted(
+          `platform: 排空收尾(触发=${source} · ${projects} 个项目 · ${rounds} 回合` +
+            (path.length > 0 ? ` · 路径 ${path.join("→")}` : "") +
+            ")",
+        );
+      }
+    }
+  }
+
+  /**
+   * 排空一个项目。返回它的结果(`null` = 因为正在跑别的回合而让开)。
+   *
+   * `hub.isBusy` 是**重入闩**的一半:用户消息那条路正在跑同一个项目的回合时,
+   * 排空让开(那条路自己会在回合结束后敲门)。另一半是上面的 `draining` ——
+   * 一次排空可能比定时器间隔还长,不加闩就会叠起来跑(而每一层都在花 token)。
+   */
+  async function drainOne(projectId: string): Promise<DrainResult | null> {
     if (hub.isBusy(projectId)) {
-      log.muted(`platform: ${channelLabel(projectId)}正在跑一个回合,跳过本次级联`);
+      log.muted(`platform: ${channelLabel(projectId)}正在跑一个回合,跳过本次排空`);
       return null;
     }
     hub.setBusy(projectId, true);
-    /** 这一层级联被用户中断过 —— 传进 driver 让它立刻停 */
+    /** 这一轮排空被用户中断过 —— 传进 dispatcher 让它立刻停 */
     let cancelled = false;
     try {
-      const result = await runCascade({
+      const result = await drainProject({
         db,
         projectId,
         now,
         log: (l) => log.muted(l),
-        stallStore,
-        state: cascadeStateFor(projectId),
         ...(opts.maxCascadeRounds !== undefined ? { maxRounds: opts.maxCascadeRounds } : {}),
         isCancelled: () => cancelled,
-        runAgentTurn: async (agentId, task): Promise<CascadeTurnReport> => {
+        runAgentTurn: async (agentId, task): Promise<DrainTurnReport> => {
           const r = await runAgentTurn(projectId, agentId, task);
           if (r.aborted) cancelled = true;
           return {
             aborted: r.aborted, timedOut: r.timedOut, text: r.text, toolCalls: r.toolCalls,
+            failed: r.failed,
           };
         },
-        runWork: async (agentId, workId): Promise<CascadeWorkReport> => {
+        runWork: async (agentId, workId): Promise<DrainWorkReport> => {
           const r = await runWorkInSession(projectId, agentId, workId);
           if (r.aborted) cancelled = true;
           return r;
         },
       });
-      announceCascade(projectId, result);
+      announceDrain(projectId, result);
       return result;
     } finally {
       hub.setBusy(projectId, false);
@@ -736,26 +836,35 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
   }
 
   /**
-   * 级联停下来之后**如实告诉用户它是怎么停的**。
+   * 排空停下来之后**如实告诉用户它是怎么停的**。
    *
-   * ⚠️ 异常停止(`max_rounds` / `no_progress`)**不能静默** —— 界面会回到 idle,
+   * ⚠️ 异常停止(`max_rounds` / 预算用尽)**不能静默** —— 界面会回到 idle,
    * 而用户会以为「还在跑」或「已经做完了」。两种误解都会让他在错误的时刻做决定。
    * 所以做两件事:广播一条 `cascade_stopped`(前端立刻看见)+ 落一条 `system`
    * 会话消息(刷新之后还在)。正常的 `exhausted` / `cancelled` 不打扰他。
+   *
+   * 「预算用尽」只在**第一次**用尽时播报(`newlyExhausted`)—— 否则每 10 秒一条
+   * system 消息,那也是一种静默。
    */
-  function announceCascade(projectId: string, r: CascadeResult): void {
+  function announceDrain(projectId: string, r: DrainResult): void {
     const who = r.visited.map((v) => v.agentId).join(" → ");
+    const reason = r.stopReason;
+    const reportable =
+      reason === "max_rounds" || (reason === "no_progress" && r.newlyExhausted.length > 0);
+    // 什么都没跑的安静停(没有待办 / 已经报过的预算用尽)不刷日志 ——
+    // 每 10 秒一行「排空结束」会把真正有信息量的行淹掉
+    if (r.rounds === 0 && !reportable) return;
     log.muted(
-      `platform: ${channelLabel(projectId)}级联结束 —— ${r.rounds} 回合,` +
-        `停止原因 ${r.stopReason}(${r.stopDetail})` +
+      `platform: ${channelLabel(projectId)}排空结束 —— ${r.rounds} 回合,` +
+        `停止原因 ${reason}(${r.stopDetail})` +
         (who !== "" ? `\n        路径:${who}` : ""),
     );
-    if (r.stopReason !== "max_rounds" && r.stopReason !== "no_progress") return;
+    if (!reportable) return;
     hub.broadcast({
       type: "cascade_stopped",
       projectId,
       rounds: r.rounds,
-      reason: r.stopReason,
+      reason,
       detail: r.stopDetail,
     });
     const sessionId = ensureSession(db, projectId, now(), newId);
@@ -769,39 +878,6 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
         (who !== "" ? `\n本轮路径:${who}` : ""),
       createdAt: now(),
     });
-  }
-
-  /**
-   * 调度器 tick 时的组织扫描 —— **驱动者循环的第二个入口**。
-   *
-   * 一次性触发(用户消息之后链式跑)的问题很具体:链子在上界处停下之后,剩下的
-   * 待办**没有任何东西会记得它们**。周期扫描就是补这个的:它不引入新的判定,
-   * 只是把同一个 `runCascade` 按项目再跑一遍。
-   *
-   * `scanning` 这个闩是必要的:一次 tick 里的级联可能比扫描间隔还长,不加闩就会
-   * 叠起来跑(而每一层都在花 token)。
-   */
-  let scanning = false;
-  async function scanForActionableWork(): Promise<void> {
-    if (scanning) return;
-    scanning = true;
-    try {
-      for (const p of listProjects(db, "active")) {
-        if (hub.isBusy(p.id)) continue;
-        // 必须带这个项目**自己的**级联状态 —— 只按库里的待办判会漏掉
-        // 「下游刚做完什么、哪些产出等着审」(那两样不在库里,见 driver.ts)。
-        // 漏掉的形态不是报错,是「工作项做完了而业务经理永远不会被叫醒来汇报」。
-        const todos = peekTodos(db, p.id, now(), cascadeStateFor(p.id));
-        if (todos.length === 0) continue;
-        log.muted(
-          `platform: 周期扫描发现 ${channelLabel(p.id)}有 ${todos.length} 条待办` +
-            `(${todos.slice(0, 3).map((t) => t.label).join(" · ")}${todos.length > 3 ? " …" : ""})`,
-        );
-        await runCascadeWithBusy(p.id);
-      }
-    } finally {
-      scanning = false;
-    }
   }
 
   // ── HTTP ──────────────────────────────────────────────────────
@@ -841,9 +917,11 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
     reset: () => {
       // 常驻会话必须丢掉:它们绑着已被删掉的项目,继续用会往空项目里写消息
       disposeAllSessions("数据重置");
-      // 级联状态与无进展记忆都必须清:它们指着已经被删掉的 work / artifact id
-      cascadeStates.clear();
-      stallStore.clear();
+      // ⚠️ 这里**没有**任何排空器状态要清 —— 那是这次重构的要点:
+      // 判定与状态全在库里(works.review_state / dispatch_events /
+      // dispatch_attempts 都是平台表,由 `resetPlatformData` 一起清),
+      // 进程内存里一份都不留。批次 20 在这里清 `cascadeStates` 与 `stallStore`
+      // 的那两行,正是因为当时状态漏进了内存。
       const report = resetPlatformData(db);
       log.ok(`platform: 数据已重置,清空 ${report.totalRows} 行(${report.cleared.length} 张表)`);
       return report;
@@ -863,14 +941,17 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
     log.warn(`platform: 没找到前端产物(${webRoot})—— 先跑 npm run build:web`);
   }
 
-  // ── 调度器 ────────────────────────────────────────────────────
+  // ── 两个周期入口(职责不同,分开)─────────────────────────────
   //
-  // 做两件事:
-  //   ① 扫超时提问并推给前端。**不自动升级** —— 经 jev 校准,单人本地服务里
-  //      「人暂时没回」是常态而不是故障(见 scheduler.ts 文件头)。
-  //   ② 每次 tick 之后再扫一次组织(驱动者循环的周期入口)——
-  //      「一次性链式触发」的缺口是:链子在上界处停下之后,剩下的待办没有
-  //      任何东西会记得它们。周期扫描按同一个 `runCascade` 把它们捡回来。
+  //   ① 调度器(60s):扫超时提问并推给前端。**不自动升级** —— 经 jev 校准,
+  //      单人本地服务里「人暂时没回」是常态而不是故障(见 scheduler.ts 文件头)。
+  //   ② 排空定时器(**fixed-delay,默认 10s**):排空器的兜底触发 ——
+  //      重启恢复、事件漏掉的、以及外部直接改库的场合。
+  //
+  // 为什么分成两条而不是继续挂在调度器上:两条周期的**语义**不同。超时扫描是
+  // 「每 60 秒看一眼有没有人没回」,而排空是「有活就干、没活就什么都不做」的
+  // 兜底 —— 它们的合理间隔差一个数量级(10s vs 60s),合成一条必然要迁就其中
+  // 一个。fixed-delay(上一轮跑完再等 10s)还顺带保证了两轮排空不重叠。
   const scheduler: Scheduler = startScheduler({
     db,
     now,
@@ -879,15 +960,12 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
     ...(opts.schedulerIntervalMs !== undefined
       ? { intervalMs: opts.schedulerIntervalMs }
       : {}),
-    onTick: () => {
-      // fire-and-forget:一次慢级联不该把超时扫描也拖住(见 SchedulerDeps.onTick)。
-      // 失败必须响亮 —— 一个静默失败的周期入口等于这个功能不存在。
-      void scanForActionableWork().catch((err: unknown) => {
-        log.error(
-          `platform: 周期组织扫描失败 —— ${err instanceof Error ? err.message : String(err)}`,
-        );
-      });
-    },
+  });
+
+  const dispatchTimer: FixedDelayLoop = startFixedDelay({
+    intervalMs: opts.dispatchIntervalMs ?? DEFAULT_DISPATCH_INTERVAL_MS,
+    run: () => drainAll("timer"),
+    log: (l) => log.error(l),
   });
 
   return {
@@ -895,14 +973,19 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
     hub,
     booted,
     scheduler,
+    dispatchTimer,
     sessionCount: () => sessions.size,
     close: () => {
       scheduler.stop();
+      dispatchTimer.stop();
       disposeAllSessions("服务关闭");
       booted.close();
     },
   };
 }
+
+/** 排空定时器的默认间隔:**fixed-delay 10 秒**(上一轮跑完再等 10 秒)。 */
+const DEFAULT_DISPATCH_INTERVAL_MS = 10_000;
 
 // ── 事件桥 ──────────────────────────────────────────────────────
 

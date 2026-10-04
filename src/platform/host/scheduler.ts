@@ -49,21 +49,6 @@ export interface SchedulerDeps {
   readonly intervalMs?: number;
   /** 日志 */
   readonly log?: (line: string) => void;
-  /**
-   * **每次 tick 之后再扫一次组织**(批次 20 接线:驱动者循环的周期入口)。
-   *
-   * ── 为什么挂在调度器上,而不是另起一个定时器 ──────────────────────
-   *
-   * 调度器已经是「进程里唯一那个周期性看一眼」的东西。再起一个定时器意味着
-   * 两个周期互相不知道对方(V1 的 `--data` 与 `--data-dir` 就是这么漂的)。
-   *
-   * ── 它**不改变** `schedulerTick` 的纯性 ──────────────────────────
-   *
-   * `tick()` 仍然是「读库 → 算报告 → 广播」;组织那件事由宿主注入的回调做,
-   * 而回调是**异步且 fire-and-forget** 的 —— `tick` 不等它,所以一次慢级联
-   * 不会把超时扫描也拖住。回调自己负责「上次还没跑完就别再起一次」。
-   */
-  readonly onTick?: (report: SchedulerReport) => void;
 }
 
 /**
@@ -148,19 +133,7 @@ export function startScheduler(deps: SchedulerDeps): Scheduler {
     return report;
   };
 
-  const timer = setInterval(() => {
-    const report = tick();
-    // 组织那件事在 tick 之后跑,且**不等它** —— 见 SchedulerDeps.onTick 的说明。
-    // 放在「签名没变就 early return」之外是有意的:超时集合没变,不代表组织
-    // 层面没有新待办(用户刚在项目里说了句话,那个待办的签名与超时集合无关)。
-    try {
-      deps.onTick?.(report);
-    } catch (err) {
-      deps.log?.(
-        `scheduler: onTick 抛错 —— ${err instanceof Error ? err.message : String(err)}`,
-      );
-    }
-  }, intervalMs);
+  const timer = setInterval(() => { tick(); }, intervalMs);
   // 不因为这个定时器把进程钉住(测试里尤其重要)
   timer.unref?.();
 
@@ -171,5 +144,70 @@ export function startScheduler(deps: SchedulerDeps): Scheduler {
     tick,
     stop: () => clearInterval(timer),
     stats: () => ({ ticks, lastTotal }),
+  };
+}
+
+// ── fixed-delay 定时器(排空器的兜底触发)────────────────────────
+
+export interface FixedDelayDeps {
+  readonly intervalMs: number;
+  /** 跑一轮。**它自己负责重入闩** —— 本定时器不关心上一次跑完没有 */
+  readonly run: () => Promise<void> | void;
+  readonly log?: (line: string) => void;
+  /** 第一轮是否等满一个间隔。缺省 true = 严格 fixed-delay 语义 */
+  readonly immediateFirstRun?: boolean;
+}
+
+export interface FixedDelayLoop {
+  stop(): void;
+  /** 手动跑一轮(测试与诊断用) */
+  runNow(): Promise<void>;
+  /** 已经跑过几轮 */
+  runs(): number;
+}
+
+/**
+ * **fixed-delay** 定时器:上一轮**跑完之后**再等 `intervalMs` 才跑下一轮。
+ *
+ * 与 `setInterval` 的区别是要紧的:一次排空可能跑几分钟(每个回合都是真模型),
+ * 而 `setInterval` 会在这期间按点堆叠触发 —— 上一轮还没结束就又进来一轮。
+ * fixed-delay 天然不重叠,缺的那点实时性由「每轮跑完再排下一轮」补回来。
+ *
+ * 它是排空器的**兜底**触发:重启恢复、事件漏掉的、以及外部直接改库的场合。
+ * 它不携带任何状态,只做一件事 —— 说「现在去查一下」。
+ */
+export function startFixedDelay(deps: FixedDelayDeps): FixedDelayLoop {
+  let stopped = false;
+  let timer: NodeJS.Timeout | null = null;
+  let runs = 0;
+
+  const fire = async (): Promise<void> => {
+    runs++;
+    try {
+      await deps.run();
+    } catch (err) {
+      // 一个静默失败的周期入口等于这个功能不存在 —— 必须响亮
+      deps.log?.(`dispatch: 排空抛错 —— ${err instanceof Error ? err.message : String(err)}`);
+    }
+    schedule();
+  };
+
+  const schedule = (): void => {
+    if (stopped) return;
+    timer = setTimeout(() => { void fire(); }, deps.intervalMs);
+    // 不因为这个定时器把进程钉住
+    timer.unref?.();
+  };
+
+  if (deps.immediateFirstRun === true) void fire();
+  else schedule();
+
+  return {
+    stop: () => {
+      stopped = true;
+      if (timer !== null) clearTimeout(timer);
+    },
+    runNow: fire,
+    runs: () => runs,
   };
 }

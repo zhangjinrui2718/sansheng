@@ -97,15 +97,21 @@ program
   )
   .option(
     "--scheduler-interval <ms>",
-    "调度器扫描间隔(毫秒;同时是驱动者循环的周期入口;默认 60000)",
+    "超时提问扫描间隔(毫秒;默认 60000)",
     "60000",
+  )
+  .option(
+    "--dispatch-interval <ms>",
+    "排空器兜底定时器间隔(毫秒,fixed-delay;默认 10000)",
+    "10000",
   )
   .action(async (opts: {
     host: string; port: string; cwd?: string; data?: string; open: boolean;
-    maxCascadeRounds: string; schedulerInterval: string;
+    maxCascadeRounds: string; schedulerInterval: string; dispatchInterval: string;
   }) => {
     const rounds = Number(opts.maxCascadeRounds);
     const interval = Number(opts.schedulerInterval);
+    const dispatchInterval = Number(opts.dispatchInterval);
     await runPlatformServe({
       dataDir: opts.data ?? dataDir(),
       host: opts.host,
@@ -116,6 +122,8 @@ program
       // 非法值不静默退回默认 —— 那会让「我调了上界」和「它根本没生效」长得一样
       maxCascadeRounds: Number.isFinite(rounds) && rounds > 0 ? rounds : 8,
       schedulerIntervalMs: Number.isFinite(interval) && interval > 0 ? interval : 60_000,
+      dispatchIntervalMs:
+        Number.isFinite(dispatchInterval) && dispatchInterval > 0 ? dispatchInterval : 10_000,
     });
   });
 

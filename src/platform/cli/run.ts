@@ -26,7 +26,7 @@ import { runWorkItem, renderExecutionReport } from "../runtime/execution.js";
 import { getAgent, listAgents } from "../storage/repo/agents.js";
 import { ensureOrg, ensureProjectOrg, pickWorker } from "../runtime/org.js";
 import { insertProject, getProjectRow } from "../storage/repo/projects.js";
-import { insertWork, type WorkRow } from "../storage/repo/works.js";
+import { insertWork, type NewWorkRow } from "../storage/repo/works.js";
 import type { Specialization } from "../identity/role.js";
 
 export interface PlatformRunOptions {
@@ -110,7 +110,7 @@ export async function runPlatformRun(opts: PlatformRunOptions): Promise<boolean>
       return false;
     }
     const workId = booted.newId("w");
-    const work: WorkRow = {
+    const work: NewWorkRow = {
       id: workId,
       projectId,
       parentWorkId: null,

@@ -8,7 +8,7 @@
 - **Sansheng(三生)** = 单用户本机常驻 Node 服务:Pi SDK 驱动**四个角色的 agent 组织**,SQLite 持久化,HTTP + WS + 托管前端。
 - **组织架构是一等数据**:`agents` / `projects` / `project_assignments` 在库里,**角色属性在代码里**(`ROLE_SPECS`)。制品是工件(`artifacts` 表),不是聊天记录。
 - 默认 `127.0.0.1:2719`;数据目录默认 `~/.sansheng/`,可用 `--data` 或 `SANSHENG_DATA` 覆盖。
-- 基线:**645 passed / 22 test files** · 两条 typecheck 0 error · `check:design` E1–E14 全绿。
+- 基线:**666 passed / 23 test files** · 两条 typecheck 0 error · `check:design` E1–E14 全绿。
 - 日志只走 stdout:`~/.sansheng/logs/sansheng.log` 恒为 0 字节,别去 tail 它。
 
 ## 源码地图(`find src -name '*.ts' | wc -l` = 55)
@@ -19,11 +19,11 @@ src/platform/cli/        smoke / run 两个子命令的实现
 src/platform/host/       常驻宿主:serve / scheduler / reset
 src/platform/transport/  传输:http(API)/ hub(WS 广播)/ views
 src/platform/runtime/    boot session turn execution assembly promptAssembly pendingWork
-                         projectContext driver org sdkAdapter
+                         projectContext dispatcher org sdkAdapter
 src/platform/tools/      工具层:9 个文件、34 个平台工具定义 + registry.ts 的 dispatch()
 src/platform/harness/    授权:capability(能力↔工具表)/ authorize(三道门)/ toolSet(L2 集合文件读盘)/ write(提示词写盘)
 src/platform/identity/   角色:role.ts 的 ROLE_SPECS
-src/platform/storage/    db.ts + repo/ 下 9 个仓储
+src/platform/storage/    db.ts + repo/ 下 10 个仓储
 src/platform/infra/      keyring / settings / settingsApply / providers / migrations
 src/platform/memory/     MemoryPort 端口 + sqlite 实现
 src/platform/client/     ClientChannel 端口
@@ -70,31 +70,42 @@ shared/types/            跨端协议类型(platform.ts / settings.ts)
 >
 > 坏文件**不会**被当成空 allowlist(那等于悄悄收回全部权限),而是退化成出厂行为(按 ceiling 全集)+ 在 `GET /api/harness` 与启动日志里如实报出。可见性的落点:`RoleHarnessView.toolSet`(`state` / `removedByToolSet` / `problem`)。
 
-## 驱动者循环:谁被唤醒(批次 20)
+## 排空器:谁被唤醒(批次 21 重构,取代批次 20 的有状态级联)
 
 **四个角色此前只有两个驱动者**:`host/serve.ts` 跑业务经理(用户消息触发)、`cli/run.ts` 跑 worker(手工 CLI)。`project_manager` 与 `quality_reviewer` **从来没有被叫醒过** —— 立项之后 `projects=1, works=0`,组织不动。
 
-现在判定与执行都在 `src/platform/runtime/driver.ts`:
+批次 20 用一个**有状态级联**补上了这件事(真机跑通),代价是六个补丁 —— 根因只有一个:把「刚才发生了什么」放在了内存里。批次 21 改成**无状态排空器**:
+
+```
+判定   collectTodos(db, projectId, now) → 可执行的待办清单    ← 唯一一处「下一步该谁跑」,纯查询
+排空   drainProject(deps)             → 查到就跑到没有为止(硬上界 maxRounds)
+触发   ① 事件 nudge(状态迁移后)  ② fixed-delay 定时器(默认 10s,兜底)
+       两者都**不携带任何状态**,只说「现在去查一下」
+```
+
+**最关键的一条:事件只是 nudge,判定永远重新查库。** 不许有任何「刚才发生了什么」的内存传递 —— 那正是六个补丁的来源。
 
 | 角色 | 待办判据 | 判据从哪来 |
 |---|---|---|
-| `business_manager` | 有人升级给它 / 下游刚出结果要它向甲方交代 | 库里的 `open` ask + **本层级联观察到的事件** |
-| `project_manager` | 有人问它 / 有变更待评 / **项目零工作项** | `pendingWork.ts`(`needsDecomposition` 只在 active 项目 + 零 work 时为真) |
+| `business_manager` | 有人问它 / **有下游结果还没向甲方交代** | 库里的 `open` ask + **`dispatch_events`(outbox)里未消费的行** |
+| `project_manager` | 有人问它 / 有变更待评 / **项目零工作项** / **有工作项被派给了非 worker** | `pendingWork.ts` + `works` |
 | `worker` | **分派给它、前置已满足、还没终态**的工作项 | `pendingWork.ts` 的 `myOpenWorks` |
-| `quality_reviewer` | 有人问它 / 有变更待评 / **刚有工作项做完** | 库查询 + **本层级联观察到的事件** |
+| `quality_reviewer` | 有人问它 / 有变更待评 / **有做完但没审的产出** | `works.status='done' AND review_state='pending'` |
 
-> ⚠️ **「等待审查」这个状态在数据模型里不存在**(`works.status` 无 review 态、无 `reviews` 关联、质检也不持 `work.update`)。所以质检那一条**不是从库里查出来的判据**,而是级联自己观察到的「工作项刚变成 done」—— 它不持久,重启后不补跑。**不要把它写成一条 SQL 查询**,那是硬编一个语义为假的判据。
+> ✅ **「等待审查」现在是库里的真状态**(`works.review_state = none | pending | done`,migration 013)。迁入 `done` → `pending`,质检回合**成功结束后**由平台置 `done`;维护点是 `works.status` 的唯一写口 `repo/works.ts` 的 `updateWorkStatus`。所以质检的待办就是**一条查询**,重启后补跑。批次 20 那句「不要把它写成一条 SQL 查询」随这次重构作废 —— 当时它是对的(语义为假),现在是假的(状态真的存在了)。
 
-**三个入口/边界**:① 用户消息的回合结束后链式跑;② 调度器 tick 时按项目扫一遍(`host/serve.ts` 的 `scanForActionableWork`,`IntervalMs` 可配);③ **接待会话里那次立项不级联** —— 用户刚被切进新项目,还没看过目标就自动开工等于在他确认之前花他的 token。
+**触发/边界**:① 可能改变流水线状态的工具调用成功后敲门铃(清单在 `runtime/dispatcher.ts` 的 `NUDGE_CAPABILITIES`,挂在 `tools/registry.ts` 的 `dispatch()` 这个唯一漏斗上);② `host/serve.ts` 的 fixed-delay 定时器(默认 10s,`--dispatch-interval` 可配)兜底;③ **接待会话里那次立项不 nudge** —— 用户刚被切进新项目,还没看过目标就自动开工等于在他确认之前花他的 token。
 
-**一定会停**三层:硬上界 `maxRounds`(默认 8,`--max-cascade-rounds` 可配)、级联内「同一 `(待办, 项目状态签名)`」重复即停、**跨级联** `stallStore`(同一待办在同一项目状态下已被叫醒过且无变化 → 以后不再叫醒 —— 没有它周期扫描每 60 秒会重叫一次)。撞上界 / 无进展**不静默**:广播 `cascade_stopped` + 落一条 `system` 会话消息。
+**一定会停两层**:硬上界 `maxRounds`(默认 8,`--max-cascade-rounds` 可配)+ **尝试预算** `dispatch_attempts`(按 `(项目, todo_key)` 记账,默认 3 次;目标行动了就清零)。到界 / 预算用尽**不静默**:广播 `cascade_stopped` + 落一条 `system` 会话消息(预算用尽只在**第一次**用尽时播报,否则每 10 秒一条也是静默)。
+
+> 预算**不是**判据,是**限流**,而且与批次 20 的 `stallStore` 有两处本质区别:它在库里(重启后还算数);它**不需要状态指纹**(没有「指纹漏一类状态 → 把真实进展读成无进展 → 掐死整条链」这条失败路径,真机踩过)。宿主**不持有任何跨排空状态** —— `CascadeState` / `stallStore` / `projectSignature` / 「最后一格预算给汇报」全部已删除。
 
 > 会话池的键是 `(上下文, agent)` 而不是上下文 —— 一个项目里四个角色各要一条自己的会话(工具面不同)。原先 BM 独占,键是 `string | null`。
 
 
 ## 数据与存储
 
-- 迁移在 `migrations/`:**007–010 建平台表**,**011 把旧系统的 7 张表 DROP**(`blackboards` / `conversations` / `messages` / `fragments` / `user_profile` / `agent_states` / `fragments_vec`)。
+- 迁移在 `migrations/`:**007–010 建平台表**,**011 把旧系统的 7 张表 DROP**(`blackboards` / `conversations` / `messages` / `fragments` / `user_profile` / `agent_states` / `fragments_vec`),**012 接待会话**(重建 `project_sessions` 放宽 `project_id` 可空,已登记进 `INTENTIONAL_REBUILDS`),**013 排空器状态**(`works.review_state` + `dispatch_events` + `dispatch_attempts`,纯加法)。
 - `artifacts` 直接挂项目 —— **没有 blackboard 容器层**。记忆在 `memory_fragments` / `memory_profile`,不是 `fragments`:`fragments` 是旧名字,001 已占用。
 - 平台表**不得复用旧表名**:`CREATE TABLE IF NOT EXISTS` 撞名时静默无操作,新表根本建不出来(见下 §三类静默失败)。加表前先 `ls migrations/` 查名。
 - 外键一律指向 `agent_id`,不存 `role` 字符串 —— 角色属性只有一处真相。
@@ -117,7 +128,7 @@ CLI 只有 4 个命令(`--help` 自己看);**无参数 = 起平台服务**:
 ```
 platform smoke      真 provider 建真会话,校验「声明 vs SDK 实际激活」,并列出缺失的提示词单元
 platform-run        真跑一个工作项(**写真实数据目录**)
-platform-serve      常驻宿主:HTTP + WS + 托管前端 + 调度器(默认 127.0.0.1:2719)
+platform-serve      常驻宿主:HTTP + WS + 托管前端 + 排空定时器(默认 127.0.0.1:2719)
 help
 ```
 
@@ -130,7 +141,7 @@ help
 ```
 npx tsc -p tsconfig.server.json --noEmit
 npx tsc -p tsconfig.web.json --noEmit
-npm test                  # 645 passed / 22 files
+npm test                  # 666 passed / 23 files
 npm run build
 npm run check:design      # 设计一致性 E1–E14
 ```

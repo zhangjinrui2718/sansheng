@@ -35,6 +35,14 @@ export interface RuntimeDeps {
   readonly newId?: (prefix: string) => string;
   /** 用户可编辑的工具集合文件内容(缺省 = 出厂行为) */
   readonly toolSetFor?: (role: ProjectRole) => ToolSetFile | undefined;
+  /**
+   * 状态迁移的门铃(排空器的触发点之一)。**不携带状态**,只说「去查一下」。
+   *
+   * 它由工具派发器在**可能改变流水线状态**的调用成功之后敲一次
+   * (清单见 `runtime/dispatcher.ts` 的 `NUDGE_CAPABILITIES`);宿主收到之后
+   * 让排空器重新查库。缺省时没有门铃 —— 定时器兜底,功能不受影响,只是慢一点。
+   */
+  readonly onStateChange?: () => void;
 }
 
 export type AssemblyFailure =
@@ -133,6 +141,7 @@ export function buildToolContext(
     newId: deps.newId ?? defaultNewId,
     ...(deps.memory !== undefined ? { memory: deps.memory } : {}),
     ...(deps.client !== undefined ? { client: deps.client } : {}),
+    ...(deps.onStateChange !== undefined ? { nudge: deps.onStateChange } : {}),
   } satisfies Omit<ToolRunContext, "project">;
 
   if (projectId === null) {

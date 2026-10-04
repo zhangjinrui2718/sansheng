@@ -34,6 +34,7 @@ import { CONTROL_TOOLS } from "./control.js";
 import { COLLAB_TOOLS } from "./collab.js";
 import { MEMORY_TOOLS } from "./memory.js";
 import { CLIENT_TOOLS } from "./client.js";
+import { NUDGE_CAPABILITIES } from "../runtime/dispatcher.js";
 import { fail, type PlatformTool, type ToolResult, type ToolRunContext } from "./types.js";
 
 /** 已实现的全部平台工具。BC2 / BC7 的工具在各自批次落地后并入这里。 */
@@ -165,13 +166,39 @@ export function dispatch(
   try {
     const r = tool.run(args, ctx);
     return r instanceof Promise
-      ? r.catch((err: unknown) =>
+      ? r.then((v) => ringNudge(v, tool.capability, ctx)).catch((err: unknown) =>
           fail("internal", err instanceof Error ? err.message : String(err)),
         )
-      : r;
+      : ringNudge(r, tool.capability, ctx);
   } catch (err) {
     return fail("internal", err instanceof Error ? err.message : String(err));
   }
+}
+
+/**
+ * **状态迁移的门铃**:一次可能改变流水线状态的调用**成功之后**,让排空器知道
+ * 「现在去查一下谁该动」。
+ *
+ * 它只挂在这一处(工具派发的唯一漏斗),因为散在十几个工具里迟早漏一个 ——
+ * 而漏掉的表现只是「这件事要等下一次定时器」,一个只在延迟上显形、极难归因的
+ * 偏差。清单与理由见 `runtime/dispatcher.ts` 的 `NUDGE_CAPABILITIES`。
+ *
+ * 门铃响不响**不影响工具结果**:它只是加速,排空器在库里重新判定。
+ */
+function ringNudge(
+  result: ToolResult,
+  capability: Capability,
+  ctx: ToolRunContext,
+): ToolResult {
+  if (result.ok !== true) return result;
+  if (ctx.nudge === undefined) return result;
+  if (!NUDGE_CAPABILITIES.includes(capability)) return result;
+  try {
+    ctx.nudge();
+  } catch {
+    // 门铃失败不该把一次成功的工具调用变成失败 —— 定时器会兜住
+  }
+  return result;
 }
 
 function implementedToolNames(): string[] {

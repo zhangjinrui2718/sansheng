@@ -59,6 +59,17 @@ export interface ToolRunContext {
    * 缺省时 `client.*` 工具会如实报装配错误。
    */
   readonly client?: ClientChannel;
+  /**
+   * **状态迁移的门铃**(排空器的触发点之一)。
+   *
+   * 一次可能改变流水线状态的工具调用成功之后,平台敲一下它 —— 含义只有一句:
+   * 「现在去查一下谁该动」。**它不携带任何状态** —— 谁该动永远由
+   * `runtime/dispatcher.ts` 的 `collectTodos` 重新查库决定,绝不接受
+   * 「刚才发生了什么」作为输入。
+   *
+   * 缺省(未注入,例如纯工具单测)时什么都不发生:门铃只是加速,定时器兜底。
+   */
+  readonly nudge?: () => void;
 }
 
 /**

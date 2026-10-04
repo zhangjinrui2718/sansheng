@@ -287,3 +287,118 @@ describe("012 接待会话重建(静默失败的三处守卫)", () => {
   });
 });
 
+
+/**
+ * 013 是**纯加法**(一个 ADD COLUMN + 两张新表),但「纯加法」这句话必须被验,
+ * 不能被相信 —— 批次 18 的事故正是一份看起来无害的 migration 静默删光了全部
+ * 会话消息(DROP TABLE 级联,`foreign_key_check` 一声不响)。
+ *
+ * 另外 `ALTER TABLE ... ADD COLUMN ... CHECK` 在 SQLite 上是否真的接受、
+ * CHECK 是否真的在拦,都不是注释能保证的事,所以这里逐条钉住。
+ */
+describe("013 排空器状态(一个 ADD COLUMN + 两张新表)", () => {
+  async function upTo012Then013() {
+    const Database = (await import("better-sqlite3")).default;
+    const db = new Database(":memory:");
+    db.pragma("foreign_keys = ON");
+    for (const f of FILES) {
+      if (f.version >= 13) break;
+      try {
+        db.exec(f.sql);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        if (f.version === 2 && /vec0|no such module/i.test(msg)) continue;
+        throw err;
+      }
+    }
+    db.exec(`INSERT INTO agents (id,role,specialization,display_name,created_at)
+             VALUES ('wk','worker','engineering','工人',1)`);
+    db.exec(`INSERT INTO projects (id,name,client,goal,status,created_at)
+             VALUES ('pj_1','语音机器人调研','甲方','目标','active',1)`);
+    db.exec(`INSERT INTO project_assignments (project_id,agent_id,added_at) VALUES ('pj_1','wk',1)`);
+    db.exec(`INSERT INTO project_sessions (id,project_id,created_at) VALUES ('s_1','pj_1',1)`);
+    db.exec(`INSERT INTO session_messages (id,session_id,agent_id,kind,content,created_at)
+             VALUES ('m_1','s_1',NULL,'user','甲方说的话',1)`);
+    db.exec(`INSERT INTO session_messages (id,session_id,agent_id,kind,content,created_at)
+             VALUES ('m_2','s_1','wk','assistant','工人说的话',2)`);
+    db.exec(`INSERT INTO works (id,project_id,parent_work_id,title,goal,status,assignee_agent_id,created_at,updated_at)
+             VALUES ('w_open','pj_1',NULL,'在跑','g','open','wk',1,1)`);
+    db.exec(`INSERT INTO works (id,project_id,parent_work_id,title,goal,status,assignee_agent_id,created_at,updated_at)
+             VALUES ('w_done','pj_1',NULL,'已完成','g','done','wk',1,1)`);
+    db.exec(`INSERT INTO artifacts (id,project_id,conversation_id,kind,status,author_agent_id,title,body,metadata_json,created_at,updated_at)
+             VALUES ('a_1','pj_1',NULL,'evidence','open','wk','证据','现场',NULL,1,1)`);
+    const m13 = FILES.find((f) => f.version === 13);
+    expect(m13, "013 迁移文件缺失").toBeDefined();
+    db.exec(m13!.sql);
+    return db;
+  }
+
+  it("不吃数据:消息 / 工作项 / 工件的行数与正文一字不少,外键无悬空", async () => {
+    const db = await upTo012Then013();
+    const count = (t: string) =>
+      (db.prepare(`SELECT COUNT(*) n FROM ${t}`).get() as { n: number }).n;
+    expect(count("session_messages")).toBe(2);
+    expect(count("project_sessions")).toBe(1);
+    expect(count("works")).toBe(2);
+    expect(count("artifacts")).toBe(1);
+    expect(
+      (db.prepare(`SELECT group_concat(content,'|') t FROM session_messages`).get() as { t: string }).t,
+    ).toBe("甲方说的话|工人说的话");
+    expect(db.pragma("foreign_key_check")).toEqual([]);
+    expect(db.pragma("integrity_check")[0]).toEqual({ integrity_check: "ok" });
+    expect(
+      (db.prepare(`SELECT COUNT(*) n FROM sqlite_master WHERE name LIKE '%\\_backup' ESCAPE '\\'`).get() as { n: number }).n,
+    ).toBe(0);
+    db.close();
+  });
+
+  it("新列与新表就位:review_state / dispatch_events / dispatch_attempts / 部分索引", async () => {
+    const db = await upTo012Then013();
+    const cols = (db.prepare(`PRAGMA table_info(works)`).all() as Array<{ name: string }>)
+      .map((c) => c.name);
+    expect(cols).toContain("review_state");
+    expect(
+      (db.prepare(`SELECT COUNT(*) n FROM works WHERE review_state = 'none'`).get() as { n: number }).n,
+    ).toBe(2);
+    for (const t of ["dispatch_events", "dispatch_attempts"]) {
+      expect(
+        (db.prepare(`SELECT COUNT(*) n FROM sqlite_master WHERE type='table' AND name=?`).get(t) as { n: number }).n,
+        `${t} 没建出来`,
+      ).toBe(1);
+    }
+    expect(
+      (db.prepare(`SELECT COUNT(*) n FROM sqlite_master WHERE type='index' AND name='idx_works_pending_review'`).get() as { n: number }).n,
+    ).toBe(1);
+    db.close();
+  });
+
+  it("已有的 done 工作项**不会**被凭空判成「等着审」(默认 none,不制造唤醒风暴)", async () => {
+    const db = await upTo012Then013();
+    const r = db.prepare(`SELECT review_state s FROM works WHERE id='w_done'`).get() as { s: string };
+    expect(r.s).toBe("none");
+    db.close();
+  });
+
+  it("两个 CHECK 真的在拦(review_state 与 dispatch_events.kind)", async () => {
+    const db = await upTo012Then013();
+    expect(() => db.exec(`UPDATE works SET review_state='whatever' WHERE id='w_open'`))
+      .toThrow(/CHECK/i);
+    expect(() =>
+      db.exec(`INSERT INTO dispatch_events (project_id,kind,subject_id,summary,created_at)
+               VALUES ('pj_1','work_exploded','w_open','x',1)`),
+    ).toThrow(/CHECK/i);
+    db.close();
+  });
+
+  it("dispatch_events 的 seq 单调自增(它是「这批事件的版本号」)", async () => {
+    const db = await upTo012Then013();
+    db.exec(`INSERT INTO dispatch_events (project_id,kind,subject_id,summary,created_at)
+             VALUES ('pj_1','work_done','w_done','「已完成」已完成',1)`);
+    db.exec(`INSERT INTO dispatch_events (project_id,kind,subject_id,summary,created_at)
+             VALUES ('pj_1','work_blocked','w_open','「在跑」受阻',2)`);
+    const seqs = (db.prepare(`SELECT seq FROM dispatch_events ORDER BY seq`).all() as Array<{ seq: number }>)
+      .map((r) => r.seq);
+    expect(seqs).toEqual([1, 2]);
+    db.close();
+  });
+});

@@ -209,16 +209,47 @@ const projectClose: PlatformTool = {
 
 // ── work_* ──────────────────────────────────────────────────────
 
+/**
+ * 负责人只能是 **worker**(执行角色)。
+ *
+ * ── 为什么在调用期拒收,而不是让它建出来 ─────────────────────────
+ *
+ * 真机现场:项目经理把「与甲方对齐业务场景」派给了 `business_manager`,
+ * 那条工作项至今 `open` —— 因为平台**只为 worker 执行工作项**
+ * (`runWorkItem.checkRunnable` 拒绝别的角色),而它也不会让「项目零工作项」
+ * 为真(项目里确实有工作项),于是它谁也不叫醒。
+ *
+ * `work_create` 的 `assigneeRole` 此前只是一个自由字符串(类型是 `Type.String`,
+ * 四个角色名只是**给模型看的提示**,不是约束),所以这条路是敞开的。
+ *
+ * 结构化拒绝 + 回灌合法值(8-F:拒绝必须让模型能据此自纠)。
+ * `work_assign` 走同一条判定 —— 设计 1 §3.3 明写「改派与分派走同一条解析路径」,
+ * 只堵创建那条,改派照样能把工作项变成没人能执行的孤儿。
+ */
+function requireExecutorRole(args: Readonly<Record<string, unknown>>): ToolResult | null {
+  const role = args["assigneeRole"];
+  if (role === "worker") return null;
+  return fail(
+    "invalid_args",
+    `负责人只能是执行角色 **worker**(收到「${String(role)}」)。` +
+      `工作项的意义就是被**执行**:business_manager / project_manager / quality_reviewer ` +
+      `都不执行工作项,平台也不会为他们唤醒执行(那条工作项会永远停在 open)。` +
+      `要请别的角色做一件事,用 ask_role 提问;要调度已有工作项,用 work_assign 改组内分工。`,
+    ["worker"],
+  );
+}
+
 const workCreate: PlatformTool = {
   name: "work_create",
   capability: "work.create",
   description:
-    "拆解出一个工作项并**指定负责人与依赖**。负责人必填 —— 没有主的工作项进度无从追问,所以 schema 层面就拒绝无主工作。开工前先 board_list 查重,重复拆解是最常见也最贵的失败。",
+    "拆解出一个工作项并**指定负责人与依赖**。负责人必填,而且只能是 **worker**(执行角色)—— " +
+    "business_manager / project_manager / quality_reviewer 都不执行工作项。开工前先 board_list 查重,重复拆解是最常见也最贵的失败。",
   parameters: Type.Object({
     projectId: Type.Optional(Type.String({ description: "缺省 = 当前项目" })),
     title: Type.String(),
     goal: Type.String({ description: "要产出什么 + 怎么算做完(可验证的判据)" }),
-    assigneeRole: Type.String({ description: "负责人角色:business_manager | project_manager | worker | quality_reviewer" }),
+    assigneeRole: Type.String({ description: "执行角色:只有 worker(别的角色不执行工作项)" }),
     assigneeSpec: Type.Optional(Type.String({ description: "worker 的细分:engineering | algorithm | data" })),
     dependsOn: Type.Optional(Type.Array(Type.String(), { description: "前置工作项 id" })),
     parentWorkId: Type.Optional(Type.String({ description: "父工作项(做工作分解树时给)" })),
@@ -231,6 +262,8 @@ const workCreate: PlatformTool = {
     if (!title.ok) return title.result;
     const goal = requireString(args, "goal");
     if (!goal.ok) return goal.result;
+    const roleError = requireExecutorRole(args);
+    if (roleError !== null) return roleError;
 
     const resolved = resolveAssignee(
       ctx.db, pid, args["assigneeRole"], args["assigneeSpec"],
@@ -310,10 +343,11 @@ const workAssign: PlatformTool = {
   name: "work_assign",
   capability: "work.assign",
   description:
-    "改派工作项。与 work_create 走同一套负责人解析,所以改派也会做歧义检查 —— 不会因为「改派是个小操作」就绕过它。",
+    "改派工作项。与 work_create 走同一套负责人解析与同一条约束:目标必须是 **worker** —— " +
+    "改派给不执行工作项的角色,等于把它变成没人能跑的孤儿。",
   parameters: Type.Object({
     workId: Type.String(),
-    assigneeRole: Type.String(),
+    assigneeRole: Type.String({ description: "执行角色:只有 worker" }),
     assigneeSpec: Type.Optional(Type.String()),
     reason: Type.Optional(Type.String()),
   }),
@@ -323,6 +357,8 @@ const workAssign: PlatformTool = {
     const found = loadWorkOrFail(ctx, workId.value);
     if (isToolResult(found)) return found;
     const w = getWork(ctx.db, workId.value)!;
+    const roleError = requireExecutorRole(args);
+    if (roleError !== null) return roleError;
 
     const resolved = resolveAssignee(ctx.db, w.projectId, args["assigneeRole"], args["assigneeSpec"]);
     if (!resolved.ok) {
