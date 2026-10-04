@@ -1,9 +1,70 @@
 # Sansheng 项目交接包
 
-**生成时间**:2026-10-03 CST · **v8.0**(批次 7-O harness 写面 + 8-A/8-B/8-C/8-D 角色职能核查迭代)
-**上一版**:v7.2(批次 7-L:worker 升级先问沟通员 + 沟通员判断轮),见下。
+**生成时间**:2026-10-03 CST · **v9.0**(平台侧全量新建:BC0–BC7 + 工具层 + 接线,9 个批次)
+**上一版**:v8.0(批次 7-O harness 写面 + 8-A…8-D 角色职能核查迭代),见下。
 **适用**:下一会话(主对话 / worker)开盒即读
-**配套阅读**:`/root/projects/sansheng/PLAN.md`(v5 集成版),`/root/projects/sansheng/ARCHITECTURE.md`(12 层模块图,v6.4 新增),`/root/.pi/agent/memory/MEMORY.md`(长期偏好 + 教训)
+**配套阅读**:`docs/DESIGN-PLATFORM.md`(目标架构)· `docs/DESIGN-AGENTS.md`(四个角色与 harness 配置)· `docs/ADR-001-harness-wiring.md`(接线决策与欠账)· `docs/TROUBLESHOOTING.md` · `ARCHITECTURE.md`(旧系统 12 层图,**描述的是被替换的那套**)
+
+> **v9.0 · 平台侧全量新建(2026-10-03 晚 → 10-04,DSH 会话,9 个批次)**
+>
+> **用户两句话定了整件事的走向**:「我们不要小修小补了,做一个全面的项目架构升级」「完全新建没问题的」。
+>
+> **核心反转:组织架构从「提示词台词 + 硬编码调用链」变成一等数据。**
+> 工具 = 能力 × 作用域;「甲方只与业务经理交互」由 `ROLE_SPECS.clientFacing` 机械保证,
+> 不再是提示词里的自觉 —— 那是 7-B / 7-L 两次「提示词在骗人」的正面修复。
+>
+> **九个批次**(全部已推送,`dfc428a` → 见 git log):
+> 1. `fe3dd47` BC0 RoleSpec + BC5 三重门控求解器
+> 2. `f04e026` BC0+BC1 schema 与仓储(agents / projects / assignments / works / deps)
+> 3. `7b3cf1d` BC3 Blackboard + BC4 ChangeControl
+> 4. `7083618` 工具层与派发器(21 工具)
+> 5. `5a78107` BC2 协作(7-L 升级链 + 会议 + 会话)
+> 6. `7b2bb75` BC7 记忆(MemoryPort 端口 + bigram 检索)
+> 7. `1ed35eb` 甲方接口(ClientChannel 端口)+ 待办注入面
+> 8. `5bfe9ca` **Harness 接线**(assembly / sdkAdapter / session)
+> 9. 本批:**CLI 入口**(`sansheng platform smoke`)+ 提示词装配(7-B 死接线守卫)
+>
+> **现状(可验证)**:`npm test` **1195 passed | 1 skipped(100 files)** · typecheck 0 · build OK ·
+> `npm run check:design` E1–E13 全绿 · `grep -rn 'as any' src/` = 0。
+> 平台侧 `src/platform/**` 27 文件 ~6500 行,测试 13 文件 ~5000 行。
+>
+> **接线在真模型下已验证**(minimax-cn/MiniMax-M3):
+> ```
+> $ node dist/src/cli/index.js platform smoke --role business_manager -p "..."
+>   工具面 26 个 | 统一 allowlist 26 | customTools 26
+>   SDK 实际激活 26 === 我们声明 26  ✓ 完全一致 —— 接线成立
+>   回答:我是 Sansheng 项目的业务经理,也是项目里唯一直接对接你的角色……
+> ```
+>
+> **这一路抓到的四个真问题**(都不是"小修小补",是设计缺陷):
+> - **表名撞车**:009 用 `conversations`/`messages`,而 001 早占了这两个名字。`CREATE TABLE IF NOT EXISTS` 撞名时**静默无操作**,新表根本没建,报错落在下游索引上 —— 167 个测试一起红而错误信息与根因无关。修法是改名 + 立不变量(`tests/platform/migrations.test.ts`,已用注入撞名反向验证会红)。同理 010 的 `fragments`/`user_profile` 改名 `memory_*`。
+> - **授权粒度过宽**:按能力授权会让 `allow:["board_list"]` 连带授予 `board_read`(按 id 读任意工件正文)—— 用户没要的权限。改成工具级。
+> - **`tools` 是统一 allowlist**:查证 `agent-session.js:2496` 的 `isAllowedTool` 对 builtin 与 customTools **同时过滤**。首跑冒烟传 `tools:[]` 得到 **0 个激活** —— 被真机不变式当场抓住。改成「统一名单 + customTools 实现」。
+> - **提示词死接线(7-B 同款复发)**:`promptUnits` 算了却从没送达模型,业务经理自称「AI 编码助手」。修法是 `composeSystemPrompt` + `DefaultResourceLoader.appendSystemPromptOverride` + **显式 `reload()`**(外部传入时 SDK 不代为 reload)。
+>
+> **关键设计决定**(详见两份设计文档与 ADR):
+> - 角色是**全局的人**(BC0),`clientFacing` 是代码内常量 —— 结构上不存在被数据篡改的路径
+> - **横向沟通自由 + 纵向 escalate 受控**(目标是平台计算,模型不能指定)
+> - **求解期 / 调用期两阶段门控**:`kind` 与 `target` 是调用参数,塞进求解期会得到假门
+> - 保持**工件通道**,不退回阻塞 RPC(`MessageBus` 待删)
+> - agent 不再交 `{outcome}` 让框架猜,改为直接调 `board_write` —— 对 7-D/7-M/7-N「信封偏差」三连的结构性解法
+> - 三条端口让外部依赖可替换:`MemoryPort` / `ClientChannel` / `createSession`(测试 seam)
+>
+> **欠账(如实标注,非遗漏)**:
+> - **12 个提示词单元尚未写出**。角色简报是机械生成的(已生效),但 `business_manager.core` 等 12 个单元内容为空 —— 冒烟会如实打印「声明了但盘上没有」。这是**行为设计**,该由用户过目。
+> - **调度器缺席**:`listOverdueAsks` / `expireAsk` 有实现无调用方。注入文本里已对 agent 明说「当前没有调度器」,链路不会静默死掉。
+> - **待办注入面有了但没接进回合**:`runtime/pendingWork.ts` 是纯函数且已测,但「谁来调用它并把文本拼进 system prompt」属运行时装配,尚未接。
+> - **阶段 7 / 8 未做**:BC6 执行层(`board_write` 取代 outcome 硬编码解析)、清场(DROP 旧表 + 删旧模块与其测试)。
+>
+> **旧系统状态**:`src/server/**` 一行未动,继续服务旧角色与旧工具名。新旧并存于同一个 SQLite(新表见 007–010)。删旧的时机是阶段 8。
+>
+> **跑一下看**:
+> ```
+> npm test                      # 1195 passed
+> npm run check:design          # 设计文档一致性 E1–E13
+> node dist/src/cli/index.js platform smoke   # 真模型接线验证
+> ```
+
 > **v8.0 · 批次 7-O + 8(2026-10-03 晚,DSH 会话,用户两连问)**:**第一问「在 harness 中能对每个 agent 的 prompt 和 tools 做管理」,第二问「按每个 agent 的角色职能做 checklist,查期望与代码的 gap,做一次大的技术迭代」。**
 > - **7-O harness 写面**:`src/server/harness/apply.ts`(唯一写盘点:备份 → 原子写 → 回读)+ facet 的可选 `apply?`/`detail?` + `http/harnessRoutes.ts`(GET 详情 / PUT 写入 / POST reset 需 confirm)+ Harness 页编辑器。测试 `tests/server/harness-apply.test.ts` 31 个。
 > - **核查报告**:`docs/AGENT-AUDIT-2026-10-03.md` —— 逐角色 checklist(9 个角色 + 横向 6 项)、可复现实证脚本、gap 汇总、批次 8 方案。**主结论:最会说话的 agent 工具是真的,最该动手干活的 agent 工具是假的。**

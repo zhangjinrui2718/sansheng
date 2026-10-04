@@ -22,7 +22,7 @@ import {
 } from "../../src/platform/storage/repo/projects.js";
 import { SqliteMemory } from "../../src/platform/memory/sqliteMemory.js";
 import { createPlatformSession, type CreateSessionFn } from "../../src/platform/runtime/session.js";
-import { splitToolset } from "../../src/platform/runtime/sdkAdapter.js";
+import { classifyToolset } from "../../src/platform/runtime/sdkAdapter.js";
 import { planAgentSession, type RuntimeDeps } from "../../src/platform/runtime/assembly.js";
 import { TOOL_INDEX } from "../../src/platform/tools/registry.js";
 import type { ProjectRole, Specialization } from "../../src/platform/identity/role.js";
@@ -88,31 +88,36 @@ describe("createPlatformSession · 接线成功路径", () => {
     const r = await createPlatformSession(deps, ids.wk, "p1", { ...OPTS, createSession: fakeSdk(cap) });
     if (!r.ok) throw new Error(r.detail);
 
-    const handedOver = [...r.wiring.allowlist, ...r.wiring.customToolNames].sort();
-    expect(handedOver).toEqual([...r.plan.tools].sort());
+    // 统一 allowlist 必须等于求解结果
+    expect([...r.wiring.allowlist].sort()).toEqual([...r.plan.tools].sort());
     // 与真正交给 SDK 的东西一致(不是我们自己算的另一份)
-    expect([...(cap.opts?.tools ?? []), ...(cap.opts?.customTools ?? []).map((t) => t.name)].sort())
-      .toEqual([...r.plan.tools].sort());
+    expect([...(cap.opts?.tools ?? [])].sort()).toEqual([...r.plan.tools].sort());
   });
 
-  it("SDK 内置进 allowlist,平台工具进 customTools(混了就静默失效)", async () => {
+  it("**allowlist 是统一名单**(只放内置会把 customTools 一起关掉)", async () => {
     const cap: Capture = { opts: null };
     const r = await createPlatformSession(deps, ids.wk, "p1", { ...OPTS, createSession: fakeSdk(cap) });
     if (!r.ok) throw new Error(r.detail);
 
-    // worker 有 code.* → 内置通道里该有 read / bash
+    // SDK 的 isAllowedTool 对 builtin 与 customTools **同时**过滤:
+    //   const isAllowedTool = (name) => (!allowedToolNames || allowedToolNames.has(name)) && ...
+    // 所以 allowlist 必须含平台工具,否则它们被一起关掉 —— 首跑冒烟实测 0 个激活。
     expect(r.wiring.allowlist).toContain("read");
     expect(r.wiring.allowlist).toContain("bash");
-    expect(r.wiring.allowlist).not.toContain("board_write");
-
-    // 平台工具不该出现在 allowlist 里(SDK 认不出那些名字)
+    expect(r.wiring.allowlist, "平台工具也必须在 allowlist 里").toContain("board_write");
+    // customTools 里的每个名字都必须在 allowlist 里,否则注册了也不会激活
     for (const t of r.wiring.customToolNames) {
-      expect(r.wiring.allowlist, `${t} 不该混进 SDK 内置通道`).not.toContain(t);
+      expect(r.wiring.allowlist, `${t} 注册了但不在 allowlist 里 → 不会激活`).toContain(t);
     }
-    // 反之亦然
-    for (const t of r.wiring.allowlist) {
-      expect(r.wiring.customToolNames).not.toContain(t);
-    }
+  });
+
+  it("allowlist 与 customTools 的差集正好是 SDK 内置", async () => {
+    const r = await createPlatformSession(deps, ids.wk, "p1", { ...OPTS, createSession: fakeSdk({ opts: null }) });
+    if (!r.ok) throw new Error(r.detail);
+    const custom = new Set(r.wiring.customToolNames);
+    const builtinOnly = r.wiring.allowlist.filter((t) => !custom.has(t));
+    // worker 的 code.write → edit / write,所以是 7 个而非 6 个
+    expect(builtinOnly.sort()).toEqual(["bash", "edit", "find", "grep", "ls", "read", "write"]);
   });
 
   it("customTools 带齐元数据(label / description / parameters / promptSnippet)", async () => {
@@ -180,17 +185,19 @@ describe("createPlatformSession · 失败路径都是结构化的", () => {
   });
 });
 
-describe("splitToolset · 分道的单元契约", () => {
-  it("把 SDK 内置与平台工具分开", () => {
-    const s = splitToolset(["read", "bash", "board_write", "memory_search"]);
-    expect(s.builtinAllowlist.sort()).toEqual(["bash", "read"]);
+describe("classifyToolset · 分道的单元契约", () => {
+  it("按来源分类,并拼出统一 allowlist", () => {
+    const s = classifyToolset(["read", "bash", "board_write", "memory_search"]);
+    expect([...s.builtinTools].sort()).toEqual(["bash", "read"]);
     expect(s.platformTools.map((t) => t.name).sort()).toEqual(["board_write", "memory_search"]);
     expect(s.unplaceable).toEqual([]);
+    // 统一名单 = 两类全都要(SDK 对 builtin 与 customTools 同时过滤)
+    expect([...s.unifiedAllowlist].sort()).toEqual(["bash", "board_write", "memory_search", "read"]);
   });
 
   it("**放不进任何通道的工具被如实报出** —— 那是 8-A 的形态", () => {
     // 现实中不该发生(solveToolset 只产出闭合集里的名字),但守卫要能拦住
-    const s = splitToolset(["read", "nonexistent_tool"]);
+    const s = classifyToolset(["read", "nonexistent_tool"]);
     expect(s.unplaceable).toEqual(["nonexistent_tool"]);
   });
 
@@ -198,7 +205,7 @@ describe("splitToolset · 分道的单元契约", () => {
     for (const key of ["bm", "pm", "wk", "qa"] as const) {
       const r = planAgentSession(deps, ids[key]!, "p1");
       if (!r.ok) throw new Error(r.detail);
-      const s = splitToolset(r.plan.tools);
+      const s = classifyToolset(r.plan.tools);
       expect(s.unplaceable, `${key} 有放不进去的工具`).toEqual([]);
     }
   });
@@ -250,13 +257,24 @@ describe("不变式 · 交出去的工具必须都有实现", () => {
     }
   });
 
-  it("交出去的 allowlist 全是 SDK 内置(SDK 认不出别的名字)", async () => {
+  it("**allowlist 里每个平台工具都注册了 customTools**,SDK 内置则不该注册", async () => {
+    // 反过来断言的形态:统一 allowlist 里既有内置也有平台,所以不能再说「全是内置」。
+    // 真正该守的不变式是「注册了就必须在名单里,反之名单里的非内置必须有注册」——
+    // 漏一边就是静默失效(注册了不激活 / 激活了没实现)。
     const SDK_BUILTINS = new Set(["read", "grep", "find", "ls", "edit", "write", "bash", "powershell"]);
     for (const key of ["bm", "pm", "wk", "qa"] as const) {
       const r = await createPlatformSession(deps, ids[key]!, "p1", { ...OPTS, createSession: fakeSdk({ opts: null }) });
       if (!r.ok) throw new Error(r.detail);
+      const custom = new Set(r.wiring.customToolNames);
       for (const name of r.wiring.allowlist) {
-        expect(SDK_BUILTINS.has(name), `${key}:allowlist 里的 ${name} 不是 SDK 内置工具`).toBe(true);
+        if (SDK_BUILTINS.has(name)) {
+          expect(custom.has(name), `${key}:${name} 是 SDK 内置,不该注册成 customTool`).toBe(false);
+        } else {
+          expect(custom.has(name), `${key}:名单里的 ${name} 没有 customTools 实现 → 会静默失效`).toBe(true);
+        }
+      }
+      for (const name of r.wiring.customToolNames) {
+        expect(r.wiring.allowlist, `${key}:注册了 ${name} 但不在名单里 → 不会激活`).toContain(name);
       }
     }
   });

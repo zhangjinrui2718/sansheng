@@ -28,7 +28,7 @@ import { SqliteMemory } from "../../src/platform/memory/sqliteMemory.js";
 import {
   buildToolContext, planAgentSession, type RuntimeDeps,
 } from "../../src/platform/runtime/assembly.js";
-import { toSdkTools, paramNames, adapterToolNames, splitToolset } from "../../src/platform/runtime/sdkAdapter.js";
+import { toSdkTools, paramNames, adapterToolNames, classifyToolset } from "../../src/platform/runtime/sdkAdapter.js";
 import { solveToolset } from "../../src/platform/harness/authorize.js";
 import {
   dispatch, TOOL_INDEX, ALL_PLATFORM_TOOLS, notYetBuiltToolNames,
@@ -159,14 +159,14 @@ describe("不变式 · 求解出的工具必须在池子里(8-A 同款防线)", 
     it(`${role}:求解出的每个工具都**有归属**`, () => {
       const r = planAgentSession(deps, ids[role === "worker" ? "wk" : role === "business_manager" ? "bm" : role === "project_manager" ? "pm" : "qa"]!, "p1");
       if (!r.ok) throw new Error(`规划失败:${r.detail}`);
-      const split = splitToolset(r.plan.tools);
+      const split = classifyToolset(r.plan.tools);
       expect(
         split.unplaceable,
         "求解给了工具面,但两条通道都放不进去 —— 这正是 8-A「声称有、实际没有」的形态。" +
           "模型会调用不存在的工具,然后编造结果",
       ).toEqual([]);
       // 拆出来的两半必须正好覆盖求解结果,不多不少
-      expect([...split.builtinAllowlist, ...split.platformTools.map((t) => t.name)].sort())
+      expect([...split.builtinTools, ...split.platformTools.map((t) => t.name)].sort())
         .toEqual([...r.plan.tools].sort());
     });
   }
@@ -174,12 +174,12 @@ describe("不变式 · 求解出的工具必须在池子里(8-A 同款防线)", 
   it("SDK 内置与平台工具被正确地分开(混了会静默失效)", () => {
     const r = planAgentSession(deps, ids.wk, "p1");
     if (!r.ok) throw new Error(r.detail);
-    const split = splitToolset(r.plan.tools);
-    // worker 有 code.* → 内置通道里该有 read/bash
-    expect(split.builtinAllowlist).toContain("read");
-    expect(split.builtinAllowlist).toContain("bash");
-    // 而平台工具不该混进内置通道
-    expect(split.builtinAllowlist).not.toContain("board_write");
+    const split = classifyToolset(r.plan.tools);
+    // worker 有 code.* → 内置类里该有 read/bash
+    expect(split.builtinTools).toContain("read");
+    expect(split.builtinTools).toContain("bash");
+    // 而平台工具不该混进内置类
+    expect(split.builtinTools as readonly string[]).not.toContain("board_write");
     // 反之亦然
     expect(split.platformTools.map((t) => t.name)).not.toContain("read");
     expect(split.platformTools.map((t) => t.name)).toContain("board_write");
@@ -200,13 +200,13 @@ describe("适配壳 · 名字集合必须与求解结果完全一致", () => {
       const ctx = buildToolContext(deps, ids[key]!, "p1");
       if (!ctx.ok) throw new Error(ctx.detail);
 
-      // 真实的会话工厂走 splitToolset:内置进 allowlist,平台工具进 customTools
-      const split = splitToolset(planned.plan.tools);
+      // 真实的会话工厂走 classifyToolset:内置进 allowlist,平台工具进 customTools
+      const split = classifyToolset(planned.plan.tools);
       const sdkTools = toSdkTools(split.platformTools, (tool, args) => dispatch(tool.name, args, ctx.ctx), () => ctx.ctx);
 
       // 两条通道合起来必须正好等于求解结果 —— 不多给也不少给
       expect(
-        [...split.builtinAllowlist, ...sdkTools.map((t) => t.name)].sort(),
+        [...split.builtinTools, ...sdkTools.map((t) => t.name)].sort(),
       ).toEqual([...planned.plan.tools].sort());
       expect(sdkTools.length).toBe(split.platformTools.length);
       expect(adapterToolNames(split.platformTools).sort())
@@ -239,9 +239,9 @@ describe("假 SDK 契约测试 · 装配 → 调用 → 结果 全链", () => {
     if (!planned.ok) throw new Error(planned.detail);
     const c = buildToolContext(deps, agentId, "p1");
     if (!c.ok) throw new Error(c.detail);
-    const tool = splitToolset(planned.plan.tools).platformTools.find((t) => t.name === toolName);
+    const tool = classifyToolset(planned.plan.tools).platformTools.find((t) => t.name === toolName);
     if (!tool) throw new Error(`${toolName} 不在 ${agentId} 的工具面里(或它不是平台工具)`);
-    const [def] = toSdkTools([tool], (t, a) => dispatch(t.name, a, c.ctx), () => c.ctx);
+    const [def] = toSdkTools([tool], (t, a) => dispatch(t.name, a, c.ctx));
     // 按 SDK 的真实签名调用:execute(toolCallId, params, signal, onUpdate, ctx)
     const res = await def!.execute(
       "call_1", args, undefined, undefined,
@@ -302,7 +302,7 @@ describe("假 SDK 契约测试 · 装配 → 调用 → 结果 全链", () => {
     const c = buildToolContext(deps, ids.wk, "p1");
     if (!c.ok) throw new Error(c.detail);
     const sdkTools = toSdkTools(
-      splitToolset(r.plan.tools).platformTools,
+      classifyToolset(r.plan.tools).platformTools,
       (t, a) => dispatch(t.name, a, c.ctx),
       () => c.ctx,
     );

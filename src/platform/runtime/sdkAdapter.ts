@@ -124,32 +124,38 @@ export function adapterToolNames(tools: readonly PlatformTool[]): ToolName[] {
 
 // ── 两条通道的分界 ──────────────────────────────────────────────
 
-export interface SdkTooling {
-  /** 交给 `createAgentSession({ tools })` 的 allowlist —— SDK 内置工具 */
-  readonly builtinAllowlist: readonly SdkToolName[];
-  /** 交给 `createAgentSession({ customTools })` 的平台工具(已解析好定义) */
+export interface ClassifiedToolset {
+  /** SDK 内置工具(由 Pi 实现,只需进 allowlist) */
+  readonly builtinTools: readonly SdkToolName[];
+  /** 平台工具(需要 customTools 注册实现) */
   readonly platformTools: readonly PlatformTool[];
   /**
-   * 求解结果里有、但两个通道都放不进去的工具。
+   * 求解结果里有、但两个来源都归不进去的工具。
    * **必须为空** —— 非空意味着「工具面声称有,实际交不出去」,正是 8-A 的形态。
    */
   readonly unplaceable: readonly ToolName[];
+  /**
+   * 交给 `createAgentSession({ tools })` 的**统一 allowlist** —— 内置 + 平台全都在里面。
+   *
+   * 不能只放内置:那会把 customTools 一起关掉(见文件头 ①)。
+   */
+  readonly unifiedAllowlist: readonly ToolName[];
 }
 
 /**
- * 把求解出的工具面拆成两条通道。
+ * 把求解出的工具面按来源分类,并拼出那份统一 allowlist。
  *
- * 这是**唯一**该做这个判断的地方 —— 会话工厂按名字自己猜(「read 大概是内置吧」)
- * 是这类 bug 的温床:SDK 的工具名是闭合集,而平台的也是,猜错的那个会静默失踪。
+ * 这是**唯一**该做这个判断的地方 —— 会话工厂按名字自己猜是这类 bug 的温床:
+ * 两边的工具名都是闭合集,猜错的那个会静默失踪。
  */
-export function splitToolset(tools: readonly ToolName[]): SdkTooling {
-  const builtinAllowlist: SdkToolName[] = [];
+export function classifyToolset(tools: readonly ToolName[]): ClassifiedToolset {
+  const builtinTools: SdkToolName[] = [];
   const platformTools: PlatformTool[] = [];
   const unplaceable: ToolName[] = [];
 
   for (const t of tools) {
     if (isSdkToolName(t)) {
-      builtinAllowlist.push(t);
+      builtinTools.push(t);
       continue;
     }
     const def = TOOL_INDEX.get(t);
@@ -157,5 +163,8 @@ export function splitToolset(tools: readonly ToolName[]): SdkTooling {
     else unplaceable.push(t);
   }
 
-  return { builtinAllowlist, platformTools, unplaceable };
+  // 统一名单的**顺序与来源无关**,但必须完整覆盖求解结果 ——
+  // 少一个就静默失踪,多一个就未声明越权
+  const unifiedAllowlist: ToolName[] = [...builtinTools, ...platformTools.map((t) => t.name)];
+  return { builtinTools, platformTools, unplaceable, unifiedAllowlist };
 }

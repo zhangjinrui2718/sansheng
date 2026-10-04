@@ -26,23 +26,29 @@
  * 就能断言「到底把什么交给了 SDK」而**不需要 provider / API key / 网络**。
  * 这是本项目吃过亏的地方(5 个 E2E blocker 至今只有 fakeLlmCall 验证)。
  */
-import { createAgentSession, type AgentSession } from "@earendil-works/pi-coding-agent";
+import {
+  createAgentSession, DefaultResourceLoader,
+  type AgentSession, type ResourceLoader,
+} from "@earendil-works/pi-coding-agent";
 import type { Model } from "@earendil-works/pi-ai";
 
 /**
+ * 平台侧的模型类型别名。**只在这一处定义。**
+ *
  * SDK 自己的签名就是 `model?: Model<any>`(`CreateAgentSessionOptions` 原文)——
  * 因为 `Model` 的泛型参数 `constraint Api` 在跨 provider 场景下无法收窄。
+ * 这里照抄 SDK 的形状,不自己发明一个更窄的类型。
  *
- * 这里照抄 SDK 的形状,不自己发明一个更窄的类型。注意这是**类型参数**,
- * 不是类型断言 —— 项目禁止的是后者(那条检查仍为 0)。
+ * 注意这是**类型参数**,不是类型断言 —— 项目禁止的是后者(那条检查仍为 0)。
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-type AnyModel = Model<any>;
+export type PlatformModel = Model<any>;
 import {
   buildToolContext, planAgentSession,
   type AgentSessionPlan, type RuntimeDeps,
 } from "./assembly.js";
-import { splitToolset, toSdkTools } from "./sdkAdapter.js";
+import { classifyToolset, toSdkTools } from "./sdkAdapter.js";
+import { composeSystemPrompt } from "./promptAssembly.js";
 import { dispatch } from "../tools/registry.js";
 
 /** `createAgentSession` 的最小结构类型 —— 只声明我们用到的字段,便于注入假货。 */
@@ -50,7 +56,7 @@ export interface CreateSessionFn {
   (opts: {
     cwd?: string;
     agentDir?: string;
-    model?: AnyModel;
+    model?: PlatformModel;
     tools?: string[];
     customTools?: ReturnType<typeof toSdkTools>;
   }): Promise<{ session: AgentSession }>;
@@ -62,9 +68,16 @@ export interface PlatformSessionOptions {
   /** Pi 全局配置目录 */
   readonly agentDir: string;
   /** 已解析的模型 */
-  readonly model?: AnyModel;
+  readonly model?: PlatformModel;
   /** 测试 seam:替换真实 SDK 调用 */
   readonly createSession?: CreateSessionFn;
+  /**
+   * 数据目录 —— 提示词单元从这里读(`harness/system_prompts/{unitId}.md`)。
+   * 缺省不注入提示词,并把「未注入」如实报进 wiring。
+   */
+  readonly dataDir?: string;
+  /** 测试 seam:替换 resourceLoader 构造(避免真读盘 + reload) */
+  readonly makeResourceLoader?: (systemPrompt: string) => Promise<ResourceLoader>;
 }
 
 export type PlatformSessionFailure =
@@ -81,6 +94,14 @@ export type PlatformSessionResult =
       readonly wiring: {
         readonly allowlist: readonly string[];
         readonly customToolNames: readonly string[];
+        /**
+         * 真正送进系统提示的提示词单元。
+         * **这两个字段是 7-B 那一课的守卫** —— 当时提示词「落地了但没人读」,
+         * 而没有任何东西报出这件事。
+         */
+        readonly loadedPromptUnits: readonly string[];
+        readonly missingPromptUnits: readonly string[];
+        readonly systemPromptChars: number;
       };
     }
   | PlatformSessionFailure;
@@ -104,8 +125,8 @@ export async function createPlatformSession(
   }
   const plan = planned.plan;
 
-  // 2. 分道
-  const split = splitToolset(plan.tools);
+  // 2. 分类 + 拼统一 allowlist
+  const split = classifyToolset(plan.tools);
   if (split.unplaceable.length > 0) {
     // 这一条必须硬失败:工具面声称有、但两条通道都放不进去 = 8-A 的形态。
     // 放行的话模型会看到不存在的工具,然后编造。
@@ -134,16 +155,50 @@ export async function createPlatformSession(
     return dispatch(tool.name, args, c.ctx);
   });
 
+  // 3.5 提示词装配 —— **这一步不能省**。
+  //     首跑冒烟时业务经理自称「AI 编码助手」,因为单元算出来了却没送达模型;
+  //     那正是 7-B 的「死接线」形态。promptUnits 只有在真的拼进系统提示之后
+  //     才算数。
+  let resourceLoader: ResourceLoader | undefined;
+  let loadedPromptUnits: string[] = [];
+  let missingPromptUnits: string[] = [];
+  let systemPromptChars = 0;
+  if (opts.dataDir !== undefined) {
+    const composed = composeSystemPrompt(opts.dataDir, plan.agent.role);
+    loadedPromptUnits = [...composed.loadedUnits];
+    missingPromptUnits = [...composed.missingUnits];
+    systemPromptChars = composed.text.length;
+    if (composed.text.trim() !== "") {
+      if (opts.makeResourceLoader !== undefined) {
+        resourceLoader = await opts.makeResourceLoader(composed.text);
+      } else {
+        const loader = new DefaultResourceLoader({
+          cwd: opts.cwd,
+          agentDir: opts.agentDir,
+          // **append 语义**:保留 SDK 默认的 preamble / 工具说明 / 规则段,
+          // 只把角色提示追加在其后。整体替换会丢掉 SDK 自己那份工具协议说明,
+          // 而 8-F 的教训正是「工具协议段必须渲染参数清单」。
+          appendSystemPromptOverride: (base: readonly string[]) => [...base, composed.text],
+        });
+        // 外部传入 resourceLoader 时 SDK **不代为 reload**(它只 reload 自建的)
+        // —— 不显式 reload 的话提示词不会生效,又是一个静默死接线。
+        await loader.reload();
+        resourceLoader = loader;
+      }
+    }
+  }
+
   // 4. 建会话
   const create = opts.createSession ?? createAgentSession;
   const created = await create({
     cwd: opts.cwd,
     agentDir: opts.agentDir,
+    ...(resourceLoader !== undefined ? { resourceLoader } : {}),
     ...(opts.model !== undefined ? { model: opts.model } : {}),
-    // 两条通道各归各位:内置进 allowlist,平台工具进 customTools。
-    // **必须同时给**:只给 tools 会让平台工具缺席,只给 customTools 会让
-    // SDK 内置被关掉(给了 allowlist 就只启用名单内的)。
-    tools: [...split.builtinAllowlist],
+    // `tools` 是**统一 allowlist**(内置 + 平台)。
+    // **不能只放内置** —— SDK 的 isAllowedTool 同时对 customTools 过滤,
+    // 只放内置等于把平台工具一起关掉(首跑冒烟实测 0 个激活)。
+    tools: [...split.unifiedAllowlist],
     customTools,
   });
 
@@ -152,8 +207,11 @@ export async function createPlatformSession(
     session: created.session,
     plan,
     wiring: {
-      allowlist: [...split.builtinAllowlist],
+      allowlist: [...split.unifiedAllowlist],
       customToolNames: customTools.map((t) => t.name),
+      loadedPromptUnits,
+      missingPromptUnits,
+      systemPromptChars,
     },
   };
 }
