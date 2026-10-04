@@ -19,7 +19,7 @@
 import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { allMigrations, MIGRATIONS_DIR } from "../storage/_migrations.js";
+import { allMigrations, MIGRATIONS_DIR } from "./_migrations.js";
 
 const FILES = allMigrations(MIGRATIONS_DIR).map((m) => ({
   version: m.version,

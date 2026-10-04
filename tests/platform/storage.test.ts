@@ -95,12 +95,22 @@ describe("migration 007 · 表就位", () => {
     expect(row?.name).toBe("platform_core");
   });
 
-  it("旧表仍在(并存而非替换)", () => {
+  it("旧表已被 011 删除(清场已完成)", () => {
+    // 这条断言在批次 15 之前是反过来的:「旧表仍在(并存而非替换)」。
+    // 并存期是刻意的过渡设计(每完成一个 BC 就删它替代掉的旧模块),而清场
+    // 就是那个过渡的终点。现在断言的是终点状态。
+    //
+    // 保留这条而不是删掉它,是因为「旧表有没有真的清掉」是清场是否完成的
+    // 唯一机器可查的证据 —— 删了断言就只剩一句「我删过了」。
     const rows = db
       .prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name IN
-                ('conversations','messages','fragments','agent_states','blackboards')`)
+                ('conversations','messages','fragments','agent_states','blackboards',
+                 'user_profile','fragments_vec')`)
       .all() as Array<{ name: string }>;
-    expect(rows.length, "007 不该删掉任何旧表 —— 那是最后阶段的事").toBe(5);
+    expect(
+      rows.map((r) => r.name),
+      "旧系统的表还在 —— 011_drop_legacy.sql 没生效,或它没被读到",
+    ).toEqual([]);
   });
 
   it("外键是开着的(SQLite 默认 OFF,忘了开 pragma 则 REFERENCES 全形同虚设)", () => {

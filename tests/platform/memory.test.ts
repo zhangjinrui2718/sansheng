@@ -80,8 +80,9 @@ describe("BC7 schema", () => {
     const names = rows.map((r) => r.name).sort();
     expect(names).toContain("memory_fragments");
     expect(names).toContain("memory_profile");
-    // 旧表仍在(并存),但平台不碰它们
-    expect(names, "旧 fragments 表还该在(阶段 8 才删)").toContain("fragments");
+    // 旧 `fragments` 表已被 011 清场删除 —— 平台用的是 memory_fragments。
+    // (这条断言在清场前是反过来的:「旧表还该在」。)
+    expect(names, "旧 fragments 表还在 —— 011_drop_legacy.sql 没生效").not.toContain("fragments");
   });
 
   it("content 非空由 schema 强制", () => {
