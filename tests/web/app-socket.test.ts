@@ -1,26 +1,22 @@
 /**
- * Sansheng 前端 App 级 socket 单例单测(批次 3 F1 / A7 前端侧)
+ * Sansheng 前端 App 级 socket 单例单测(项目为中心)
  *
- * 缺陷(docs/CODE-REVIEW-2026-10-01.md §A7-2):socket 生命周期绑死在 chat 路由的
- *   ChatSurface(卸载即 close)→ Timeline 路由上 pending_question 的回答/取消按钮
- *   对 null socket 静默 no-op,100% 失效;路由切换还会断流。
+ * 守的是**同一个不变量**(旧版已守过,只是协议换了):socket 生命周期与 App 相同,
+ * 不绑在某个路由组件的 useEffect 上 —— 否则切到「待办 / 工件 / 工作项」页即断开,
+ * 那些页上的按钮会把命令发进 null socket 并**静默 no-op**。
  *
- * 修复:web/src/lib/appSocket.ts —— App mount 即 initAppSocket()(模块级单例,
- *   StrictMode 双调用幂等),事件 → applyEvent,socket → store.attachSocket。
+ * 旧版断言的是 `load_conversation` / `bus_replay`(这两个机制在新架构里已删除),
+ * 现在改断言契约里的 `send` 命令与 `ready` 事件 —— 见 `@shared/types/platform`。
  *
- * 测试形态(轻量 setup,报告说明项):node 环境 + stub 全局 window/WebSocket
- *   (FakeWebSocket 记录 sent),不引 jsdom/RTL(禁新增依赖)。
- *
- * RED:web/src/lib/appSocket.ts 尚不存在 → import 失败。
+ * 测试形态:node 环境 + stub 全局 window/WebSocket(FakeWebSocket 记录 sent),
+ * 不引 jsdom/RTL(禁新增依赖)。
  */
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { initAppSocket, getAppSocket } from "../../web/src/lib/appSocket.js";
 import { useChatStore } from "../../web/src/stores/chat.js";
 
 class FakeWebSocket {
-  static CONNECTING = 0;
   static OPEN = 1;
-  static CLOSING = 2;
   static CLOSED = 3;
   static instances: FakeWebSocket[] = [];
 
@@ -55,7 +51,7 @@ afterAll(() => {
   vi.unstubAllGlobals();
 });
 
-describe("F1 · App 级 socket 单例", () => {
+describe("App 级 socket 单例", () => {
   it("initAppSocket 建立单例:重复 init(StrictMode 双 effect)不再新建连接", () => {
     const s1 = initAppSocket();
     const s2 = initAppSocket();
@@ -65,33 +61,43 @@ describe("F1 · App 级 socket 单例", () => {
     expect(FakeWebSocket.instances[0]!.url).toContain("/ws");
   });
 
-  it("store.socket 已接线:store 动作可经单例发送命令", () => {
+  it("store 动作经单例发送契约里的 send 命令(项目为中心)", () => {
     expect(useChatStore.getState().socket).toBeTruthy();
-    useChatStore.setState({ conversationId: "c-wire" });
-    useChatStore.getState().sendLoadConversation("c-x");
-    const inst = FakeWebSocket.instances[0]!;
-    const parsed = inst.sentMessages.map((m) => JSON.parse(m) as Record<string, unknown>);
-    expect(parsed.some((c) => c.type === "load_conversation" && c.conversationId === "c-x")).toBe(true);
-  });
-
-  it("server 事件 → applyEvent:ready 驱动 store 状态 + 经同一 socket 发 bus_replay", () => {
-    useChatStore.setState({ kernelReady: false, conversationId: null, turns: [], busStream: [] });
+    useChatStore.setState({ projectId: "p-wire" });
     const inst = FakeWebSocket.instances[0]!;
     inst.sentMessages.length = 0;
+
+    useChatStore.getState().sendMessage("你好");
+    const parsed = inst.sentMessages.map((m) => JSON.parse(m) as Record<string, unknown>);
+    expect(parsed.some((c) => c.type === "send" && c.projectId === "p-wire" && c.content === "你好")).toBe(
+      true,
+    );
+    // 乐观上屏:用户那条消息立刻进 turns(不等 server 回 message_start)
+    expect(useChatStore.getState().turns.some((t) => t.role === "user")).toBe(true);
+  });
+
+  it("server 事件 → applyEvent:ready 驱动 store 的 modelId / provider", () => {
+    const inst = FakeWebSocket.instances[0]!;
     inst.onmessage?.({
-      data: JSON.stringify({
-        type: "ready",
-        conversationId: "c-app",
-        modelId: "m1",
-        provider: "p1",
-      }),
+      data: JSON.stringify({ type: "ready", modelId: "m1", provider: "p1", cwd: "/tmp" }),
     });
     const s = useChatStore.getState();
-    expect(s.kernelReady).toBe(true);
-    expect(s.conversationId).toBe("c-app");
     expect(s.modelId).toBe("m1");
-    // F2 联动:ready 后 bus_replay 经真实 ChatSocket.send 落到 ws 帧
-    const parsed = inst.sentMessages.map((m) => JSON.parse(m) as Record<string, unknown>);
-    expect(parsed.some((c) => c.type === "bus_replay" && c.conversationId === "c-app")).toBe(true);
+    expect(s.provider).toBe("p1");
+    expect(s.status).toBe("idle");
+  });
+
+  it("onProject 只派发该项目的事件(eventProjectId 分派)", () => {
+    const socket = getAppSocket()!;
+    const seen: string[] = [];
+    const off = socket.onProject("p-a", (e) => seen.push(e.type));
+    const inst = FakeWebSocket.instances[0]!;
+    // 别的项目的事件不该进来
+    inst.onmessage?.({ data: JSON.stringify({ type: "delta", projectId: "p-b", messageId: "m", text: "x" }) });
+    // 本项目的事件要进来
+    inst.onmessage?.({ data: JSON.stringify({ type: "agent_end", projectId: "p-a", ts: 1 }) });
+    off();
+    inst.onmessage?.({ data: JSON.stringify({ type: "agent_end", projectId: "p-a", ts: 2 }) });
+    expect(seen).toEqual(["agent_end"]);
   });
 });

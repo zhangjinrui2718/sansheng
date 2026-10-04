@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { useSettingsStore } from "@/stores/settings";
+import { resetData } from "@/lib/api";
 import type { ProviderConfig, ThinkingLevel } from "@shared/types/settings";
 
 /** 编辑中的 provider 草稿。apiKey="" 表示「不改动」(服务端会保留旧真值) */
@@ -321,29 +322,19 @@ function ResetSection() {
   async function onReset() {
     if (busy) return;
     const ok = window.confirm(
-      "确认重置 Sansheng?\n\n将删除:所有对话 / 配置 / API key / 记忆片段。\n日志会保留。\n\n需要重启 server 才能重新初始化。",
+      "确认重置 Sansheng?\n\n将删除:所有项目 / 工作项 / 工件 / 配置 / API key / 记忆片段。\n日志会保留。\n\n需要重启 server 才能重新初始化。",
     );
     if (!ok) return;
     setDone(null);
     setInfo("");
     setBusy(true);
     try {
-      const r = await fetch("/api/reset", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ confirm: "reset" }),
-      });
-      const data = (await r.json().catch(() => null)) as
-        | { ok?: boolean; removed?: string[]; failed?: string[]; error?: string }
-        | null;
-      if (!r.ok || !data?.ok) {
-        setDone("err");
-        setInfo(data?.error ?? `HTTP ${r.status}`);
-        return;
-      }
+      // 经 lib/api.ts 的 resetData() —— 页面不许散落裸 fetch(项目纪律)。
+      // ⚠️ 该端点不在平台冻结契约的接口面里,见 api.ts 里的说明。
+      const data = await resetData();
       setDone("ok");
       setInfo(
-        `已删除 ${data.removed?.length ?? 0} 项${data.failed?.length ? `,失败 ${data.failed.length}` : ""}。请运行 sansheng stop && sansheng start`,
+        `已删除 ${data.removed.length} 项${data.failed.length > 0 ? `,失败 ${data.failed.length}` : ""}。请运行 sansheng stop && sansheng start`,
       );
     } catch (err) {
       setDone("err");

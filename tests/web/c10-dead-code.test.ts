@@ -56,9 +56,9 @@ describe("C10 · web 侧 AGENTS.md 硬规则:as any = 0", () => {
   });
 });
 
-describe("C10 · Agents 页 / AgentPanel 不再轮询恒 null 的 legacy blackboard 端点", () => {
-  it("routes/Agents.tsx 不引用 `/api/blackboard/${...}` 单数端点", () => {
-    const src = stripComments(read("routes/Agents.tsx"));
+describe("C10 · 不再轮询恒 null 的 legacy blackboard 端点", () => {
+  it("routes/Members.tsx 不引用 `/api/blackboard/${...}` 单数端点", () => {
+    const src = stripComments(read("routes/Members.tsx"));
     expect(src).not.toMatch(/\/api\/blackboard\/\$\{/);
   });
 

@@ -1,20 +1,14 @@
 /**
- * 对话消息流(批次 UI U4:每轮的头/尾两行合成一行)
+ * 对话消息流(项目的一条连续对话)
  *
- * 改这一层之前,每一轮助手回复都在内容上方单独占一行「三生」,内容下方再单独占
- * 一行 `in 12 · out 340`(且 token 为 0 时也占一行)。也就是说,**每轮有 2 行
- * 不是内容的行**。现在合成一条头(左:说话人 / 右:usage,usage 为 0 时不显示)，
- * 一屏能多看到大约一轮对话。
- *
- * 空态同理:原来「三生」+ 一句slogan + 一块两行的「去设置配 Key」提示共三段文字。
- * 现在保留人格名与**唯一可执行的一步**,其余移到文件注释。
+ * 旧版这里还有两种块:`plan`(计划卡)与 `delivery`(交付物卡)。计划概念在新
+ * 架构里已删除(换成 works / 工件),`DeliveryBlock` 只服务旧的 `plan_done`,
+ * 两者随契约一起删掉了 —— 现在只剩思考 / 正文 / 工具三类。
  */
 import { memo, useEffect, useRef } from "react";
 import { useChatStore, type Turn } from "@/stores/chat";
 import { ThinkingBlock } from "./ThinkingBlock";
-import { DeliveryBlock } from "./DeliveryBlock.js";
 import { ToolCallCard } from "./ToolCallCard";
-import { PlanBlock } from "./PlanBlock.js";
 
 export function MessageList() {
   const turns = useChatStore((s) => s.turns);
@@ -91,9 +85,9 @@ function Empty() {
 }
 
 /**
- * 批次 8-C:`memo` 不是洁癖 —— plan_todo_update 每变一次就 set 一遍 turns,
- * 没有 memo 的话**整屏对话重渲染**(计划可能十几个 todo,滚动位置与焦点都会跳)。
- * turn 对象引用未变的轮次因此被跳过;store 侧的 withLastPlan 只替换命中的那一轮。
+ * `memo` 保留的原因:streaming 时每个 delta 都会 set 一遍 turns/currentTurn,
+ * 没有 memo 的话**整屏对话重渲染**(滚动位置与焦点都会跳)。turn 对象引用未变的
+ * 轮次因此被跳过 —— store 只替换正在流式的那一轮。
  */
 const TurnView = memo(function TurnView({
   turn,
@@ -152,16 +146,6 @@ const TurnView = memo(function TurnView({
           }
           if (b.kind === "tool") {
             return <ToolCallCard key={i} block={b} />;
-          }
-
-          // 批次 8-C:执行计划卡 —— 与 plan_done 总结卡同一区域(同一段 turn 序列),
-          // plan_planned 时落地,plan_todo_update 逐行更新,plan_done/plan_failed 进终态。
-          if (b.kind === "plan") {
-            return <PlanBlock key={i} plan={b.plan} />;
-          }
-          // 批次 7-I(B):交付物 —— 执行者真正做出来的东西,默认折叠、正文可展开
-          if (b.kind === "delivery") {
-            return <DeliveryBlock key={i} items={b.items} />;
           }
           return null;
         })}

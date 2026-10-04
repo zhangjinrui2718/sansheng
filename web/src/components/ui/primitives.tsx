@@ -84,6 +84,7 @@ export function Section({
   title,
   count,
   hint,
+  hintTitle,
   aside,
   children,
   className,
@@ -91,6 +92,8 @@ export function Section({
   title: string;
   count?: number;
   hint?: string;
+  /** 要展开解释的整段话 —— 悬停才出现。与 `PageHeader` 同一语义。 */
+  hintTitle?: string;
   aside?: ReactNode;
   children: ReactNode;
   className?: string;
@@ -102,7 +105,7 @@ export function Section({
           <h2 className="ss-section">{title}</h2>
           {typeof count === "number" ? <span className="ss-meta">{count}</span> : null}
           {hint ? (
-            <span className="ss-note truncate" title={hint}>
+            <span className="ss-note truncate" title={hintTitle ?? hint}>
               {hint}
             </span>
           ) : null}
