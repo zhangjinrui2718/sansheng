@@ -28,7 +28,9 @@
 import { useCallback, useEffect, useState } from "react";
 import type {
   ArtifactView,
+  AskView,
   BlockerView,
+  ChangeView,
   ClientQuestionView,
   MemberView,
   ProjectDetail,
@@ -191,4 +193,33 @@ export function useClientQuestions(): Loaded<ClientQuestionView[]> {
   const revision = useChatStore((s) => s.projectsRevision);
   const r = useLoad(() => api.listClientQuestions(), [revision]);
   return { data: r.data?.questions ?? [], loading: r.loading, error: r.error };
+}
+
+/**
+ * 本项目里**角色之间**的提问(内部协作),不是等甲方答的问题。
+ *
+ * 与 `useClientQuestions()` 刻意分开:那个是**用户的队列**(要动手答),这个是
+ * **团队内部的横向沟通**(看了知道进度,不需要用户插手)。混在一起会让用户
+ * 以为自己欠了 20 个回答。
+ */
+export function useProjectAsks(projectId: string | null): Loaded<AskView[]> {
+  const revision = useChatStore((s) => s.projectRevision);
+  const r = useLoad(
+    () => (projectId ? api.listProjectAsks(projectId) : Promise.resolve({ asks: [] as AskView[] })),
+    [projectId, revision],
+  );
+  return { data: r.data?.asks ?? [], loading: r.loading, error: r.error };
+}
+
+/** 本项目的变更记录(提议 → 评审 → 接受/实施)。 */
+export function useProjectChanges(projectId: string | null): Loaded<ChangeView[]> {
+  const revision = useChatStore((s) => s.projectRevision);
+  const r = useLoad(
+    () =>
+      projectId
+        ? api.listProjectChanges(projectId)
+        : Promise.resolve({ changes: [] as ChangeView[] }),
+    [projectId, revision],
+  );
+  return { data: r.data?.changes ?? [], loading: r.loading, error: r.error };
 }

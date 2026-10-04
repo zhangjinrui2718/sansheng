@@ -334,7 +334,7 @@ function ResetSection() {
       const data = await resetData();
       setDone("ok");
       setInfo(
-        `已删除 ${data.removed.length} 项${data.failed.length > 0 ? `,失败 ${data.failed.length}` : ""}。请运行 sansheng stop && sansheng start`,
+        `已清空 ${data.totalRows} 行数据(${data.cleared.length} 张表)。页面即将刷新。`,
       );
     } catch (err) {
       setDone("err");

@@ -33,7 +33,7 @@ import { loadPromptUnits, unitPath } from "../runtime/promptAssembly.js";
 import { solveToolset } from "../harness/authorize.js";
 import { loadProjectForAuthz } from "../storage/repo/projects.js";
 import { ROLE_SPECS, PROJECT_ROLES, type ProjectRole } from "../identity/role.js";
-import { listAgents } from "../storage/repo/agents.js";
+import { getAgent, listAgents } from "../storage/repo/agents.js";
 import {
   listAllClientQuestions,
   listProjectArtifacts, listProjectAsks, listProjectBlockers,
@@ -216,7 +216,12 @@ export function createPlatformApp(deps: HttpDeps): Hono {
   app.get("/api/artifacts/:id", (c) => {
     const row = getArtifact(db, c.req.param("id"));
     if (row === null) return c.json(err("not_found", "工件不存在", 404).body, 404);
-    return c.json({ artifact: toArtifactView(db, row, (id) => id) });
+    // authorName 要**解析**,不能回 agent id —— 同一个工件,列表端点回
+    // 「工程师」而详情端点回「wk」,前端只能照实显示一个不像名字的东西。
+    // (这个 bug 是并行 subagent 逐字段比对两个端点时发现的。)
+    return c.json({
+      artifact: toArtifactView(db, row, (id) => getAgent(db, id)?.displayName ?? id),
+    });
   });
 
   // ── 等甲方答的问题(全项目)────────────────────────────────────

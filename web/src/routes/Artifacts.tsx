@@ -18,13 +18,27 @@
  * 呈现:先在页首**选定一个项目**(契约没有跨项目的 `/api/artifacts` ——
  * 「工件总是属于某个项目,提供平级列表等于邀请调用方绕过项目这个组织维度」),
  * 再按 kind 分组。分组只依据**本次真实返回的 kind**;未知 kind 原样显示英文。
+ *
+ * ── 点开看详情(本次新加)────────────────────────────────────────
+ *
+ * 列表里的 body 是截断的,而工件的价值大半在全文与**关联关系**上。所以每条可以
+ * 展开:展开时按 id 拉一次 `GET /api/artifacts/:id`(`{ artifact: ArtifactView }`),
+ * 显示 body 全文 + links 出边(rel → targetId)。
+ *
+ * **详情单独拉一次,不拿列表里那条凑** —— 契约给了 `/:id` 这条端点,它的存在
+ * 意义就是「列表里的字段可能不是全量」;用列表项假装详情,等于把契约里的那条
+ * 端点变成死代码。
+ *
+ * 关联目标只显示 id(契约 `ArtifactView.links` 只有 `targetId`,没有目标标题);
+ * 若目标恰好在本次已加载的列表里,顺手把它的标题带上 —— **不做二次请求**。
  */
 import { useEffect, useMemo, useState } from "react";
-import type { ArtifactKind } from "@shared/types/platform";
+import type { ArtifactKind, ArtifactView } from "@shared/types/platform";
 import {
   Clamp,
   Disclosure,
   EmptyState,
+  KV,
   PageHeader,
   Pill,
   Section,
@@ -33,6 +47,7 @@ import {
 } from "@/components/ui/primitives";
 import { useArtifacts } from "@/lib/data";
 import { useChatStore } from "@/stores/chat";
+import { errorMessage, getArtifact } from "@/lib/api";
 import {
   artifactKindLabel,
   artifactKindTone,
@@ -59,10 +74,13 @@ export function ArtifactsPage() {
   const projects = useChatStore((s) => s.projects);
   const activeProjectId = useChatStore((s) => s.projectId);
   const [scope, setScope] = useState<string | null>(activeProjectId);
+  /** 展开查看详情的那条工件 id(null = 都收起)。 */
+  const [openId, setOpenId] = useState<string | null>(null);
 
   useEffect(() => {
     // 用户在对话页切了项目 → 工件页跟着切(不然会对着旧项目的工件发呆)。
     setScope(activeProjectId);
+    setOpenId(null);
   }, [activeProjectId]);
 
   const { data: artifacts, loading, error } = useArtifacts({ projectId: scope });
@@ -139,6 +157,7 @@ export function ArtifactsPage() {
               <div className="grid gap-1.5">
                 {rows.map((a) => {
                   const long = a.body.length > 120;
+                  const open = openId === a.id;
                   return (
                     <article key={a.id} className="sansheng-card p-2.5" title={a.id}>
                       <div className="flex items-center gap-2 flex-wrap">
@@ -156,6 +175,15 @@ export function ArtifactsPage() {
                           {a.title || "(无标题)"}
                         </span>
                         <span className="ss-meta ml-auto">{a.authorName || a.authorAgentId}</span>
+                        <button
+                          type="button"
+                          className="sansheng-button"
+                          style={{ padding: "1px 8px", fontSize: 11 }}
+                          title="按 id 拉 GET /api/artifacts/:id,看正文全文与关联关系"
+                          onClick={() => setOpenId(open ? null : a.id)}
+                        >
+                          {open ? "收起" : "详情"}
+                        </button>
                       </div>
                       {a.body.length > 0 && a.body !== a.title && (
                         <>
@@ -174,12 +202,155 @@ export function ArtifactsPage() {
                         {a.links.length > 0 &&
                           ` · 关联 ${a.links.map((l) => `${l.rel}→${l.targetId}`).join(" · ")}`}
                       </div>
+                      {open && <ArtifactDetail id={a.id} known={artifacts} />}
                     </article>
                   );
                 })}
               </div>
             </Section>
           ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** links 的 rel 是契约里的闭合联合(parent | depends_on | answers);未知值原样透出。 */
+const REL_LABEL: Record<string, string> = {
+  parent: "父工件",
+  depends_on: "依赖",
+  answers: "答复",
+};
+
+/**
+ * 工件详情。展开时按 id 拉一次 `GET /api/artifacts/:id`。
+ *
+ * `known` 只用来**顺手**把关联目标的标题显示出来(目标恰好在本次列表里时),
+ * 不做二次请求 —— 目标不在列表里就只显示 id,不编一个标题出来。
+ */
+function ArtifactDetail({ id, known }: { id: string; known: ArtifactView[] }) {
+  const [artifact, setArtifact] = useState<ArtifactView | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    setArtifact(null);
+    setError(null);
+    getArtifact(id)
+      .then((r) => {
+        if (cancelled) return;
+        setArtifact(r.artifact);
+      })
+      .catch((e: unknown) => {
+        if (!cancelled) setError(errorMessage(e));
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [id]);
+
+  const titleOf = (targetId: string): string | null =>
+    known.find((k) => k.id === targetId)?.title ?? null;
+
+  return (
+    <div
+      className="mt-2"
+      style={{ borderTop: "1px solid var(--ink-3)", paddingTop: 6 }}
+      title="GET /api/artifacts/:id"
+    >
+      {error !== null ? (
+        <div className="text-xs" style={{ color: "var(--cinnabar)" }}>
+          详情加载失败:{error}
+        </div>
+      ) : loading ? (
+        <div className="ss-meta">详情加载中…</div>
+      ) : artifact === null ? (
+        <div className="ss-meta">读不到这条工件的详情。</div>
+      ) : (
+        <div className="flex flex-col gap-1.5">
+          <div className="flex items-center gap-1.5 flex-wrap">
+            <Pill tone={artifactKindTone(artifact.kind)} title={artifact.kind}>
+              {artifactKindLabel(artifact.kind)}
+            </Pill>
+            <Pill tone={artifactStatusTone(artifact.status)} title={artifact.status}>
+              {artifactStatusLabel(artifact.status)}
+            </Pill>
+            <span className="ss-body" style={{ color: "var(--bone)" }}>
+              {artifact.title || "(无标题)"}
+            </span>
+            <span className="ss-meta ml-auto">
+              {artifact.authorName || artifact.authorAgentId} · {fmtTime(artifact.createdAt)}
+            </span>
+          </div>
+
+          {artifact.body.length > 0 ? (
+            <>
+              <div className="ss-section" style={{ fontSize: 12 }}>
+                正文
+              </div>
+              <pre
+                style={{
+                  whiteSpace: "pre-wrap",
+                  wordBreak: "break-word",
+                  fontSize: 12,
+                  lineHeight: 1.7,
+                  margin: 0,
+                  padding: "6px 8px",
+                  background: "var(--ink-1)",
+                  border: "1px solid var(--ink-3)",
+                  borderRadius: 6,
+                  color: "var(--bone-dim)",
+                  maxHeight: 420,
+                  overflow: "auto",
+                }}
+              >
+                {artifact.body}
+              </pre>
+            </>
+          ) : (
+            <div className="ss-note">这条工件没有正文(body 为空)。</div>
+          )}
+
+          <div>
+            <div className="ss-section" style={{ fontSize: 12 }}>
+              关联({artifact.links.length})
+            </div>
+            {artifact.links.length === 0 ? (
+              <div className="ss-note">没有出边 —— 这条工件不挂在别的工件上。</div>
+            ) : (
+              <div className="flex flex-col">
+                {artifact.links.map((l) => {
+                  const t = titleOf(l.targetId);
+                  return (
+                    <KV
+                      key={`${l.rel}:${l.targetId}`}
+                      label={REL_LABEL[l.rel] ?? l.rel}
+                      value={t ?? l.targetId}
+                      title={t !== null ? l.targetId : "该目标不在本次列表里,只显示 id"}
+                    />
+                  );
+                })}
+              </div>
+            )}
+          </div>
+
+          <Disclosure summary="原始字段">
+            <div className="flex flex-col gap-0.5">
+              <span>工件 id:{artifact.id}</span>
+              <span>项目 id:{artifact.projectId}</span>
+              <span>kind:{artifact.kind}</span>
+              <span>status:{artifact.status}</span>
+              <span>作者 id:{artifact.authorAgentId}</span>
+              <span>作者名(authorName):{artifact.authorName}</span>
+              <span>创建:{fmtTime(artifact.createdAt)}</span>
+              <span>更新:{fmtTime(artifact.updatedAt)}</span>
+            </div>
+          </Disclosure>
         </div>
       )}
     </div>

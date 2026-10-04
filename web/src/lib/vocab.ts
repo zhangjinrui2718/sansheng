@@ -125,6 +125,21 @@ export const ASK_STATUS_LABEL: Record<AskStatus, string> = {
   expired: "已超时",
 };
 
+/**
+ * AskStatus → 语义色。
+ *
+ * `escalated` 是**琥珀不是红**:它表示「有人替你判断过、认为这事得往上走」,
+ * 不是失败;`expired` 才是红 —— 过了截止还没人答,那是真的没人管。
+ * (调度器只如实报超时,不自动升级,见契约 `overdue_asks`。)
+ */
+export const ASK_STATUS_TONE: Record<AskStatus, Tone> = {
+  open: "bone",
+  answered: "bamboo",
+  escalated: "amber",
+  cancelled: "mute",
+  expired: "cinnabar",
+};
+
 export const BLOCKER_STATUS_LABEL: Record<BlockerStatus, string> = {
   open: "未处理",
   acknowledged: "已知悉",
@@ -163,6 +178,14 @@ export const CHANGE_STATUS_LABEL: Record<ChangeStatus, string> = {
   rejected: "已否决",
 };
 
+export const CHANGE_STATUS_TONE: Record<ChangeStatus, Tone> = {
+  proposed: "amber",
+  under_review: "cyan",
+  accepted: "jade",
+  implemented: "bamboo",
+  rejected: "cinnabar",
+};
+
 // ── 角色 ────────────────────────────────────────────────────────
 
 /**
@@ -196,6 +219,8 @@ export const artifactStatusTone = (s: string): Tone =>
   (ARTIFACT_STATUS_TONE as Record<string, Tone>)[s] ?? "mute";
 export const askStatusLabel = (s: string): string =>
   (ASK_STATUS_LABEL as Record<string, string>)[s] ?? s;
+export const askStatusTone = (s: string): Tone =>
+  (ASK_STATUS_TONE as Record<string, Tone>)[s] ?? "mute";
 export const blockerStatusLabel = (s: string): string =>
   (BLOCKER_STATUS_LABEL as Record<string, string>)[s] ?? s;
 export const blockerStatusTone = (s: string): Tone =>
@@ -206,6 +231,8 @@ export const blockerSeverityTone = (s: string): Tone =>
   (BLOCKER_SEVERITY_TONE as Record<string, Tone>)[s] ?? "mute";
 export const changeStatusLabel = (s: string): string =>
   (CHANGE_STATUS_LABEL as Record<string, string>)[s] ?? s;
+export const changeStatusTone = (s: string): Tone =>
+  (CHANGE_STATUS_TONE as Record<string, Tone>)[s] ?? "mute";
 
 // ── 展示工具 ────────────────────────────────────────────────────
 

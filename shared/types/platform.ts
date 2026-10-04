@@ -285,7 +285,13 @@ export interface HarnessView {
 // ── HTTP 响应 ────────────────────────────────────────────────────
 
 export interface ApiErrorBody {
-  error: { code: string; message: string; detail?: string };
+  error: {
+    code: string;
+    message: string;
+    detail?: string;
+    /** 仅 `unknown_unit` 时出现:合法 id 清单(帮调用方自纠,而非去猜) */
+    validIds?: readonly string[];
+  };
 }
 
 export interface HealthResponse {
@@ -436,7 +442,11 @@ export function eventProjectId(ev: ServerEvent): string | null {
 //
 // 错误形状(所有非 2xx):`{ error: { code, message } }`
 //   code: invalid_body | invalid_args | not_found | already_resolved |
-//         not_a_question | settings_write_failed | internal
+//         not_a_question | settings_write_failed | internal |
+//         unknown_unit | confirmation_required | write_failed | no_factory_copy
+//
+// `unknown_unit` 的响应里**额外带 `validIds`**(在 `error` 对象**里面**,
+// 不是 body 顶层)—— 让调用方知道合法 id 有哪些,而不是去猜。
 
 export interface AppConfigResponse {
   cwd: string;
