@@ -1,6 +1,6 @@
 # Sansheng 项目交接包
 
-**生成时间**:2026-10-04 CST · **v9.0**(平台侧全量新建:BC0–BC7 + 工具层 + 接线 + BC6 执行,10 个批次)
+**生成时间**:2026-10-04 CST · **v9.0**(平台侧全量新建:BC0–BC7 + 工具层 + 接线 + BC6 执行 + 角色提示词,11 个批次)
 **上一版**:v8.0(批次 7-O harness 写面 + 8-A…8-D 角色职能核查迭代),见下。
 **适用**:下一会话(主对话 / worker)开盒即读
 **配套阅读**:`docs/DESIGN-PLATFORM.md`(目标架构)· `docs/DESIGN-AGENTS.md`(四个角色与 harness 配置)· `docs/ADR-001-harness-wiring.md`(接线决策与欠账)· `docs/TROUBLESHOOTING.md` · `ARCHITECTURE.md`(旧系统 12 层图,**描述的是被替换的那套**)
@@ -13,7 +13,7 @@
 > 工具 = 能力 × 作用域;「甲方只与业务经理交互」由 `ROLE_SPECS.clientFacing` 机械保证,
 > 不再是提示词里的自觉 —— 那是 7-B / 7-L 两次「提示词在骗人」的正面修复。
 >
-> **十个批次**(全部已推送,`dfc428a` → 见 git log):
+> **十一个批次**(全部已推送,`dfc428a` → 见 git log):
 > 1. `fe3dd47` BC0 RoleSpec + BC5 三重门控求解器
 > 2. `f04e026` BC0+BC1 schema 与仓储(agents / projects / assignments / works / deps)
 > 3. `7b3cf1d` BC3 Blackboard + BC4 ChangeControl
@@ -23,10 +23,11 @@
 > 7. `1ed35eb` 甲方接口(ClientChannel 端口)+ 待办注入面
 > 8. `5bfe9ca` **Harness 接线**(assembly / sdkAdapter / session)
 > 9. `880a476` **CLI 入口**(`platform smoke`)+ 提示词装配(7-B 死接线守卫)
-> 10. 本批:**BC6 执行层**(`runtime/turn.ts` 一个回合 + `runtime/execution.ts` 跑工作项)
+> 10. `bf2283b` **BC6 执行层**(`runtime/turn.ts` 一个回合 + `runtime/execution.ts` 跑工作项)
 >     + `sansheng platform-run` 驱动。真机跑通:worker 领活 → 写工件 → 工作项落 done。
+> 11. 本批:**四角色 12 个提示词单元**(仓库 `harness/system_prompts/`,693 行)+ 覆盖不变式测试。
 >
-> **现状(可验证)**:`npm test` **1234 passed | 1 skipped(102 files)** · typecheck 0 · build OK ·
+> **现状(可验证)**:`npm test` **1238 passed | 1 skipped(102 files)** · typecheck 0 · build OK ·
 > `npm run check:design` E1–E13 全绿 · `grep -rn 'as any' src/` = 0。
 > 平台侧 `src/platform/**` 36 文件 ~8200 行,测试 15 文件 ~5900 行。
 >
@@ -55,12 +56,15 @@
 > - 三条端口让外部依赖可替换:`MemoryPort` / `ClientChannel` / `createSession`(测试 seam)
 >
 > **欠账(如实标注,非遗漏)**:
-> - **12 个提示词单元尚未写出**。角色简报是机械生成的(已生效),但 `business_manager.core` 等 12 个单元内容为空 —— 冒烟会如实打印「声明了但盘上没有」。这是**行为设计**,该由用户过目。
+> - ~~12 个提示词单元尚未写出~~ ✅ **已完成**(批次 11)。四角色 12 个单元(15 处声明,3 个共享),693 行。
+>   仓库版在 `harness/system_prompts/`(可 git 审阅),运行版已装到 `~/.sansheng/harness/system_prompts/`。
+>   迁移了旧提示词里的四块真判断:8-E 的「不许口头交付」实机事故、7-L 的「默认动作是答不是问」四类升级判据、
+>   planner 的拆解归类表与三条硬规则、executor 的「事实来自工具」纪律。
 > - **调度器:不是欠账,是阻塞**。已验证:平台侧 `bootPlatform`/`createPlatformSession` **只有 CLI 一个调用方**,`src/platform/` 内无任何 `setInterval`/daemon(全平台唯一一处 `setTimeout` 是等答案的定时器)。调度器没有宿主进程可以待,**现在写就是死代码**。前置条件:平台有自己的长驻宿主(旧系统有 Hono daemon,平台没有)。注入文本里已对 agent 明说「当前没有调度器」,链路不会静默死掉。
 > - **待办注入已接进回合** ✅(`runtime/turn.ts` 的 `runTurn` 每回合收集并拼进消息前部)。
 > - **阶段 8 未做**:清场(DROP 旧表 + 删旧模块与其测试)。
 >
-> **旧系统状态**:`src/server/**` 一行未动,继续服务旧角色与旧工具名。新旧并存于同一个 SQLite(新表见 007–010)。删旧的时机是阶段 8。
+> **旧系统状态**:`src/server/**` 一行未动,继续服务旧角色与旧工具名。新旧并存于同一个 SQLite(新表见 007–010),提示词也是两套并存(旧 `communicator.*/planner/executor/critic` 与新 `business_manager.*/project_manager.*/worker.*/quality_reviewer.*`,文件名不重叠)。删旧的时机是阶段 8。
 >
 > **跑一下看**:
 > ```

@@ -19,6 +19,7 @@ import { join } from "node:path";
 import {
   unitPath, loadPromptUnits, renderRoleBrief, composeSystemPrompt,
 } from "../../src/platform/runtime/promptAssembly.js";
+import { readdirSync, readFileSync } from "node:fs";
 import { ROLE_SPECS, PROJECT_ROLES, type ProjectRole } from "../../src/platform/identity/role.js";
 
 let dataDir: string;
@@ -152,5 +153,55 @@ describe("composeSystemPrompt · 简报 + 单元", () => {
     const c = composeSystemPrompt(dataDir, "business_manager");
     expect(c.missingUnits.length).toBeGreaterThan(0);
     expect(c.text).toContain("业务经理");
+  });
+});
+
+// ── 出厂提示词单元集的覆盖不变式 ──────────────────────────────────
+
+describe("出厂单元集 · 覆盖不变式(仓库 harness/system_prompts/)", () => {
+  // 仓库存一份出厂单元集,数据目录那份是用户可改的运行副本。
+  // 两件事都要守住:声明了的必须有出厂内容;出厂内容必须有人用。
+  const DIR = join(import.meta.dirname, "../../harness/system_prompts");
+
+  function declaredUnits(): Set<string> {
+    const s = new Set<string>();
+    for (const r of PROJECT_ROLES) for (const u of ROLE_SPECS[r].promptUnits) s.add(u);
+    return s;
+  }
+  function shippedUnits(): Set<string> {
+    return new Set(
+      readdirSync(DIR).filter((f) => f.endsWith(".md")).map((f) => f.replace(/\.md$/, "")),
+    );
+  }
+
+  it("**每个声明的单元都有出厂内容** —— 缺一个就是一条职责从没告诉过 agent", () => {
+    const declared = declaredUnits();
+    const shipped = shippedUnits();
+    const missing = [...declared].filter((u) => !shipped.has(u));
+    expect(missing, `这些单元在 ROLE_SPECS 里声明了但没有出厂内容:${missing.join(", ")}`).toEqual([]);
+  });
+
+  it("**出厂内容都被声明引用** —— 没人用的单元文件会烂掉", () => {
+    const declared = declaredUnits();
+    const orphan = [...shippedUnits()].filter((u) => !declared.has(u));
+    expect(orphan, `这些单元文件没有任何角色声明使用:${orphan.join(", ")}`).toEqual([]);
+  });
+
+  it("每个单元都非空且不是占位符", () => {
+    for (const u of shippedUnits()) {
+      const body = readFileSync(join(DIR, `${u}.md`), "utf8");
+      expect(body.trim().length, `${u} 内容为空`).toBeGreaterThan(200);
+      expect(body, `${u} 像是占位符`).not.toMatch(/TODO|TBD|待补/);
+    }
+  });
+
+  it("出厂集能被 composeSystemPrompt 装载(路径与命名法一致)", () => {
+    // 把出厂集当数据目录用 —— 装载器应当能全部读到
+    for (const role of PROJECT_ROLES) {
+      const declared = ROLE_SPECS[role].promptUnits;
+      const loaded = loadPromptUnits(join(DIR, "..", ".."), declared);
+      expect(loaded.loaded.sort(), `${role} 的单元没能从出厂集装载`).toEqual([...declared].sort());
+      expect(loaded.missing).toEqual([]);
+    }
   });
 });
