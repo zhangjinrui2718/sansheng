@@ -42,11 +42,16 @@ import type Database from "better-sqlite3";
  * 于是「这条工作项被取消了」业务经理与质检都不知道 —— 而它正是下游依赖悬空的
  * 来源(真机事故的起点)。
  *
- * ⚠️ `migrations/013` 给 `dispatch_events.kind` 的 CHECK 闭集**只有前 4 个取值**,
- * 而 CHECK 只能靠**重建表**放宽(SQLite 的 `ADD CONSTRAINT` 只能收紧)。那笔迁移
- * 是 015(见 `DISPATCH_EVENT_KIND_MIGRATION`)。在那之前写 `work_cancelled`
- * 会被 SQL 拒绝 —— 见下面 `insertDispatchEvent` 的**显式降级**:拒绝要能被看见,
- * 但不许把工具调用打崩。
+ * ⚠️ `migrations/013` 给 `dispatch_events.kind` 的 CHECK 闭集只有前 4 个取值,
+ * 而 CHECK 只能靠**重建表**放宽(SQLite 的 `ADD CONSTRAINT` 只能**收紧** ——
+ * 拿它去放宽会得到一次「无错应用而约束一个字节没变」,实测见 `migrations/015`
+ * 文件头)。`migrations/015` 已把闭集放宽到下面这 5 个取值。
+ *
+ * **015 之前**写 `work_cancelled` 会被 SQL 拒绝 —— 见下面 `insertDispatchEvent`
+ * 的**显式降级**:拒绝要能被看见,但不许把工具调用打崩。015 落地之后那条分支
+ * 不再会自己触发(这正是它的设计目的);仍然留着它,是因为「schema 落后于代码」
+ * 这件事本身仍然可能发生(旧库 / 手工动过的库 / 只回滚了代码没回滚库),
+ * 而那时它必须仍然**如实**报出来,不能静默丢事件。
  */
 export type DispatchEventKind =
   | "work_done"
@@ -64,10 +69,12 @@ export const DISPATCH_EVENT_KINDS: readonly DispatchEventKind[] = [
 ];
 
 /**
- * 哪些 kind 需要一笔**还没落地**的迁移才能写进库。
+ * 哪些 kind 靠哪一笔迁移放宽 CHECK。
  *
- * 这张表是「代码可以先走、schema 随后放宽」的**唯一**落点:015 落地之后
- * 这里清空即可(或者留着也无害 —— 写成功了就不会走到那个分支)。
+ * 这张表是「代码可以先走、schema 随后放宽」的**唯一**落点。015 已落地,
+ * 所以在今天的 schema 上写这几个 kind 都会成功、走不到这张表;留着它是为了
+ * 在**落后的 schema** 上仍能如实报出「缺的是哪一笔迁移」—— 报出 `needsMigration`
+ * 比只报一句「SQL 错了」有用得多。
  */
 export const DISPATCH_EVENT_KIND_MIGRATION: Readonly<
   Partial<Record<DispatchEventKind, string>>
@@ -126,12 +133,16 @@ function rowToEvent(raw: RawDispatchEvent): DispatchEventRow {
  *
  * `dispatch_events.kind` 的 CHECK 是闭集,而 013 只放了 4 个取值。写入侧新增
  * `work_cancelled`(任务 4 / 设计 §12 #10)之后,在 015 落地之前**每一条取消
- * 根工作项的调用都会撞 CHECK**。写口在工具调用路径上(`work_update` / `report`),
+ * 根工作项的调用都会撞 CHECK**(真机实测原文见 `migrations/015` 文件头)。
+ * 写口在工具调用路径上(`work_update` / `report`),
  * 抛出去就是「一次合法的取消把整轮对话打崩」—— 那比不写事件坏得多。
  *
  * 所以这里**只吞掉那一个已知的、可预期的失败**(窄匹配 `kind IN` 那条 CHECK),
  * 其余任何错误一律原样抛出:把别的原因也吞掉,就成了本项目反复栽过的
  * 「检查本身静默出错」。
+ *
+ * 015 已把那条 CHECK 放宽,于是这条降级分支在今天的 schema 上不再触发 ——
+ * 这正是当初写下它的目的(「schema 随后放宽,写入侧零代码改动」)。
  */
 export type InsertDispatchEventResult =
   | { readonly ok: true; readonly written: true }
@@ -152,7 +163,7 @@ export type InsertDispatchEventResult =
       readonly written: false;
       readonly reason: "kind_not_enabled_by_schema";
       readonly kind: DispatchEventKind;
-      /** 放宽 CHECK 需要的那笔迁移(015 落地后这里不会再出现) */
+      /** 放宽 CHECK 需要的那笔迁移(015 已落地,只在落后的 schema 上才会报出来) */
       readonly needsMigration: string;
       readonly detail: string;
     };

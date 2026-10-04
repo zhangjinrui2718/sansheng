@@ -95,6 +95,31 @@ export interface ServeOptions {
    */
   readonly turnTimeoutMs?: number;
   /**
+   * **一个 agent 回合的墙钟上界(毫秒)**。缺省交给 `runTurn` 的
+   * `DEFAULT_WALL_CLOCK_TIMEOUT_MS`(10 分钟)。
+   *
+   * 与 `turnTimeoutMs` **不是同一个东西**,这也是它必须单独有一个旋钮的理由:
+   *   - `turnTimeoutMs` 护的是「`prompt()` resolve 之后等 `agent_settled` 那段」,
+   *     **不打断** `prompt()` 自己;
+   *   - `turnWallClockMs` 到点会真的调 `AgentSession.abort()` 打断这个回合。
+   *
+   * Wave 1 把判定与打断做完了,但**运行期只能吃默认值** —— 宿主没有把它接出去,
+   * 于是「调了上界」与「它根本没生效」在真机上长得一样。这里补上那条线。
+   */
+  readonly turnWallClockMs?: number;
+  /**
+   * **合并唤醒**的两个旋钮(见 `runtime/dispatcher.ts` 的 `collectTodos`)。
+   *
+   * 下游事件不再「有一条就生成一次汇报待办」,而是:
+   *   - `reportBatchSize`(缺省 3):攒够这么多条就叫醒业务经理一次;
+   *   - `reportMaxDelayMs`(缺省 5 分钟):最老的那条等了这么久就叫醒一次
+   *     —— 它是**延迟上界**,保证事件不可能永远等不到叫醒。
+   *
+   * `work_failed` 与 severity ≥ high 的阻塞**绕过这两个条件,立刻叫醒**。
+   */
+  readonly reportBatchSize?: number;
+  readonly reportMaxDelayMs?: number;
+  /**
    * 测试 seam:替换真实的 `createAgentSession`(与 `session.ts` 的 DI 同一条理由 ——
    * 「到底把什么交给了 SDK」/「中断有没有到达会话」这类断言不该需要 provider 与网络)。
    * 生产不传。
@@ -537,6 +562,12 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
         agentId,
         projectId,
         message: task,
+        // 墙钟上界透传。**不给默认值**:缺省由 `runTurn` 自己那份
+        // `DEFAULT_WALL_CLOCK_TIMEOUT_MS` 兜底 —— 两个地方各写一个默认值,
+        // 迟早会漂,而漂的表现是「文档说 10 分钟、实际是另一个数」。
+        ...(opts.turnWallClockMs !== undefined
+          ? { wallClockTimeoutMs: opts.turnWallClockMs }
+          : {}),
         onEvent: (ev) => {
           bridge(ev, projectId, messageId, hub, textBuf, thinkBuf);
         },
@@ -642,6 +673,11 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
       const execution = await runWorkItem({
         session, db, workId,
         ...(opts.turnTimeoutMs !== undefined ? { timeoutMs: opts.turnTimeoutMs } : {}),
+        // 同一根线也要接在**执行**这条路上:worker 卡在 curl 文档 16 分钟那次
+        // 真机现场走的正是这里,只接 `runAgentTurn` 等于没接。
+        ...(opts.turnWallClockMs !== undefined
+          ? { wallClockTimeoutMs: opts.turnWallClockMs }
+          : {}),
         // 让 worker 这一回合也流式上屏 —— 否则它在界面上是一段没有反应的等待
         onEvent: (ev) => {
           bridge(ev, projectId, messageId, hub, textBuf, thinkBuf);
@@ -812,6 +848,15 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
         now,
         log: (l) => log.muted(l),
         ...(opts.maxCascadeRounds !== undefined ? { maxRounds: opts.maxCascadeRounds } : {}),
+        // 合并唤醒的两个旋钮。同样**不给默认值** —— 缺省在 `collectTodos` 里
+        // (`DEFAULT_REPORT_BATCH_SIZE` / `DEFAULT_REPORT_MAX_DELAY_MS`),
+        // 两个地方各写一份迟早会漂,而漂的表现是「CLI 说 5 分钟、实际不是」。
+        ...(opts.reportBatchSize !== undefined
+          ? { reportBatchSize: opts.reportBatchSize }
+          : {}),
+        ...(opts.reportMaxDelayMs !== undefined
+          ? { reportMaxDelayMs: opts.reportMaxDelayMs }
+          : {}),
         isCancelled: () => cancelled,
         runAgentTurn: async (agentId, task): Promise<DrainTurnReport> => {
           const r = await runAgentTurn(projectId, agentId, task);

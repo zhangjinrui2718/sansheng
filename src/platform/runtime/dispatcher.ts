@@ -40,10 +40,51 @@
  * ⚠️ **但这一层不再收「全部状态迁移」**:outbox 从「事件流水」缩成了
  * 「待交代队列」—— 写入侧的**可打扰判据**(根工作项 / 里程碑 / failed /
  * high|critical 的阻塞)在 `repo/works.ts` 的 `updateWorkStatus` 与
- * `repo/dispatch.ts` 的 `insertDispatchEvent`,**不在判定侧收窄**。
- * 为什么必须是写入侧:消费是全量的(`consumePendingDispatchEvents` 无差别标记
- * 全部未消费行),一次可打扰事件会把一串不可打扰事件一起标记为已交代,
- * 于是 `consumed_at` 开始撒谎。理由与代价见 `repo/works.ts` 那段长注释。
+ * `repo/dispatch.ts` 的 `insertDispatchEvent`。
+ *
+ * ── 判定侧收窄的是**时机**,不是**资格**(合并唤醒 / coalesce)──────────
+ *
+ * ⚠️ **真机复核:写入侧那一层在扁平结构下是空转的。** 实测用户自己的库:
+ * `9 条 work → 9 条 root → 0 条中间`,而 `grep -rn parentWorkId harness/` 是**空的**
+ * —— 没有任何地方告诉项目经理要建树。扁平结构下**每条工作项终态都是「根终态」**,
+ * 于是写入侧的「只要根」那条判据全部命中,一条也没被筛掉。
+ *
+ * 所以「少打扰甲方」还需要第二刀,而这一刀只能落在**判定侧**(写入侧已经判不出
+ * 更多东西了):`report_downstream` 不再「有一条事件就生成」,而是**攒够 N 条**
+ * (`reportBatchSize`,缺省 3)**或最老的那条等了 T**
+ * (`reportMaxDelayMs`,缺省 5 分钟)才生成一次待办。
+ *
+ * ── ⚠️ 澄清:「判定侧收窄会让 `consumed_at` 撒谎」这条论证的适用边界 ──────
+ *
+ * Wave 1 的复核提出过一条反方论证:消费是**全量**的
+ * (`consumePendingDispatchEvents` 无差别标记该项目全部未消费行),所以判定侧
+ * 收窄 = 一次可打扰事件会把一串不可打扰事件**一起**标记成已交代 → `consumed_at`
+ * 撒谎。
+ *
+ * 那条论证**只在「不可打扰的事件仍然进库」时成立**。写入侧收紧之后它们大多
+ * 根本不进库,库里剩下的每一行都是「该向甲方交代的事」⇒ 全量消费**不再是缺陷**。
+ * 而合并唤醒与那条论证**不是同一件事**:它收窄的是**什么时候叫醒**,不是
+ * **哪一行算交代过**。一次合并唤醒之后:
+ *
+ *   - 被消费的行 = 库里此刻全部未消费行 = `renderDownstream` 在同一回合里
+ *     **逐行渲染给业务经理的那一批**(`renderTask` 就在这个回合里查库)。
+ *     所以「这一行被交代过」与「业务经理见过这一行」是同一件事。
+ *   - 攒着没到阈值的那几行**根本没被消费**(没有待办 → 没有回合 → 不消费),
+ *     它们 `consumed_at` 仍是 `NULL`。
+ *
+ * ⇒ **结论:合并唤醒之后 `consumed_at` 不因「合并」而撒谎。** 唯一残留的谎是
+ * 一条**先于本次改动就存在**的竞态:业务经理回合**进行中**新落库的事件会被
+ * 同一次全量消费扫进去,而它没进那一回合渲染的名单(窗口 = 一个 agent 回合的
+ * 时长,改动前后一样宽)。这不是合并唤醒引入的,也不是它能修的 —— 要修得把
+ * 消费从「全量」改成「按 seq 集合」,落在 `repo/dispatch.ts`(见 §12 未决)。
+ *
+ * ── 立刻叫醒(绕过合并窗口)──────────────────────────────────────
+ *
+ * 「少打扰」不能拿「该立刻说的也不说」换:`work_failed` 与
+ * severity ∈ {high, critical} 的 `blocker_opened` **不等窗口** —— 它们影响
+ * 时间表,甲方要能据此重新决策(§2.9 的表)。判据见 `isImmediateEvent`。
+ * 其余(根工作项完成 / 里程碑 / 取消 / 受阻)进窗口:它们**值得记录**,
+ * 但**不值得为每一条单独叫醒一次**。
  */
 import type Database from "better-sqlite3";
 import { collectPendingWork, hasActionableWork } from "./pendingWork.js";
@@ -58,6 +99,7 @@ import {
 import {
   bumpAttempt, consumePendingDispatchEvents, listAttempts,
   listPendingDispatchEvents, markAttemptNotified, pruneAttempts,
+  type DispatchEventRow,
 } from "../storage/repo/dispatch.js";
 import { ROLE_SPECS, isProjectRole, type ProjectRole } from "../identity/role.js";
 import type { Capability } from "../harness/capability.js";
@@ -175,9 +217,83 @@ export interface CollectTodosOptions {
   readonly now: number;
   /** 单条待办的尝试预算。缺省 3 */
   readonly maxAttemptsPerTodo?: number;
+  /**
+   * **合并唤醒 · 条数**(coalesce)。下游事件攒够这么多条才叫醒业务经理一次。
+   * 缺省 {@link DEFAULT_REPORT_BATCH_SIZE}。
+   */
+  readonly reportBatchSize?: number;
+  /**
+   * **合并唤醒 · 时限**(ms)。最老的那条未消费事件等了这么久就叫醒一次 ——
+   * 它是**合并窗口的上界**,保证「事件永远等不到叫醒」不可能发生。
+   * 缺省 {@link DEFAULT_REPORT_MAX_DELAY_MS}。
+   */
+  readonly reportMaxDelayMs?: number;
 }
 
 const DEFAULT_MAX_ATTEMPTS = 3;
+
+/**
+ * 合并唤醒的**条数**阈值:缺省 3。
+ *
+ * 依据(都是可算的,不是手感):
+ *   - 用户抱怨的是「**一长串**」。真机库是扁平结构(9 work / 9 root / 0 中间),
+ *     所以**每条工作项终态都会产生一条事件**。攒 3 条 = 把「3 次唤醒」压成
+ *     「1 次」,而这是**用户自己库里反复出现的规模**(9 条工作项 ⇒ 大约 3 次唤醒)。
+ *   - 取 2 省得太少(仍有 4~5 次唤醒),取 5 会让只有 2~4 条工作项的小项目
+ *     **永远靠 T 兜底** —— 那等于把「攒批」换成「定时」,丢掉了合并的意义。
+ *   - 3 与本项目已有的「每待办尝试预算 3 次」同量级,不是新引入的魔法数。
+ */
+export const DEFAULT_REPORT_BATCH_SIZE = 3;
+
+/**
+ * 合并唤醒的**时限**阈值:缺省 5 分钟(300_000ms)。
+ *
+ * 依据:
+ *   - 它是**延迟上界**,不是省 token 的手段:「一条根交付物做完了」最晚 5 分钟
+ *     内就会进入业务经理的候选队列。
+ *   - **必须显著大于定时器周期**:排空兜底定时器是 10 秒(`--dispatch-interval`),
+ *     所以 T 到点之后最多再等 1 个 tick(≈10s)就会被查到 —— 5 分钟 ≈ 30 个 tick,
+ *     漏掉一两个 tick 不会改变结果。
+ *   - **不能太小**:一次 agent 回合本身是 2–3 分钟(真机观测),T 取到分钟以下
+ *     等同于「每条都立刻叫醒」(合并根本不生效)。
+ *   - **不能太大**:15 / 30 分钟会让「只有一个交付物的项目」在甲方的观感上
+ *     变成「没有反应」—— 而用户要的是少打扰,不是不吭声。
+ */
+export const DEFAULT_REPORT_MAX_DELAY_MS = 5 * 60_000;
+
+/**
+ * **该立刻播、不等合并窗口**的阻塞严重度。
+ *
+ * ⚠️ 与 `repo/dispatch.ts` 的 `INTERRUPTING_BLOCKER_SEVERITIES`(写入侧那一份)
+ * 是**同一个判据的两道独立防线**,刻意不共用常量:写入侧那份是「值不值得记」,
+ * 这一份是「值不值得立刻叫醒」。两层各自成立 —— 哪天写入侧放宽(例如为了审计
+ * 把 low/medium 也记下来),这里仍然不会因为它们去打断甲方。
+ * 两处不一致的表现是「多叫醒一次」(at-least-once 方向),不是静默漏掉。
+ */
+const IMMEDIATE_BLOCKER_SEVERITIES: ReadonlySet<string> = new Set(["high", "critical"]);
+
+/**
+ * 这条未消费事件**绕过合并窗口**吗?
+ *
+ * 只有两类:
+ *   ① `work_failed` —— 与树的位置无关。它影响时间表,甲方要能重新决策。
+ *   ② `blocker_opened` 且 severity ∈ {high, critical} —— 同上。
+ *
+ * **其余一律进窗口**(根工作项完成 / 里程碑 / 取消 / 受阻):它们值得记录,
+ * 但不值得为每一条单独烧一次完整回合 + 在会话里留一条回复。
+ */
+function isImmediateEvent(db: Database.Database, e: DispatchEventRow): boolean {
+  if (e.kind === "work_failed") return true;
+  if (e.kind !== "blocker_opened") return false;
+  const found = db
+    .prepare(`SELECT severity FROM blockers WHERE id = ?`)
+    .get(e.subjectId) as { severity: string } | undefined;
+  // 查不到阻塞行时**立刻叫醒**(宁可多说一次,不能静默漏一条)。
+  // 与写入侧 `worthInterrupting` 同一条 at-least-once 取舍:直接往
+  // outbox 写一条 subject 不存在的 blocker_opened 是允许的。
+  if (found === undefined) return true;
+  return IMMEDIATE_BLOCKER_SEVERITIES.has(found.severity);
+}
 
 /**
  * 扫一遍这个项目,列出**此刻真的有人能动手**的待办。
@@ -288,11 +404,37 @@ export function collectTodos(opts: CollectTodosOptions): TodoBoard {
   const events = listPendingDispatchEvents(db, projectId);
   if (bm !== undefined && events.length > 0) {
     const version = Math.max(...events.map((e) => e.seq));
-    todos.push({
-      agentId: bm.id, role: "business_manager", kind: "report_downstream",
-      key: `report_downstream:${version}`, target: null, refs: [], targetState: version,
-      label: `向甲方交代下游的 ${events.length} 条结果`,
-    });
+    /**
+     * ── 合并唤醒:攒够 N 条、或最老的那条等到 T,才叫醒一次 ──────────
+     *
+     * 加这两个条件的**唯一**理由是用户的原话:「业务经理干的事情太多了……
+     * 聊天记录里面的一长串,真真甲方不关心这些」。真机库是扁平结构,写入侧的
+     * 「只留根」那条判据**全部命中**(每条工作项都是根),所以「每条终态都叫醒
+     * 一次」这件事只能在这里收窄。见本文件头注释。
+     *
+     * ⚠️ `events` 是**升序**(`created_at, seq`),所以 `events[0]` 就是最老的那条
+     * —— 「最老的等了多久」不需要另查一次,它就在这一次查询里。
+     */
+    const reportBatchSize = opts.reportBatchSize ?? DEFAULT_REPORT_BATCH_SIZE;
+    const reportMaxDelayMs = opts.reportMaxDelayMs ?? DEFAULT_REPORT_MAX_DELAY_MS;
+    const immediate = events.some((e) => isImmediateEvent(db, e));
+    const oldest = events[0]!.createdAt;
+    const waitedMs = now - oldest;
+    const enough = events.length >= reportBatchSize;
+    const waited = waitedMs >= reportMaxDelayMs;
+    if (immediate || enough || waited) {
+      // 叫醒的理由要能被看见 —— 否则「为什么这次只叫了一次」在事后无从回答
+      const why = immediate
+        ? "其中有该立刻说的(失败 / 高危阻塞)"
+        : enough
+          ? `已攒够 ${events.length} 条(阈值 ${reportBatchSize})`
+          : `最老的一条等了 ${Math.round(waitedMs / 1000)}s(上界 ${Math.round(reportMaxDelayMs / 1000)}s)`;
+      todos.push({
+        agentId: bm.id, role: "business_manager", kind: "report_downstream",
+        key: `report_downstream:${version}`, target: null, refs: [], targetState: version,
+        label: `向甲方交代下游的 ${events.length} 条结果(${why})`,
+      });
+    }
   }
   const qa = roster.find((m) => m.role === "quality_reviewer");
   const pendingReview = listWorksPendingReview(db, projectId);
@@ -387,15 +529,30 @@ export function renderTask(db: Database.Database, todo: DriverTodo): string {
       );
     case "report_downstream":
       return (
-        "# 现在轮到你了:主动向甲方交代进展\n\n" +
-        "**没有人向你提问。** 你是被下游的结果唤醒的 —— 甲方不知道刚才发生了什么,\n" +
-        "而这正是你该主动做的事(不要等他来问)。\n\n" +
+        // ⚠️ **刻意不下命令、不复述判据。**
+        //
+        // 这里原先是「# 现在轮到你了:**主动**向甲方交代进展 … 而这正是你该主动做的事
+        // (不要等他来问)… 值得让他知道的,用 tell_client 播报;**不值得打扰他的,
+        // 就不要播**(他的注意力是稀缺资源)」。
+        //
+        // 问题有两层:① 它在 **user message** 里(recency 比 system prompt 强),
+        // 而且**标题本身就是在下命令** —— 提示词里那条克制要去跟一句命令对撞;
+        // ② 那句「不值得打扰的不要播」是**判据的第二次陈述**,而判据的真相源在
+        // `business_manager.core`(「播不播:三个问题」)—— **两份定义迟早漂**,
+        // 而这个项目为「两份定义会漂」已经付过好几次代价。
+        //
+        // 所以平台只做两件事:**把事实摆出来**、**说「你来判断」**。
+        // 判据只**引用**位置,不复述内容。(批次 22,由提示词那一批 subagent 发现:
+        // 它在提示词侧只能「去预设」这句平台措辞,消除不了它。)
+        "# 下游出了结果 —— 播不播由你决定\n\n" +
+        "**没有人向你提问。** 你是被下游的结果唤醒的 —— 甲方不知道刚才发生了什么。\n\n" +
         renderDownstream(db, todo) +
-        "\n\n值得让他知道的,用 `tell_client` 播报;**不值得打扰他的,就不要播**" +
-        "(他的注意力是稀缺资源)。有分量的结论仍然要 `board_write` —— " +
-        "播报不替代落库。\n\n" +
+        "\n\n播不播**由你判断**,判据是 `business_manager.core` 的「播不播:三个问题」那一节 ——\n" +
+        "**这里刻意不复述它**。有分量的结论仍然要 `board_write` —— 播报不替代落库。\n\n" +
         "下面这些事件**已经过写入侧的筛子**(只留根工作项 / 里程碑 / 失败 / " +
-        "高severity 阻塞)—— 但「库里记了一笔」不等于「值得播报」:整批可以合成一句,也可以不播。"
+        "高severity 阻塞),而且**已经过合并窗口** —— 平台攒够一批或等到时限才 " +
+        "叫醒你这一次,所以这里**一次列出的是一批**,不是一件。" +
+        "「库里记了一笔」不等于「值得播报」:整批可以合成**一句**,也可以不播。"
       );
     case "execute_work":
       // worker 那条不走这里 —— `runWorkItem` 自己拼 `composeWorkPrompt`。
@@ -482,6 +639,16 @@ export interface DrainDeps {
   readonly maxRounds?: number;
   /** 单条待办最多被叫醒几次(目标一动不动时)。默认 3 */
   readonly maxAttemptsPerTodo?: number;
+  /**
+   * 合并唤醒:下游事件攒够这么多条才叫醒业务经理一次。
+   * 默认 {@link DEFAULT_REPORT_BATCH_SIZE}(见 `collectTodos`)。
+   */
+  readonly reportBatchSize?: number;
+  /**
+   * 合并唤醒:最老的那条未消费事件等了这么久(ms)就叫醒一次。
+   * 默认 {@link DEFAULT_REPORT_MAX_DELAY_MS}。
+   */
+  readonly reportMaxDelayMs?: number;
   /** 用户中断:每回合前后各看一次 */
   readonly isCancelled?: () => boolean;
 }
@@ -567,6 +734,8 @@ export async function drainProject(deps: DrainDeps): Promise<DrainResult> {
 
     const board = collectTodos({
       db: deps.db, projectId: deps.projectId, now: deps.now(), maxAttemptsPerTodo: maxAttempts,
+      ...(deps.reportBatchSize !== undefined ? { reportBatchSize: deps.reportBatchSize } : {}),
+      ...(deps.reportMaxDelayMs !== undefined ? { reportMaxDelayMs: deps.reportMaxDelayMs } : {}),
     });
     // 账本只保留还存在的待办 —— 待办消失即预算作废(将来再次出现就是新预算)
     pruneAttempts(deps.db, deps.projectId, [

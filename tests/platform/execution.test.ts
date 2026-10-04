@@ -17,7 +17,7 @@ import { openPlatformMemoryDb } from "../../src/platform/storage/index.js";
 import { insertAgent } from "../../src/platform/storage/repo/agents.js";
 import { insertProject, addMember } from "../../src/platform/storage/repo/projects.js";
 import { insertWork, getWork, updateWorkStatus, type WorkRow } from "../../src/platform/storage/repo/works.js";
-import { insertArtifact } from "../../src/platform/storage/repo/artifacts.js";
+import { insertArtifact, listArtifacts } from "../../src/platform/storage/repo/artifacts.js";
 import { insertBlocker } from "../../src/platform/storage/repo/blockers.js";
 import { listPendingDispatchEvents } from "../../src/platform/storage/repo/dispatch.js";
 import { collectPendingWork } from "../../src/platform/runtime/pendingWork.js";
@@ -187,19 +187,26 @@ describe("runWorkItem · 按事实判定结局,不替它判成功", () => {
 // ── 产出与现场 ──────────────────────────────────────────────────
 
 describe("runWorkItem · 产出与现场", () => {
-  it("只把**这一回合新写的**工件算作产出", async () => {
-    // 回合前就存在的工件不该被算进去
+  it("只把**这一回合新写的、且沿 014 产出边挂到这条工作项上的**工件算作产出", async () => {
+    // 回合前就已经挂着这条边的工件(典型:上一次审查留下的 review_finding,
+    // 或上一次跑留下的 evidence)不算这一回合的产出
+    const w = mkWork();
     insertArtifact(db, {
       id: "art_old", projectId: "p1", conversationId: null, kind: "note", status: "open",
       authorAgentId: "wk", title: "旧的", body: "b", metadataJson: null,
+      createdAt: AT, updatedAt: AT, workId: w.id,
+    });
+    // 同项目、同一作者、但**没有**挂到这条工作项上的工件(别的回合的产出)
+    insertArtifact(db, {
+      id: "art_loose", projectId: "p1", conversationId: null, kind: "evidence", status: "open",
+      authorAgentId: "wk", title: "没挂边", body: "b", metadataJson: null,
       createdAt: AT, updatedAt: AT,
     });
-    const w = mkWork();
     const r = await run(w.id, fakeSession(() => {
       insertArtifact(db, {
         id: "art_new", projectId: "p1", conversationId: null, kind: "evidence", status: "open",
         authorAgentId: "wk", title: "新的", body: "b", metadataJson: null,
-        createdAt: AT + 1, updatedAt: AT + 1,
+        createdAt: AT + 1, updatedAt: AT + 1, workId: w.id,
       });
     }));
     expect(r.producedArtifacts.map((a) => a.id)).toEqual(["art_new"]);
@@ -435,5 +442,101 @@ describe("runWorkItem · 墙钟超时后的处置(不静默、留现场)", () =>
     expect(r.timeoutDisposition).toBeUndefined();
     expect(getWork(db, w.id)!.status).toBe("in_progress");
     expect(listPendingDispatchEvents(db, "p1"), "没超时就不该有下游事件").toEqual([]);
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════
+// 任务 1 · 产出采集接读方(014 的产出边)
+//
+// Wave 1 给 `artifacts` 加了 `work_id`,但 `runWorkItem` 还在用**项目级集合差**
+// —— 它连 `author_agent_id` 都不读,同项目两回合交叠时会互相认领对方的产出。
+// 下面这一组钉住新判据,以及那条边的**已知歧义**怎么被挡住。
+// ══════════════════════════════════════════════════════════════════
+
+describe("任务 1 · 产出采集走 014 的产出边", () => {
+  it("**同项目另一条工作项的产出不会被认领**(修掉的正是这个 bug)", async () => {
+    const mine = mkWork();
+    const other = mkWork();
+    const r = await run(mine.id, fakeSession(() => {
+      // 交叠的另一个回合:它产出的是**它自己那条**工作项的工件
+      insertArtifact(db, {
+        id: "art_theirs", projectId: "p1", conversationId: null, kind: "evidence", status: "open",
+        authorAgentId: "wk", title: "别人的", body: "b", metadataJson: null,
+        createdAt: AT + 1, updatedAt: AT + 1, workId: other.id,
+      });
+      insertArtifact(db, {
+        id: "art_mine", projectId: "p1", conversationId: null, kind: "evidence", status: "open",
+        authorAgentId: "wk", title: "我的", body: "b", metadataJson: null,
+        createdAt: AT + 1, updatedAt: AT + 1, workId: mine.id,
+      });
+    }));
+    expect(
+      r.producedArtifacts.map((a) => a.id),
+      "旧的集合差判据会把 art_theirs 也算成我的产出",
+    ).toEqual(["art_mine"]);
+  });
+
+  it("质检意见**不算产出**,但它那条边**保留**(那是它唯一能记的链接)", async () => {
+    insertAgent(db, {
+      id: "qa", role: "quality_reviewer", specialization: null,
+      displayName: "质检", createdAt: AT,
+    });
+    const w = mkWork();
+    const r = await run(w.id, fakeSession(() => {
+      // 真机第一跑就发生的形状:质检把 review_finding 挂到**被审的**工作项上。
+      // 这里由另一个 agent 写(worker 的 writeKinds 里没有 review_finding),
+      // 模拟「质检回合与 worker 回合交叠」—— 02 判据挡不住它,03 才挡得住。
+      insertArtifact(db, {
+        id: "art_finding", projectId: "p1", conversationId: null,
+        kind: "review_finding", status: "open",
+        authorAgentId: "qa", title: "审查意见", body: "b", metadataJson: null,
+        createdAt: AT + 1, updatedAt: AT + 1, workId: w.id,
+      });
+    }));
+    expect(r.producedArtifacts.map((a) => a.id), "质检意见不是这条工作项的交付物").toEqual([]);
+    expect(
+      listArtifacts(db, "p1", { workId: w.id }).map((a) => a.kind),
+      "⚠️ 那条边必须还在 —— `work_id` 是 review_finding 唯一能表达「关于哪条工作项」的地方",
+    ).toEqual(["review_finding"]);
+  });
+
+  it("**别的人**挂在它上面的工件不算产出(边是「关于」,不是「产出」)", async () => {
+    const w = mkWork();
+    const r = await run(w.id, fakeSession(() => {
+      insertArtifact(db, {
+        id: "art_pm", projectId: "p1", conversationId: null, kind: "work_brief", status: "open",
+        authorAgentId: "pm", title: "项目经理补充的简述", body: "b", metadataJson: null,
+        createdAt: AT + 1, updatedAt: AT + 1, workId: w.id,
+      });
+      insertArtifact(db, {
+        id: "art_wk", projectId: "p1", conversationId: null, kind: "evidence", status: "open",
+        authorAgentId: "wk", title: "我的证据", body: "b", metadataJson: null,
+        createdAt: AT + 1, updatedAt: AT + 1, workId: w.id,
+      });
+    }));
+    expect(r.producedArtifacts.map((a) => a.id)).toEqual(["art_wk"]);
+  });
+
+  it("**没挂边**的工件不算产出(边是显式的,平台不猜「当前工作项」)", async () => {
+    const w = mkWork();
+    const r = await run(w.id, fakeSession(() => {
+      insertArtifact(db, {
+        id: "art_no_edge", projectId: "p1", conversationId: null, kind: "note", status: "open",
+        authorAgentId: "wk", title: "忘了挂边", body: "b", metadataJson: null,
+        createdAt: AT + 1, updatedAt: AT + 1,
+      });
+    }));
+    expect(r.producedArtifacts).toEqual([]);
+    // 但工件本身在库里(丢的是「这一条工作项的产出」这条关系,不是数据)
+    expect(listArtifacts(db, "p1").map((a) => a.id)).toEqual(["art_no_edge"]);
+  });
+
+  it("任务描述里**点名了**要挂边的那一句(边的写入侧:不叫它传,边就永远是空的)", () => {
+    const p = composeWorkPrompt({
+      id: "w1", projectId: "p1", parentWorkId: null, title: "t", goal: "g",
+      status: "open", assigneeAgentId: "wk", createdAt: AT, updatedAt: AT,
+    });
+    expect(p).toContain("workId");
+    expect(p).toContain('"w1"');
   });
 });

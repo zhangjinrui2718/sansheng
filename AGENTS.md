@@ -8,10 +8,10 @@
 - **Sansheng(三生)** = 单用户本机常驻 Node 服务:Pi SDK 驱动**四个角色的 agent 组织**,SQLite 持久化,HTTP + WS + 托管前端。
 - **组织架构是一等数据**:`agents` / `projects` / `project_assignments` 在库里,**角色属性在代码里**(`ROLE_SPECS`)。制品是工件(`artifacts` 表),不是聊天记录。
 - 默认 `127.0.0.1:2719`;数据目录默认 `~/.sansheng/`,可用 `--data` 或 `SANSHENG_DATA` 覆盖。
-- 基线:**666 passed / 23 test files** · 两条 typecheck 0 error · `check:design` E1–E14 全绿。
+- 基线:**838 passed / 28 test files** · 两条 typecheck 0 error · `check:design` E1–E14 全绿。
 - 日志只走 stdout:`~/.sansheng/logs/sansheng.log` 恒为 0 字节,别去 tail 它。
 
-## 源码地图(`find src -name '*.ts' | wc -l` = 55)
+## 源码地图(`find src -name '*.ts' | wc -l` = 56)
 
 ```
 src/cli/                 CLI 入口(index.ts + paths.ts)
@@ -87,7 +87,7 @@ shared/types/            跨端协议类型(platform.ts / settings.ts)
 
 | 角色 | 待办判据 | 判据从哪来 |
 |---|---|---|
-| `business_manager` | 有人问它 / **有下游结果还没向甲方交代** | 库里的 `open` ask + **`dispatch_events`(outbox)里未消费的行** |
+| `business_manager` | 有人问它 / **有下游结果还没向甲方交代**(**且过了合并窗口**:攒够 N 条或最老的一条等到 T;失败与高危阻塞**绕过**窗口) | 库里的 `open` ask + **`dispatch_events`(outbox)里未消费的行** |
 | `project_manager` | 有人问它 / 有变更待评 / **项目零工作项** / **有工作项被派给了非 worker** | `pendingWork.ts` + `works` |
 | `worker` | **分派给它、前置已满足、还没终态**的工作项 | `pendingWork.ts` 的 `myOpenWorks` |
 | `quality_reviewer` | 有人问它 / 有变更待评 / **有做完但没审的产出** | `works.status='done' AND review_state='pending'` |
@@ -96,16 +96,23 @@ shared/types/            跨端协议类型(platform.ts / settings.ts)
 
 **触发/边界**:① 可能改变流水线状态的工具调用成功后敲门铃(清单在 `runtime/dispatcher.ts` 的 `NUDGE_CAPABILITIES`,挂在 `tools/registry.ts` 的 `dispatch()` 这个唯一漏斗上);② `host/serve.ts` 的 fixed-delay 定时器(默认 10s,`--dispatch-interval` 可配)兜底;③ **接待会话里那次立项不 nudge** —— 用户刚被切进新项目,还没看过目标就自动开工等于在他确认之前花他的 token。
 
-**一定会停两层**:硬上界 `maxRounds`(默认 8,`--max-cascade-rounds` 可配)+ **尝试预算** `dispatch_attempts`(按 `(项目, todo_key)` 记账,默认 3 次;目标行动了就清零)。到界 / 预算用尽**不静默**:广播 `cascade_stopped` + 落一条 `system` 会话消息(预算用尽只在**第一次**用尽时播报,否则每 10 秒一条也是静默)。
+**一定会停三层**:硬上界 `maxRounds`(默认 8,`--max-cascade-rounds` 可配)+ **尝试预算** `dispatch_attempts`(按 `(项目, todo_key)` 记账,默认 3 次;目标行动了就清零)+ **墙钟上界** `wallClockTimeoutMs`(默认 10 分钟,`--turn-wall-clock-ms` 可配)。到界 / 预算用尽**不静默**:广播 `cascade_stopped` + 落一条 `system` 会话消息(预算用尽只在**第一次**用尽时播报,否则每 10 秒一条也是静默)。
+
+> 前两层管「**还要不要叫醒**」,第三层管「**已经叫醒的那一个回合还能跑多久**」—— 一个回合卡在某个工具上时前两层都拦不住(它占着项目 busy 闩,而账本记的是次数不是时长;真机现场是一个 worker 回合跑了 16 分钟还在 `curl` 文档)。到点由平台 `AgentSession.abort()` **真的打断**,然后**按超时处置**:还没终态就记 `failed`(经唯一写口写出 `work_failed` 事件 → 业务经理的汇报待办),它自己已终态 / 已 blocked 就不覆盖。**为什么是 `failed` 而不是留在 `in_progress`**:留着 = 静默死(不在任何 outbox 事件里、会被反复叫醒直到预算用尽、然后永久停在原地),而每次叫醒再买一个完整的墙钟上界。**Wave 1 只做完了判定与打断,运行期吃不到它**(宿主没把 `ServeOptions.turnWallClockMs` 接出去,于是「我调了上界」与「它根本没生效」在真机上长得一样);Wave 2 把那条线接上了,而且**两条路都要接**(`runAgentTurn` 聊天那条 + `runWorkInSession` 执行那条 —— 只接前者等于没接)。
+
+**合并唤醒:少打扰甲方的第二刀(判定侧的时机收窄)**。写入侧只对「根工作项终态 / 里程碑 / `work_failed` / high|critical 阻塞」写 outbox —— **但真机复核发现它在扁平结构下是空转的**:用户自己的库是 `9 work → 9 root → 0 中间`,而 `grep -rn parentWorkId harness/` 是**空的**(没有任何地方告诉项目经理要建树),于是每条工作项终态都是「根终态」,全部照写。所以 `collectTodos` 生成 `report_downstream` 时再加两个条件之一:**攒够 N 条**(`--report-batch-size`,默认 **3**)或**最老的那条等了 T**(`--report-max-delay-ms`,默认 **5 分钟**,它是延迟上界)。⚠️ `work_failed` 与 severity ≥ high 的 `blocker_opened` **绕过窗口立刻叫醒**(它们影响时间表,甲方要能据此重新决策)。判定侧收窄的是**时机**,不是**资格** —— 它不按 kind / 位置丢掉任何一行;而「没到阈值的行根本没被消费 ⇒ `consumed_at` 不因合并而撒谎」这条推理写在 `runtime/dispatcher.ts` 与设计 1 §9.4。
 
 > 预算**不是**判据,是**限流**,而且与批次 20 的 `stallStore` 有两处本质区别:它在库里(重启后还算数);它**不需要状态指纹**(没有「指纹漏一类状态 → 把真实进展读成无进展 → 掐死整条链」这条失败路径,真机踩过)。宿主**不持有任何跨排空状态** —— `CascadeState` / `stallStore` / `projectSignature` / 「最后一格预算给汇报」全部已删除。
+
+> ⚠️ **`as never` / `parentWorkId` 这类「有声明没读者」的东西要定期复核。** 合并唤醒这一刀的**起因**正是复核发现的:`repo/works.ts` 写入侧有一套完整的「按工作分解树判可打扰」逻辑,而运行期**没有任何地方会建树** —— 逻辑正确、测试齐、生产上空转。判断机制是否生效,要看**真机库里的形状**(`SELECT COUNT(*) FROM works WHERE parent_work_id IS NOT NULL`),不是看代码里写没写。
 
 > 会话池的键是 `(上下文, agent)` 而不是上下文 —— 一个项目里四个角色各要一条自己的会话(工具面不同)。原先 BM 独占,键是 `string | null`。
 
 
 ## 数据与存储
 
-- 迁移在 `migrations/`:**007–010 建平台表**,**011 把旧系统的 7 张表 DROP**(`blackboards` / `conversations` / `messages` / `fragments` / `user_profile` / `agent_states` / `fragments_vec`),**012 接待会话**(重建 `project_sessions` 放宽 `project_id` 可空,已登记进 `INTENTIONAL_REBUILDS`),**013 排空器状态**(`works.review_state` + `dispatch_events` + `dispatch_attempts`,纯加法)。
+- 迁移在 `migrations/`:**007–010 建平台表**,**011 把旧系统的 7 张表 DROP**(`blackboards` / `conversations` / `messages` / `fragments` / `user_profile` / `agent_states` / `fragments_vec`),**012 接待会话**(重建 `project_sessions` 放宽 `project_id` 可空,已登记进 `INTENTIONAL_REBUILDS`),**013 排空器状态**(`works.review_state` + `dispatch_events` + `dispatch_attempts`,纯加法),**014 产出边**(`artifacts.work_id` + 一条部分索引,纯加法),**015 放宽 `dispatch_events.kind`**(加 `work_cancelled`;闭集**只能靠重建表**放宽,已登记进 `INTENTIONAL_REBUILDS`)。
+- ⚠️ **`artifacts.work_id` 一条边承载两个语义**(「产出」∪「关于」,migration 014):worker 写 `evidence` 是产出,质检把 `review_finding` 挂到**被审的那条**上是「关于」。取「这条工作项交付了什么」必须自己区分(`runtime/execution.ts` 用 `work_id` + 作者 + `kind ∉ ABOUT_ONLY_ARTIFACT_KINDS` 三条判据);**不要删那些边** —— 它是 `review_finding` 唯一能表达「审的是哪一条」的地方。
 - `artifacts` 直接挂项目 —— **没有 blackboard 容器层**。记忆在 `memory_fragments` / `memory_profile`,不是 `fragments`:`fragments` 是旧名字,001 已占用。
 - 平台表**不得复用旧表名**:`CREATE TABLE IF NOT EXISTS` 撞名时静默无操作,新表根本建不出来(见下 §三类静默失败)。加表前先 `ls migrations/` 查名。
 - 外键一律指向 `agent_id`,不存 `role` 字符串 —— 角色属性只有一处真相。
@@ -141,7 +148,7 @@ help
 ```
 npx tsc -p tsconfig.server.json --noEmit
 npx tsc -p tsconfig.web.json --noEmit
-npm test                  # 666 passed / 23 files
+npm test                  # 838 passed / 28 files
 npm run build
 npm run check:design      # 设计一致性 E1–E14
 ```

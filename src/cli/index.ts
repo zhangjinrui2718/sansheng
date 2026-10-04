@@ -105,13 +105,32 @@ program
     "排空器兜底定时器间隔(毫秒,fixed-delay;默认 10000)",
     "10000",
   )
+  .option(
+    "--turn-wall-clock-ms <ms>",
+    "一个 agent 回合的墙钟上界(毫秒;到点真的 abort 打断;默认 600000 = 10 分钟)",
+    "600000",
+  )
+  .option(
+    "--report-batch-size <n>",
+    "合并唤醒:下游事件攒够几条才叫醒业务经理一次(默认 3)",
+    "3",
+  )
+  .option(
+    "--report-max-delay-ms <ms>",
+    "合并唤醒:最老的一条事件等多久就叫醒一次(毫秒;默认 300000 = 5 分钟)",
+    "300000",
+  )
   .action(async (opts: {
     host: string; port: string; cwd?: string; data?: string; open: boolean;
     maxCascadeRounds: string; schedulerInterval: string; dispatchInterval: string;
+    turnWallClockMs: string; reportBatchSize: string; reportMaxDelayMs: string;
   }) => {
     const rounds = Number(opts.maxCascadeRounds);
     const interval = Number(opts.schedulerInterval);
     const dispatchInterval = Number(opts.dispatchInterval);
+    const turnWallClock = Number(opts.turnWallClockMs);
+    const reportBatch = Number(opts.reportBatchSize);
+    const reportDelay = Number(opts.reportMaxDelayMs);
     await runPlatformServe({
       dataDir: opts.data ?? dataDir(),
       host: opts.host,
@@ -124,6 +143,11 @@ program
       schedulerIntervalMs: Number.isFinite(interval) && interval > 0 ? interval : 60_000,
       dispatchIntervalMs:
         Number.isFinite(dispatchInterval) && dispatchInterval > 0 ? dispatchInterval : 10_000,
+      turnWallClockMs:
+        Number.isFinite(turnWallClock) && turnWallClock > 0 ? turnWallClock : 600_000,
+      reportBatchSize: Number.isFinite(reportBatch) && reportBatch > 0 ? reportBatch : 3,
+      reportMaxDelayMs:
+        Number.isFinite(reportDelay) && reportDelay > 0 ? reportDelay : 300_000,
     });
   });
 

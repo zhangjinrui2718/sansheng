@@ -212,6 +212,7 @@ Blocker        open → acknowledged → resolved | deferred | rejected
 | `WorkDep` | 实体(边) | `work_deps` | **M:N**,DAG(自环 + 多跳环都由 `addDep` 拦) | **只有 `work_create` 能写**(`:296`);`removeDep`(`repo/works.ts:322`)**零生产调用方** |
 | `Artifact` | 实体 | `artifacts` | 1 Artifact — **1** Project(必填);1 Artifact — N ArtifactLink | **三条路**:模型 `board_write`(`tools/blackboard.ts:122`)· 协议工具原子创建(`collab.ts` / `client.ts`)· 平台 `POST /api/client-questions/:id/answer`(`http.ts:249`) |
 | `ArtifactLink` | 实体(边) | `artifact_links` | **M:N**(Artifact × Artifact),`rel ∈ parent \| depends_on \| answers` | `board_write` 的 `links` 参数;协议工具 |
+| **`Artifact → Work`**(**产出 ∪ 关于**,migration 014) | 值型的边 | `artifacts.work_id` | **N:1**(N 工件 — 1 工作项),**可空** | `board_write` 的 `workId` 参数(模型显式指名,平台校验「存在且同项目」);`ON DELETE SET NULL`。⚠️ 一条边承载**两个**语义 —— 「交付物」与「关于哪条工作项」,读产出要自己区分(§2.6 末) |
 | `Ask` | 实体 | `asks` | **N:1** from / **N:1** to;自引用 `parent_ask_id` = 升级链(**一条链上同时只有一条活问**) | `ask_role` / `answer` / `escalate` |
 | `Meeting` + 参会记录 | 实体 + 关联 | `meetings` / `meeting_participants` | 1 Meeting — **M:N** Agent(`PRIMARY KEY(meeting_id, agent_id)`) | `convene` / `meeting_respond` / `meeting_conclude` |
 | `Blocker` + 命中记录 | 实体 + 边 | `blockers` / `blocker_blocks` | 1 Blocker — **M:N** Work | `blocker_open` / `blocker_update` |
@@ -284,21 +285,34 @@ dispatch_attempts   技术机制(限流账本:叫醒过几次)
 
 > **为什么建议不改表名。** 改名在 SQLite 上等于**重建表**(012 那条路,它的注释里记着这条路会静默删数据),还要同步索引、`INTENTIONAL_REBUILDS` 登记(`tests/platform/migrations.test.ts:42`)与真机库。**收益是措辞,成本是一次数据迁移** —— 不对等。所以结论是**分层命名,不动表名**:领域层用 `Todo`,机制层在文档与类型上叫 outbox / 账本。
 
-### 2.6 缺口 ①:工件与工作项之间没有边(成立,且比描述的更严重)
+### 2.6 缺口 ①:工件与工作项之间没有边(**已落地** —— 本节保留为「为什么这么画」的记录)
 
-**现状**:`artifacts` 没有 `work_id`(`migrations/008_blackboard_change.sql` 的 `artifacts` 表;`src/platform/storage/repo/artifacts.ts` 里 grep 不到 `work_id`)。
+> **⚠️ 本节的状态(2026-10-04 · Wave 2 更新)**
+>
+> 下面这段「现状」描述的是**014 之前**的形态,它**已经为假**:
+> `migrations/014_artifact_work.sql` **已落地**,`artifacts.work_id` 存在,
+> `board_write` 的 `workId` 参数与 `listArtifacts(projectId, { workId })` 都已接线,
+> `runtime/execution.ts` 的产出采集也已从「项目级集合差」换成走这条边。
+>
+> 下面**保留**两样东西:① 方案 B(`artifact_links.rel = 'produces'`)为什么结构上
+> 不成立的三条实测证据 —— 那些结论与这个项目无关、与 SQLite 有关,换不掉;
+> ② 这条边的设计选择与理由。**读的时候把「现状」当历史**,以代码为准。
+>
+> **⚠️ 另有一处当时的判断被真机推翻了** —— 见本节末「这条边的语义其实是两个」。
 
-「这条工作项产出了什么」今天是**项目级集合差**算出来的:
+**当时的现状**:`artifacts` 没有 `work_id`(`migrations/008_blackboard_change.sql` 的 `artifacts` 表;`src/platform/storage/repo/artifacts.ts` 里 grep 不到 `work_id`)。
+
+「这条工作项产出了什么」那时是**项目级集合差**算出来的:
 
 ```
 回合前   artifactsBefore = set(listArtifacts(db, projectId))        ← 整个项目
 回合后   差集                                                        ← 就是「产出」
 ```
-落点 `runtime/execution.ts:143` 与 `:161`。
+落点 `runtime/execution.ts`(Wave 2 已改成走 014 的产出边)。
 
-**这比「靠作者 + 时间接近猜」更弱 —— 它连作者都不看。** 后果:同一项目里两个回合交叠时,**两边都会把对方的工件算成自己的产出**。今天的宿主有 per-project 忙闩(`host/serve.ts` 的 `hub.isBusy`),所以只有「常驻宿主 + `platform-run` CLI 同时跑同一项目」才会撞上;**判据本身是错的,只是暂时没有触发面。**
+**这比「靠作者 + 时间接近猜」更弱 —— 它连作者都不看。** 后果:同一项目里两个回合交叠时,**两边都会把对方的工件算成自己的产出**。今天的宿主有 per-project 忙闩(`host/serve.ts` 的 `hub.isBusy`),所以只有「常驻宿主 + `platform-run` CLI 同时跑同一项目」才会撞上;**判据本身是错的,只是暂时没有触发面。**(修它 = 让读写两侧都走这条边,见 §2.6 末。)
 
-质检那一侧同样断: `review_work` 待办的 `refs` 是 work id(`dispatcher.ts:292`),而 `listArtifacts` 的过滤器只有 kind / status / author / parentOf(`repo/artifacts.ts:119`)—— **从 work id 查不到它的产出。**
+质检那一侧当时同样断: `review_work` 待办的 `refs` 是 work id(`dispatcher.ts:292`),而 `listArtifacts` 的过滤器只有 kind / status / author / parentOf(`repo/artifacts.ts:119`)—— **从 work id 查不到它的产出。**
 
 #### 方案对比(带实测)
 
@@ -319,14 +333,43 @@ dispatch_attempts   技术机制(限流账本:叫醒过几次)
 
 #### 这条边的基数与语义
 
-- **N:1**(N 个工件由 1 条工作项产出),**可空**。`NULL` = 不是任何工作项的执行产出:立项书、会议纪要、变更记录、甲方问答、质检意见。
-- 它**只表达「产出(provenance)」**,不表达「这条工件**关于**哪条工作项」—— 后者才是 M:N,是另一件事,列入未决(§12 #7)。
-- **谁维护**:`board_write` 增加**可选** `workId` 参数(模型显式指名),平台在写入时校验「存在且同项目」。不用会话级的「当前工作项」默认值 —— 一条会话会连续跑多个工作项(`execution.ts:118` 的注释),`ToolRunContext` 是建会话时构造一次的(`runtime/assembly.ts:137`),放了默认值它会**过期**。
+- **N:1**(N 个工件由 1 条工作项产出),**可空**。`NULL` = 不是任何工作项的执行产出:立项书、会议纪要、变更记录、甲方问答。
+- 它**只表达「产出(provenance)」** ← ⚠️ **这条判断被真机推翻了,见下。**
+- **谁维护**:`board_write` 有**可选** `workId` 参数(模型显式指名),平台在写入时校验「存在且同项目」。不用会话级的「当前工作项」默认值 —— 一条会话会连续跑多个工作项(`execution.ts` 的注释),`ToolRunContext` 是建会话时构造一次的(`runtime/assembly.ts:137`),放了默认值它会**过期**。
 
-#### migration 草案 `014_artifact_work.sql`(草案 · 未落地)
+#### ⚠️ 这条边的语义其实是**两个**(真机第一跑就推翻了上一版)
+
+上面那句「它**只**表达产出」**是假的**。真机第一次跑到质检就发生:
+
+> 质检审完一条工作项,会把 `review_finding` 挂到**被审的那一条**上。
+
+所以 `workId` 的实际语义是「**产出 ∪ 关于**」:
+
+| 谁 | kind | 那条边其实在说 |
+|---|---|---|
+| worker 自己 | `evidence` / `hypothesis` / `work_brief` / `note` | **产出**:这条工作项交付了它 |
+| 质检审查员 | `review_finding` | **关于**:这条工件在说这条工作项 |
+| 项目经理 | `work_brief` / `note` | **关于**(通常是补充说明) |
+
+**处置(两件事必须同时做,否则会静默丢东西)**:
+
+1. **不能删那些边。** `work_id` 是 `review_finding` **唯一**能表达「我审的是哪一条」的地方
+   —— §2.6 已经实测过 `artifact_links.rel` 放不下 `produces`(两端都必须是工件),
+   而「关于」这条 M:N 关系还没有自己的表(§12 #7)。删边 = 质检意见变孤儿。
+2. **读「产出」时必须自己区分。** `runtime/execution.ts` 采产出时用三条**机械**判据
+   取交集:`work_id = 这条工作项` **且** `author_agent_id = 本回合的执行者`
+   **且** `kind ∉ ABOUT_ONLY_ARTIFACT_KINDS`(`["review_finding"]`)。
+   作者那一条是真的在挡东西(质检也是这条边的合法作者),不是冗余。
+
+**这是一个权宜,缺口仍然开着**:一条边承载两种关系。真正的解法是给 `artifacts`
+再加一个 `rel ∈ {produces, about}`,那又是一笔迁移。在那之前,
+「这条工作项交付了什么」这个问题的答案**必须**经过上面那三条判据 ——
+直接拿 `workId` 当答案会把质检意见算成交付物。
+
+#### migration `014_artifact_work.sql`(**已落地**)
 
 ```sql
--- 014 · 工件 → 工作项的产出边(DRAFT)
+-- 014 · 工件 → 工作项的产出边(已落地,`migrations/014_artifact_work.sql`)
 --
 -- 纯加法:一个可空列 + 一条部分索引。没有 DROP、没有重建、没有 NOT NULL。
 -- ⚠️ 不建表 —— 因此没有 `CREATE TABLE IF NOT EXISTS` 撞名的面(AGENTS.md 静默失败 #1)。
@@ -337,7 +380,7 @@ CREATE INDEX IF NOT EXISTS idx_artifacts_work
   ON artifacts(work_id) WHERE work_id IS NOT NULL;
 ```
 
-**实测结论**(对着 001→013 的真实迁移链跑,已含正负样本):
+**落地前的实测结论**(对着 001→013 的真实迁移链跑,已含正负样本):
 
 | 检查 | 结果 |
 |---|---|
@@ -436,7 +479,7 @@ CREATE INDEX IF NOT EXISTS idx_artifacts_work
 
 **建议**:给 `work_update` 加可选 `dependsOn`(**整体替换**语义,内部走 `addDep` / `removeDep` 同一套环检测,不做第二套);并把「取消一条有后继依赖的工作项」变成一条**非阻塞警告**(结构化返回 + 列出后继 id),**不是拒绝** —— 拒绝会把合法的「这块不要了」也一起挡住。
 
-**另一条立即该补的**:`cancelled` **不写任何 outbox 事件**(`works.ts:204` 的 `EVENT_KIND` 只有 done / failed / blocked)。于是「一条工作项被取消」这件事业务经理与质检**都不知道** —— 而它恰恰是下游悬空的来源。补它要给 `dispatch_events.kind` 的 CHECK 闭集加一个取值,那需要**重建表**(理由同 §2.6 的实测第 3 条)。这张表没有子表引用、只有一条部分索引,重建成本低,但**它是一次真迁移**,列入未决(§12 #10)。
+**另一条立即该补的(✅ 已补:migration 015 + `repo/works.ts` 的 `cancelled` 判定)**:`cancelled` **曾**不写任何 outbox 事件(`EVENT_KIND` 只有 done / failed / blocked)。于是「一条工作项被取消」这件事业务经理与质检**都不知道** —— 而它恰恰是下游悬空的来源。补它要给 `dispatch_events.kind` 的 CHECK 闭集加一个取值,那需要**重建表**(理由同 §2.6 的实测第 3 条)。这张表没有子表引用、只有一条部分索引,重建成本低 —— 已在 `migrations/015_dispatch_event_kinds.sql` 走过一次(见 §12 #10)。
 
 ### 2.9 谁决定甲方可见性
 
@@ -1168,7 +1211,7 @@ AgentRuntime
 
 | 角色 | 「可执行的待办」 | 判据来源 |
 |---|---|---|
-| `business_manager` | **有下游结果还没向甲方交代** | `dispatch_events`(outbox)里未消费的行 |
+| `business_manager` | **有下游结果还没向甲方交代**(且过了**合并窗口**:攒够 N 条 / 最老的一条等到 T)**或**有立刻可播的(失败 / 高危阻塞) | `dispatch_events`(outbox)里未消费的行 |
 | `project_manager` | 有人问它;有变更待评;**项目一个工作项都没有**(还没拆解);**有工作项被派给了非 worker** | `pendingWork.ts` + `works` |
 | `worker` | **分派给它、前置已满足、还没到终态**的工作项 | `pendingWork.ts` 的 `myOpenWorks` |
 | `quality_reviewer` | 有人问它;有变更待评;**有做完但没审的产出** | `works.status='done' AND review_state='pending'` |
@@ -1190,9 +1233,9 @@ AgentRuntime
 
 判定与状态全在库里,所以宿主**不持有任何跨排空的状态**;「刚才发生了什么」不参与判定,那正是批次 20 六个补丁的同一个根因。
 
-**一定会停**,两层:
+**一定会停**,三层:
 
-1. **硬上界** `maxRounds`(默认 8,`--max-cascade-rounds` 可配)。到界**不静默停**:返回 `stopReason`,宿主广播 `cascade_stopped` + 落一条 `system` 会话消息。界面回到 `idle` 而用户以为「还在跑」或「已经做完了»,两种误解都会让他在错误的时刻做决定。
+1. **硬上界** `maxRounds`(默认 8,`--max-cascade-rounds` 可配)。到界**不静默停**:返回 `stopReason`,宿主广播 `cascade_stopped` + 落一条 `system` 会话消息。界面回到 `idle` 而用户以为「还在跑」或「已经做完了」,两种误解都会让他在错误的时刻做决定。
 2. **尝试预算** `maxAttemptsPerTodo`(默认 3),记在 `dispatch_attempts` 的 `(project_id, todo_key)` 上。某条待办被叫醒若干次而目标一动不动 → 不再叫醒它,并**广播一次**(不静默)。待办消失时账本行被删掉,所以「同一件事再次出现」自动拿到新预算。
 
    ⚠️ 这与批次 20 的 `stallStore` + 项目状态签名的本质区别有两条,而正是那两条让它安全:
@@ -1200,6 +1243,47 @@ AgentRuntime
    - **它不需要状态指纹**:不存在「指纹漏了一类状态 → 把真实进展读成没有进展 → 整条链被掐死」这条失败路径(真机跑出来过:签名漏了 `meetings`,项目经理成功表态却被判无进展,那个项目最后 `works=0`)。计数的失效方向永远是「多跑一次」,不会是「误判停住」。
 
    顺带地,「卡住一条待办不拖停整条」不再需要专门的补丁:预算按待办逐条记账,到界只影响它自己。
+
+3. **墙钟上界** `wallClockTimeoutMs`(`runtime/turn.ts` 的 `DEFAULT_WALL_CLOCK_TIMEOUT_MS` = **10 分钟**;`--turn-wall-clock-ms` 可配)。前两层管的是「**还要不要叫醒**」,这一层管的是「**已经叫醒的那一个回合还能跑多久**」—— 一个回合卡在某个工具上时,前两层都拦不住它:它占着该项目的 busy 闩,预算也不会变(目标没动过,账本记的是次数,不是时长)。真机现场是一个 worker 回合跑了 **16 分钟**还在 `curl` 文档。
+
+   到点由平台调 `AgentSession.abort()` **真的打断**这个回合(`abortGraceMs` 默认 15 秒 —— 宽限到点就不再等一个不会收敛的 `prompt()`),然后**按超时处置**:
+
+   | 打断时工作项的状态 | 平台怎么做 | 回报 |
+   |---|---|---|
+   | 还没终态、也没 blocked | **记 `failed`** | `marked_failed` |
+   | 它自己已到终态(done / failed / cancelled) | 不覆盖它(那是它自己更权威的判定) | `left_terminal` |
+   | 它自己登记了阻塞(blocked) | 不覆盖它(`blocked` 的语义是「已登记阻塞」,平台这里没有阻塞记录可指) | `left_blocked` |
+
+   **为什么是 `failed` 而不是留在 `in_progress`**:留在 `in_progress` 是**静默死**。它不在任何 outbox 事件里(`updateWorkStatus` 只对 done / failed / blocked 写事件),所以业务经理永远不会向甲方交代「这条活没做完」;而它会作为 `execute_work` 待办被反复叫醒,直到尝试预算用尽 —— 每次叫醒再买一个完整的墙钟上界,然后它**再也不被叫醒**。`failed` 是终态里唯一诚实的落点:它不假装成功、不假装有人登记过阻塞、也不假装还活着;它经 `updateWorkStatus` 这个唯一写口写出 `work_failed` 事件 → 业务经理的汇报待办 → 甲方可见。要人(项目经理)介入才能继续,这是对的失效方向。
+
+   ⚠️ **这个上界在 Wave 1 只做完了判定与打断,运行期吃不到它** —— 宿主没有把 `ServeOptions.turnWallClockMs` 接出去,于是「我调了上界」与「它根本没生效」在真机上长得一样。Wave 2 补上了那条线(CLI → `ServeOptions` → `runAgentTurn` / `runWorkInSession` 两条路都要接,**只接聊天那条等于没接**)。
+
+**会不会打扰甲方:合并唤醒(判定侧的时机收窄)。**
+
+「谁被唤醒」这件事还有第二个问题 —— 不是「该不该叫醒业务经理」,而是「**为一条事件就叫醒一次值不值**」。用户的原话:
+
+> 我觉得现在**业务经理干的事情太多了** …… 业务经理就不需要再将项目实际执行的**细节进展**直接同步给用户,你看聊天记录里面的一长串,**真真甲方不关心这些**
+
+写入侧已经收过一刀(`updateWorkStatus` 只对**根工作项**终态 / 里程碑 / `work_failed` / severity ∈ {high, critical} 的阻塞写 outbox)。**但真机复核发现那一刀在扁平结构下是空转的**:用户自己的库是 `9 work → 9 root → 0 中间`,而 `grep -rn parentWorkId harness/` 是**空的** —— 没有任何地方告诉项目经理要建树。扁平结构下**每条工作项终态都是「根终态」**,写入侧的判据条条命中,一条也没筛掉。
+
+所以第二刀落在**判定侧**,而且它收窄的是**时机**,不是**资格**:
+
+| 条件 | 缺省 | 含义 |
+|---|---|---|
+| `reportBatchSize`(攒够 N 条) | **3** | 攒够 3 条未消费事件就叫醒一次 |
+| `reportMaxDelayMs`(最老的一条等了 T) | **5 分钟** | 它是**延迟上界** —— 保证「事件永远等不到叫醒」不可能发生 |
+
+两个都可配(`--report-batch-size` / `--report-max-delay-ms`)。
+
+**默认值的依据**:N = 3 是因为真机库的规模就是 9 条工作项(⇒ 大约 3 次唤醒),攢 3 条把「3 次唤醒」压成 1 次;取 2 省得太少,取 5 会让只有 2~4 条工作项的小项目永远靠 T 兜底(那等于把攒批换成定时)。T = 5 分钟是因为它是延迟上界、不是省 token 的手段:排空兜底定时器是 10 秒,所以到点后最多再等一个 tick;而一次 agent 回合本身就是 2–3 分钟,取到分钟以下等于「每条都立刻叫醒」(合并根本不生效)。
+
+⚠️ **该立刻说的不许被 debounce 掉**:`work_failed` 与 severity ∈ {high, critical} 的 `blocker_opened` **绕过合并窗口**,立刻叫醒 —— 它们影响时间表,甲方要能据此重新决策(§2.9 那张表)。判据在 `dispatcher.ts` 的 `isImmediateEvent`,与写入侧 `repo/dispatch.ts` 的 `worthInterrupting` 是**同一个判据的两道独立防线**(刻意不共用常量:一处判「值不值得记」,一处判「值不值得立刻叫醒」;两层不一致的表现是「多叫醒一次」,不是静默漏掉)。
+
+**「判定侧收窄会让 `consumed_at` 撒谎」这条论证的适用边界**(Wave 1 提出,Wave 2 复核后修正):
+
+- 那条论证**只在「不可打扰的事件仍然进库」时成立**。写入侧收紧之后它们大多根本不进库 ⇒ 库里剩下的每一行都值得交代,全量消费(`consumePendingDispatchEvents` 无差别标记全部未消费行)**不再是缺陷**。
+- 合并唤醒与那条论证**不是同一件事**:它决定**什么时候叫醒**,不决定**哪一行算交代过**。攒着没到阈值的行**根本没被消费**(没有待办 → 没有回合 → 不消费),它们的 `consumed_at` 仍是 `NULL`;一旦叫醒,被消费的正好是 `renderDownstream` 在同一回合里逐行渲染给业务经理的那一批。
+- ⇒ **结论:合并唤醒不因「合并」而让 `consumed_at` 撒谎。** 唯一残留的谎是一条**先于本次改动就存在**的竞态:业务经理回合**进行中**新落库的事件会被同一次全量消费扫进去,而它没进那一回合渲染的名单(窗口 = 一个 agent 回合的时长,改动前后一样宽)。要修得把消费从「全量」改成「按 seq 集合」,落在 `repo/dispatch.ts`,列入 §12。
 
 **为什么项目上下文进回合消息,而不是系统提示。** 系统提示在会话建立时算一次,而一个项目的会话是**常驻**的;项目状态会在它活着的时候变(`project_update` 改目标、`project_close` 关项目、成员增减)。拼进系统提示等于把建立那一刻的快照当成永久事实,而且不会有任何东西提醒它过期。回合消息则每回合现算 —— 与待办注入同一条理由。注入的层次是:
 
@@ -1352,12 +1436,18 @@ AgentRuntime
 
 **6. 调度器的巡检策略**(2026-10-04 新增)。`listOverdueAsks` / `expireAsk` 已实现但无调用方。超时之后该做什么有几种选择:只surface 给知情方(当前注入文本的处置)、自动升级给上一级、还是标记为失效。7-L 的 fail-safe 原则(「判断轮缺席/超时/解析失败一律退回升级」)倾向于自动升级,但那会产生噪音。**前置依赖:阶段 12 的宿主进程** —— 没有长驻进程时这题连实验都做不了。
 
-**7. `artifacts.work_id` 只表达「产出」,那「关于」这条边要不要建?**(2026-10-04 新增,§2.6)。已定的是 **N:1 的 provenance**(这条工件是哪条工作项跑出来的)。未定的是 **M:N 的「这条工件是关于哪条工作项的」** —— 一份决策可能同时关乎三条工作项,一份质检意见天然覆盖多条。今天用 `metadata_json` 记,不可查(与 §8.1 修订里 `affected_work_ids_json` 被换掉的理由完全同型)。**建议:先看真实用量**;`provenance` 落地并跑了若干项目之后,如果「按工作项找相关工件」这条查询真的被反复需要,再建 `work_artifacts(work_id, artifact_id, rel)`。不要现在就建 —— 没有读方的边表就是下一个 `fragments_vec`。
+**7. `artifacts.work_id` 只表达「产出」吗?「关于」这条边怎么办?**(2026-10-04 新增,§2.6;**Wave 2 更新:前提被真机推翻**)。原题是「`work_id` 只表达产出,那 M:N 的『关于』边要不要建」。**真机第一跑就证明它不只表达产出**:质检把 `review_finding` 挂到被审的那条工作项上 —— 「关于」已经**在同一个列里**表达了,只是没有字段区分它。所以今天的状态是**一条边承载两个语义**,而 `runtime/execution.ts` 用「作者 + kind」两条判据把它们分开(见 §2.6 末)。
+
+**仍然未定的那一半**没变,而且更清楚了:一份决策可能同时关乎三条工作项,一份质检意见天然覆盖多条 —— 那是 **M:N**,`work_id` 这个 N:1 的列表达不了。**建议不变:先看真实用量。** 但新增一条更该先做的:**给 `work_id` 加一个 `rel ∈ {produces, about}`**,让「产出 ∪ 关于」那个并集在 schema 上分开 —— 否则每个读产出的地方都要自己复刻那两条判据,漏一处就是静默把质检意见算成交付物。
 
 **8. 人员移出项目时,他手上在办的工作项怎么办?**(2026-10-04 新增,§2.4.3)。`removeMember`(`repo/projects.ts:134`)与 `deleteWork`(`repo/works.ts:267`)**都零生产调用方**,所以这条规则今天触发不了 —— 它是**潜伏的**而不是活的。但两条已有的机制边界已经画出来了,值得先定规则再开路径:① 负责人**不存在或不是 worker** 时,`dispatcher.ts:210` 会把项目经理叫醒来处置(`fix_work_assignment`);② 负责人**仍存在、角色仍是 worker,但已不在本项目**时,**没有任何判据会命中** —— `myOpenWorks` 按花名册算(`dispatcher.ts:192`),被移出的人不在花名册里,于是那条工作项**静默停在原地**。**建议:先定「移出时其未终态工作项必须改派」为规则,再开 `removeMember` 的路径**;顺序反了会先制造出一批静默停住的工作项。
 
 **9. `done → in_progress`(审查后退回重做)算不算合法迁移?**(2026-10-04 新增,§2.7)。它今天**是允许的**(写口不校验迁移),代价是 `review_state` 被清成 `none` 而**已消费的 outbox 事件不撤回** —— 于是「已向甲方交代」与「其实还没做完」可以同时成立,`consumed_at` 这个字段开始撒谎。两条出路:(a) 判定为非法,退回重做走「新建一条工作项并 `supersedes` 旧的」;(b) 判定为合法,但要求退回时**写一条新的 outbox 事件**(让甲方知道先前那次交代作废)。(b) 更贴合真实工作流,但它要求 `dispatch_events.kind` 再加取值 —— 与 #10 是同一笔迁移。
 
-**10. `cancelled` 要不要写 outbox 事件?**(2026-10-04 新增,§2.8)。今天**不写**(`repo/works.ts:204` 的 `EVENT_KIND` 只有 done / failed / blocked),于是「一条工作项被取消」业务经理与质检都不知道 —— 而它正是下游依赖悬空的来源(真机事故的起点)。要补就得给 `dispatch_events.kind` 的 CHECK 闭集加取值,而**闭集只能通过重建表放宽**(实测见 §2.6:`ADD CONSTRAINT` 只能收紧)。成本评估:`dispatch_events` 没有子表引用,只有一条部分索引 `idx_dispatch_events_pending`,重建可以照 012 的备份→重建→灌回→**重建索引**四步走,并登记进 `tests/platform/migrations.test.ts` 的 `INTENTIONAL_REBUILDS`。**建议:做** —— 「取消」是关系语义里的一等事件(§2.8),它不该是唯一一个对下游不可见的状态迁移。
+**10. `cancelled` 要不要写 outbox 事件?**(2026-10-04 新增,§2.8;**✅ 已决并落地:migration 015**)。「要写」,而且已经落地:`repo/works.ts` 的写入侧会为 `cancelled` 判定事件,`migrations/015_dispatch_event_kinds.sql` 把 `dispatch_events.kind` 的闭集从 4 个取值放宽到含 `work_cancelled`(办法是**重建表** —— §2.6 实测过 `ADD CONSTRAINT` 只能收紧不能放宽,拿它放宽会得到一次**无错、约束一个字节都没变**的应用)。重建的静默失败面(隐式 DELETE 级联子表、索引随 `DROP TABLE` 消失、`sqlite_sequence` 回退)由 `INTENTIONAL_REBUILDS` 登记与 `tests/platform/migrations.test.ts` 的 015 一组钉住。**015 刻意不加 `work_reopened`**,理由逐条记在那个迁移文件里(核心一条:放进 CHECK 却没有写出方的取值 = 一句「本系统会发这种事件」的假话)。
 
 **11. `artifacts.conversation_id` 删还是补?**(2026-10-04 新增,§8.1 修订)。它是 008 留的悬空列,BC2(009)落地时刻意没补外键。今天它**恒为 `null`**(五个生产写入点全部写 `null`)、无读方、不在任何索引或 CHECK 里 —— `ALTER TABLE artifacts DROP COLUMN conversation_id` **实测成功**(SQLite 3.53.4)。**建议:删。** 未定的只是顺序:它要与「真机库上跑一次迁移」一起做,而现有一份真机库(`~/.sansheng/sansheng.db`)在跑 —— 删列会让**旧版进程读新库时读不到这一列**,而 `rowToArtifact`(`repo/artifacts.ts:89`)是显式读列的。所以这条要么等一个明确的停机窗口,要么与 #10 那次重建合并成一次迁移。**不要**在没有停机窗口时单独发它。
+
+**12. `consumePendingDispatchEvents` 是「全量」消费,那它会不会交代掉没有被渲染过的事件?**(2026-10-04 新增,§9.4;Wave 2 复核 `consumed_at` 那条论证时发现)。**会,但窗口很窄。** 消费的落点是 `drainProject` 里那一句无差别的 `WHERE project_id = ? AND consumed_at IS NULL`(`repo/dispatch.ts`),而 `renderDownstream` 渲染给业务经理的名单是**回合开始时**查出来的 —— 于是**业务经理回合进行中**新落库的事件会被同一次消费扫进去,却从没出现在它眼前。窗口 = 一个 agent 回合的时长(真机 2–3 分钟),改动前后一样宽:**合并唤醒不引入它,也修不了它**(合并唤醒收窄的是「什么时候叫醒」,不是「哪一行算交代过」)。
+
+**建议:把消费从「全量」改成「按 seq 集合」** —— `collectTodos` 生成 `report_downstream` 待办时把那一批的 `seq` 放进 `todo.refs`,消费时 `WHERE seq IN (...)`。这样「被消费的」与「被渲染的」在定义上就是同一批。**为什么列在这里而不是顺手做掉**:`consumePendingDispatchEvents` 的签名与语义在 `repo/dispatch.ts`,而它正好是 015 那笔迁移的同一层;两处同时改会让「谁负责哪一半」说不清。**在它修掉之前,`consumed_at` 的诚实边界是**:「这一行在某次成功回合的快照里」(不是「业务经理见过这一行」)。

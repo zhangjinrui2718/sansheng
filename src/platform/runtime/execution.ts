@@ -21,7 +21,8 @@
  *
  * 旧系统靠解析 `outcome` 判定成败。新系统靠**两个可查的事实**:
  *   ① 工作项状态被谁改成了终态(worker 有 `work.update`)
- *   ② 这一回合写了哪些工件
+ *   ② 这一回合**沿 014 的产出边**采到了哪些工件(`artifacts.work_id = 这条工作项`,
+ *      且作者是本回合的执行者)—— 不再是「项目里所有新工件」的集合差
  *
  * 如果回合结束了而工作项还是 `in_progress`,**不猜**、不替它判成功 ——
  * 如实记为「未收敛」并把现场带回。7-N 的现场原则在这里的落点就是这件事:
@@ -51,7 +52,10 @@ import type { AgentSession, AgentSessionEvent } from "@earendil-works/pi-coding-
 import {
   getWork, updateWorkStatus, isTerminalWorkStatus, type WorkRow,
 } from "../storage/repo/works.js";
-import { listArtifacts, type ArtifactRow } from "../storage/repo/artifacts.js";
+import {
+  listArtifacts, type ArtifactRow,
+} from "../storage/repo/artifacts.js";
+import type { ArtifactKind } from "../identity/role.js";
 import { listBlockers } from "../storage/repo/blockers.js";
 import { getAgent } from "../storage/repo/agents.js";
 import {
@@ -92,7 +96,10 @@ export interface ExecutionResult {
   readonly work: WorkRow;
   /** 回合原始结果(回答、工具调用现场) */
   readonly turn: TurnResult;
-  /** 这一回合新写的工件 —— 这才是真正的产出 */
+  /**
+   * 这一回合**沿 014 的产出边**采到的产出(见 `runWorkItem` 里那三条判据)。
+   * 不是「项目里所有新工件」。
+   */
   readonly producedArtifacts: readonly ArtifactRow[];
   /** 这一回合新登记的阻塞 */
   readonly raisedBlockers: readonly string[];
@@ -135,6 +142,26 @@ export interface RunWorkOptions {
   readonly onEvent?: (ev: AgentSessionEvent) => void;
 }
 
+/**
+ * **只表达「关于(about)」、不表达「产出(produces)」的工件 kind。**
+ *
+ * `artifacts.work_id`(migration 014)这一条边的语义在真机上被证实是**两个意思的
+ * 并集**:「这条工作项**产出了**它」与「这条工件**关于**这条工作项」。质检是后者的
+ * 第一个实例 —— 它审完一条工作项,会把 `review_finding` 挂到**被审的那一条**上
+ * (真机第一跑就发生)。
+ *
+ * 于是「这条工作项交付了什么」若直接拿 `work_id` 当答案,一条 `done` 的工作项会把
+ * 自己的**质检意见**算成自己的产出。这里按 kind 排除,**不删那条边**:它是质检意见
+ * 唯一能记的链接(§2.6:把 `produces` 塞进 `artifact_links.rel` 结构上不成立),
+ * 删了它质检意见就成了孤儿。
+ *
+ * ⚠️ 这是一个**权宜**:一条边承载两种关系。真正的解法是给这条边加 `rel`
+ * (`produces` / `about`),那又是一笔迁移(§12 #7 那一族)。在那之前,由
+ * 「work_id 指对了」+「作者是本回合的执行者」+「kind 不在本表里」三条**机械**
+ * 判据把两者分开 —— 见 `runWorkItem` 里那段。
+ */
+export const ABOUT_ONLY_ARTIFACT_KINDS: readonly ArtifactKind[] = ["review_finding"];
+
 /** 工作项的可执行性前置检查。**不满足就拒绝,不硬跑。** */
 function checkRunnable(db: Database.Database, work: WorkRow): string | null {
   if (work.status === "done" || work.status === "failed" || work.status === "cancelled") {
@@ -163,6 +190,14 @@ export function composeWorkPrompt(work: WorkRow): string {
     "中途受阻就调 `blocker_open` 登记阻塞,并把工作项改成 blocked;",
     "有需要产出的东西(证据、结论、笔记)直接调 `board_write` —— " +
       "**工件就是你的交付物**,不需要另外写一段总结来「汇报」。",
+    "",
+    // ⚠️ 这一句是**产出边的写入侧**。014 那条边由模型显式指名(`board_write`
+    // 的 `workId`),平台不提供「当前工作项」默认值(一次会话连跑多个工作项,
+    // 那个默认值会过期)。于是**不在任务描述里点名,边就永远是空的** ——
+    // 而空的边会让「这条工作项交付了什么」查成空,静默丢掉产出。
+    "`board_write` 时**把你这条工作项的 id 传进 `workId`**:",
+    `\`workId: "${work.id}"\` —— 平台不猜「当前工作项」,不传就等于这些工件`,
+    "不是任何工作项的执行产出(事后查「这条工作项交付了什么」会得到空)。",
   ].join("\n");
 }
 
@@ -197,7 +232,20 @@ export async function runWorkItem(opts: RunWorkOptions): Promise<ExecutionResult
   }
 
   // ── 记录回合前的基线,用于算出「这一回合新产出了什么」──
-  const artifactsBefore = new Set(listArtifacts(opts.db, before.projectId).map((a) => a.id));
+  //
+  // ⚠️ **判据从「项目级集合差」换成 014 的产出边**(`work_id`)。
+  //
+  // 旧判据是「回合前后拿整个项目的工件集合做差」—— 它**连 `author_agent_id`
+  // 都不读**,于是同项目里两个回合交叠时,两边都会把对方的工件算成自己的产出。
+  // 今天常驻宿主有 per-project 忙闩挡着,只有「宿主 + `platform-run` CLI 同时跑
+  // 同一项目」才会撞上 —— 但那是判据错,只是暂时没有触发面。
+  //
+  // 快照仍然要打:这条边记的是「哪条工件关于/产出于这条工作项」,**不是**
+  // 「这一回合产出的」。要回答后者,还得减去回合前就已经挂着这条边的那些
+  // (典型:上一次审查留下的 `review_finding`)。
+  const artifactsBefore = new Set(
+    listArtifacts(opts.db, before.projectId, { workId: before.id }).map((a) => a.id),
+  );
   const blockersBefore = new Set(
     listBlockers(opts.db, before.projectId).map((b) => b.id),
   );
@@ -226,9 +274,30 @@ export async function runWorkItem(opts: RunWorkOptions): Promise<ExecutionResult
     after = getWork(opts.db, before.id) ?? after;
   }
 
-  const producedArtifacts = listArtifacts(opts.db, before.projectId).filter(
-    (a) => !artifactsBefore.has(a.id),
-  );
+  /**
+   * ── 这一回合的产出:沿着 014 的产出边查,不再做项目级集合差 ──────────
+   *
+   * 三条**机械**判据全部为真才算「这条工作项在本回合交付了它」:
+   *
+   *   ① `work_id = 这条工作项`         ← 取代旧的「项目里所有新工件」
+   *   ② 作者 = 本回合的执行者          ← 项目经理 / 质检挂在它上面的东西是
+   *                                      「关于」,不是「产出」
+   *   ③ kind 不在 `ABOUT_ONLY_ARTIFACT_KINDS`  ← 质检意见(见那张表的注释)
+   *
+   * ② 与 ③ 是有意的**冗余**:本回合的执行者被 `checkRunnable` 钉死是 worker,
+   * 而 worker 的 `writeKinds` 里没有 `review_finding`(`ROLE_SPECS`),所以 ③
+   * 在本回合里永远命不中。留着它是因为**回合可以交叠** —— 质检员在同一个项目里
+   * 并发审这条工作项时写下的 `review_finding` 会正好落进 ① 里,而 ② 挡不住它
+   * (它也是这条边的合法作者)。两个都判,才不依赖「同一时刻只有一个回合」这条
+   * 今天只是**靠忙闩兜着**的性质。
+   *
+   * 判据错了的后果是静默的(产出一栏多一条/少一条),所以这里宁可选三条窄判据
+   * 而不是一条宽判据 —— 少报也能在上面的 `onEvent` 现场里看出来。
+   */
+  const producedArtifacts = listArtifacts(opts.db, before.projectId, { workId: before.id })
+    .filter((a) => !artifactsBefore.has(a.id))
+    .filter((a) => a.authorAgentId === before.assigneeAgentId)
+    .filter((a) => !ABOUT_ONLY_ARTIFACT_KINDS.includes(a.kind));
   const raisedBlockers = listBlockers(opts.db, before.projectId)
     .filter((b) => !blockersBefore.has(b.id))
     .map((b) => b.id);

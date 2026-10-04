@@ -34,6 +34,7 @@ import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { allMigrations, MIGRATIONS_DIR } from "./_migrations.js";
+import { DISPATCH_EVENT_KINDS } from "../../src/platform/storage/repo/dispatch.js";
 
 /**
  * 有意重建的表。**例外必须逐条登记**(表名 + 涉及的迁移文件 + 理由)。
@@ -50,6 +51,15 @@ const INTENTIONAL_REBUILDS: ReadonlyArray<{
     why:
       "012 把 project_id 从 NOT NULL 放宽为可空(接待会话)。SQLite 没有 ALTER COLUMN," +
       "放宽可空性只能重建表;而重建前后表名必须相同(其他表与全部代码都按这个名字引用它)",
+  },
+  {
+    table: "dispatch_events",
+    files: ["013_dispatch_state.sql", "015_dispatch_event_kinds.sql"],
+    why:
+      "015 把 kind 的 CHECK 闭集从 4 个取值放宽到 5 个(加 work_cancelled —— 「取消」是" +
+      "下游悬空的来源,业务经理与质检都该知道)。SQLite 改不了已有 CHECK 的表达式," +
+      "而 ALTER TABLE ADD CONSTRAINT 只能**收紧**(实测:拿去放宽会无错应用而约束一个字节没变," +
+      "见 015 文件头),所以只能重建表;重建前后表名必须相同(代码与全部查询都按这个名字引用它)",
   },
 ];
 
@@ -519,5 +529,272 @@ describe("014 产出边(纯 ADD COLUMN + 部分索引)", () => {
     expect(db.pragma("foreign_key_check")).toEqual([]);
     expect(db.pragma("integrity_check")[0]).toEqual({ integrity_check: "ok" });
     db.close();
+  });
+});
+
+/**
+ * 015 是**重建表**的迁移 —— 与 012 同一类,失败方式也全是静默的:
+ *
+ *   - `DROP TABLE` 若命中一张**被引用**的表,会级联删掉子表的行(012 实测:删光了
+ *     全部 `session_messages`),而 `foreign_key_check` 一声不响;
+ *   - `DROP TABLE` 会连表上的索引一起丢掉,不报错;
+ *   - `AUTOINCREMENT` 的 `sqlite_sequence` 记账会被抹掉,于是「版本号」可能回退;
+ *   - 拿 `ALTER TABLE ... ADD CONSTRAINT` 去「放宽」会**无错应用而约束一个字节没变**。
+ *
+ * 所以这里把「前提 + 结果」逐条钉住,并且每条都带一个**已知答案**的样本自检
+ * (AGENTS.md §三类静默失败:一个坏掉的检查不等于「检查失败」)。
+ *
+ * ── 裁决:`work_reopened` **不加**(这条裁决存档在这里)────────────────
+ *
+ * 设计 §12 #9 的出路 (b)(`done → in_progress` 退回时写一条「先前那次交代作废」
+ * 的事件)需要新 kind,而「每加一个 kind 都要重建一次表」——看起来应该一次加够。
+ * **没有加**,理由四条:
+ *
+ *   1. **死枚举**:全仓没有写出方(`repo/works.ts` 的 `EVENT_KIND` 只有
+ *      done / failed / blocked / cancelled —— 本迁移不改 `repo/works.ts`,
+ *      这正是 Wave 1 的设计)。把没有写者的取值放进 CHECK,等于让 schema 说
+ *      一句假话「本系统会发出这种事件」;与「代码写了但没有读者」同构,只是方向
+ *      反过来:**schema 开了口,但没有写者**。
+ *   2. **省下的那次重建可能是假的**:§12 #9(b) 要的是「让甲方知道先前那次交代
+ *      作废」,而 outbox 现在的列只有 `subject_id`(工作项 id 或阻塞 id),**没有
+ *      任何字段能指向前一条事件**。真要实现 (b),多半还要动列 —— 那时照样得
+ *      重建表,预先塞一个 kind **省不掉任何东西**。
+ *   3. **代价不对称**:`dispatch_events` 没有子表引用(见下面「重建前提」那条)、
+ *      只有一条部分索引,重建成本极低(012 那次贵,是因为 `project_sessions`
+ *      有级联子表);而一个无写者的取值会**永久**留在闭集里误导读者,并让
+ *      「闭集里每个取值都真的会被写出来」这条不变量永久变假。
+ *   4. §12 #9 至今**未决**(文档原文只说「(b) 更贴合真实工作流」)。为一个尚未
+ *      裁决的分支先占位,等于把一个没做的决定固化进 schema。
+ *
+ * 将来真要 (b):照 015 再走一次重建 + 登记进 `INTENTIONAL_REBUILDS`。
+ * 下面「闭集与代码同步」那条用例会在加常量而忘加迁移时先红。
+ */
+describe("015 放宽 dispatch_events.kind(重建表:012 那类静默失败)", () => {
+  /**
+   * 到 014 为止的真 schema。**015 不在里面** —— 每个用例显式决定应不应用它,
+   * 因为「之前」与「之后」两个方向都要有牙地测(负样本靠「之前」)。
+   */
+  async function upTo014() {
+    const Database = (await import("better-sqlite3")).default;
+    const db = new Database(":memory:");
+    db.pragma("foreign_keys = ON");
+    for (const f of FILES) {
+      if (f.version >= 15) break;
+      try {
+        db.exec(f.sql);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        if (f.version === 2 && /vec0|no such module/i.test(msg)) continue;
+        throw err;
+      }
+    }
+    for (const [id, role, spec, name] of [
+      ["bm", "business_manager", null, "业务经理"],
+      ["wk", "worker", "engineering", "工人"],
+    ] as ReadonlyArray<[string, string, string | null, string]>) {
+      db.prepare(
+        `INSERT INTO agents (id,role,specialization,display_name,created_at) VALUES (?,?,?,?,1)`,
+      ).run(id, role, spec, name);
+    }
+    for (const p of ["pj_1", "pj_2"]) {
+      db.exec(`INSERT INTO projects (id,name,client,goal,status,created_at)
+               VALUES ('${p}','项目${p}','甲方','目标','active',1)`);
+    }
+    // 四行旧事件:两种 consumed 形态 + 中文 / 引号 / 反斜杠
+    // (逐字对比要能看出正文被动过 —— 所以样本里必须有不平凡的字符)
+    const events: ReadonlyArray<
+      readonly [string, string, string, string, number, number | null, string | null]
+    > = [
+      ["pj_1", "work_done", "w_1", "「完成」已完成", 11, null, null],
+      ["pj_1", "work_failed", "w_2", '「失败」带"引号"与\\反斜杠', 12, 99, "bm"],
+      ["pj_1", "work_blocked", "w_3", "「受阻」中文正文", 13, null, null],
+      ["pj_2", "blocker_opened", "b_1", "阻塞开了", 14, 100, "bm"],
+    ];
+    for (const e of events) {
+      db.prepare(
+        `INSERT INTO dispatch_events (project_id,kind,subject_id,summary,created_at,consumed_at,consumed_by)
+         VALUES (?,?,?,?,?,?,?)`,
+      ).run(...e);
+    }
+    db.exec(`INSERT INTO dispatch_attempts
+               (project_id,todo_key,attempts,target_state,first_attempt_at,last_attempt_at,notified_at)
+             VALUES ('pj_1','execute_work:w_1',2,111,5,6,NULL)`);
+    db.exec(`INSERT INTO dispatch_attempts
+               (project_id,todo_key,attempts,target_state,first_attempt_at,last_attempt_at,notified_at)
+             VALUES ('pj_1','answer_ask:a_1',3,NULL,7,8,9)`);
+    return db;
+  }
+
+  function migration015() {
+    const m15 = FILES.find((f) => f.version === 15);
+    expect(m15, "015 迁移文件缺失").toBeDefined();
+    return m15!;
+  }
+
+  function apply015(db: Awaited<ReturnType<typeof upTo014>>): void {
+    db.exec(migration015().sql);
+  }
+
+  /** 一个必然命中的 kind 闭集探测器:只认 `kind TEXT NOT NULL CHECK (kind IN (...))` */
+  function kindsInSchema(db: Awaited<ReturnType<typeof upTo014>>): string[] {
+    const row = db
+      .prepare(`SELECT sql FROM sqlite_master WHERE type='table' AND name='dispatch_events'`)
+      .get() as { sql: string } | undefined;
+    expect(row, "dispatch_events 表不存在").toBeDefined();
+    const m = row!.sql.match(
+      /kind\s+TEXT\s+NOT\s+NULL\s+CHECK\s*\(\s*kind\s+IN\s*\(([^)]*)\)/i,
+    );
+    expect(m, "没在表定义里找到 kind 的 CHECK 闭集(正则写歪了?)").not.toBeNull();
+    return [...m![1]!.matchAll(/'([a-z_]+)'/g)].map((x) => x[1]!);
+  }
+
+  function insertKind(db: Awaited<ReturnType<typeof upTo014>>, kind: string): void {
+    db.prepare(
+      `INSERT INTO dispatch_events (project_id,kind,subject_id,summary,created_at)
+       VALUES ('pj_1',?,?,?,1)`,
+    ).run(kind, "s", "x");
+  }
+
+  it("**负样本**:015 之前 work_cancelled 必须被拒(证明下一条断言有牙)", async () => {
+    const db = await upTo014();
+    expect(() => insertKind(db, "work_cancelled"), "schema 里居然已经有它 —— 这条就没牙了")
+      .toThrow(/CHECK/i);
+    // 正样本:同一个探针在合法取值上不报错(否则上一条可能是「什么都拒」)
+    expect(() => insertKind(db, "work_done")).not.toThrow();
+    expect(kindsInSchema(db)).toHaveLength(4);
+    db.close();
+  });
+
+  it("015 之后:work_cancelled 真的落库;旧 4 个取值仍可用;未知取值仍被拒", async () => {
+    const db = await upTo014();
+    apply015(db);
+    expect(() => insertKind(db, "work_cancelled")).not.toThrow();
+    for (const k of ["work_done", "work_failed", "work_blocked", "blocker_opened"]) {
+      expect(() => insertKind(db, k), `${k} 被误伤`).not.toThrow();
+    }
+    // 负样本两条:CHECK 只是放宽了一个取值,不是被拆掉
+    expect(() => insertKind(db, "work_exploded")).toThrow(/CHECK/i);
+    expect(
+      () => insertKind(db, "work_reopened"),
+      "本次裁决**不加**这个 kind —— 它必须仍然被拒(理由见本 describe 头)",
+    ).toThrow(/CHECK/i);
+    db.close();
+  });
+
+  it("闭集与代码同步:015 之后的 kind 列表**恰好等于** DISPATCH_EVENT_KINDS", async () => {
+    const db = await upTo014();
+    apply015(db);
+    expect(
+      kindsInSchema(db),
+      "schema 的闭集与 repo/dispatch.ts 的 DISPATCH_EVENT_KINDS 不同步" +
+        "(加了常量却忘了加迁移,或迁移加了而常量没加)",
+    ).toEqual([...DISPATCH_EVENT_KINDS]);
+    db.close();
+  });
+
+  it("重建不吃数据:行数一条不少、内容逐字不变;attempts 不受影响;检查干净", async () => {
+    const db = await upTo014();
+    const snap = () => ({
+      events: db.prepare(`SELECT * FROM dispatch_events ORDER BY seq`).all(),
+      seqs: (db.prepare(`SELECT seq FROM dispatch_events ORDER BY seq`).all() as
+        Array<{ seq: number }>).map((r) => r.seq),
+      attempts: db.prepare(`SELECT * FROM dispatch_attempts ORDER BY project_id,todo_key`).all(),
+      objects: db.prepare(
+        `SELECT type,name FROM sqlite_master WHERE tbl_name='dispatch_events' ORDER BY type,name`,
+      ).all(),
+      fks: db.pragma("foreign_key_list(dispatch_events)"),
+      autoinc: db.prepare(`SELECT * FROM sqlite_sequence WHERE name='dispatch_events'`).all(),
+      tableSql: (db.prepare(`SELECT sql FROM sqlite_master WHERE name='dispatch_events'`)
+        .get() as { sql: string }).sql,
+    });
+    const before = snap();
+    // 前置:样本非空 —— 否则下面的「相等」是空的(一个坏掉的检查)
+    expect(before.events).toHaveLength(4);
+    expect(before.attempts).toHaveLength(2);
+    expect(before.objects.length).toBeGreaterThan(0);
+    expect(before.autoinc).toHaveLength(1);
+
+    apply015(db);
+    const after = snap();
+
+    expect(after.events, "重建后事件行变了 —— 这是 012 那类静默数据事故").toEqual(before.events);
+    expect(after.seqs, "seq(这批事件的版本号)变了").toEqual(before.seqs);
+    expect(after.attempts, "dispatch_attempts 受到了重建的影响").toEqual(before.attempts);
+    expect(after.fks, "外键(projects CASCADE / agents)没原样保留").toEqual(before.fks);
+    expect(after.objects, "表上的对象(索引)集合变了").toEqual(before.objects);
+    expect(after.autoinc, "AUTOINCREMENT 记账被抹掉了 —— 版本号会回退").toEqual(before.autoinc);
+    // 正控制:schema 必须**真的**变了,否则上面那些「不变」可能只是 015 什么都没做
+    expect(after.tableSql, "schema 没变 —— 015 什么都没做").not.toBe(before.tableSql);
+
+    expect(
+      (db.prepare(`SELECT COUNT(*) n FROM sqlite_master WHERE name LIKE '%\\_backup' ESCAPE '\\'`)
+        .get() as { n: number }).n,
+      "中转备份表残留了(迁移没跑完或忘了 DROP)",
+    ).toBe(0);
+    expect(db.pragma("foreign_key_check")).toEqual([]);
+    expect(db.pragma("integrity_check")[0]).toEqual({ integrity_check: "ok" });
+    db.close();
+  });
+
+  it("被 DROP 掉的索引真的重建了,而且是同一条**部分索引**(谓词不能丢)", async () => {
+    const db = await upTo014();
+    const indexOf = (d: Awaited<ReturnType<typeof upTo014>>) =>
+      d.prepare(`SELECT name,sql FROM sqlite_master WHERE type='index' AND tbl_name='dispatch_events'`)
+        .all() as Array<{ name: string; sql: string }>;
+    const before = indexOf(db);
+    expect(before.map((i) => i.name), "015 之前的样本索引不对 —— 这条断言会失去意义")
+      .toEqual(["idx_dispatch_events_pending"]);
+
+    apply015(db);
+    const after = indexOf(db);
+    expect(after.map((i) => i.name), "DROP TABLE 把索引一起带走了,而 015 没有重建它").toEqual(
+      before.map((i) => i.name),
+    );
+    expect(after[0]!.sql, "重建出来了,但不再是部分索引(谓词丢了 = 静默的语义漂移)").toMatch(
+      /WHERE\s+consumed_at\s+IS\s+NULL/i,
+    );
+    expect(after[0]!.sql).toMatch(/ON\s+dispatch_events\s*\(\s*project_id\s*,\s*created_at\s*\)/i);
+    db.close();
+  });
+
+  it("**重建前提**:没有任何表引用 dispatch_events(否则 DROP 会静默级联删掉子表的行)", async () => {
+    const db = await upTo014();
+    apply015(db);
+    const tables = (db.prepare(
+      `SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'`,
+    ).all() as Array<{ name: string }>).map((r) => r.name);
+    const referenced = new Set<string>();
+    for (const t of tables) {
+      for (const fk of db.pragma(`foreign_key_list(${t})`) as Array<{ table: string }>) {
+        referenced.add(fk.table);
+      }
+    }
+    // 正样本:探测器真的看得见外键(projects / agents 明明被一大票表引用)
+    expect(referenced.has("projects"), "探测器坏了:projects 明明被多张表引用").toBe(true);
+    expect(referenced.has("agents"), "探测器坏了:agents 明明被多张表引用").toBe(true);
+    // 被测事实
+    const children = [...referenced].filter((t) => t === "dispatch_events");
+    expect(
+      children,
+      "有表引用了 dispatch_events —— 015 的 DROP TABLE 会隐式 DELETE 并级联删掉那张子表的行," +
+        "(012 就是这样删光 session_messages 的),而 foreign_key_check 不会响。" +
+        "加子表的那笔迁移必须同时改掉 015 的重建方式(先把子表内容移出去再灌回),并更新本用例。",
+    ).toEqual([]);
+    db.close();
+  });
+
+  it("迁移文件形态:重建表(不是 ALTER),且关键语句不带 IF NOT EXISTS(要响亮不要静默)", () => {
+    const body = stripSqlComments(migration015().sql);
+    // 一行 ALTER 都没有:ADD CONSTRAINT 只能收紧,拿它放宽是「无错而无效」(见文件头实测)
+    expect(body, "015 里出现了 ALTER TABLE —— 那条路只能收紧,放宽会静默无效").not.toMatch(
+      /\bALTER\s+TABLE\b/i,
+    );
+    expect(body, "重建路径上不能有 IF NOT EXISTS:撞名时它会静默无操作(批次 5 的事故形态)")
+      .not.toMatch(/\bIF\s+NOT\s+EXISTS\b/i);
+    expect(body, "015 没有 DROP 旧表 —— 那它就不是重建").toMatch(/\bDROP\s+TABLE\s+dispatch_events\b/i);
+    expect(body, "015 没有重建那条部分索引(DROP TABLE 会静默丢掉它)").toMatch(
+      /CREATE\s+INDEX\s+idx_dispatch_events_pending/i,
+    );
+    expect(createdTables(migration015().sql)).toContain("dispatch_events");
   });
 });

@@ -120,16 +120,26 @@ function errOf(r: ToolResult): Extract<ToolResult, { ok: false }> {
   return r;
 }
 
-/** 模拟 migration 015:重建 `dispatch_events` 放宽 `kind` 的 CHECK。 */
-function simulateMigration015(): void {
+/**
+ * 把 `dispatch_events` **退回 migration 015 之前**的 schema(013 的 4 值闭集)。
+ *
+ * ── 为什么方向反过来了(015 落地时改的)────────────────────────────
+ * 这个函数原来是 `simulateMigration015()` —— 015 还没落地,于是手工重建一次来
+ * 证明「放宽之后 work_cancelled 就落库了」。015 真的落地之后:
+ *   - 正向模拟变成**空转**:真迁移已经做过同一件事,它只会掩盖一个事实 ——
+ *     那两个用例其实是在测「schema 已经放宽」,而不是在测降级;
+ *   - 而写入侧的降级路径(窄匹配那条 CHECK → 如实报 `deferred`)仍然必须
+ *     **有牙地**被覆盖:它现在防的是「schema 落后于代码」(旧库 / 手工动过的库)。
+ * 要测它,就得把 schema **真的**退回去 —— 方向反过来,断言一个字不用改。
+ */
+function simulatePreMigration015(): void {
   db.exec(`
-    ALTER TABLE dispatch_events RENAME TO dispatch_events_pre015;
+    ALTER TABLE dispatch_events RENAME TO dispatch_events_post015;
     CREATE TABLE dispatch_events (
       seq         INTEGER PRIMARY KEY AUTOINCREMENT,
       project_id  TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
       kind        TEXT NOT NULL CHECK (kind IN (
-                    'work_done', 'work_failed', 'work_blocked', 'blocker_opened',
-                    'work_cancelled')),
+                    'work_done', 'work_failed', 'work_blocked', 'blocker_opened')),
       subject_id  TEXT NOT NULL,
       summary     TEXT NOT NULL,
       created_at  INTEGER NOT NULL,
@@ -139,8 +149,8 @@ function simulateMigration015(): void {
     INSERT INTO dispatch_events (seq, project_id, kind, subject_id, summary, created_at,
                                  consumed_at, consumed_by)
       SELECT seq, project_id, kind, subject_id, summary, created_at, consumed_at, consumed_by
-      FROM dispatch_events_pre015;
-    DROP TABLE dispatch_events_pre015;
+      FROM dispatch_events_post015;
+    DROP TABLE dispatch_events_post015;
     CREATE INDEX IF NOT EXISTS idx_dispatch_events_pending
       ON dispatch_events(project_id, created_at) WHERE consumed_at IS NULL;
   `);
@@ -655,7 +665,20 @@ describe("任务 3 · 里程碑(某根工作项全部后代终态)", () => {
   });
 });
 
-describe("任务 3 · 写入侧收紧 vs 判定侧收窄(为什么不能反着做)", () => {
+/**
+ * ⚠️ 这一节的**推理在 Wave 2 被修正了一半**,如实记在这里:
+ *
+ *   - Wave 1 的结论「不能收在判定侧」**只在「不可打扰的事件仍然进库」时成立**。
+ *     写入侧收紧之后它们大多根本不进库 ⇒ 库里剩下的每一行都值得交代,全量消费
+ *     不再是缺陷。
+ *   - 但**扁平结构**(真机库 9 work / 9 root / 0 中间)下写入侧几乎筛不掉东西 ⇒
+ *     「每条终态都叫醒一次」这件事仍然要修,而它只能修在**判定侧**。
+ *   - 判定侧新收窄的是**时机**(合并唤醒:N 条 / T 分钟),**不是资格** ——
+ *     它不按 kind / 位置丢掉任何一行。所以下面这两条不变:
+ *       ① 进库的行数由写入侧决定(第一节);
+ *       ② 判定侧看到几行就报几行,不额外过滤(第二条断言的后半段)。
+ */
+describe("任务 3 · 写入侧收紧 vs 判定侧时机收窄(Wave 2 修正了归因)", () => {
   it("一次消费**不会**顺带交代一串不可打扰事件 —— 因为那一串根本没进库", () => {
     const root = mkWork();
     const kids = [1, 2, 3].map(() => mkWork({ parentWorkId: root }));
@@ -676,19 +699,26 @@ describe("任务 3 · 写入侧收紧 vs 判定侧收窄(为什么不能反着�
     ).toBe(0);
   });
 
-  it("collectTodos:中间完成**不再**唤醒业务经理;根完成才唤醒", () => {
+  it("collectTodos:中间完成**连事件都没有**;根完成写一条,但叫醒要过合并窗口", () => {
     // 两个子项:完成一个**不等于**全部收口,所以不该产生任何事件
     const root = mkWork();
     const kid = mkWork({ parentWorkId: root });
     mkWork({ parentWorkId: root });
+    // ⚠️ 「合并唤醒」开着缺省窗口时,**一条**事件不会生成待办(N=3 / T=5 分钟)。
+    //    所以下面用 `reportBatchSize: 1` 只回答「写侧留了哪些行、它们会不会
+    //    被判定侧过滤掉」——「一条事件要不要叫醒」由 dispatcher.test.ts 的
+    //    `任务 5 · 合并唤醒` 专门钉。判定侧**不**按 kind/位置过滤任何一行。
+    const NOW_COALESCE = { reportBatchSize: 1 };
     const hasReport = () =>
-      collectTodos({ db, projectId: "p1", now: T0 + 100 }).runnable
+      collectTodos({ db, projectId: "p1", now: T0 + 100, ...NOW_COALESCE }).runnable
         .some((t) => t.kind === "report_downstream");
     expect(hasReport()).toBe(false);
     updateWorkStatus(db, kid, "done", T0 + 1);
-    expect(hasReport(), "中间完成不该叫醒业务经理").toBe(false);
+    expect(hasReport(), "中间完成不写事件 ⇒ 也不该叫醒业务经理").toBe(false);
+    expect(listPendingDispatchEvents(db, "p1"), "中间完成连一行都没有").toEqual([]);
     updateWorkStatus(db, root, "done", T0 + 2);
-    expect(hasReport(), "根完成才该叫醒他").toBe(true);
+    expect(listPendingDispatchEvents(db, "p1"), "根完成才写这一条").toHaveLength(1);
+    expect(hasReport(), "写侧留了行 → 判定侧就该把它变成待办").toBe(true);
   });
 });
 
@@ -727,11 +757,14 @@ describe("任务 3 · blocker_opened 按 severity 判(high/critical 才打扰)",
 });
 
 // ══════════════════════════════════════════════════════════════════
-// 任务 4 · cancelled 写 outbox(SQL CHECK 待 migration 015 放宽)
+// 任务 4 · cancelled 写 outbox(migration 015 已放宽 CHECK)
 // ══════════════════════════════════════════════════════════════════
 
 describe("任务 4 · cancelled 进写入侧", () => {
-  it("根 cancelled **判定为可打扰**,但当前 schema(013)拒绝它 → 如实报成 deferred", () => {
+  it("根 cancelled **判定为可打扰**;schema 落后(015 之前)时如实报成 deferred", () => {
+    // 015 已落地 —— 「schema 落后于代码」不会自己发生了,所以显式把
+    // dispatch_events 退回 013 的 4 值闭集,这条降级路径才**有牙**。
+    simulatePreMigration015();
     const w = mkWork({ title: "这块不要了" });
     const r = updateWorkStatus(db, w, "cancelled", T0 + 1);
     expect(r.ok).toBe(true);
@@ -747,7 +780,8 @@ describe("任务 4 · cancelled 进写入侧", () => {
     expect(getWork(db, w)?.status).toBe("cancelled");
   });
 
-  it("工具层把这件事**说出来**,不静默(work_update 的返回文本)", () => {
+  it("工具层把这件事**说出来**,不静默(schema 落后时的 work_update 返回文本)", () => {
+    simulatePreMigration015();
     const w = mkWork();
     const text = okText(callPm("work_update", { workId: w, status: "cancelled" }));
     expect(text).toContain("没有落库");
@@ -766,9 +800,10 @@ describe("任务 4 · cancelled 进写入侧", () => {
     expect(getWork(db, kid)?.status, "状态照样改").toBe("cancelled");
   });
 
-  it("**015 放宽 CHECK 之后,同一条取消就落库了**(模拟重建表,不改 migration)", () => {
+  it("**015 之后(真迁移,不是模拟),同一条取消就落库了** —— deferred 与那句提示都消失", () => {
+    // 这里**不再**手工重建:015 已经是真迁移,由 beforeEach 的
+    // openPlatformMemoryDb() 经迁移器应用。断言因此更强 —— 它验的是真 schema。
     const w = mkWork({ title: "取消后该被交代" });
-    simulateMigration015();
     const r = updateWorkStatus(db, w, "cancelled", T0 + 1);
     expect(r.ok).toBe(true);
     if (!r.ok) return;
@@ -777,6 +812,10 @@ describe("任务 4 · cancelled 进写入侧", () => {
     const evs = listPendingDispatchEvents(db, "p1");
     expect(evs.map((e) => e.kind)).toEqual(["work_cancelled"]);
     expect(evs[0]?.summary).toContain("取消");
+    // 工具层的同一段文本里,那句「没有落库」必须**消失**(核心判据)
+    const w2 = mkWork({ title: "第二条取消" });
+    const text = okText(callPm("work_update", { workId: w2, status: "cancelled" }));
+    expect(text).not.toContain("没有落库");
   });
 
   it("里程碑事件用的是既有 kind —— 因此 015 之前也能落库(不会被 CHECK 挡)", () => {

@@ -38,6 +38,7 @@ import {
 } from "../../src/platform/runtime/pendingWork.js";
 import {
   collectTodos, drainProject, renderTask,
+  DEFAULT_REPORT_BATCH_SIZE, DEFAULT_REPORT_MAX_DELAY_MS,
   type DrainTurnReport, type DrainWorkReport,
 } from "../../src/platform/runtime/dispatcher.js";
 import {
@@ -87,7 +88,21 @@ function mkArtifact(id: string, authorAgentId = "wk"): void {
  * 待办快照。**判定函数就是 `collectTodos`**(纯查询),测试不再另要一个入口 ——
  * 免得生产代码里留一个只有测试读的函数(「没有读者的逻辑」是这个项目的常客)。
  */
-const board = (projectId = "p1", now = T0) => collectTodos({ db, projectId, now });
+const board = (
+  projectId = "p1",
+  now = T0,
+  over: { reportBatchSize?: number; reportMaxDelayMs?: number } = {},
+) => collectTodos({ db, projectId, now, ...over });
+
+/**
+ * **把合并唤醒关掉**(窗口 = 1 条事件)。下面这些用例测的是**别的机制** ——
+ * 消费语义 / 尝试预算 / 待办顺序 / 渲染 / 重启补跑 —— 而它们各自只需要
+ * 「有一条事件就叫醒一次」这个形状。开着缺省窗口(N=3 / T=5 分钟)会让它们
+ * 统统变成「没有待办」,于是看不出自己到底在测什么。
+ *
+ * 合并窗口本身的行为由本文件 `describe("任务 5 · 合并唤醒")` 单独钉住。
+ */
+const NO_COALESCE = { reportBatchSize: 1 } as const;
 
 const okTurn: DrainTurnReport = {
   aborted: false, timedOut: false, text: "好了", toolCalls: [],
@@ -210,13 +225,16 @@ describe("collectTodos · 谁此刻能动手(纯查询,不接收任何「上次�
     expect(board("p1", T0).runnable.some((t) => t.kind === "report_downstream")).toBe(false);
     const w = mkWork();
     updateWorkStatus(db, w, "done", T0 + 5);
-    const t = board("p1", T0 + 6).runnable.find((x) => x.kind === "report_downstream");
+    // 合并窗口关掉(窗口 = 1 条)→ 有事件就叫醒
+    const t = board("p1", T0 + 6, NO_COALESCE).runnable
+      .find((x) => x.kind === "report_downstream");
     expect(t).toMatchObject({ agentId: "bm" });
     expect(t?.label).toContain("1 条结果");
     // 消费之后就不再是待办
     consumePendingDispatchEvents(db, "p1", "bm", T0 + 7);
     expect(listPendingDispatchEvents(db, "p1")).toEqual([]);
-    expect(board("p1", T0 + 8).runnable.some((t) => t.kind === "report_downstream")).toBe(false);
+    expect(board("p1", T0 + 8, NO_COALESCE).runnable
+      .some((t) => t.kind === "report_downstream")).toBe(false);
   });
 
   it("新登记的阻塞也是下游事件(甲方该知道)", () => {
@@ -301,6 +319,7 @@ describe("drainProject · 尝试预算(库里的账本,取代内存 stallStore)"
     let n = 0;
     const r = await drainProject({
       db, projectId: "p1", now: () => T0, log: () => {}, maxAttemptsPerTodo: 1,
+      ...NO_COALESCE,
       runAgentTurn: async (): Promise<DrainTurnReport> => {
         const count = (db.prepare(`SELECT COUNT(*) AS n FROM works`).get() as { n: number }).n;
         if (count === 0) {
@@ -460,7 +479,7 @@ describe("drainProject · 消费语义(at-least-once)", () => {
   it("工作项 done → 质检审 → 业务经理汇报一次,且两边都被消费掉", async () => {
     const w = mkWork();
     const r = await drainProject({
-      db, projectId: "p1", now: () => T0, log: () => {},
+      db, projectId: "p1", now: () => T0, log: () => {}, ...NO_COALESCE,
       runAgentTurn: async () => okTurn,
       runWork: async (_agentId, workId) => {
         updateWorkStatus(db, workId, "done", T0 + 1);
@@ -499,7 +518,7 @@ describe("drainProject · 消费语义(at-least-once)", () => {
   it("业务经理回合失败就不消费事件 —— 做完了不会没人汇报", async () => {
     const w = mkWork();
     await drainProject({
-      db, projectId: "p1", now: () => T0, log: () => {}, maxRounds: 1,
+      db, projectId: "p1", now: () => T0, log: () => {}, maxRounds: 1, ...NO_COALESCE,
       runAgentTurn: async () => okTurn,
       runWork: async (_agentId, workId) => {
         updateWorkStatus(db, workId, "done", T0 + 1);
@@ -512,7 +531,7 @@ describe("drainProject · 消费语义(at-least-once)", () => {
     // 只跑了 1 回合(wk 执行)→ 事件还在,下一次排空会汇报
     expect(listPendingDispatchEvents(db, "p1")).toHaveLength(1);
     const r2 = await drainProject({
-      db, projectId: "p1", now: () => T0, log: () => {},
+      db, projectId: "p1", now: () => T0, log: () => {}, ...NO_COALESCE,
       runAgentTurn: async () => okTurn,
       runWork: async () => { throw new Error("不该被调用"); },
     });
@@ -563,7 +582,7 @@ describe("排空器 · 重启后补跑(状态在库里)", () => {
       expect(listWorksPendingReview(db2, "p1").map((w) => w.id)).toEqual(["w1"]);
       const seen: string[] = [];
       const second = await drainProject({
-        db: db2, projectId: "p1", now: () => T0 + 100, log: () => {},
+        db: db2, projectId: "p1", now: () => T0 + 100, log: () => {}, ...NO_COALESCE,
         runAgentTurn: async (agentId): Promise<DrainTurnReport> => {
           seen.push(agentId);
           return okTurn;
@@ -595,11 +614,40 @@ describe("renderTask · 每个待办给 agent 的那一段", () => {
   it("汇报那条明说「没有人向你提问」,并带上库里查出来的事件现场", () => {
     const w = mkWork();
     updateWorkStatus(db, w, "done", T0 + 3);
-    const t = board("p1", T0 + 4).runnable.find((x) => x.kind === "report_downstream")!;
+    const t = board("p1", T0 + 4, NO_COALESCE).runnable
+      .find((x) => x.kind === "report_downstream")!;
     const text = renderTask(db, t);
     expect(text).toContain("没有人向你提问");
-    expect(text).toContain("tell_client");
     expect(text).toContain("调研路线 A");
+  });
+
+  it("**汇报那条不下命令、也不复述判据** —— 只摆事实 + 说「你来判断」", () => {
+    // 这条断言守的是一个**结构不变量**,不是措辞。
+    //
+    // 这一段原先是:「# 现在轮到你了:**主动**向甲方交代进展 … 而这正是你该主动做的事
+    // (不要等他来问)… 值得让他知道的,用 `tell_client` 播报;**不值得打扰他的,
+    // 就不要播**(他的注意力是稀缺资源)」。
+    //
+    // 两层问题:① 它在 **user message** 里(recency 比 system prompt 强),而**标题本身
+    // 就是在下命令** —— 提示词里那条克制要去跟一句命令对撞;② 它是**判据的第二次陈述**,
+    // 而判据的真相源在 `business_manager.core` 的「三个问题」——**两份定义迟早漂**
+    // (这个项目为「两份定义会漂」已付过好几次代价)。
+    //
+    // 所以平台只做两件事:**把事实摆出来**、**说「你来判断」**。
+    const w = mkWork();
+    updateWorkStatus(db, w, "done", T0 + 3);
+    const t = board("p1", T0 + 4, NO_COALESCE).runnable
+      .find((x) => x.kind === "report_downstream")!;
+    const text = renderTask(db, t);
+
+    // ① 不复述判据:动词与判据词都不该在这里出现
+    expect(text, "不该在这里复述判据").not.toContain("tell_client");
+    expect(text, "不该在这里复述「不值得打扰」那条克制").not.toContain("不值得打扰");
+    expect(text, "不该在这里下「主动交代」的命令").not.toContain("主动向甲方交代");
+    // ② 但必须指向真相源,否则模型不知道去哪找判据
+    expect(text, "要指向判据的真相源").toContain("business_manager.core");
+    // ③ 平台仍然要把「判断权在你」说清 —— 去掉命令不等于去掉责任
+    expect(text).toContain("播不播");
   });
 
   it("审查那条要求「通过也要写依据」,并列出等着审的产出", () => {
@@ -786,5 +834,183 @@ describe("collectTodos · 快照的一致性", () => {
     const b = board("p1", T0);
     expect(b.runnable).toEqual([]);
     expect(b.exhausted.map((t) => t.kind)).toEqual(["decompose_project"]);
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════
+// 任务 5 · 合并唤醒(判定侧的**时机**收窄)
+//
+// 用户的抱怨:「业务经理干的事情太多了……聊天记录里面的一长串,真真甲方不关心
+// 这些」。写入侧(只留根 / 里程碑 / failed / 高危阻塞)在**扁平结构**下是空转的
+// —— 真机库实测 `9 work / 9 root / 0 中间`,而 `grep -rn parentWorkId harness/`
+// 是空的(没有任何地方告诉项目经理建树),于是每条工作项终态都是「根终态」,
+// 全部照写。所以「少打扰」这第二刀落在**判定侧**:攒够 N 条、或最老的那条等到 T
+// 才叫醒一次。下面这一组就是那一刀的全部判据。
+// ══════════════════════════════════════════════════════════════════
+
+describe("任务 5 · 合并唤醒", () => {
+  /** 造一条**根**工作项并把它推到 done(扁平结构:每条都是根 → 每条都写事件)。 */
+  const doneRoot = (): string => {
+    const id = mkWork();
+    updateWorkStatus(db, id, "done", T0 + 1);
+    return id;
+  };
+  const hasReport = (now: number, over: { reportBatchSize?: number; reportMaxDelayMs?: number } = {}) =>
+    board("p1", now, over).runnable.some((t) => t.kind === "report_downstream");
+
+  it("**两个缺省值是约定**:N = 3 条 · T = 5 分钟(CLI 的 --report-* 与文档都写这两个数)", () => {
+    expect(DEFAULT_REPORT_BATCH_SIZE).toBe(3);
+    expect(DEFAULT_REPORT_MAX_DELAY_MS).toBe(300_000);
+  });
+
+  it("缺省窗口:1 条事件**不**叫醒 —— 但写入侧照样记了一行(收窄的是时机,不是丢弃)", () => {
+    doneRoot();
+    expect(listPendingDispatchEvents(db, "p1"), "写侧照写").toHaveLength(1);
+    expect(hasReport(T0 + 2), "1 < N,而且时间也没到").toBe(false);
+    expect(listPendingDispatchEvents(db, "p1"), "攒着的行不该被顺手消费").toHaveLength(1);
+  });
+
+  it("攒够 N 条 → 叫醒一次,且 label 说得出**为什么是这一次**", () => {
+    doneRoot();
+    doneRoot();
+    expect(hasReport(T0 + 2), "2 < 3").toBe(false);
+    doneRoot();
+    const t = board("p1", T0 + 2).runnable.find((x) => x.kind === "report_downstream");
+    expect(t).toBeDefined();
+    expect(t?.label, "3 条结果").toContain("3 条结果");
+    expect(t?.label).toContain("已攒够 3 条");
+  });
+
+  it("最老的那条等满 T → 叫醒(时限是**延迟上界**,不是可选项)", () => {
+    doneRoot();
+    expect(hasReport(T0 + 1 + DEFAULT_REPORT_MAX_DELAY_MS - 1), "差 1ms 也不叫").toBe(false);
+    const t = board("p1", T0 + 1 + DEFAULT_REPORT_MAX_DELAY_MS).runnable
+      .find((x) => x.kind === "report_downstream");
+    expect(t).toBeDefined();
+    expect(t?.label).toContain("最老的一条等了");
+  });
+
+  it("两个条件**都可配**:N 单独可配,T 也单独可配", () => {
+    doneRoot();
+    expect(hasReport(T0 + 2), "缺省:两条都不满足").toBe(false);
+    expect(hasReport(T0 + 2, { reportBatchSize: 1 }), "N=1 → 一条就叫").toBe(true);
+    expect(hasReport(T0 + 3, { reportMaxDelayMs: 1 }), "T=1ms → 到点就叫").toBe(true);
+  });
+
+  // ── 绕过窗口:该立刻播的不许被 debounce 掉 ──────────────────────
+
+  it("`work_failed` **绕过合并窗口**,立刻叫醒(1 条、时间没到也照样叫)", () => {
+    const w = mkWork();
+    updateWorkStatus(db, w, "failed", T0 + 1);
+    const t = board("p1", T0 + 2).runnable.find((x) => x.kind === "report_downstream");
+    expect(t, "失败影响时间表,甲方要能据此重新决策").toBeDefined();
+    expect(t?.label).toContain("该立刻说的");
+  });
+
+  it("**中间**工作项的 `work_failed` 也立刻叫醒(写侧与位置无关,判侧同一条)", () => {
+    const root = mkWork();
+    insertWork(db, {
+      id: "kid_fail", projectId: "p1", parentWorkId: root, title: "子项", goal: "g",
+      status: "open", assigneeAgentId: "wk", createdAt: T0, updatedAt: T0,
+    });
+    updateWorkStatus(db, "kid_fail", "failed", T0 + 1);
+    // 两条:kid 自己那条 `work_failed`(与位置无关)+ 根那条里程碑
+    // (`repo/works.ts` 里记着的、可接受的重复:两件各自都有信息量)
+    expect(listPendingDispatchEvents(db, "p1").map((e) => e.kind)).toContain("work_failed");
+    // 里程碑那条单独**不会**立刻叫醒(它走窗口)—— 所以这次立刻叫醒只可能来自
+    // `work_failed`,这条断言真的在测「中间项的失败也绕过窗口」
+    expect(hasReport(T0 + 2)).toBe(true);
+  });
+
+  it("severity = high 的 `blocker_opened` 立刻叫醒", () => {
+    insertBlocker(db, {
+      id: "b_high", projectId: "p1", raisedByAgentId: "wk", title: "缺依赖", detail: "d",
+      severity: "high", status: "open", createdAt: T0,
+    });
+    expect(hasReport(T0 + 1)).toBe(true);
+  });
+
+  it("手工塞一条 **low** 的 `blocker_opened`(绕过写入侧)→ 判定侧**自己**判它不立刻", () => {
+    // 写入侧本来就不会写它(`repo/dispatch.ts` 的 worthInterrupting)。这里直接
+    // 插库,验证判定侧不是**依赖**那一层 —— 两层各自成立。
+    insertBlocker(db, {
+      id: "b_low", projectId: "p1", raisedByAgentId: "wk", title: "小噪音", detail: "d",
+      severity: "low", status: "open", createdAt: T0,
+    });
+    db.prepare(
+      `INSERT INTO dispatch_events (project_id, kind, subject_id, summary, created_at,
+                                    consumed_at, consumed_by)
+       VALUES ('p1', 'blocker_opened', 'b_low', 's', ?, NULL, NULL)`,
+    ).run(T0);
+    expect(hasReport(T0 + 1), "low 不值得打断甲方").toBe(false);
+    // 但**不是丢弃**:等满 T 之后照样进候选队列
+    expect(hasReport(T0 + DEFAULT_REPORT_MAX_DELAY_MS)).toBe(true);
+  });
+
+  it("`blocker_opened` 查不到阻塞行 → 立刻(at-least-once:宁可多说一次)", () => {
+    db.prepare(
+      `INSERT INTO dispatch_events (project_id, kind, subject_id, summary, created_at,
+                                    consumed_at, consumed_by)
+       VALUES ('p1', 'blocker_opened', 'b_ghost', 's', ?, NULL, NULL)`,
+    ).run(T0);
+    expect(hasReport(T0 + 1)).toBe(true);
+  });
+
+  // ── 合并唤醒**没有**让 consumed_at 撒谎 ────────────────────────
+
+  it("3 条根工作项完成 → 业务经理**只被叫醒一次**(而不是三次)", async () => {
+    const roots = [doneRoot(), doneRoot(), doneRoot()];
+    expect(
+      (db.prepare(`SELECT COUNT(*) n FROM works WHERE parent_work_id IS NULL`).get() as { n: number }).n,
+      "扁平结构:3 条都是根 —— 写入侧的「只留根」一条也没筛掉",
+    ).toBe(3);
+    expect(listPendingDispatchEvents(db, "p1"), "3 条各自都进了库").toHaveLength(3);
+
+    let bmTurns = 0;
+    const r = await drainProject({
+      db, projectId: "p1", now: () => T0 + 2, log: () => {},
+      runAgentTurn: async (agentId) => { if (agentId === "bm") bmTurns++; return okTurn; },
+      runWork: async () => { throw new Error("不该被调用"); },
+    });
+    expect(bmTurns, "三次事件、一次唤醒").toBe(1);
+    expect(r.visited.filter((v) => v.kind === "report_downstream")).toHaveLength(1);
+    expect(r.reportedToClient).toBe(true);
+    expect(listPendingDispatchEvents(db, "p1"), "这一批一次交代掉(它们都被渲染给它看过)").toEqual([]);
+    expect(roots).toHaveLength(3);
+  });
+
+  it("**没到阈值的行一次都没被消费**;被消费的正好是渲染给它的那一批(`consumed_at` 不撒谎)", async () => {
+    doneRoot();
+    doneRoot();
+    // 2 条 < 3,时间也没到 → 没有待办 → 没有回合 → **不消费**
+    const idle = await drainProject({
+      db, projectId: "p1", now: () => T0 + 2, log: () => {},
+      runAgentTurn: async () => okTurn,
+      runWork: async () => { throw new Error("不该被调用"); },
+    });
+    expect(idle.visited.some((v) => v.kind === "report_downstream")).toBe(false);
+    expect(
+      listPendingDispatchEvents(db, "p1"),
+      "那两行的 consumed_at 仍然是 NULL —— 合并窗口不让它们「被代表」",
+    ).toHaveLength(2);
+
+    doneRoot();
+    let rendered = "";
+    const r = await drainProject({
+      db, projectId: "p1", now: () => T0 + 3, log: () => {},
+      runAgentTurn: async (agentId, task) => { if (agentId === "bm") rendered = task; return okTurn; },
+      runWork: async () => { throw new Error("不该被调用"); },
+    });
+    expect(r.visited.filter((v) => v.kind === "report_downstream")).toHaveLength(1);
+    expect(listPendingDispatchEvents(db, "p1")).toEqual([]);
+    // 判据不是「消费了多少行」,而是「消费的行 == 渲染给它的行」
+    const bullets = rendered.split("\n").filter((l) => l.startsWith("- [")).length;
+    const consumed = (
+      db.prepare(
+        `SELECT COUNT(*) n FROM dispatch_events WHERE project_id = 'p1' AND consumed_by = 'bm'`,
+      ).get() as { n: number }
+    ).n;
+    expect(bullets).toBe(3);
+    expect(consumed).toBe(bullets);
   });
 });
