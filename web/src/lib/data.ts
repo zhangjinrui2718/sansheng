@@ -32,13 +32,17 @@ import type {
   BlockerView,
   ChangeView,
   ClientQuestionView,
+  HarnessView,
+  MemberConversationView,
   MemberView,
   ProjectDetail,
+  ProjectRole,
+  RoleHarnessView,
   WorkView,
 } from "@shared/types/platform";
 import * as api from "./api";
 import { errorMessage } from "./api";
-import { useChatStore } from "../stores/chat";
+import { useChatStore, type Turn } from "../stores/chat";
 
 /** 客户端请求的页大小。后端有上限时由后端截断,这里不假装知道它的上限。 */
 export const ARTIFACT_LIMIT = 200;
@@ -222,4 +226,177 @@ export function useProjectChanges(projectId: string | null): Loaded<ChangeView[]
     [projectId, revision],
   );
   return { data: r.data?.changes ?? [], loading: r.loading, error: r.error };
+}
+
+/**
+ * 成员页的「他产生了什么对话」清单(`GET /api/projects/:id/member-conversations`)。
+ *
+ * 条数来自后端的 SQL `GROUP BY agent_id` —— **不要**改成拿 `useProjectMessages` 在
+ * 客户端分组:那条读函数每条会话只取最早的 200 条,消息一多,数出来的条数会静默少数。
+ */
+export function useMemberConversations(projectId: string | null): Loaded<MemberConversationView[]> {
+  const revision = useChatStore((s) => s.projectRevision);
+  const r = useLoad(
+    () =>
+      projectId
+        ? api.listMemberConversations(projectId)
+        : Promise.resolve({ groups: [] as MemberConversationView[] }),
+    [projectId, revision],
+  );
+  return { data: r.data?.groups ?? [], loading: r.loading, error: r.error };
+}
+
+// ── 角色能力面(全局面;对话页的「谁面向甲方」判据的一半)─────────────
+
+/**
+ * 模块级缓存的 `GET /api/harness`。**失败不缓存** —— 一次网络抖动不该把
+ * 「读不到角色能力面」钉死到整个会话(那样对话页会一直显示不出业务经理的发言)。
+ */
+let harnessPromise: Promise<HarnessView> | null = null;
+
+export function loadHarnessOnce(): Promise<HarnessView> {
+  if (harnessPromise === null) {
+    harnessPromise = api.getHarness().catch((e: unknown) => {
+      harnessPromise = null;
+      throw e;
+    });
+  }
+  return harnessPromise;
+}
+
+/**
+ * 四个角色的能力面(只读,`clientFacing` 是代码内常量的投影)。
+ *
+ * `ready === false` 表示**还没有拿到这份判据** —— 调用方不许据此断言
+ * 「这个人不面向甲方」(见 `channelOf` 的 fail-closed 分支与其后果说明)。
+ */
+export function useHarnessRoles(): {
+  roles: RoleHarnessView[];
+  ready: boolean;
+  error: string | null;
+} {
+  const [roles, setRoles] = useState<RoleHarnessView[]>([]);
+  const [ready, setReady] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    loadHarnessOnce()
+      .then((h) => {
+        if (cancelled) return;
+        setRoles(h.roles);
+        setReady(true);
+        setError(null);
+      })
+      .catch((e: unknown) => {
+        if (cancelled) return;
+        setReady(false);
+        setError(errorMessage(e));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  return { roles, ready, error };
+}
+
+// ── 通道分离:对话页 = 甲方 ↔ 业务经理(设计 1 §2.10 / §2.12 的 A3)──────
+//
+// 「谁面向甲方」**不需要新字段**:`agentId` → `MemberView.role` →
+// `HarnessView.roles[].clientFacing` 两跳,两个端点都已经在页面上被读过。
+
+/** 一轮属于哪条通道。三值而不是布尔:系统提示既不是甲方说的,也不是内部角色的。 */
+export type TurnChannel = "client" | "system" | "internal";
+
+export interface ChannelContext {
+  /** agentId → role(`GET /api/projects/:id/members`) */
+  readonly rolesByAgentId: ReadonlyMap<string, ProjectRole>;
+  /** 面向甲方的角色(`GET /api/harness` 的 `RoleHarnessView.clientFacing`) */
+  readonly clientFacingRoles: ReadonlySet<ProjectRole>;
+  /** 判据是否已就绪(harness 拿到了没)—— 只影响提示的措辞,不影响分类 */
+  readonly ready: boolean;
+  /** 当前上下文是**接待会话**(没有项目 ⇒ 没有成员表) */
+  readonly intake: boolean;
+}
+
+export function channelContextOf(input: {
+  members: readonly MemberView[];
+  /**
+   * 只需要「角色 → 是否面向甲方」这一列。**收窄类型是有意的**:判据只依赖
+   * `ROLE_SPECS` 的这一个布尔,收窄之后测试能直接喂一张两列的表,
+   * 而不必造一份完整的 `RoleHarnessView`。
+   */
+  roles: ReadonlyArray<Pick<RoleHarnessView, "role" | "clientFacing">>;
+  ready: boolean;
+  intake: boolean;
+}): ChannelContext {
+  return {
+    rolesByAgentId: new Map(input.members.map((m) => [m.id, m.role])),
+    clientFacingRoles: new Set(
+      input.roles.filter((r) => r.clientFacing).map((r) => r.role),
+    ),
+    ready: input.ready,
+    intake: input.intake,
+  };
+}
+
+/**
+ * 这一轮该进哪条通道。
+ *
+ * ── 判据(三条,顺序不能换)────────────────────────────────────
+ *
+ * 1. **`agentId === null` 不等于「甲方」** —— `session_messages.agent_id` 的 null
+ *    有**两个**作者:`kind='user'`(甲方)与 `kind='system'`(平台通知,
+ *    `host/serve.ts` 的 `announceDrain` 在排空器异常停下时落的那条)。所以必须
+ *    **同时看 kind**;`Turn.role` 就是 kind 的投影(kind `user` → role `user`,
+ *    kind `system` → role `system`)。
+ * 2. `agentId !== null` → 两跳查该 agent 的角色是否 `clientFacing`。
+ * 3. **映射缺失时**(这个 agent 不在本项目成员表里,或接待会话根本没有成员表):
+ *    - 接待会话:`client` —— 那条会话的对象就是业务经理(界面头部也这么写),
+ *      而成员表是**按项目**的,接待会话没有项目 ⇒ 这里拿不到判据,不该假装拿得到;
+ *    - 项目里:`internal`(**fail-closed**)。宁可暂时看不见业务经理的发言,也不
+ *      把内部角色的发言放进甲方通道 —— 后者是**通道分离失效**,前者只是晚一拍,
+ *      而且被滤掉的**条数**会显示在页面上(见 `partitionTurns().hidden`)。
+ */
+export function channelOf(turn: Turn, ctx: ChannelContext): TurnChannel {
+  if (turn.agentId === null) {
+    return turn.role === "user" ? "client" : "system";
+  }
+  const role = ctx.rolesByAgentId.get(turn.agentId);
+  if (role === undefined) {
+    return ctx.intake ? "client" : "internal";
+  }
+  return ctx.clientFacingRoles.has(role) ? "client" : "internal";
+}
+
+/** 一屏里要看的两类轮 + 被滤掉的条数。 */
+export interface ConversationPartition {
+  /** 按时间正序,只含 `client` 与 `system`(内部角色的发言不在里面) */
+  timeline: Array<{ turn: Turn; channel: Exclude<TurnChannel, "internal"> }>;
+  /**
+   * 被滤掉的内部角色发言**条数**。
+   *
+   * ⚠️ **必须有读者**:看不到就等于平台替甲方删了证据(设计 1 §2.10.4 的同一条
+   * 纪律)。调用方把它显示成一行「另有 N 条不在这条通道里」。
+   */
+  hidden: number;
+}
+
+/** 把一屏轮按通道分开。纯函数 —— 判据在这里,渲染层只消费结果。 */
+export function partitionTurns(
+  turns: readonly Turn[],
+  ctx: ChannelContext,
+): ConversationPartition {
+  const timeline: ConversationPartition["timeline"] = [];
+  let hidden = 0;
+  for (const turn of turns) {
+    const channel = channelOf(turn, ctx);
+    if (channel === "internal") {
+      hidden += 1;
+      continue;
+    }
+    timeline.push({ turn, channel });
+  }
+  return { timeline, hidden };
 }

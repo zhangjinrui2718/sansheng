@@ -7,7 +7,7 @@
  * `tests/platform/dispatcher.test.ts` —— 那个文件**一字不改**全绿就说明改对了。
  * 所以这里不再重复它的用例,只钉三件**它测不到**的事:
  *
- *   ① **规则表本身是闭合的**:8 条规则恰好覆盖 `TodoKind` 的 8 个取值,
+ *   ① **规则表本身是闭合的**:规则恰好覆盖 `TodoKind` 的每一个取值,
  *      没有哪个 kind 还留在表外的分支里;每条 `on` 都含 `tick`(漏了它,
  *      「重启后补跑」那条性质就断了)。
  *   ② **纯度回归**(§2.12 的 B2 验收判据):`collectTodos` 在**有事件 / 无事件**下
@@ -92,11 +92,13 @@ function sync(r: Promise<ToolResult> | ToolResult): ToolResult {
 
 // ── ① 规则表是闭合的 ────────────────────────────────────────────
 
-describe("B1 · 规则表:8 条规则恰好是那 8 个分支", () => {
+describe("B1 · 规则表:每个 `TodoKind` 恰好一条规则(C3 之后是 10 条)", () => {
   it("`TodoKind` 的每个取值**恰好**有一条规则产出它 —— 没有分支留在表外", () => {
     const kinds = RULES.map((r) => r.then.kind);
-    expect(RULES).toHaveLength(8);
-    expect(TODO_KINDS).toHaveLength(8);
+    // B1 落地时是 8/8;C3 补了流水线缺的两环(`integrate` / `handover`)。
+    // 这两个数字**同时**改是对的:集合相等那条断言才是闭合性本身。
+    expect(RULES).toHaveLength(10);
+    expect(TODO_KINDS).toHaveLength(10);
     // 集合相等 ⇒ 「表产出的 kind」与「闭集」是同一个集合
     expect([...kinds].sort()).toEqual([...TODO_KINDS].sort());
     // 且没有两条规则争同一个 kind(否则「谁负责这一条」没有答案)
@@ -128,14 +130,19 @@ describe("B1 · 规则表:8 条规则恰好是那 8 个分支", () => {
     }
   });
 
-  it("**`artifact_inserted` 今天不在任何规则的 `on` 里**(B2 的纪律:事件不是判据)", () => {
-    // 这条断言是刻意的「钉死现状」:B2 让产出工件去敲门铃,而**没有**让任何规则
-    // 开始读工件。哪天有人给某条规则补上 `artifact_inserted`,这条会红 ——
-    // 那一刻正是需要一次显式评审的时刻(§2.11.3:规则一旦读工件,就会滑向语义猜测)。
-    // C3 的 `integrate` / `handover` 是**唯一**预计会合法打破它的地方。
+  it("**`artifact_inserted` 只被 C3 的两条新规则用**(B2 的纪律:事件不是判据)", () => {
+    // B2 让产出工件去敲门铃,而**没有**让任何规则开始读工件 —— 所以当时这条断言
+    // 写的是「`artifact_inserted` 不在任何规则的 `on` 里」。C3 的 `integrate` /
+    // `handover` 是**唯一**计划内合法打破它的地方(B2 的注释里就预告了这一刻),
+    // 所以这里改成钉**谁**用它:多一条规则都不许。
+    //
+    // 它守的仍然是同一条纪律:规则的 `if` 只许读工件的**结构化列**(kind /
+    // `work_id` / status),不许读正文;而**判定永远重新查库** —— 门铃只是门铃。
+    const usingArtifact = RULES.filter((r) => r.on.includes("artifact_inserted")).map((r) => r.id);
+    expect(usingArtifact.sort()).toEqual(["handover_deliverable", "integrate_reviewed_subtree"]);
     const used = new Set<string>(RULES.flatMap((r) => [...r.on]));
     expect([...used].sort()).toEqual([
-      "ask_answered", "ask_opened", "change_decided",
+      "artifact_inserted", "ask_answered", "ask_opened", "change_decided",
       "meeting_concluded", "tick", "work_status_changed",
     ]);
   });

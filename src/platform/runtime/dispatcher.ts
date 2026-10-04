@@ -106,6 +106,9 @@ import {
   isTerminalWorkStatus, type WorkRow, type WorkStatus,
 } from "../storage/repo/works.js";
 import {
+  listArtifacts, getArtifact, type ArtifactRow,
+} from "../storage/repo/artifacts.js";
+import {
   bumpAttempt, consumePendingDispatchEvents, listAttempts,
   listPendingDispatchEvents, markAttemptNotified, pruneAttempts,
   type DispatchEventRow,
@@ -139,6 +142,24 @@ export const TODO_KINDS = [
   "execute_work",
   /** 有工作项做完了、还等着审(`works.review_state = 'pending'`) */
   "review_work",
+  /**
+   * 根工作项的整棵子树都收口了(终态 + 审过),而**这条根上还没有 `deliverable` 工件**
+   * —— 质检之后缺的那一环(C3,设计 1 §2.11.4)。
+   *
+   * 「整合完了」这个事实**没有**落在 `works` 上,而是落在**工件**上:根工作项上存在
+   * 一条 `kind='deliverable'` 的工件。这正是用户要的「工件即推动流程」—— 也是这条
+   * 规则唯一的终止判据(缺了它,`if` 每次都成立,会一直叫到尝试预算用尽,而预算
+   * 是**限流不是判据**)。
+   */
+  "integrate",
+  /**
+   * 存在**已验收**的 `deliverable` 工件,而它还没有交付会话 —— 该业务经理出面了(C3)。
+   *
+   * ⚠️ 建会话是 **C4** 的活(migration 017 给 `project_sessions` 加
+   * `deliverable_artifact_id` + `channel`)。C3 只把这条待办**产出来**;
+   * 终止判据读的正是那一列(见 `collectRuleFacts` 的 `deliveredArtifactIds`)。
+   */
+  "handover",
   /** 下游出了结果,该由我向甲方交代(未消费的 outbox 事件) */
   "report_downstream",
 ] as const;
@@ -150,7 +171,7 @@ export type TodoKind = (typeof TODO_KINDS)[number];
  *
  * 次序的理由:
  *   - `answer_ask` 最前 —— 有人处于 blocked,不答它整条链停摆(设计 §5.1)
- *   - 其余按流程顺序:对齐(会议/变更)→ 修派活 → 拆解 → 执行 → 审查 → 汇报
+ *   - 其余按流程顺序:对齐(会议/变更)→ 修派活 → 拆解 → 执行 → 审查 → 整合 → 交付 → 汇报
  *   - `report_downstream` 最后 —— 它汇报的正是前面那些动作的结果
  *
  * ⚠️ 批次 20 在这里额外有一条「**最后一格预算留给汇报**」的特例(否则甲方
@@ -166,7 +187,13 @@ const PRIORITY: Readonly<Record<TodoKind, number>> = {
   decompose_project: 4,
   execute_work: 5,
   review_work: 6,
-  report_downstream: 7,
+  // 整合与交付接在**审查之后**(C3,§2.11.4):子树收口 → 整合 → 交付。
+  // `integrate` 排在 `review_work` 之后是刻意的:容器自己也可能 `done` 而没审,
+  // 那种情况下先让质检把 `review_work` 跑掉,再叫项目经理整合(否则会在
+  // 「还有一条 done 没审」时提前整合 —— 而 ② 那一条判据正是禁止这个的)。
+  integrate: 7,
+  handover: 8,
+  report_downstream: 9,
 };
 
 export interface DriverTodo {
@@ -245,7 +272,10 @@ export const NUDGE_CAPABILITIES: readonly Capability[] = [
   "change.propose", "change.review",
   "blocker.open", "blocker.update",
   // 产出工件 = 「工件推动流程」的**触发侧**(§2.11.2):门铃响一下,排空器重新查库。
-  // 它今天不点亮任何一条规则(`on` 里没有 `artifact_inserted`)—— 这正是纪律本身。
+  // ⚠️ B2 落地时它**一条规则也点不亮**(8 条规则的 `on` 里没有 `artifact_inserted`);
+  // C3 之后它有读者了 —— `integrate_reviewed_subtree` 与 `handover_deliverable`
+  // 的 `on` 里都有它(这一批里第一次真的有人用这个触发名)。纪律没变:门铃只是
+  // 「去查一下」,判定仍然全部重新查库(它们读的是工件的 kind / work_id 这两列)。
   "blackboard.write",
 ];
 
@@ -417,6 +447,39 @@ export interface RuleFacts {
   readonly immediateEvent: boolean;
   /** `works.status='done' AND review_state='pending'` */
   readonly pendingReview: readonly WorkRow[];
+  // ── C3 的两条新规则要读的结构化事实(§2.11.4 的下两行)────────────
+  /**
+   * 项目里**全部**工作项(树形关系就在 `parentWorkId` 上)。
+   *
+   * `integrate` 要沿它算「根 R 的整棵子树」,而那**必须**是一条集合谓词:
+   * 「3 个子项都跑完了」不是任何一条工件的属性(§2.11.2 的两条反例)。
+   * 与 `strandedWorks` 共用这一次查询,不另查一遍。
+   */
+  readonly works: readonly WorkRow[];
+  /**
+   * **已经有 `deliverable` 工件挂着的**工作项。
+   *
+   * 这就是 `integrate` 的终止判据 ③(§2.11.4):「这条交付已经整合完了」这个
+   * 结构化事实落在**工件**上,不在 `works` 的某一列上 —— 用户要的正是
+   * 「工件即推动流程」。缺了它,`if` 每次都成立,规则会一直叫到尝试预算用尽
+   * (而预算是**限流,不是判据**)。
+   */
+  readonly deliverableWorkIds: ReadonlySet<string>;
+  /**
+   * `kind='deliverable' AND status='accepted'` 的工件 —— `handover` 的**资格**判据。
+   *
+   * 只有**已验收**的交付物才该交付:整合刚写完(`open`)时还不该惊动甲方。
+   */
+  readonly acceptedDeliverables: readonly ArtifactRow[];
+  /**
+   * **已经有交付会话挂着的**交付物 id —— `handover` 的**终止**判据。
+   *
+   * 读的是 `project_sessions.deliverable_artifact_id`,而**那一列今天还不存在**:
+   * 它是 C4 的 migration 017(§2.11.6)。所以这里**先问 schema**,列不在时如实
+   * 返回空集(= 还没有任何交付会话),并**不假装**判据已成立或已失效 ——
+   * 见 `deliveredArtifactIds` 的说明。
+   */
+  readonly deliveredArtifactIds: ReadonlySet<string>;
   readonly reportBatchSize: number;
   readonly reportMaxDelayMs: number;
 }
@@ -446,7 +509,8 @@ export interface Rule {
 }
 
 /**
- * 8 条规则 —— 原来的 8 个分支,行为逐字不变。
+ * **10 条**规则 —— 前 8 条是 B1 从原来那 8 个分支搬过来的(行为逐字不变),
+ * 后 2 条是 C3 新增的 `integrate` / `handover`(§2.11.4 的下两行)。
  *
  * ── ⚠️ 每条 `on` 都含 `tick`,这是刻意的、也是必须的 ─────────────
  *
@@ -692,7 +756,208 @@ export const RULES: readonly Rule[] = [
       "(`dispatch_events`)里,所以这条规则重启之后照样查得出来;它**收窄的是时机,不是资格**" +
       "(没到阈值的行根本没被消费,`consumed_at` 不因合并而撒谎,§9.4)。",
   },
+
+  // ══ C3:质检之后缺的那两环(设计 1 §2.11.4 的下两行)══════════════
+  //
+  // 上面 8 条是 B1「行为逐字不变」的搬运结果;下面 2 条是**新功能**,所以它们
+  // 改变行为是**设计的一部分**(`tests/platform/dispatcher.test.ts` 里几条精确的
+  // 序列断言因此会多出一环 —— 那些断言在 C3 里被如实更新,见该文件的注释)。
+  //
+  // 用户的原话:「质检完了产出工件触发项目经理整合然后交付,交付给到业务经理,
+  // 业务经理拿到交付物(也是工件的一种),然后**主动发起和用户的对话**」。
+  // 上面两条规则各自对应这句话的一环,而**唯一的机械判据**都落在工件上:
+  // `integrate` 的终止判据是「根工作项上有没有 `deliverable` 工件」,
+  // `handover` 的资格判据是「有没有 `status='accepted'` 的 `deliverable`」。
+  {
+    id: "integrate_reviewed_subtree",
+    // ①子树最后一条工作项**收口**(`work_status_changed` —— 一次状态迁移)
+    // ②**产出工件**(`artifact_inserted`,这一批里第一次真的有人用它 —— B1 实测
+    //   8 条规则一条都没用到它;约束是给**条件侧**的:下面 `if` 读的是工件的
+    //   **结构化列**(kind / work_id),不读正文,§2.11.3)
+    // ③兜底 tick(重启后补跑:状态在库里)
+    on: ["work_status_changed", "artifact_inserted", "tick"],
+    if: (q) => {
+      const pm = q.members.find((m) => m.role === "project_manager");
+      if (pm === undefined) return [];
+      const children = childrenByParent(q.works);
+      /** 这一轮准备好整合的根(每个 = 一条要写交付物的交付) */
+      const ready: WorkRow[] = [];
+      for (const root of q.works) {
+        if (root.parentWorkId !== null) continue; // 只看根
+        const subtree = subtreeOf(root, children);
+        const kids = subtree.slice(1);
+        // ── ① 子树**全部终态** ──────────────────────────────────────
+        //
+        // `cancelled` 按 §2.8 算**收口**(`isTerminalWorkStatus` 含它):取消的定义
+        // 是「这块范围不要了,输入少了一块」,它不阻塞也不产出 —— 若按「必须有产出」
+        // 判,一个取消的子项就能把里程碑**永久钉死**(§2.11.2 的第一条反例)。
+        //
+        // ⚠️ 判的是**后代**;没有后代时判 R **自己**(§9.4:「扁平时每个根就是它
+        // 自己,子树判据退化成单条工作项判据」)。不能反过来只判后代:空集上
+        // 「全部终态」**恒真**,刚拆完就会把项目经理叫来整合。
+        const judged = kids.length > 0 ? kids : [root];
+        if (!judged.every((w) => isTerminalWorkStatus(w.status))) continue;
+        // ── ② 产出都审过 ─────────────────────────────────────────────
+        //
+        // 含 R 自己:容器也可能是 `done` 而没审(在树上,`work_update` 可以把它标成
+        // done)。这时**先让 `review_work` 跑**(优先级 6 < 7),别在还有人没审时整合。
+        if (subtree.some((w) => w.status === "done" && w.reviewState !== "done")) continue;
+        // ── ③ **终止判据**:这条交付还没有 `deliverable` 工件 ──────────
+        //
+        // 「已经整合过了」这个结构化事实落在**工件**上,不在 `works` 的某一列上。
+        // 判据放宽到**整棵子树**(而不只是 R 自己):`board_write` 的产出边是模型
+        // 显式填的,填给子项同样是「这份交付有整合产物」—— 这里宁可少叫一次,
+        // 也不能因为边挂错了地方而反复叫到预算用尽(那是**静默**的一种:
+        // 它长得像「系统跑过很多次」)。
+        if (subtree.some((w) => q.deliverableWorkIds.has(w.id))) continue;
+        // ── 两条「没什么可交付」的处置(设计表里没有,理由是它们各自的现场)──
+        //
+        //   - **R 自己 `cancelled`**:整块范围不要了,没有交付可言。不拦它就会
+        //     叫项目经理去交付一个已经被取消的交付物(它什么都不会写 ⇒ 被反复
+        //     叫醒到预算用尽,然后在会话里留下一条「预算用尽」的噪音)。
+        //   - **子树里一条 `done` 都没有**(全 failed / 全 cancelled):没有产出可
+        //     整合。失败该走的是「向甲方交代」(outbox 里已有 `work_failed`),
+        //     不是「交付」。
+        if (root.status === "cancelled") continue;
+        if (!subtree.some((w) => w.status === "done")) continue;
+        ready.push(root);
+      }
+      if (ready.length === 0) return [];
+
+      // ── 为什么**一条待办覆盖全部就绪的根**,而不是每个根一条 ─────────
+      //
+      // ① 与这张表里其他「集合谓词」的规则同形(`review_work` / `fix_work_assignment`
+      //    的 key 就是 id 集合的 join):**进度 = key 变了**。项目经理整合掉一个根,
+      //    那个根从集合里消失 ⇒ key 变 ⇒ 自动拿到新预算(at-least-once,不会漏)。
+      // ② 一条待办 = **一个回合**。真机库是扁平结构(9 work / 9 root / 0 中间),
+      //    每根一条待办会一次排空就叫醒项目经理 9 次,把 `maxRounds`(默认 8)烧光 ——
+      //    而业务经理的汇报排在它们**后面**,于是「甲方什么都不知道」这件事会
+      //    被一次整合风暴掩盖(那是真机上已经出现过一次的形态)。
+      const ids = ready.map((w) => w.id).sort();
+      const only = ready.length === 1 ? ready[0]! : null;
+      const kidCount = only === null ? 0 : (children.get(only.id) ?? []).length;
+      return [{
+        agentId: pm.agentId, role: "project_manager", kind: "integrate",
+        key: `integrate:${ids.join("+")}`, target: null, refs: ids,
+        // 没有单一目标行,版本由 **key 的集合**承载(与 `review_work` 同一条理由)
+        targetState: null,
+        label: only === null
+          ? `整合 ${ready.length} 条已收口的交付(根工作项 ${ids.join(" / ")})`
+          : kidCount > 0
+            ? `整合根工作项 ${only.id}「${only.title}」下的 ${kidCount} 条子项产出`
+            : `整合工作项 ${only.id}「${only.title}」并写出交付物`,
+      }];
+    },
+    then: { kind: "integrate", targetRole: "project_manager" },
+    why:
+      "流水线在质检之后**没有下一环**:`TodoKind` 的 8 个取值里没有「整合」," +
+      "`grep -rn 整合 src/` 只命中两处测试数据注释(§2.11.1)。判据是**集合 + 状态谓词**" +
+      "而不是「产出了工件」—— 一个 `cancelled` 的子项没有工件,纯工件判据会让里程碑" +
+      "永不达成(§2.11.2)。而**终止判据必须是工件**(③):`deliverable` 挂在根工作项上" +
+      "这件事就是「整合完了」在库里的唯一答案;没有它,这条 `if` 每次 tick 都成立," +
+      "会一直叫到尝试预算用尽 —— 而预算是**限流不是判据**,拿它兜一条每次都成立的规则" +
+      "等于让流水线静默停在一个「看起来跑过很多次」的地方(§2.11.4 末)。",
+  },
+  {
+    id: "handover_deliverable",
+    // 只可能因为「新落了一条工件」而变:资格是 `deliverable` + `accepted`,
+    // 而 `status` 今天**写完之后基本改不了**(唯一的生产变更点是 client_question 那条;
+    // `applyArtifactStatus` 全仓零调用方,§2.11.3)。所以它今天事实上是**建**触发的。
+    // 仍然写 `tick`:兜底定时器是**重启后补跑**的唯一载体(见 `RULES` 的说明)。
+    on: ["artifact_inserted", "tick"],
+    if: (q) => {
+      const bm = q.members.find((m) => m.role === "business_manager");
+      if (bm === undefined) return [];
+      const out: TodoDraft[] = [];
+      for (const a of q.acceptedDeliverables) {
+        // ── 终止判据:这条交付物已经有交付会话了(§2.11.6 的那条边)──
+        //
+        // 判据**从库里查**(`project_sessions.deliverable_artifact_id`),不是从
+        // 本回合的产出里带 —— 一个回合的产出只有 worker 那条路、只有挂了 014 边的
+        // 行、而且只有增量(B3 实测),拿它当触发会让交付这一环**静默不可见**。
+        if (q.deliveredArtifactIds.has(a.id)) continue;
+        out.push({
+          agentId: bm.agentId, role: "business_manager", kind: "handover",
+          key: `handover:${a.id}`, target: a.id, refs: [a.id], targetState: a.updatedAt,
+          label: `把交付物「${a.title}」交付给甲方`,
+        });
+      }
+      return out;
+    },
+    then: { kind: "handover", targetRole: "business_manager" },
+    why:
+      "交付之后**没有下一环**:交付物的存在没人读(§2.11.1)。这条规则是「业务经理" +
+      "主动开一条对话」的**唯一入口**。资格判据是 `status='accepted'` —— 整合刚写完" +
+      "(`open`)时还不该惊动甲方;终止判据是**交付会话那条边**,它由 C4 的 migration 017" +
+      "加到 `project_sessions` 上(`deliverable_artifact_id`)。列不在时 `deliveredArtifactIds`" +
+      "**如实**返回空集(还没有任何交付会话),而不是假装已经交付过 —— C4 一落地,这条" +
+      "判据自动开始成立,规则自己就停了。",
+  },
 ];
+
+/**
+ * **交付会话 ↔ 交付物**这条边(设计 1 §2.11.6)的读面。
+ *
+ * ⚠️ **这一列今天还不存在** —— 它由 **C4** 的 migration 017 加到 `project_sessions`
+ * 上(`deliverable_artifact_id TEXT REFERENCES artifacts(id)`)。C3 只做「产出这条
+ * 待办」,建会话留给 C4。所以这里**先问 schema 再查**(`PRAGMA table_info`):
+ *
+ *   - 列在  → 查出已被交付过的交付物 id(终止判据真的成立)
+ *   - 列不在 → 返回**空集**,含义是「还没有任何交付会话」
+ *
+ * 为什么不是 `try { … } catch { return new Set() }`:一条 SQL 报错被吞掉之后,
+ * 「列还没迁移」与「查询写错了」在结果上长得一模一样(本项目最贵的失败形态)。
+ * `PRAGMA table_info` 是一次**问得出答案**的检查,不需要靠异常区分。
+ *
+ * 为什么不在模块作用域缓存这张表的结构:那是**跨调用的进程内状态**,而本模块
+ * 全部的纪律就是「判定每次从库里重算」(§9.4)。`table_info` 是常数级开销。
+ */
+function deliveredArtifactIds(db: Database.Database, projectId: string): ReadonlySet<string> {
+  const columns = db.pragma("table_info(project_sessions)") as ReadonlyArray<{ name: string }>;
+  if (!columns.some((c) => c.name === "deliverable_artifact_id")) return new Set();
+  const rows = db
+    .prepare(
+      `SELECT deliverable_artifact_id AS id FROM project_sessions
+       WHERE project_id = ? AND deliverable_artifact_id IS NOT NULL`,
+    )
+    .all(projectId) as ReadonlyArray<{ id: string }>;
+  return new Set(rows.map((r) => r.id));
+}
+
+/**
+ * 子 → 父 的邻接表(一次遍历建好,免得每个根各扫一遍全部工作项)。
+ *
+ * 树形是**数据**上的关系(`works.parent_work_id`,migration 007),不是内存里的
+ * 级联状态 —— 所以重启之后子树判据照样算得出来。
+ */
+function childrenByParent(works: readonly WorkRow[]): ReadonlyMap<string, WorkRow[]> {
+  const map = new Map<string, WorkRow[]>();
+  for (const w of works) {
+    if (w.parentWorkId === null) continue;
+    const kids = map.get(w.parentWorkId);
+    if (kids === undefined) map.set(w.parentWorkId, [w]);
+    else kids.push(w);
+  }
+  return map;
+}
+
+/** 整棵子树(含 `root` 自己)。广度优先,顺序稳定(按 `works` 的 `created_at` 序)。
+ *
+ * `seen` 不是优化而是**终止条件**:`parent_work_id` 上的环今天没有校验(它是数据,
+ * 不是 `work_deps` 的那张表),一个环会让「算子树」永远不收敛 —— 而它挂在排空的
+ * 每个 tick 上。环里的节点只算一次,规则照常给出答案(宁可少叫一次,不能挂住进程)。 */
+function subtreeOf(root: WorkRow, children: ReadonlyMap<string, WorkRow[]>): WorkRow[] {
+  const out: WorkRow[] = [root];
+  const seen = new Set<string>([root.id]);
+  for (let i = 0; i < out.length; i++) {
+    for (const kid of children.get(out[i]!.id) ?? []) {
+      if (seen.has(kid.id)) continue;
+      seen.add(kid.id);
+      out.push(kid);
+    }
+  }
+  return out;
+}
 
 /**
  * 把规则要读的结构化事实**一次性**从库里查出来(纯查询,查完规则就没有别的读法)。
@@ -719,11 +984,19 @@ function collectRuleFacts(
     });
   }
 
+  const works = listWorks(db, projectId);
+  const deliverables = listArtifacts(db, projectId, {
+    kind: "deliverable",
+    // 上界调到 `listArtifacts` 允许的最大值:这条查询是**全项目**的,漏掉一条
+    // 就意味着「明明整合过了却又被叫醒一次」(而反向漏掉 = 永远不叫)。
+    limit: 500,
+  });
+
   /**
    * 派给非 worker(或负责人已不存在)的**非终态**工作项 —— `fix_stranded_assignment`
    * 的判据。它与成员无关,所以按项目算一次;角色条件留在规则里。
    */
-  const strandedWorks = listWorks(db, projectId).filter((w) => {
+  const strandedWorks = works.filter((w) => {
     if (isTerminalWorkStatus(w.status)) return false;
     const a = getAgent(db, w.assigneeAgentId);
     return a === null || a.role !== "worker";
@@ -739,6 +1012,16 @@ function collectRuleFacts(
     // 查库的活在这里做完 —— `isImmediateEvent` 要看 `blockers.severity`,规则拿不到 db
     immediateEvent: events.some((e) => isImmediateEvent(db, e)),
     pendingReview: listWorksPendingReview(db, projectId),
+    works,
+    deliverableWorkIds: new Set(
+      deliverables.map((a) => a.workId).filter((id): id is string => id !== null),
+    ),
+    acceptedDeliverables: listArtifacts(db, projectId, {
+      kind: "deliverable",
+      status: "accepted",
+      limit: 500,
+    }),
+    deliveredArtifactIds: deliveredArtifactIds(db, projectId),
     reportBatchSize: opts.reportBatchSize ?? DEFAULT_REPORT_BATCH_SIZE,
     reportMaxDelayMs: opts.reportMaxDelayMs ?? DEFAULT_REPORT_MAX_DELAY_MS,
   };
@@ -874,11 +1157,106 @@ export function renderTask(db: Database.Database, todo: DriverTodo): string {
         "叫醒你这一次,所以这里**一次列出的是一批**,不是一件。" +
         "「库里记了一笔」不等于「值得播报」:整批可以合成**一句**,也可以不播。"
       );
+    case "integrate":
+      // ⚠️ **这一段是 `deliverable` 这个 kind 的「什么时候写」**(C3 的另一半)。
+      //
+      // 为什么写在**这里**而不是只写在 `harness/system_prompts/project_manager.core.md`:
+      //   - `board_write` 的 kind 描述是**派生**的(`ARTIFACT_KINDS.join(" | ")`),
+      //     所以项目经理**看得见** `deliverable` 这个名字,却没有任何地方告诉它
+      //     「整合完子树后要写一条」。这一支正是那个「什么时候」。
+      //   - 这条通道是 **user message**,而本项目自己认定 recency 比 system prompt
+      //     强(= §9.4 的教训:`decompose_project` 里那句「用 parentWorkId 建树」
+      //     就写在这里);它只在**真被叫醒整合**的那一个回合出现,不占别处的 context。
+      //   - 它同时**引用了平台判据**(③ 靠 `workId` 挂边):不写清这一点,模型很
+      //     容易写一条不挂边的交付物 —— 那时 `if` 仍然成立,规则会一直叫到预算用尽,
+      //     而表现只是「系统跑过很多次」(静默失败的一种)。
+      return (
+        "# 现在轮到你了:整合这条交付\n\n" +
+        "下面这些交付的工作项**都已经跑完并审过了**,流水线停在这里等你整合。\n\n" +
+        renderSubtrees(db, todo) +
+        "\n\n**怎么整合**:\n\n" +
+        "1. 用 `board_list`(传 `workId` = 每条子项)**逐条读**它们的产出 —— " +
+        "整合是收敛,不是复述:甲方的诉求、结论、依据、还剩什么没解决,收成一份能独立读懂的东西\n" +
+        "2. **每一份交付各写一条**交付物,用 `board_write`:\n" +
+        "   - `kind` 用 **`deliverable`**\n" +
+        "   - `workId` **必须显式传那条根工作项的 id**:" +
+        "平台判「这条交付整合完了没有」看的**就是**「这条根工作项上有没有 `deliverable` 工件」——" +
+        "不传 `workId` 的话这条待办会**一直重新出现**,直到把尝试预算烧完\n" +
+        "   - `status` 用 **`accepted`**:交付那一环的资格判据是「已验收的交付物」," +
+        "写成 `open` 交付就不会被触发(而工件状态写完之后**改不了**,只能重写一条)\n" +
+        "3. 子项里的细节**不要**抄进来:交付物给甲方看,用 `links` 把依据指回那几条产出\n\n" +
+        "**不要自己动手补做子项里的活** —— 你持 `work.update`(该关的关掉、该登记的阻塞登记)," +
+        "但执行是 worker 的事。写完之后交付由业务经理接手,不需要你去催。"
+      );
+    case "handover":
+      // 这一支只说**事实**与**职责**,不承诺平台行为:建交付会话是 C4 的活
+      // (migration 017 + `ensureSession` 的显式通道),而这里的话必须在 C4 之前
+      // 与之后都成立 —— 提示词许一个平台还没做的承诺,是最容易腐烂的一类文字。
+      return (
+        "# 现在轮到你了:把这份交付交代给甲方\n\n" +
+        renderDeliverable(db, todo) +
+        "\n\n这份交付物**已经验收**,而甲方**还没有收到它**。整合是项目经理的产物," +
+        "你的职责是**交付与交代**:\n\n" +
+        "1. 先 `board_read` 读它的正文 —— 你要交代的是它的**内容**,不是它的 id\n" +
+        "2. 用你自己的话把它交代给甲方:交付了什么、依据是什么、甲方接下来能做什么、\n" +
+        "   还剩什么没解决(有就直说,不要粉饰)\n" +
+        "3. 甲方的追问用 `ask_client`(会等他回答)—— 不要自己假设他会怎么答\n\n" +
+        "**不要在这里重新整合或改写它**,也不要替项目经理补做子项里的活。" +
+        "你的价值在于**让甲方听懂这份交付**,不在于再写一份。"
+      );
     case "execute_work":
       // worker 那条不走这里 —— `runWorkItem` 自己拼 `composeWorkPrompt`。
       // 留着这一支是为了穷尽性:新增 TodoKind 时这里会编译失败。
       return "# 现在轮到你了:执行工作项\n";
   }
+}
+
+/**
+ * 要整合的那些子树(查出来的现场:`id` / 标题 / 状态 / 审查态)。
+ *
+ * 只渲染**结构化的列**,不渲染正文 —— 与规则的 `if` 同一条纪律(§2.11.3):
+ * 整合要收敛什么内容,是**它的判断**,平台只负责把「有哪些东西、都什么状态」摆出来。
+ *
+ * 一个回合可能覆盖**多条**交付(扁平结构下尤其如此):那时这个回合要**每一条**
+ * 各写一份交付物 —— 而不是把几份交付揉成一份。
+ */
+function renderSubtrees(db: Database.Database, todo: DriverTodo): string {
+  const works = listWorks(db, todo.projectId);
+  const children = childrenByParent(works);
+  const blocks: string[] = [];
+  for (const id of todo.refs) {
+    const root = getWork(db, id);
+    if (root === null) continue;
+    const subtree = subtreeOf(root, children);
+    const kids = subtree.slice(1);
+    blocks.push(
+      [
+        `### 交付 \`${root.id}\`「${root.title}」`,
+        "",
+        ...subtree.map((w) => `- \`${w.id}\`「${w.title}」[${w.status} · 审查 ${w.reviewState}]`),
+        "",
+        kids.length > 0
+          ? `根工作项是 \`${root.id}\`,下面 ${kids.length} 条都属于它 —— ` +
+            `交付物的 \`workId\` 传 \`${root.id}\`。`
+          : `\`${root.id}\` 没有子项(扁平结构:它就是这条交付本身)—— ` +
+            `交付物的 \`workId\` 传 \`${root.id}\`。`,
+      ].join("\n"),
+    );
+  }
+  if (blocks.length === 0) return "";
+  return ["## 这回合要整合的交付(库里查出来的,不是猜的)", ...blocks].join("\n\n");
+}
+
+/** 等着交付的那条工件(结构化列;正文由模型自己 `board_read`)。 */
+function renderDeliverable(db: Database.Database, todo: DriverTodo): string {
+  const a = todo.target === null ? null : getArtifact(db, todo.target);
+  if (a === null) return "";
+  return [
+    "## 已验收的交付物(库里查出来的)",
+    "",
+    `- \`${a.id}\`「${a.title}」(${a.kind} · ${a.status} · 作者 ${a.authorAgentId})` +
+      (a.workId !== null ? `\n- 挂在根工作项 \`${a.workId}\` 上` : "\n- 没有挂工作项(产出边为空)"),
+  ].join("\n");
 }
 
 const EVENT_LABEL: Readonly<Record<string, string>> = {

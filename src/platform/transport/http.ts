@@ -43,9 +43,15 @@ import {
   listProjectArtifacts, listProjectAsks, listProjectBlockers,
   listProjectChanges, toProjectDetail, listProjectMembers,
   listProjectMessages, listProjectSummaries, toArtifactView, toProjectSummary,
+  toMessageView,
   toWorkView,
 } from "./views.js";
-import type { HarnessView, PromptUnitView, RoleHarnessView } from "@shared/types/platform.js";
+import { isSessionMessageKind } from "../storage/repo/sessions.js";
+import type { SessionMessageKind, SessionMessageRow } from "../storage/repo/sessions.js";
+import type {
+  HarnessView, MemberConversationView, MemberConversationsResponse,
+  PromptUnitView, RoleHarnessView, SessionMessageView,
+} from "@shared/types/platform.js";
 import type { ResetReport } from "../host/reset.js";
 import {
   listBackups, promptUnitIds, resetPromptUnit, writePromptUnit, type FactoryDirs,
@@ -190,6 +196,25 @@ export function createPlatformApp(deps: HttpDeps): Hono {
     const id = c.req.param("id");
     if (getProjectRow(db, id) === null) return c.json(err("not_found", "项目不存在", 404).body, 404);
     return c.json({ projectId: id, messages: listProjectMessages(db, id) });
+  });
+
+  /**
+   * 「谁产生了什么对话」—— 成员页的清单(设计 1 §2.10 / §2.12 的 A3)。
+   *
+   * ⚠️ **为什么不能让客户端拿 `/messages` 自己分组**:那条读函数是
+   * `listProjectMessages`(`views.ts`),它**没有** agent 谓词,而每条会话取的是
+   * `ORDER BY created_at LIMIT n` 的**最早** n 条、最后再 `slice(-n)` ——
+   * 于是「消息多的项目」会**静默少数**:界面上显示「业务经理 3 条」而库里是 30 条,
+   * 两边都长得一样正常。条数只能由 SQL `GROUP BY agent_id` 给出。
+   */
+  app.get("/api/projects/:id/member-conversations", (c) => {
+    const id = c.req.param("id");
+    if (getProjectRow(db, id) === null) return c.json(err("not_found", "项目不存在", 404).body, 404);
+    const raw = Number(c.req.query("limit"));
+    const limit = Number.isFinite(raw) && raw > 0
+      ? Math.min(Math.floor(raw), MEMBER_GROUP_LIMIT_MAX)
+      : MEMBER_GROUP_LIMIT;
+    return c.json(memberConversations(db, id, limit));
   });
 
   // ── 接待会话(第一个项目之前)──────────────────────────────────
@@ -533,4 +558,112 @@ const DISPLAY: Readonly<Record<ProjectRole, string>> = {
 
 function displayNameOf(role: ProjectRole): string {
   return DISPLAY[role];
+}
+
+// ── 成员页的「他产生了什么对话」清单 ──────────────────────────────
+//
+// ⚠️ **这段 SQL 落在 transport 层是 A3 的一处已知层次妥协**:它本该在
+// `storage/repo/sessions.ts`(查询)与 `transport/views.ts`(行 → 视图)里,
+// 但这两个文件**不在本批次的可碰清单内**。纪律照抄 repo 那层的写法:
+//   · 未知 `kind` **抛错**(`isSessionMessageKind`),不静默透出一个没定义的种类;
+//   · `agent_id` 的 NULL 用 `IS ?` 匹配(`= NULL` 恒为 unknown,一条也查不出来);
+//   · 条数来自 `GROUP BY`,消息只是「每组的最近一页」。
+
+/** 每组默认带多少条消息(与 `/messages` 的 200 同量级)—— **不影响 `total`**。 */
+const MEMBER_GROUP_LIMIT = 200;
+const MEMBER_GROUP_LIMIT_MAX = 500;
+
+interface AgentKindCount {
+  total: number;
+  byKind: Partial<Record<SessionMessageKind, number>>;
+}
+
+/**
+ * 按 `agent_id` 分组的会话消息。
+ *
+ * `total` 与 `byKind` 来自一次 `GROUP BY agent_id, kind`;`messages` 是每组
+ * **新的在前**的最多 `limit` 条。两者分开取是有意的:`LIMIT` 是分页,
+ * 不是计数 —— 混在一起的那一版会在消息变多时静默少数。
+ */
+export function memberConversations(
+  db: Database.Database,
+  projectId: string,
+  limit: number,
+): MemberConversationsResponse {
+  const counts = db
+    .prepare(
+      `SELECT m.agent_id AS agentId, m.kind AS kind, COUNT(*) AS n
+         FROM session_messages m
+         JOIN project_sessions s ON s.id = m.session_id
+        WHERE s.project_id = ?
+        GROUP BY m.agent_id, m.kind`,
+    )
+    .all(projectId) as Array<{ agentId: string | null; kind: string; n: number }>;
+
+  const agg = new Map<string | null, AgentKindCount>();
+  for (const row of counts) {
+    if (!isSessionMessageKind(row.kind)) {
+      // 与 repo 同一条纪律:表里出现未定义 kind 是数据错误,不是「跳过它」
+      throw new Error(`session_messages 表里出现未定义 kind「${row.kind}」`);
+    }
+    const cur = agg.get(row.agentId) ?? { total: 0, byKind: {} };
+    cur.total += row.n;
+    cur.byKind[row.kind] = (cur.byKind[row.kind] ?? 0) + row.n;
+    agg.set(row.agentId, cur);
+  }
+
+  const msgStmt = db.prepare(
+    // `IS ?` 而不是 `= ?`:接待/系统那条 agent_id 为 NULL,`= NULL` 永远查不出来
+    `SELECT m.id, m.session_id, m.agent_id, m.kind, m.content, m.created_at
+       FROM session_messages m
+       JOIN project_sessions s ON s.id = m.session_id
+      WHERE s.project_id = ? AND m.agent_id IS ?
+      ORDER BY m.created_at DESC, m.id DESC
+      LIMIT ?`,
+  );
+
+  const groups: MemberConversationView[] = [];
+  // 名字解析与 `/messages` 同判据(agentNameCache 未导出,这里内联同一件事):
+  // 查得到用 displayName,查不到回 id —— **不回空串**,空串在界面上看不出是缺失。
+  const name = (id: string): string => getAgent(db, id)?.displayName ?? id;
+  // 顺序固定(agentId 字典序、NULL 最后)—— 呈现顺序是页面的事,但接口不能
+  // 每次返回不同顺序,否则「同一份数据两次请求不一样」无法比对。
+  const agentIds = [...agg.keys()].sort((a, b) => {
+    if (a === null) return 1;
+    if (b === null) return -1;
+    return a < b ? -1 : a > b ? 1 : 0;
+  });
+
+  for (const agentId of agentIds) {
+    const c = agg.get(agentId);
+    if (c === undefined) continue;
+    const rows = msgStmt.all(projectId, agentId, limit) as Array<{
+      id: string; session_id: string; agent_id: string | null;
+      kind: string; content: string; created_at: number;
+    }>;
+    const messages: SessionMessageView[] = rows.map((r) => {
+      if (!isSessionMessageKind(r.kind)) {
+        throw new Error(`session_messages 表里出现未定义 kind「${r.kind}」(id=${r.id})`);
+      }
+      const row: SessionMessageRow = {
+        id: r.id, sessionId: r.session_id, agentId: r.agent_id,
+        kind: r.kind, content: r.content, createdAt: r.created_at,
+      };
+      return toMessageView(row, name, projectId);
+    });
+    // `agents.role` 的读时解析(角色只在库里存一处 —— 与 `MemberView.role` 同源)。
+    // `getAgent` 在角色越界时抛错,所以这里拿到的已经是 `ProjectRole`。
+    const agent = agentId === null ? null : getAgent(db, agentId);
+    groups.push({
+      agentId,
+      agentName: agentId === null ? null : name(agentId),
+      role: agent === null ? null : agent.role,
+      total: c.total,
+      byKind: c.byKind,
+      messages,
+      truncated: c.total > messages.length,
+    });
+  }
+
+  return { projectId, limit, groups };
 }

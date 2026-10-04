@@ -166,6 +166,16 @@ export interface ArtifactView {
   links: Array<{ rel: "parent" | "depends_on" | "answers"; targetId: string }>;
 }
 
+/**
+ * 会话消息的种类(与 `session_messages.kind` 的 CHECK 闭集逐个对齐)。
+ *
+ * ⚠️ **它与 `agent_id` 一起才定得住「谁在说话」**:`agent_id IS NULL` 有**两个**
+ * 作者 —— `kind='user'` 是甲方,`kind='system'` 是平台通知(`host/serve.ts` 的
+ * `announceDrain` 在排空器异常停下时落的那条)。**只看 `agentId` 会把平台通知
+ * 算成甲方说的话**(设计 1 §2.10)。
+ */
+export type SessionMessageKind = "user" | "assistant" | "thinking" | "tool" | "system";
+
 export interface SessionMessageView {
   id: string;
   /**
@@ -180,9 +190,43 @@ export interface SessionMessageView {
   /** null = 甲方说的话 */
   agentId: string | null;
   agentName: string | null;
-  kind: "user" | "assistant" | "thinking" | "tool" | "system";
+  kind: SessionMessageKind;
   content: string;
   createdAt: number;
+}
+
+/**
+ * 一个**作者**在某个项目里产生的会话消息(成员页「他产生了什么对话」的数据源,
+ * 设计 1 §2.10 / §2.12 的 A3)。
+ *
+ * 分组键是 `session_messages.agent_id`(**身份**),不是 `role`(**属性**)——
+ * 与 §2.4.2 的 M:N 基数一致:两个 worker 是两组,不是一组。
+ *
+ * ⚠️ **`agentId: null` 不等于「甲方」**,它是「没有角色作者」:甲方(`kind='user'`)
+ * 与平台通知(`kind='system'`)都落在这里,所以这一组必须靠 `byKind` 把两者分开。
+ *
+ * ⚠️ **`total` 是 SQL `GROUP BY` 的真值,不是 `messages.length`** ——
+ * `messages` 只是这一组最新的一页。拿 `messages.length` 冒充总数会在消息量增长时
+ * **静默少数**,而界面上看不出来。
+ */
+export interface MemberConversationView {
+  /** 分组键 = `session_messages.agent_id`;`null` = 没有角色作者(甲方 / 平台通知) */
+  agentId: string | null;
+  /** `agentId` 非空时解析出来的显示名;`null` 组也为 `null` */
+  agentName: string | null;
+  /**
+   * 该 agent 在 `agents` 表里的角色(**读时解析**,与 `MemberView.role` 同一个真相
+   * 来源:`agents.role`)。`agentId === null` 或查不到时为 `null`。
+   */
+  role: ProjectRole | null;
+  /** 这一组的真实条数(SQL `GROUP BY`) */
+  total: number;
+  /** 按 kind 分列的条数 —— `agentId === null` 那一组靠它区分甲方与平台通知 */
+  byKind: Partial<Record<SessionMessageKind, number>>;
+  /** 这一组的消息,**新的在前**,最多 `MemberConversationsResponse.limit` 条 */
+  messages: SessionMessageView[];
+  /** `total > messages.length` —— 截断了就如实说,不许拿返回条数冒充总数 */
+  truncated: boolean;
 }
 
 /** 项目内的提问(角色之间,或对角色的)。**甲方看不到横向沟通**,只看发给自己那部分。 */
@@ -369,6 +413,23 @@ export interface MessagesResponse {
 export interface IntakeMessagesResponse {
   projectId: null;
   messages: SessionMessageView[];
+}
+
+/**
+ * `GET /api/projects/:id/member-conversations` —— 成员页的「他产生了什么对话」清单。
+ *
+ * **为什么需要它(而不是拿 `/messages` 在客户端分组)**:`/messages` 走
+ * `listProjectMessages`(`transport/views.ts`),它**没有** agent 谓词,而且每条会话
+ * 取的是 `ORDER BY created_at LIMIT n` 的**最早** n 条、再 `slice(-n)` ——
+ * 消息一多,按项目整体分出来的组会**静默少数**(界面上看不出来)。
+ * 所以条数必须由 SQL `GROUP BY agent_id` 给出,那是这一节唯一能采信的数。
+ */
+export interface MemberConversationsResponse {
+  projectId: string;
+  /** 每组最多带回多少条消息(可用 `?limit=` 调,上限 500) */
+  limit: number;
+  /** 按 agent 分组。**顺序不定** —— 呈现顺序是页面的事(成员页按角色排) */
+  groups: MemberConversationView[];
 }
 
 // ── WS 协议 ─────────────────────────────────────────────────────
@@ -564,6 +625,10 @@ export function eventProjectId(ev: ServerEvent): string | null {
 //   GET    /api/projects/:id/works            → { works: WorkView[] }
 //   GET    /api/projects/:id/artifacts        → { artifacts: ArtifactView[] }
 //   GET    /api/projects/:id/messages         → MessagesResponse
+//   GET    /api/projects/:id/member-conversations → MemberConversationsResponse
+//                                                「谁产生了什么对话」:按 agent_id
+//                                                **在 SQL 里** GROUP BY(条数是真值,
+//                                                不是「返回了多少条」)。
 //   GET    /api/projects/:id/asks             → { asks: AskView[] }
 //   GET    /api/projects/:id/blockers         → { blockers: BlockerView[] }
 //   GET    /api/projects/:id/changes          → { changes: ChangeView[] }
@@ -591,6 +656,7 @@ export function eventProjectId(ev: ServerEvent): string | null {
 // 查询参数:
 //   /api/projects?status=draft|active|paused|done|abandoned
 //   /api/projects/:id/artifacts?kind=&status=&limit=
+//   /api/projects/:id/member-conversations?limit=   (每组消息条数,默认 200,上限 500)
 //   /api/memory/fragments?limit=
 //
 // **没有** `/api/works` 与 `/api/artifacts`(不带项目)这两个平级列表 ——

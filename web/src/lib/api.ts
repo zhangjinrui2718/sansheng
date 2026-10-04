@@ -42,6 +42,7 @@ import type {
   HarnessView,
   HealthResponse,
   IntakeMessagesResponse,
+  MemberConversationsResponse,
   MemberView,
   MemoryFragmentView,
   MessagesResponse,
@@ -198,6 +199,23 @@ export function getProject(id: string): Promise<{ project: ProjectDetail }> {
 /** 项目的一条连续对话。 */
 export function getProjectMessages(id: string): Promise<MessagesResponse> {
   return request<MessagesResponse>(`/projects/${encodeURIComponent(id)}/messages`);
+}
+
+/**
+ * 成员页的「他产生了什么对话」清单 —— **按 `agent_id` 在 SQL 里分组**。
+ *
+ * ⚠️ 它**不是** `getProjectMessages()` 的客户端分组的替代品:那条端点每条会话只取
+ * 最早的 200 条,消息一多,客户端数出来的条数就会**静默少数**。这里的 `total` 是
+ * `GROUP BY` 的真值,页面要显示条数就必须用它。
+ */
+export function listMemberConversations(
+  id: string,
+  opts?: { limit?: number },
+): Promise<MemberConversationsResponse> {
+  const q = opts?.limit !== undefined ? `?limit=${encodeURIComponent(String(opts.limit))}` : "";
+  return request<MemberConversationsResponse>(
+    `/projects/${encodeURIComponent(id)}/member-conversations${q}`,
+  );
 }
 
 /**

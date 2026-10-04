@@ -23,12 +23,12 @@ import { insertAgent } from "../../src/platform/storage/repo/agents.js";
 import { insertProject, addMember, removeMember } from "../../src/platform/storage/repo/projects.js";
 import { ensureProjectOrg } from "../../src/platform/runtime/org.js";
 import {
-  insertWork, getWork, updateWorkStatus, listWorksPendingReview,
+  insertWork, getWork, updateWorkStatus, listWorks, listWorksPendingReview,
 } from "../../src/platform/storage/repo/works.js";
 import {
   listPendingDispatchEvents, consumePendingDispatchEvents,
 } from "../../src/platform/storage/repo/dispatch.js";
-import { insertArtifact } from "../../src/platform/storage/repo/artifacts.js";
+import { insertArtifact, listArtifacts } from "../../src/platform/storage/repo/artifacts.js";
 import { insertAsk, answerAsk } from "../../src/platform/storage/repo/asks.js";
 import { insertChange } from "../../src/platform/storage/repo/changes.js";
 import { insertBlocker, setBlockerStatus } from "../../src/platform/storage/repo/blockers.js";
@@ -107,6 +107,32 @@ const NO_COALESCE = { reportBatchSize: 1 } as const;
 const okTurn: DrainTurnReport = {
   aborted: false, timedOut: false, text: "好了", toolCalls: [],
 };
+
+/**
+ * **假的项目经理**:被叫醒整合时真的写出那份 `deliverable`(C3)。
+ *
+ * 为什么这个文件需要它:整合(C3 新增)是流水线里**真实的一环**,而 `integrate`
+ * 规则的**终止判据就是这条工件** —— 挂在那条根工作项上(设计 1 §2.11.4 的 ③)。
+ * 假回合若对「整合」什么都不做,下面几条用例测到的就不再是它们自己的意思,
+ * 而是「一个不听指令的项目经理把回合一路烧到预算用尽」:那件事由
+ * `dispatcher-rules.test.ts` 的 C3 那组单独钉住。
+ *
+ * `status` 刻意写 **`open`** 而不是 `accepted`:`accepted` 会点亮 `handover`,
+ * 而**交付那一环今天还没有终点**(建交付会话是 C4 的 migration 017)。
+ * 这个文件测的是执行 / 审查 / 汇报那条链;交付链在 C3 那组。
+ */
+function pmIntegrate(agentId: string, task: string, on: Database.Database = db): void {
+  if (agentId !== "pm" || !task.startsWith("# 现在轮到你了:整合这条交付")) return;
+  for (const root of listWorks(on, "p1").filter((w) => w.parentWorkId === null)) {
+    if (listArtifacts(on, "p1", { kind: "deliverable", workId: root.id }).length > 0) continue;
+    insertArtifact(on, {
+      id: newId("art_deliv"), projectId: "p1", conversationId: null,
+      kind: "deliverable", status: "open", authorAgentId: "pm",
+      title: `${root.title} 的交付`, body: "整合完成:结论与依据见子项产出",
+      metadataJson: null, createdAt: T0 + 100, updatedAt: T0 + 100, workId: root.id,
+    });
+  }
+}
 
 // ── ① 每个角色的可执行待办 ──────────────────────────────────────
 
@@ -266,9 +292,17 @@ describe("collectTodos · 谁此刻能动手(纯查询,不接收任何「上次�
 
 describe("drainProject · 没有待办就什么都不做", () => {
   it("拆过、没有指派、没有提问 → 0 回合 exhausted", async () => {
-    mkWork({ status: "done" });
+    const w = mkWork({ status: "done" });
     // 把 review 也消掉(否则质检那条是待办)
     db.prepare(`UPDATE works SET review_state = 'done'`).run();
+    // C3 之后「收口且审过但**还没有交付物**」本身就是项目经理的整合待办,
+    // 所以「真的没有待办」的现场是**整合也做完了**:这条根上有一条 `deliverable`。
+    insertArtifact(db, {
+      id: "art_已整合", projectId: "p1", conversationId: null,
+      kind: "deliverable", status: "open", authorAgentId: "pm",
+      title: "调研路线的交付", body: "整合完成", metadataJson: null,
+      createdAt: T0 + 1, updatedAt: T0 + 1, workId: w,
+    });
     const r = await drainProject({
       db, projectId: "p1", now: () => T0, log: () => {},
       runAgentTurn: async () => okTurn,
@@ -320,7 +354,9 @@ describe("drainProject · 尝试预算(库里的账本,取代内存 stallStore)"
     const r = await drainProject({
       db, projectId: "p1", now: () => T0, log: () => {}, maxAttemptsPerTodo: 1,
       ...NO_COALESCE,
-      runAgentTurn: async (): Promise<DrainTurnReport> => {
+      runAgentTurn: async (agentId, task): Promise<DrainTurnReport> => {
+        // C3:项目经理被叫醒整合时写出那条 `deliverable`(否则它会一直是待办)
+        pmIntegrate(agentId, task);
         const count = (db.prepare(`SELECT COUNT(*) AS n FROM works`).get() as { n: number }).n;
         if (count === 0) {
           n++;
@@ -340,8 +376,9 @@ describe("drainProject · 尝试预算(库里的账本,取代内存 stallStore)"
         };
       },
     });
-    // 待办换了一条就换了一个 key → 新预算:pm 拆解 → wk 执行 → qa 审查 → bm 汇报
-    expect(r.visited.map((v) => v.agentId)).toEqual(["pm", "wk", "qa", "bm"]);
+    // 待办换了一条就换了一个 key → 新预算:pm 拆解 → wk 执行 → qa 审查 → pm 整合 → bm 汇报
+    // (「pm 整合」是 C3 补上的那一环:审查之后交付之前必须有它,否则流水线停在质检)
+    expect(r.visited.map((v) => v.agentId)).toEqual(["pm", "wk", "qa", "pm", "bm"]);
     expect(r.reportedToClient).toBe(true);
     expect(r.stopReason).toBe("exhausted");
   });
@@ -480,7 +517,7 @@ describe("drainProject · 消费语义(at-least-once)", () => {
     const w = mkWork();
     const r = await drainProject({
       db, projectId: "p1", now: () => T0, log: () => {}, ...NO_COALESCE,
-      runAgentTurn: async () => okTurn,
+      runAgentTurn: async (agentId, task) => { pmIntegrate(agentId, task); return okTurn; },
       runWork: async (_agentId, workId) => {
         updateWorkStatus(db, workId, "done", T0 + 1);
         mkArtifact("art_1");
@@ -490,8 +527,9 @@ describe("drainProject · 消费语义(at-least-once)", () => {
         };
       },
     });
+    // C3 在这一串里插入了 `pm:integrate`(审查之后、交付之前那一环)
     expect(r.visited.map((v) => `${v.agentId}:${v.kind}`)).toEqual([
-      "wk:execute_work", "qa:review_work", "bm:report_downstream",
+      "wk:execute_work", "qa:review_work", "pm:integrate", "bm:report_downstream",
     ]);
     expect(r.reportedToClient).toBe(true);
     expect(listPendingDispatchEvents(db, "p1")).toEqual([]);
@@ -532,10 +570,11 @@ describe("drainProject · 消费语义(at-least-once)", () => {
     expect(listPendingDispatchEvents(db, "p1")).toHaveLength(1);
     const r2 = await drainProject({
       db, projectId: "p1", now: () => T0, log: () => {}, ...NO_COALESCE,
-      runAgentTurn: async () => okTurn,
+      runAgentTurn: async (agentId, task) => { pmIntegrate(agentId, task); return okTurn; },
       runWork: async () => { throw new Error("不该被调用"); },
     });
-    expect(r2.visited.map((v) => v.agentId)).toEqual(["qa", "bm"]);
+    // 中间那个 `pm` 是 C3 的整合(它写出交付物 ⇒ 这条待办随即消失)
+    expect(r2.visited.map((v) => v.agentId)).toEqual(["qa", "pm", "bm"]);
     expect(listPendingDispatchEvents(db, "p1")).toEqual([]);
   });
 });
@@ -583,14 +622,18 @@ describe("排空器 · 重启后补跑(状态在库里)", () => {
       const seen: string[] = [];
       const second = await drainProject({
         db: db2, projectId: "p1", now: () => T0 + 100, log: () => {}, ...NO_COALESCE,
-        runAgentTurn: async (agentId): Promise<DrainTurnReport> => {
+        runAgentTurn: async (agentId, task): Promise<DrainTurnReport> => {
           seen.push(agentId);
+          pmIntegrate(agentId, task, db2); // ← C3 的整合那一环(用重启后的连接)
           return okTurn;
         },
         runWork: async () => { throw new Error("重启后没有可执行的工作项"); },
       });
       expect(seen).toContain("qa"); // ← 这就是「重启后补跑」
-      expect(second.visited.map((v) => v.kind)).toEqual(["review_work", "report_downstream"]);
+      // C3 之后这一串里多了 `integrate`(审查之后、汇报之前)
+      expect(second.visited.map((v) => v.kind)).toEqual([
+        "review_work", "integrate", "report_downstream",
+      ]);
       expect(listWorksPendingReview(db2, "p1")).toEqual([]);
       expect(listPendingDispatchEvents(db2, "p1")).toEqual([]);
     } finally {
