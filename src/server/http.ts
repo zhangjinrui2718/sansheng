@@ -14,6 +14,7 @@ import type { Server } from "node:http";
 import { log } from "../shared/log.js";
 import { SettingsStore, genProviderId, isMaskedApiKey, type ProviderConfig, type ThinkingLevel } from "./settings/store.js";
 import { maskApiKey } from "./storage/keyring.js";
+import { applySettingsPatch, toPublicSettings } from "./settings/apply.js";
 import { listProviders } from "./providers/registry.js";
 import type { AgentKernel } from "./kernel/agentKernel.js";
 import { attachWebSocket } from "./ws.js";
@@ -72,24 +73,6 @@ function errMsg(err: unknown): string {
 import { parseLimitQuery } from "./http/query.js";
 
 /** 把内部 Settings 转成对外(掩码 apiKey)的 SettingsPublic */
-function toPublic(s: ReturnType<SettingsStore["load"]>) {
-  return {
-    providers: s.providers.map((p) => ({
-      id: p.id,
-      label: p.label,
-      provider: p.provider,
-      modelId: p.modelId,
-      apiKey: maskApiKey(p.apiKey),
-      hasApiKey: p.apiKey.length > 0,
-      baseUrl: p.baseUrl,
-      thinkingLevel: p.thinkingLevel,
-    })),
-    activeProviderId: s.activeProviderId,
-    cwd: s.cwd,
-    personaName: s.personaName,
-    costBudgetUsd: s.costBudgetUsd,
-  };
-}
 
 export async function createApp(opts: AppOptions): Promise<Hono> {
   const app = new Hono();
@@ -148,56 +131,17 @@ export async function createApp(opts: AppOptions): Promise<Hono> {
   });
 
   // —— Settings: GET(掩码 apiKey) ——
-  app.get("/api/settings", (c) => c.json(toPublic(settingsStore.load())));
+  app.get("/api/settings", (c) => c.json(toPublicSettings(settingsStore.load())));
 
-  // —— Settings: PUT(整体替换 providers + 全局字段) ——
+  // —— Settings: PUT ——
+  // 逻辑提取到 src/server/settings/apply.ts(唯一实现)。旧侧多一步
+  // kernel.invalidate() —— 那是旧 kernel 的生命周期,不属于设置本身。
   app.put("/api/settings", async (c) => {
-    const body = (await c.req.json().catch(() => null)) as {
-      providers?: Array<Partial<ProviderConfig>>;
-      activeProviderId?: string;
-      cwd?: string;
-      personaName?: string;
-      costBudgetUsd?: number;
-    } | null;
-    if (!body) return c.json({ error: "invalid body" }, 400);
-
-    const cur = settingsStore.load();
-    const curById = new Map(cur.providers.map((p) => [p.id, p]));
-
-    const nextProviders: ProviderConfig[] = (body.providers ?? []).map((p) => {
-      const existing = p.id ? curById.get(p.id) : undefined;
-      // apiKey: 用户没填(undefined)或填的是掩码串 → 保留旧真值;填了新真值 → 用它
-      let apiKey = existing?.apiKey ?? "";
-      if (p.apiKey !== undefined && !isMaskedApiKey(p.apiKey)) apiKey = p.apiKey;
-      return {
-        id: p.id || genProviderId(),
-        label: p.label || p.provider || "未命名",
-        provider: p.provider || "",
-        modelId: p.modelId || "",
-        apiKey,
-        baseUrl: p.baseUrl || undefined,
-        thinkingLevel: (p.thinkingLevel as ThinkingLevel) ?? "medium",
-      };
-    });
-
-    let activeProviderId = body.activeProviderId ?? cur.activeProviderId;
-    if (!nextProviders.find((p) => p.id === activeProviderId)) {
-      activeProviderId = nextProviders[0]?.id ?? "";
-    }
-
-    const next = {
-      ...cur,
-      providers: nextProviders,
-      activeProviderId,
-      cwd: body.cwd ?? cur.cwd,
-      personaName: body.personaName ?? cur.personaName,
-      costBudgetUsd: body.costBudgetUsd ?? cur.costBudgetUsd,
-    };
-    settingsStore.save(next);
-
-    // provider 配置变了 → 让 kernel 下次重新 start
+    const body: unknown = await c.req.json().catch(() => null);
+    const r = applySettingsPatch(settingsStore, body);
+    if (!r.ok) return c.json({ error: r.error }, 400);
     opts.kernel.invalidate();
-    return c.json({ ok: true, settings: toPublic(next) });
+    return c.json({ ok: true, settings: toPublicSettings(r.settings) });
   });
 
   // —— Providers catalog(Pi builtin) ——

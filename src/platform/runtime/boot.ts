@@ -50,6 +50,11 @@ export interface BootedPlatform {
   /** 解析出的模型;没配 provider 或模型不认识时为 null */
   readonly model: PlatformModel | null;
   readonly dbPath: string;
+  /**
+   * 设置存储。暴露出来是因为**设置会变** —— 用户改 provider 之后,
+   * 下一次建会话必须用新的模型,而 boot 时解析的那个会过期。
+   */
+  readonly settingsStore: SettingsStore;
   /** 时钟 —— bootPlatform 总会提供,这里提升为必填,免得调用方到处写 `?.()` */
   readonly now: () => number;
   /** id 生成 —— 同上 */
@@ -113,6 +118,7 @@ export function bootPlatform(opts: BootOptions): BootedPlatform {
 
   return {
     deps,
+    settingsStore,
     settings,
     provider,
     model,

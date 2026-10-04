@@ -362,6 +362,16 @@ export type ServerEvent =
   | { type: "artifact_created"; artifact: ArtifactView }
   | { type: "work_changed"; projectId: string; workId: string; status: WorkStatus }
   | { type: "blocker_changed"; projectId: string; blockerId: string; status: BlockerView["status"] }
+  /**
+   * 该有提问已过截止时间仍未答复。
+   *
+   * **调度器只做这一件事:如实告诉你。** 它**不会**自动升级 —— 2026-10-04 经
+   * jev 校准(p=0.81):单人本地服务里「人暂时没回」是常态而不是故障,
+   * 自动升级会把组织图变成噪音放大器,而噪音的代价是用户学会忽略通知。
+   *
+   * 收到它该做的是:前端把该项目的待办标注为超时并置顶。**不自动替用户决定。**
+   */
+  | { type: "overdue_asks"; projectId: string; askIds: readonly string[]; count: number }
   | { type: "error"; projectId?: string; error: { code: string; message: string } };
 
 /** 事件是否属于某个项目(前端分派用)。 */

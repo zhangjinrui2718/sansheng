@@ -38,13 +38,15 @@ import { runTurn } from "../runtime/turn.js";
 import { ORG, ensureOrg, orgReady } from "../runtime/org.js";
 import { createPlatformApp } from "../transport/http.js";
 import { attachHub, ensureSession, PlatformHub } from "../transport/hub.js";
+import { startScheduler, type Scheduler } from "./scheduler.js";
 import { appendSessionMessage } from "../storage/repo/sessions.js";
 import { resolveClientQuestion } from "../tools/client.js";
 import { listProjectSummaries } from "../transport/views.js";
 import { getProjectRow } from "../storage/repo/projects.js";
 import { getAgent } from "../storage/repo/agents.js";
 import { log } from "../../shared/log.js";
-import { maskApiKey } from "../../server/storage/keyring.js";
+import { applySettingsPatch, toPublicSettings } from "../../server/settings/apply.js";
+import { listProviders, resolveModel, syncActiveProviderApiKeyEnv } from "../../server/providers/registry.js";
 import type { ServerEvent } from "@shared/types/platform.js";
 
 export interface ServeOptions {
@@ -63,6 +65,7 @@ export interface PlatformHost {
   readonly app: Hono;
   readonly hub: PlatformHub;
   readonly booted: BootedPlatform;
+  readonly scheduler: Scheduler;
   /** 关掉所有常驻会话与库 */
   close(): void;
   /** 当前常驻会话数(诊断用) */
@@ -79,6 +82,30 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
   const newId = booted.newId;
 
   const cwd = opts.cwd ?? booted.settings.cwd;
+
+  /**
+   * 当前模型。**可变** —— 用户在界面上改了 provider 之后必须换掉,
+   * 否则会用 boot 时那个一直跑下去(而且他改了却没有效果,最难排查)。
+   */
+  let currentModel = booted.model;
+
+  /** 重新按当前设置解析模型。写设置后调用。 */
+  async function reResolveModel(): Promise<void> {
+    const p = booted.settingsStore.activeProvider();
+    if (p === undefined) {
+      currentModel = null;
+      return;
+    }
+    // 凭据要先同步到 env 再解析 —— 与 bootPlatform 里同一条理由
+    syncActiveProviderApiKeyEnv(p.provider, p.apiKey);
+    currentModel = resolveModel({
+      provider: p.provider,
+      modelId: p.modelId,
+      apiKey: p.apiKey,
+      baseUrl: p.baseUrl ?? null,
+    });
+    log.muted(`platform: 模型已重新解析 → ${currentModel !== null ? `${p.provider}/${p.modelId}` : "(失败)"}`);
+  }
 
   // ── 常驻会话(每个项目一个)────────────────────────────────────
   const sessions = new Map<string, AgentSession>();
@@ -159,7 +186,7 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
     // 2. 拿(或建)业务经理的常驻会话
     let session = sessions.get(projectId);
     if (session === undefined) {
-      if (booted.model === null) {
+      if (currentModel === null) {
         hub.broadcast({
           type: "error", projectId,
           error: { code: "no_model", message: "没有可用的 provider —— 先在设置里配一个" },
@@ -175,7 +202,7 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
         bm.id, projectId, {
         cwd,
         agentDir: booted.settings.agentDir ?? join(opts.dataDir, "agent"),
-        model: booted.model,
+        model: currentModel,
           dataDir: opts.dataDir,
         },
       );
@@ -252,9 +279,27 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
     now,
     newId,
     settings: {
-      read: () => shapeSettings(booted),
-      write: async () => ({ ok: false as const, error: "设置写入尚未接到平台侧 —— 用旧的 /api/settings(旧服务运行时)" }),
-      providers: () => [],
+      // 每次都重新 load —— store 内部有缓存,但语义上要表达「读的是当前值」
+      read: () => toPublicSettings(booted.settingsStore.load()),
+      write: async (body) => {
+        const r = applySettingsPatch(booted.settingsStore, body);
+        if (!r.ok) return { ok: false as const, error: r.error };
+        // **写成功之后必须重新解析模型** —— 用户改 provider 之后,
+        // 下一次建会话要用新的那个;沿用 boot 时解析的会一直用旧模型。
+        await reResolveModel();
+        // 已建的常驻会话带着旧模型,必须丢掉重建
+        for (const [pid, sess] of sessions) {
+          try {
+            sess.dispose();
+          } catch {
+            /* dispose 失败不影响设置已保存这个事实 */
+          }
+          sessions.delete(pid);
+          log.muted(`platform: 设置变更,已丢弃项目 ${pid} 的常驻会话(下次对话用新模型重建)`);
+        }
+        return { ok: true as const, settings: toPublicSettings(r.settings) };
+      },
+      providers: () => listProviders(),
     },
   });
 
@@ -271,12 +316,25 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
     log.warn(`platform: 没找到前端产物(${webRoot})—— 先跑 npm run build:web`);
   }
 
+  // ── 调度器 ────────────────────────────────────────────────────
+  //
+  // 只做一件事:扫超时提问并推给前端。**不自动升级** —— 经 jev 校准,
+  // 单人本地服务里「人暂时没回」是常态而不是故障(见 scheduler.ts 文件头)。
+  const scheduler: Scheduler = startScheduler({
+    db,
+    now,
+    broadcast: (ev) => hub.broadcast(ev),
+    log: (l) => log.muted(l),
+  });
+
   return {
     app,
     hub,
     booted,
+    scheduler,
     sessionCount: () => sessions.size,
     close: () => {
+      scheduler.stop();
       for (const s of sessions.values()) {
         try {
           s.dispose();
@@ -326,24 +384,6 @@ function bridge(
   }
 }
 
-// ── 设置(沿用旧 store —— 它是基础设施,不是旧系统的领域逻辑)──────
-
-function shapeSettings(booted: BootedPlatform): unknown {
-  const s = booted.settings;
-  return {
-    providers: s.providers.map((p) => ({
-      id: p.id, label: p.label, provider: p.provider, modelId: p.modelId,
-      // 掩码而不是空串 —— 空串会让前端以为「没配 key」,
-      // 而掩码是 isMaskedApiKey 认得的形态,回写时能正确保留旧真值
-      apiKey: maskApiKey(p.apiKey), hasApiKey: p.apiKey.length > 0,
-      baseUrl: p.baseUrl, thinkingLevel: p.thinkingLevel,
-    })),
-    activeProviderId: s.activeProviderId,
-    cwd: s.cwd,
-    personaName: s.personaName,
-    costBudgetUsd: s.costBudgetUsd,
-  };
-}
 
 // ── CLI 入口 ────────────────────────────────────────────────────
 
