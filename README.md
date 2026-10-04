@@ -70,4 +70,4 @@ npm run dev         # 并发启 server (tsx watch) + web (vite)
 - **中文 only**:后续 i18n 可加,先不引框架
 - **不依赖 Electron**:纯 npm 包,浏览器访问 `localhost:2718`
 
-详见 [`PLAN.md`](./PLAN.md)。
+详见 [`docs/DESIGN-PLATFORM.md`](docs/DESIGN-PLATFORM.md)。(原 `PLAN.md` 已于 2026-10-04 删除 —— 它描述的旧系统在批次 15 清场时整体移除。)

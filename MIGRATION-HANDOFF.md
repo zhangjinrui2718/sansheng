@@ -143,7 +143,7 @@
 2. `HANDOFF.md` v6.4 — 项目动态状态与待办
 3. `docs/pi-memory/MEMORY.md` — 历史全量(派工标准演变、jev 方法论全文、M3+ 15 决策、技术教训原始记录)
 4. `docs/pi-memory/daily/2026-10-01.md` — 迁移前最后一个工作日日志(含 5-blocker 一锅端全程与 worker SIGKILL 教训)
-5. ~~`ARCHITECTURE.md`~~(**已删,批次 18**)/ `PLAN.md` — 架构与总计划。(现存结构文档:`docs/DESIGN-PLATFORM.md`)
+5. ~~`ARCHITECTURE.md`~~ / ~~`PLAN.md`~~(**均已删,2026-10-04**)—— 它们描述的旧系统已整体移除。现存结构文档:`docs/DESIGN-PLATFORM.md`
 
 ---
 

@@ -4,7 +4,10 @@
 **上一版**:v8.0(批次 7-O harness 写面 + 8-A…8-D 角色职能核查迭代),见下。
 **适用**:下一会话(主对话 / worker)开盒即读
 **配套阅读**:`docs/DESIGN-PLATFORM.md`(目标架构)· `docs/DESIGN-AGENTS.md`(四个角色与 harness 配置)· `docs/ADR-001-harness-wiring.md`(接线决策与欠账)· `docs/TROUBLESHOOTING.md`
-> **注**:根目录 `ARCHITECTURE.md` 已删(批次 18)—— 它描述的旧系统已在批次 15 清场时删除。结构以 `docs/DESIGN-PLATFORM.md` 为准。
+> **注**:根目录 `ARCHITECTURE.md`(12 层模块图)与 `PLAN.md`(v5 实施计划)**都已删除**
+> (2026-10-04)—— 它们描述的旧系统已在批次 15 清场时整体移除。
+> 下文与历史段落里对它们的引用**保留作历史记录**,不再是现行依据。
+> **现行的结构文档是 `docs/DESIGN-PLATFORM.md`,角色与 harness 是 `docs/DESIGN-AGENTS.md`。**
 
 > **v9.0 · 平台侧全量新建(2026-10-03 晚 → 10-04,DSH 会话,9 个批次)**
 >
@@ -665,7 +668,8 @@ git log / status / typecheck / test / build / 改进点 / files / open questions
 
 ## 8. 启动新会话推荐顺序
 
-1. 读这 3 个文件: HANDOFF.md / PLAN.md / MEMORY.md(开盒)
+1. 读这 3 个文件: HANDOFF.md / docs/DESIGN-PLATFORM.md / docs/DESIGN-AGENTS.md(开盒)
+   (原为 HANDOFF.md / PLAN.md / MEMORY.md —— PLAN.md 已删,记忆归档在 docs/pi-memory/)
 2. `git log --oneline -10` 看 HEAD / `npm run test` 确认 baseline
 3. 决定下一步优先级 — **建议先 push 7 commits**(clean state),再派 B6 重做
 4. 任何决策先用 **jev**(state 写满 5 段)
