@@ -439,6 +439,7 @@ const workRead: PlatformTool = {
           `## 前置依赖(${deps.length})`,
           `- 已满足:${st.satisfied.join(", ") || "(无)"}`,
           `- **已失败(永远等不到)**:${st.failed.join(", ") || "(无)"}`,
+          `- **已取消(不阻塞,但你该知道)**:${st.cancelled.join(", ") || "(无)"}`,
           `- 仍在跑:${st.pending.join(", ") || "(无)"}`,
           ...(st.missing.length > 0 ? [`- ⚠️ 依赖的目标不存在:${st.missing.join(", ")}`] : []),
         ].join("\n"),

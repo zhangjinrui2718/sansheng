@@ -468,7 +468,7 @@ describe("BC1 · work_deps 环检测(旧代码在这里踩过 DAG 通配 bug)", 
 
 // ── depState:三态 ───────────────────────────────────────────────
 
-describe("BC1 · depState 三态(failed 的前置永远等不到)", () => {
+describe("BC1 · depState 四态(failed 才真正等不到;cancelled 不阻塞但要可见)", () => {
   it("前置 done → satisfied", () => {
     const p = mkProject();
     const a = mkAgent("worker");
@@ -501,27 +501,54 @@ describe("BC1 · depState 三态(failed 的前置永远等不到)", () => {
     expect(depsSatisfied(db, w), "failed 不该被当成放行").toBe(false);
   });
 
-  it("前置 cancelled 同样算 failed 类", () => {
+  it("**前置 cancelled 不阻塞** —— 但单独一类,必须可见", () => {
+    // 这条测试原先是反过来的:断言「cancelled 同样算 failed 类」。
+    // 那个断言把 bug 当成了规范 —— 真机事故:项目经理取消「综合对比」并新建同名项,
+    // 下游「报告整合」的 dependsOn 指向被取消的那份旧的 → **永不唤醒**(不报错)。
+    //
+    // 取消的语义是「这块范围不要了」,不是「这条活失败了」。两者混淆的代价是
+    // 下游永远等一个不会有人做的活。
     const p = mkProject();
     const a = mkAgent("worker");
     const d = mkWork(p, a), w = mkWork(p, a);
     updateWorkStatus(db, d, "cancelled", T0);
     addDep(db, w, d);
-    expect(depState(db, w).failed).toEqual([d]);
+    const s = depState(db, w);
+    expect(s.cancelled, "单独一类").toEqual([d]);
+    expect(s.failed, "不能混进 failed").toEqual([]);
+    expect(depsSatisfied(db, w), "取消不是阻塞,下游该开工").toBe(true);
   });
 
-  it("混合三态各归各位", () => {
+  it("真机事故回归:cancelled 前置不再永久堵死下游", () => {
+    // 精确复现用户数据里的形状:PM 取消了 W,新建了同名 W′,
+    // 而下游 D 的 dependsOn 仍指向被取消的 W。
     const p = mkProject();
     const a = mkAgent("worker");
-    const okD = mkWork(p, a), badD = mkWork(p, a), waitD = mkWork(p, a), w = mkWork(p, a);
+    const cancelled = mkWork(p, a), replacement = mkWork(p, a), downstream = mkWork(p, a);
+    updateWorkStatus(db, cancelled, "cancelled", T0);
+    addDep(db, downstream, cancelled); // ← 指向旧的那份(现实里就是这么发生的)
+    addDep(db, downstream, replacement);
+    updateWorkStatus(db, replacement, "done", T0);
+    expect(depsSatisfied(db, downstream), "不该再永远等不到").toBe(true);
+    // 但下游必须能看见「有一个前置被取消了」
+    expect(depState(db, downstream).cancelled).toEqual([cancelled]);
+  });
+
+  it("混合各态各归各位", () => {
+    const p = mkProject();
+    const a = mkAgent("worker");
+    const okD = mkWork(p, a), badD = mkWork(p, a), waitD = mkWork(p, a);
+    const goneD = mkWork(p, a), w = mkWork(p, a);
     updateWorkStatus(db, okD, "done", T0);
     updateWorkStatus(db, badD, "failed", T0);
     updateWorkStatus(db, waitD, "in_progress", T0);
-    addDep(db, w, okD); addDep(db, w, badD); addDep(db, w, waitD);
+    updateWorkStatus(db, goneD, "cancelled", T0);
+    addDep(db, w, okD); addDep(db, w, badD); addDep(db, w, waitD); addDep(db, w, goneD);
     const s = depState(db, w);
     expect(s.satisfied).toEqual([okD]);
     expect(s.failed).toEqual([badD]);
     expect(s.pending).toEqual([waitD]);
+    expect(s.cancelled).toEqual([goneD]);
     expect(s.missing).toEqual([]);
   });
 
@@ -529,7 +556,9 @@ describe("BC1 · depState 三态(failed 的前置永远等不到)", () => {
     const p = mkProject();
     const w = mkWork(p, mkAgent("worker"));
     expect(depsSatisfied(db, w)).toBe(true);
-    expect(depState(db, w)).toEqual({ satisfied: [], failed: [], pending: [], missing: [] });
+    expect(depState(db, w)).toEqual({
+      satisfied: [], cancelled: [], failed: [], pending: [], missing: [],
+    });
   });
 });
 

@@ -28,7 +28,7 @@ import { getAgent } from "../storage/repo/agents.js";
 import { listBlockers, type BlockerRow } from "../storage/repo/blockers.js";
 import { isChangeTerminal, listChanges, type ChangeRequestRow } from "../storage/repo/changes.js";
 import {
-  listWorks, depsSatisfied, type WorkRow,
+  listWorks, depsSatisfied, depState, type WorkRow,
 } from "../storage/repo/works.js";
 import { getProjectRow } from "../storage/repo/projects.js";
 import { ROLE_SPECS, isProjectRole, type ProjectRole } from "../identity/role.js";
@@ -70,6 +70,21 @@ export interface PendingWork {
    */
   myWaitingWorks: readonly WorkRow[];
   /**
+   * 可开工,但**前置里有被取消的**。
+   *
+   * 取消不构成阻塞(`depsSatisfied` 把 cancelled 算作满足),所以这些工作项进了
+   * `myOpenWorks`。但**不能让 agent 以为一切按计划** —— 它是在「某个前置被取消了」
+   * 的前提下开工的,那会影响它怎么理解自己的目标边界。
+   *
+   * 真机事故就出在这里:项目经理取消「综合对比」并新建了同名项,下游的 `dependsOn`
+   * 指向**被取消的那份旧的**;修好阻塞判定之后,下游终于能开工了 —— 如果这时不告诉它,
+   * 它就会在缺一块输入的情况下闷头做。
+   */
+  myWorksWithCancelledDeps: readonly {
+    readonly work: WorkRow;
+    readonly cancelledDepIds: readonly string[];
+  }[];
+  /**
    * 我负责拆解、但这个项目里**一个工作项都还没有**。
    *
    * 只有 `project_manager` 且项目 `active` 时才为真 —— 这是项目经理被唤醒的
@@ -97,9 +112,18 @@ export function collectPendingWork(
   );
   const myOpenWorks: WorkRow[] = [];
   const myWaitingWorks: WorkRow[] = [];
+  const myWorksWithCancelledDeps: Array<{ work: WorkRow; cancelledDepIds: readonly string[] }> = [];
   for (const w of assigned) {
-    if (depsSatisfied(db, w.id)) myOpenWorks.push(w);
-    else myWaitingWorks.push(w);
+    if (!depsSatisfied(db, w.id)) {
+      myWaitingWorks.push(w);
+      continue;
+    }
+    myOpenWorks.push(w);
+    // 只在「可开工」时多查一次,专门为了把「前置被取消」这件事捞出来(见字段注释)
+    const st = depState(db, w.id);
+    if (st.cancelled.length > 0) {
+      myWorksWithCancelledDeps.push({ work: w, cancelledDepIds: st.cancelled });
+    }
   }
 
   // 项目还没拆过:只有项目经理该管这件事,且只在 active 项目上。
@@ -119,6 +143,7 @@ export function collectPendingWork(
     pendingChanges: listChanges(db, projectId).filter((c) => !isChangeTerminal(c.status)),
     myOpenWorks,
     myWaitingWorks,
+    myWorksWithCancelledDeps,
     needsDecomposition,
     role,
   };
@@ -236,6 +261,18 @@ export function renderPendingWork(db: Database.Database, w: PendingWork): string
       ...w.myOpenWorks.map(
         (x) => `- ${x.id} [${x.status}] ${x.title}(更新于 ${new Date(x.updatedAt).toISOString()})`,
       ),
+    );
+  }
+
+  if (w.myWorksWithCancelledDeps.length > 0) {
+    lines.push(
+      "",
+      `### ⚠️ 可开工,但前置里有被取消的(${w.myWorksWithCancelledDeps.length})`,
+      "**这不是阻塞** —— 取消意味着那块范围不要了,你可以做。但你要知道自己的输入少了一块:",
+      ...w.myWorksWithCancelledDeps.map(
+        (x) => `- ${x.work.id} ${x.work.title} ← 前置被取消:${x.cancelledDepIds.join(", ")}`,
+      ),
+      "拿不准就先 `work_read` 看依赖,或 `ask_role` 问派活的人。",
     );
   }
 

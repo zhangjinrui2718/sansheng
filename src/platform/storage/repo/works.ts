@@ -353,7 +353,19 @@ export function listDependents(db: Database.Database, workId: string): string[] 
 export interface DepState {
   /** 已 done —— 依赖满足 */
   satisfied: string[];
-  /** failed / cancelled —— **永远不可能满足**,调用方应级联失败而非等待 */
+  /**
+   * 被**取消**的前置 —— **不构成阻塞**。
+   *
+   * 取消的语义是「这块范围不要了」,不是「这条活失败了」。把它归进 `failed`
+   * 会让下游**永远等一个不会有人做的活** —— 真机事故:项目经理取消了「综合对比」
+   * 并新建了一份同名项,而新「报告整合」的 `dependsOn` 指向了**被取消的那份旧的**,
+   * 于是那条工作项永远不会被唤醒(数据里躺了很久,不报错)。
+   *
+   * 单独一类而不是并入 satisfied,是因为**它必须可见** —— 下游要知道自己是在
+   * 「前置被取消」的前提下开工的,而不是以为一切按计划。
+   */
+  cancelled: string[];
+  /** failed —— 真的失败了,**仍然不满足**(这条才需要人介入) */
   failed: string[];
   /** 仍在推进 —— 等得起 */
   pending: string[];
@@ -362,18 +374,25 @@ export interface DepState {
 }
 
 export function depState(db: Database.Database, workId: string): DepState {
-  const state: DepState = { satisfied: [], failed: [], pending: [], missing: [] };
+  const state: DepState = { satisfied: [], cancelled: [], failed: [], pending: [], missing: [] };
   for (const d of listDeps(db, workId)) {
     const w = getWork(db, d);
     if (w === null) { state.missing.push(d); continue; }
     if (w.status === "done") state.satisfied.push(d);
-    else if (w.status === "failed" || w.status === "cancelled") state.failed.push(d);
+    else if (w.status === "cancelled") state.cancelled.push(d);
+    else if (w.status === "failed") state.failed.push(d);
     else state.pending.push(d);
   }
   return state;
 }
 
-/** 前置是否全部满足(可以开工)。failed / missing 都算「不满足」—— 它们不该被当成放行。 */
+/**
+ * 前置是否全部满足(可以开工)。
+ *
+ * - `failed` / `pending` / `missing` → **不满足**(它们不该被当成放行)
+ * - `cancelled` → **算满足**(取消 = 范围不要了,不构成阻塞;但见 `DepState.cancelled`,
+ *   它必须对下游可见)
+ */
 export function depsSatisfied(db: Database.Database, workId: string): boolean {
   const s = depState(db, workId);
   return s.failed.length === 0 && s.pending.length === 0 && s.missing.length === 0;
