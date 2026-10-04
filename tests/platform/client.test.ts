@@ -18,6 +18,10 @@ import {
   CLIENT_TOOLS,
 } from "../../src/platform/tools/client.js";
 import { createLoggingClientChannel, type ClientChannel, type ClientQuestion } from "../../src/platform/client/port.js";
+import { PlatformHub } from "../../src/platform/transport/hub.js";
+import { listSessions, listSessionMessages } from "../../src/platform/storage/repo/sessions.js";
+import type { ServerEvent } from "@shared/types/platform.js";
+import type { WebSocket } from "ws";
 import { dispatch, notYetBuiltToolNames, capabilitiesWithoutTools, registrySnapshot } from "../../src/platform/tools/registry.js";
 import type { ToolRunContext, ToolResult } from "../../src/platform/tools/types.js";
 import type { Agent, Project } from "../../src/platform/harness/authorize.js";
@@ -33,12 +37,15 @@ const ids: Record<string, string> = {};
 interface RecordingChannel extends ClientChannel {
   asked: Array<ClientQuestion & { questionId: string }>;
   told: string[];
+  /** **谁播报的** —— A1 起 tell 必须带真实 agent id(§2.10.2 末) */
+  toldBy: string[];
   failNextAsk?: Error;
 }
 function recordingChannel(): RecordingChannel {
   const ch: RecordingChannel = {
     asked: [],
     told: [],
+    toldBy: [],
     async ask(q) {
       if (ch.failNextAsk) throw ch.failNextAsk;
       ch.asked.push(q);
@@ -46,7 +53,12 @@ function recordingChannel(): RecordingChannel {
     async tell(input) {
       // 签名带 projectId —— 播报必须知道属于哪个项目(按项目分组呈现)
       if (input.projectId === undefined) throw new Error("tell 缺 projectId");
+      // 作者必填且不可空:没有作者位的播报就是「静默归错人」的入口
+      if (typeof input.agentId !== "string" || input.agentId === "") {
+        throw new Error("tell 缺 agentId(播报没有作者 = 静默归错人)");
+      }
       ch.told.push(input.message);
+      ch.toldBy.push(input.agentId);
     },
   };
   return ch;
@@ -274,5 +286,84 @@ describe("createLoggingClientChannel · 记下来而不是假装送达", () => {
     expect(lines[0]).toContain("候选:要 | 不要");
     expect(lines[0]).toContain("倾向:倾向要");
     expect(lines[1]).toContain("client.tell");
+  });
+});
+
+// ── A1 · 说话者身份铺到线上(设计 1 §2.10.2)────────────────────────
+//
+// 这一批只做「谁在说话」的**字段铺设**:契约必填 `agentId`、hub 的两个建轮
+// 事件带它、`tell_client` 把 `ctx.agent.id` 透传进通道。
+//
+// ⚠️ 它**救不了** §2.10.3 那条「回合中途播报抢走前端 currentTurn」的缺陷 ——
+// 根因在前端只有一个 currentTurn 槽、且 delta 不校验 messageId。那是 A2 的活,
+// 所以这里一条都不涉及前端行为。
+
+describe("A1 · 播报作者是「调用它的那个 agent」,不是通道里写死的值", () => {
+  it("tell_client 把 ctx.agent.id 透传进 ClientChannel.tell", async () => {
+    okText(await call(ids.bm, "tell_client", { text: "已开工" }));
+    expect(channel.told).toEqual(["已开工"]);
+    // 夹具里业务经理的 id 是 `ag_business_manager`,**不是字面量 "bm"** ——
+    // 这正是「组织表换 id」的现场:写死 "bm" 的实现在这里会当场露馅。
+    expect(channel.toldBy).toEqual([ids.bm]);
+    expect(ids.bm).not.toBe("bm");
+  });
+});
+
+describe("A1 · hub 的两个「建轮」事件带说话人,播报落库也用它", () => {
+  /** 直接建 hub(不碰网络):假 ws 只做一件事 —— 把广播到的 JSON 收下来 */
+  function hubCapturing(): { hub: PlatformHub; events: ServerEvent[] } {
+    const events: ServerEvent[] = [];
+    const hub = new PlatformHub(
+      { db, now: () => clock, newId: (p) => `${p}_${++seq}` },
+      {
+        onUserMessage: async () => undefined,
+        onAnswerQuestion: async () => undefined,
+        onInterrupt: () => undefined,
+      },
+    );
+    hub.addClient({
+      on: () => undefined,
+      send: (raw: string) => events.push(JSON.parse(raw) as ServerEvent),
+    } as unknown as WebSocket);
+    events.length = 0; // 丢掉 addClient 那条 ready
+    return { hub, events };
+  }
+
+  it("emitMessageStart 把 agentId 原样放进事件(null = 甲方)", () => {
+    const { hub, events } = hubCapturing();
+    hub.emitMessageStart("p1", "m1", "assistant", ids.pm);
+    hub.emitMessageStart("p1", "m2", "user", null);
+    expect(events).toEqual([
+      { type: "message_start", projectId: "p1", messageId: "m1", role: "assistant", agentId: ids.pm },
+      { type: "message_start", projectId: "p1", messageId: "m2", role: "user", agentId: null },
+    ]);
+  });
+
+  it("emitToolStart 把 agentId 原样放进事件(tool_start 自己也能建轮)", () => {
+    const { hub, events } = hubCapturing();
+    hub.emitToolStart("p1", "m1", { id: "t1", name: "board_write" }, ids.wk);
+    expect(events).toEqual([
+      {
+        type: "tool_start", projectId: "p1", messageId: "m1", agentId: ids.wk,
+        tool: { id: "t1", name: "board_write" },
+      },
+    ]);
+  });
+
+  it("clientChannel.tell 用入参里的 agent 落库 + 广播(不再写死 bm)", async () => {
+    const { hub, events } = hubCapturing();
+    await hub.clientChannel.tell({ projectId: "p1", message: "播报内容", agentId: ids.pm });
+
+    const sessionId = listSessions(db, "p1")[0]!.id;
+    expect(listSessionMessages(db, sessionId).map((m) => [m.kind, m.agentId, m.content])).toEqual([
+      ["assistant", ids.pm, "播报内容"],
+    ]);
+    // 三条信封共用同一个 messageId(不写死它 —— 它由注入的 newId 计数器决定)
+    expect(events.map((e) => e.type)).toEqual(["message_start", "delta", "message_end"]);
+    const start = events[0]!;
+    expect(start.type === "message_start" ? start.agentId : null).toBe(ids.pm);
+    expect(start.type === "message_start" ? start.messageId : null).toBe(
+      events[1]!.type === "delta" ? events[1]!.messageId : null,
+    );
   });
 });

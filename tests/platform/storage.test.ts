@@ -749,3 +749,118 @@ describe("014 · 产出边(board_write 的 workId)", () => {
     expect(listArtifacts(db, other, { workId })).toEqual([]);
   });
 });
+
+/**
+ * 016 · `artifacts.kind` 多了一个 `deliverable`(设计 1 §2.11.5:工件即推动流程)
+ *
+ * `migrations.test.ts` 的 016 那一组守的是 **schema 级**的东西(闭集、逐字回归、
+ * 6 条索引、子表清单、朴素重建的负样本)。这里补的是**启动路径**:
+ * 真迁移器(`openPlatformMemoryDb` → `runMigrations`)把库带到 16,
+ * 闭集真的通了、014 的产出边还在、中转备份表没留在库里。
+ *
+ * ⚠️⚠️ **016 单独上线时,读面比写面严 —— 这是 DAG 上的一个先后约束,不是本测试的缺陷。**
+ * `repo/artifacts.ts:96` 的 `rowToArtifact` 用 `isArtifactKind`(代码侧的
+ * `ARTIFACT_KINDS`)把未定义的 kind **响亮地抛出来**:`deliverable` 一旦落库,
+ * `getArtifact` / `listArtifacts` 就会对**整个项目**抛
+ * 「artifacts 表里出现未定义 kind「deliverable」」。所以:
+ *   - 016(本批次)只负责**让 schema 收得下**;
+ *   - `ARTIFACT_KINDS` 与六处同步面(设计 §2.11.5 末)是 **C2**,它才让读面通;
+ *   - 两步之间**不能有任何 deliverable 的写者**(今天也没有 —— 见 016 文件头
+ *     「写入侧零代码改动」)。C2 落地后本 describe 可以补一条
+ *     `getArtifact(...).kind === 'deliverable'` 的用例,那时它才有意义。
+ *
+ * 基于同一个理由,这里用**裸 SQL** 写入而不是 `insertArtifact(..., { kind: "deliverable" })`:
+ * `ArtifactKind` 联合里的 `deliverable` 是 C2 的活,本批次不碰 `identity/role.ts`。
+ */
+describe("016 · deliverable 工件(真启动路径 + 仓储层)", () => {
+  const A_COLS =
+    "id,project_id,conversation_id,kind,status,author_agent_id,title,body,metadata_json,created_at,updated_at,work_id";
+  const KIND_016 = [
+    "decision", "note", "evidence", "hypothesis", "project_brief", "work_brief",
+    "meeting_note", "review_finding", "change_record", "client_question", "deliverable",
+  ] as const;
+
+  function rawArtifact(id: string, kind: string, projectId: string, authorId: string, workId: string | null): void {
+    db.prepare(`INSERT INTO artifacts (${A_COLS}) VALUES (?,?,NULL,?,'open',?,?,?,NULL,1,1,?)`)
+      .run(id, projectId, kind, authorId, "标题", "正文", workId);
+  }
+
+  it("真迁移器把库带到 16(不是只有手写 SQL 才认这个闭集)", () => {
+    const row = db.prepare(`SELECT name FROM schema_version WHERE version = 16`).get() as
+      | { name: string }
+      | undefined;
+    expect(row, "openPlatformMemoryDb 没跑到 016 —— 迁移文件没被迁移器读到").toBeDefined();
+    expect(row!.name).toBe("artifacts_deliverable");
+    // 016 是重建表:它必须先备份子表再灌回,中转表不能留在**真库**里
+    const leftovers = db.prepare(
+      `SELECT COUNT(*) n FROM sqlite_master WHERE name LIKE '%\\_backup' ESCAPE '\\'`,
+    ).get() as { n: number };
+    expect(leftovers.n, "真库上残留了 016 的中转备份表").toBe(0);
+    expect(db.pragma("foreign_key_check")).toEqual([]);
+  });
+
+  it("deliverable 写得进,013/014 的列与产出边跟着一起活着", () => {
+    const pid = mkProject("active");
+    const wk = mkAgent("worker", "engineering");
+    const workId = mkWork(pid, wk);
+    const id = `a016_keep_${++seq}`;
+    rawArtifact(id, "deliverable", pid, wk, workId);
+
+    // ⚠️ 这里**故意**用裸 SQL 读回,不是 `getArtifact` —— 见本 describe 头:
+    // `rowToArtifact` 用 `isArtifactKind`(代码侧的 `ARTIFACT_KINDS`)把未定义的
+    // kind **响亮地**抛出来,而那个联合里的 `deliverable` 是 C2 的活。
+    // 换句话说:**016 单独上线时,一条 deliverable 行会让 getArtifact /
+    // listArtifacts 直接抛错**(读面比写面严)。C2 落地后这条读面才通 ——
+    // 那是 DAG 上的下一步,不是本迁移能独自解决的事。
+    const got = db.prepare(`SELECT * FROM artifacts WHERE id = ?`).get(id) as {
+      kind: string; title: string; body: string; work_id: string | null; status: string;
+    } | undefined;
+    expect(got, "这条工件没写进去").toBeDefined();
+    expect(got!.kind).toBe("deliverable");
+    expect(got!.title).toBe("标题");
+    expect(got!.body).toBe("正文");
+    expect(got!.status).toBe("open");
+    // 016 的重建若照 008 抄列清单,这一列整列就没了(用户真机库 11 条工件里 10 条非空)
+    expect(got!.work_id, "014 的产出边丢了 —— 016 重建时漏了 work_id 列").toBe(workId);
+    // 014 的按 work_id 过滤读法:用 SQL 证明这条边真的建起来了
+    expect(db.prepare(`SELECT id FROM artifacts WHERE work_id = ?`).all(workId)).toEqual([{ id }]);
+    expect(db.pragma("foreign_key_check")).toEqual([]);
+  });
+
+  it("**负样本**:闭集是被放宽,不是被拆掉 —— nonsense 仍被拒,旧 10 个取值仍可用", () => {
+    const pid = mkProject("active");
+    const wk = mkAgent("worker", "engineering");
+    // 正样本:同一支探针在合法取值上不报错(否则下面两条可能是「什么都拒」)
+    expect(() => rawArtifact(`a016_ok_${++seq}`, "deliverable", pid, wk, null)).not.toThrow();
+    // 负样本两条
+    expect(() => rawArtifact(`a016_bad_${++seq}`, "nonsense", pid, wk, null)).toThrow(/CHECK/i);
+    expect(() => rawArtifact(`a016_bad2_${++seq}`, "deliverables", pid, wk, null)).toThrow(/CHECK/i);
+    for (const k of KIND_016.filter((x) => x !== "deliverable")) {
+      expect(() => rawArtifact(`a016_old_${k}_${++seq}`, k, pid, wk, null), `${k} 被误伤`).not.toThrow();
+    }
+    expect(
+      (db.prepare(`SELECT COUNT(*) n FROM artifacts`).get() as { n: number }).n,
+      1 + KIND_016.length - 1,
+    ).toBe(KIND_016.length);
+  });
+
+  it("016 重建之后 6 条索引仍在真库上(启动路径上的 DROP TABLE 没把它们带走)", () => {
+    const names = (db.pragma("index_list(artifacts)") as Array<{ name: string }>)
+      .map((r) => r.name)
+      .filter((n) => !n.startsWith("sqlite_autoindex"))
+      .sort();
+    expect(
+      names,
+      "DROP TABLE 会连索引一起丢掉 —— 016 必须把 6 条全部原样重建" +
+        "(设计稿 §2.11.5 写的是五条,那是 014 之前的数字)",
+    ).toEqual([
+      "idx_artifacts_author", "idx_artifacts_kind", "idx_artifacts_project",
+      "idx_artifacts_recent", "idx_artifacts_status", "idx_artifacts_work",
+    ]);
+    // 部分索引的谓词不能丢(丢了不报错,只是悄悄退化成全表扫)
+    const sql = db.prepare(
+      `SELECT sql FROM sqlite_master WHERE type='index' AND name='idx_artifacts_work'`,
+    ).get() as { sql: string };
+    expect(sql.sql).toMatch(/WHERE\s+work_id\s+IS\s+NOT\s+NULL/i);
+  });
+});

@@ -48,8 +48,23 @@ export interface ClientChannel {
    */
   ask(input: ClientQuestion & { questionId: string; projectId: string }): Promise<void>;
 
-  /** 向甲方播报。不等待、不产生待答状态。 */
-  tell(input: { projectId: string; message: string }): Promise<void>;
+  /**
+   * 向甲方播报。不等待、不产生待答状态。
+   *
+   * ── `agentId` 为什么是必填、且**不可空** ────────────────────────
+   *
+   * 播报是「谁在跟甲方说话」——它同时决定两件事:落库时写进
+   * `session_messages.agent_id` 的值,以及 WS `message_start.agentId`
+   * (前端据此建轮并知道说话人是谁,`shared/types/platform.ts`)。
+   *
+   * 它**不是** `string | null`:那种取值域里的 `null` 是「甲方说的话」,而
+   * 播报永远是某个角色发出的 —— 留一个可空的作者位,就等于留了一条
+   * 「播报没有作者」的静默路径。所以这里要的是实参,不是默认值。
+   *
+   * ⚠️ 这一项以前是写死的:实现里硬编码成业务经理的 agent id,今天恰好对,
+   * 组织表换 id 的那一刻那条消息会**静默归错人**(设计 1 §2.10.2 末)。
+   */
+  tell(input: { projectId: string; message: string; agentId: string }): Promise<void>;
 }
 
 /**
@@ -69,8 +84,8 @@ export function createLoggingClientChannel(
           (lean !== undefined ? `\n  倾向:${lean}` : ""),
       );
     },
-    async tell({ projectId, message }) {
-      log(`[client.tell @${projectId}] ${message}`);
+    async tell({ projectId, message, agentId }) {
+      log(`[client.tell @${projectId} by ${agentId}] ${message}`);
     },
   };
 }

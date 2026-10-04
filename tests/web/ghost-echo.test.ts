@@ -43,7 +43,7 @@ beforeEach(() => {
 describe("server 回显的用户消息不产生幽灵气泡", () => {
   it("**用户 delta 不建助手轮**(修复前:currentTurn 会变成 assistant)", () => {
     const s = useChatStore.getState();
-    s.applyEvent({ type: "message_start", projectId: P, messageId: "m-user", role: "user" });
+    s.applyEvent({ type: "message_start", projectId: P, messageId: "m-user", role: "user", agentId: null });
     s.applyEvent({ type: "delta", projectId: P, messageId: "m-user", text: "帮我调研一个语音机器人" });
     s.applyEvent({ type: "message_end", projectId: P, messageId: "m-user" });
 
@@ -54,7 +54,7 @@ describe("server 回显的用户消息不产生幽灵气泡", () => {
 
   it("用户消息的 thinking_delta 同样被忽略(两条流都不能漏)", () => {
     const s = useChatStore.getState();
-    s.applyEvent({ type: "message_start", projectId: P, messageId: "m-user", role: "user" });
+    s.applyEvent({ type: "message_start", projectId: P, messageId: "m-user", role: "user", agentId: null });
     s.applyEvent({ type: "thinking_delta", projectId: P, messageId: "m-user", text: "用户的内心戏" });
     expect(useChatStore.getState().currentTurn).toBeNull();
   });
@@ -62,10 +62,10 @@ describe("server 回显的用户消息不产生幽灵气泡", () => {
   it("**助手那条照常工作** —— 忽略逻辑不能误伤真消息", () => {
     const s = useChatStore.getState();
     // 先走一遍用户回显
-    s.applyEvent({ type: "message_start", projectId: P, messageId: "m-user", role: "user" });
+    s.applyEvent({ type: "message_start", projectId: P, messageId: "m-user", role: "user", agentId: null });
     s.applyEvent({ type: "delta", projectId: P, messageId: "m-user", text: "用户的话" });
     // 助手真的开始流
-    s.applyEvent({ type: "message_start", projectId: P, messageId: "m-bm", role: "assistant" });
+    s.applyEvent({ type: "message_start", projectId: P, messageId: "m-bm", role: "assistant", agentId: "ag_bm" });
     s.applyEvent({ type: "delta", projectId: P, messageId: "m-bm", text: "好的," });
     s.applyEvent({ type: "delta", projectId: P, messageId: "m-bm", text: "我来收敛一下" });
 
@@ -76,17 +76,51 @@ describe("server 回显的用户消息不产生幽灵气泡", () => {
 
   it("会话里出现第二个用户消息时,回显判定跟着更新", () => {
     const s = useChatStore.getState();
-    s.applyEvent({ type: "message_start", projectId: P, messageId: "m-u1", role: "user" });
+    s.applyEvent({ type: "message_start", projectId: P, messageId: "m-u1", role: "user", agentId: null });
     s.applyEvent({ type: "delta", projectId: P, messageId: "m-u1", text: "第一句" });
     expect(useChatStore.getState().currentTurn).toBeNull();
 
     // 第二条用户消息
-    s.applyEvent({ type: "message_start", projectId: P, messageId: "m-u2", role: "user" });
+    s.applyEvent({ type: "message_start", projectId: P, messageId: "m-u2", role: "user", agentId: null });
     s.applyEvent({ type: "delta", projectId: P, messageId: "m-u2", text: "第二句" });
     expect(useChatStore.getState().currentTurn).toBeNull();
 
     // 迟到的 m-u1 回显不该被当成助手
     s.applyEvent({ type: "delta", projectId: P, messageId: "m-u1", text: "迟到的" });
     expect(useChatStore.getState().currentTurn).toBeNull();
+  });
+});
+
+// ── A1 · 新契约字段到达前端这一层之后(读者是 A2 的活)─────────────────
+//
+// A1 只把「谁在说话」铺到线上(`message_start` / `tool_start` 的必填 `agentId`,
+// 设计 1 §2.10.2)。**前端拿它做什么是 A2**:今天 `applyEvent` 忽略 `agentId`
+// —— 它在 `turns` / 渲染里没有读者。
+//
+// ⚠️ 这两条**不是**在说缺陷已修:§2.10.3 那条「回合中途的播报抢走 currentTurn」
+// 的根因是**前端只有一个 currentTurn 槽 + delta 不校验 messageId**,加字段救不了它。
+// 所以这里只钉住一件今天为真的事:**带上新字段的信封不会破坏既有消费路径**。
+
+describe("A1 · 契约带 agentId 不破坏前端既有消费路径", () => {
+  it("message_start 带 agentId 时照常建轮(字段今天无读者,行为不变)", () => {
+    const s = useChatStore.getState();
+    s.applyEvent({ type: "message_start", projectId: P, messageId: "m-pm", role: "assistant", agentId: "ag_pm" });
+    s.applyEvent({ type: "delta", projectId: P, messageId: "m-pm", text: "我来拆解" });
+
+    const cur = useChatStore.getState().currentTurn;
+    expect(cur?.role).toBe("assistant");
+    expect(cur?.blocks).toEqual([{ kind: "text", text: "我来拆解" }]);
+  });
+
+  it("tool_start 带 agentId 时照常建轮(tool_start 自己也能建轮)", () => {
+    const s = useChatStore.getState();
+    s.applyEvent({
+      type: "tool_start", projectId: P, messageId: "m-wk", agentId: "ag_wk",
+      tool: { id: "t1", name: "board_write" },
+    });
+
+    const cur = useChatStore.getState().currentTurn;
+    expect(cur?.role).toBe("assistant");
+    expect(cur?.blocks).toEqual([{ kind: "tool", tool: { id: "t1", name: "board_write" } }]);
   });
 });

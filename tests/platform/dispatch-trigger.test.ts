@@ -259,3 +259,113 @@ describe("硬上界不会被门铃的重跑绕过(真机跑出来的洞)", () =>
     expect(w2.status).toBe("open");
   });
 });
+
+// ── A1 · 「建轮那一刻说清是谁」在真链路上的兑现(设计 1 §2.10.2)────────
+//
+// A1 把 `agentId` 加成了**必填**字段。必填只在类型上约束构造点,而构造点按
+// **驱动路径**分岔:接待会话的 bm、项目内用户消息那条 bm、排空器叫起来的
+// pm / qa(`drainProject` 的回调)、worker 执行那条(`runWorkInSession`)。
+// 各自构造事件的单测证明不了「宿主在每条路上都传对了」—— 必须把**线上收到的
+// json** 收下来看,而且要用**不是 `bm` 的 id** 去验:硬编码 `"bm"` 的实现在
+// 默认组织(`runtime/org.ts` 的 id 恰好就是 bm/pm/wk/qa)下**看起来是对的**。
+
+interface StartsSeen {
+  starts: Array<{ role: string | null; agentId: string | null }>;
+  toolStarts: Array<{ name: string; agentId: string | null }>;
+}
+
+/** 把这条 WS 连接上收到的 message_start / tool_start 收下来(NULL 原样保留) */
+function collectStarts(): StartsSeen {
+  const seen: StartsSeen = { starts: [], toolStarts: [] };
+  ws!.on("message", (raw: unknown) => {
+    const ev = JSON.parse(String(raw)) as Record<string, unknown>;
+    if (ev.type === "message_start") {
+      seen.starts.push({
+        role: typeof ev.role === "string" ? ev.role : null,
+        agentId: typeof ev.agentId === "string" ? ev.agentId : null,
+      });
+    }
+    if (ev.type === "tool_start") {
+      const tool = ev.tool as { name?: unknown } | undefined;
+      seen.toolStarts.push({
+        name: typeof tool?.name === "string" ? tool.name : "",
+        agentId: typeof ev.agentId === "string" ? ev.agentId : null,
+      });
+    }
+  });
+  return seen;
+}
+
+describe("A1 · 说话者身份在每条驱动路径上都传对(不硬编码 bm)", () => {
+  it("接待会话 → 项目内 bm → 排空器:每个建轮事件的 agentId 都是库里那个 agent", async () => {
+    const h = await startHost();
+    const db = h.db();
+    const seen = collectStarts();
+
+    // ① 接待会话:用户那句 → 业务经理立项(含它的 tool_start)
+    h.send({ type: "send", projectId: null, content: "我想做一个语音机器人的调研,直接立项吧" });
+    expect(
+      await until(() => (db.prepare(`SELECT COUNT(*) AS n FROM projects`).get() as { n: number }).n === 1),
+    ).toBe(true);
+    expect(await until(() => seen.starts.some((s) => s.role === "assistant"))).toBe(true);
+
+    const bmId = (db.prepare(`SELECT id FROM agents WHERE role = 'business_manager'`).get() as { id: string }).id;
+    // 用户那条的 `null` 是**甲方**(与 session_messages.agent_id 同义),不是「没填」
+    expect(seen.starts.find((s) => s.role === "user")?.agentId).toBeNull();
+    expect(seen.starts.filter((s) => s.role === "assistant").map((s) => s.agentId)).toEqual([bmId]);
+    // bridge 那条路:tool_start 也带作者(project_open 由业务经理调)
+    expect(seen.toolStarts.find((t) => t.name === "project_open")?.agentId).toBe(bmId);
+
+    // ② 项目内说一句 → 回合结束敲铃 → 排空器叫起**别的角色**(pm / worker)
+    const projectId = (db.prepare(`SELECT id FROM projects LIMIT 1`).get() as { id: string }).id;
+    h.send({ type: "send", projectId, content: "开工" });
+
+    expect(
+      await until(() => seen.starts.some((s) => s.role === "assistant" && s.agentId !== bmId)),
+      "排空器叫起来的那个 agent 必须出现在建轮事件里(硬编码 bm 的实现在这里露馅)",
+    ).toBe(true);
+
+    // ③ 全部助手轮的作者:必须是 agents 表里真实存在的 id,且不许是 null
+    const agentIds = new Set(
+      (db.prepare(`SELECT id FROM agents`).all() as Array<{ id: string }>).map((r) => r.id),
+    );
+    const authors = seen.starts.filter((s) => s.role === "assistant").map((s) => s.agentId);
+    expect(authors).not.toContain(null);
+    expect(agentIds.size).toBeGreaterThanOrEqual(4);
+    for (const a of authors) expect(agentIds.has(a!)).toBe(true);
+  });
+
+  it("自定义 worker id:执行那条路(`runWorkInSession`)的作者是分派给它的 worker", async () => {
+    const h = await startHost();
+    const db = h.db();
+    // 默认组织的 id 恰是 bm/pm/wk(`runtime/org.ts`)—— 那会让「硬编码 bm」与
+    // 「真传参」长得一模一样。这里把 **worker** 换成 wk1:把执行那条路的作者
+    // 写死成任何默认 id 都会当场失败。
+    //
+    // ⚠️ 业务经理这一条**只能**用 ORG 的 id:用户消息那条路由 `handleUserMessage`
+    // 按 `ORG` 常量选人(`serve.ts`),不按项目成员选 —— 这是本次复核发现的另一处
+    // 「id 来自代码常量」,不在 A1 的改动范围内(见报告)。
+    insertAgent(db, { id: "bm", role: "business_manager", specialization: null, displayName: "业", createdAt: 1 });
+    insertAgent(db, { id: "pm1", role: "project_manager", specialization: null, displayName: "经", createdAt: 1 });
+    insertAgent(db, { id: "wk1", role: "worker", specialization: "engineering", displayName: "工", createdAt: 1 });
+    insertProject(db, { id: "pj_a", name: "a", client: "甲", goal: "g", status: "active", createdAt: 1 });
+    for (const id of ["bm", "pm1", "wk1"]) addMember(db, "pj_a", id, 1);
+    insertWork(db, {
+      id: "w1", projectId: "pj_a", parentWorkId: null, title: "w1", goal: "g", status: "open",
+      assigneeAgentId: "wk1", createdAt: 1, updatedAt: 1,
+    });
+
+    const seen = collectStarts();
+    h.send({ type: "send", projectId: "pj_a", content: "开工" });
+
+    expect(await until(() => seen.starts.some((s) => s.role === "assistant"))).toBe(true);
+    // 这条工作项派给了 wk1、前置为空 ⇒ 排空器会走 `runWorkInSession`(worker 那条)
+    expect(
+      await until(() => seen.starts.some((s) => s.agentId === "wk1")),
+      "worker 执行路的建轮事件必须写 worker 自己的 id(不是 bm,也不是任何默认 id)",
+    ).toBe(true);
+    // 用户那条仍然是甲方;业务经理那条是它自己的 id
+    expect(seen.starts.find((s) => s.role === "user")?.agentId).toBeNull();
+    expect(seen.starts.some((s) => s.role === "assistant" && s.agentId === "bm")).toBe(true);
+  });
+});

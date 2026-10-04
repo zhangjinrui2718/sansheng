@@ -45,9 +45,18 @@
  * ── 判定侧收窄的是**时机**,不是**资格**(合并唤醒 / coalesce)──────────
  *
  * ⚠️ **真机复核:写入侧那一层在扁平结构下是空转的。** 实测用户自己的库:
- * `9 条 work → 9 条 root → 0 条中间`,而 `grep -rn parentWorkId harness/` 是**空的**
- * —— 没有任何地方告诉项目经理要建树。扁平结构下**每条工作项终态都是「根终态」**,
+ * `9 条 work → 9 条 root → 0 条中间`。扁平结构下**每条工作项终态都是「根终态」**,
  * 于是写入侧的「只要根」那条判据全部命中,一条也没被筛掉。
+ *
+ * ⚠️ **这条归因错过一次(2026-10-04 按设计 1 §9.4 更正,存此以免重犯)**:原文写的是
+ * 「`grep -rn parentWorkId harness/` 是空的 —— 没有任何地方告诉项目经理要建树」。
+ * **grep 的结果对,推出来的结论错**:作用域只扫了提示词单元目录,而**运行期的任务
+ * 提示词**里就写着这句话 —— 本项目 `renderTask` 的 `decompose_project` 正文
+ * (见下面「多件产出同属**一个交付物**时,用 `parentWorkId` 把它们挂到一条根工作项
+ * 下面」),而它所在的通道(user message)正是这个文件自己认定为最强的那一条。
+ * ⇒ 不是「没人告诉」,是「告诉了没做到」;**要修的是合规校验/机制,不是再加提示词**。
+ * 归因错了,下一次的修法也会错 —— 教训:「grep 不到」不等于「不存在」,
+ * 先问「还有哪条通道我没想到」。
  *
  * 所以「少打扰甲方」还需要第二刀,而这一刀只能落在**判定侧**(写入侧已经判不出
  * 更多东西了):`report_downstream` 不再「有一条事件就生成」,而是**攒够 N 条**
@@ -87,14 +96,14 @@
  * 但**不值得为每一条单独叫醒一次**。
  */
 import type Database from "better-sqlite3";
-import { collectPendingWork, hasActionableWork } from "./pendingWork.js";
+import { collectPendingWork, type PendingWork } from "./pendingWork.js";
 import { getAgent } from "../storage/repo/agents.js";
 import {
   getProjectRow, loadProjectRoster,
 } from "../storage/repo/projects.js";
 import {
   listWorks, getWork, listWorksPendingReview, markWorkReviewed,
-  isTerminalWorkStatus, type WorkStatus,
+  isTerminalWorkStatus, type WorkRow, type WorkStatus,
 } from "../storage/repo/works.js";
 import {
   bumpAttempt, consumePendingDispatchEvents, listAttempts,
@@ -107,23 +116,34 @@ import type { ToolCallRecord } from "./turn.js";
 
 // ── 待办的形状 ──────────────────────────────────────────────────
 
-export type TodoKind =
+/**
+ * 待办的**闭合集**。
+ *
+ * 写成数组再导出类型,而不是一段裸联合:规则表(下面的 `RULES`)要用它做
+ * **闭合性自检** —— 「每个 TodoKind 都恰有一条规则产出它,且没有规则产出集外的东西」
+ * 因此是一条断言,而不是一句注释。类型仍然是同一个联合(`TodoKind`),
+ * `PRIORITY` 的 `Record<TodoKind, number>` 照样强制穷尽。
+ */
+export const TODO_KINDS = [
   /** 有人提问,我在等答 —— 有人因此停着,最高优先级 */
-  | "answer_ask"
+  "answer_ask",
   /** 有会议等我表态 */
-  | "attend_meeting"
+  "attend_meeting",
   /** 有变更提案等我评审 */
-  | "review_change"
+  "review_change",
   /** 有工作项被派给了非 worker(平台不会执行它)—— 派活的人必须改派或关掉 */
-  | "fix_work_assignment"
+  "fix_work_assignment",
   /** 项目里一个工作项都没有 —— 拆解 */
-  | "decompose_project"
+  "decompose_project",
   /** 分派给我、前置已满足的工作项 */
-  | "execute_work"
+  "execute_work",
   /** 有工作项做完了、还等着审(`works.review_state = 'pending'`) */
-  | "review_work"
+  "review_work",
   /** 下游出了结果,该由我向甲方交代(未消费的 outbox 事件) */
-  | "report_downstream";
+  "report_downstream",
+] as const;
+
+export type TodoKind = (typeof TODO_KINDS)[number];
 
 /**
  * 优先级。**数字小的先跑。**
@@ -191,13 +211,31 @@ export interface TodoBoard {
 /**
  * 哪些**成功的**工具调用算「状态迁移」,值得敲一下门铃。
  *
- * 判据是「这次调用可能改变**流水线**的状态」—— 于是 `blackboard.write`(产出)
- * 不在里面:写工件不产生新待办(工件不是待办来源),而 `work.update` 会
- * (做完了要审、要汇报)。`project.read` 之类只读的自然也不算。
+ * 判据是「这次调用可能改变**流水线**的状态」—— 于是 `work.update` 在里面
+ * (做完了要审、要汇报),`project.read` 之类只读的不在。
  *
  * 门铃**不携带任何状态**,只让排空器「现在去查一下」。挂在这里(工具派发的
  * 唯一漏斗)而不是散在十几个工具里:散着写迟早漏一个,而漏掉的表现是
  * 「这件事要等下一次定时器」—— 一个只在延迟上显形、很难归因的 bug。
+ *
+ * ── `blackboard.write` 为什么从「不在里面」变成「在里面」(B2)──────────
+ *
+ * 这里原先写着「`blackboard.write`(产出)**不在里面**:写工件**不产生新待办**
+ * (**工件不是待办来源**)」—— 那句话今天**只对了一半**,而错的那一半正是本次
+ * 要修的东西:
+ *
+ *   - **对的**:工件确实不是判据。`collectTodos` 一条规则都不读
+ *     `artifacts`/`artifact_inserted`(见下面的 `RULES`),判定仍然全部从库里重算。
+ *   - **错的**:「不产生新待办」⇒「不必敲门」。而门铃的判据**从来不是**
+ *     「有没有新待办」,是「**值不值得重查一次**」。用户的原话是「每个角色的产出
+ *     『工件』即可以推动这个流程往下走」—— 而今天**产出工件不会敲门铃**,
+ *     于是「工件推动流程」这件事连一个触发点都没有:写完工件只能等 10 秒的
+ *     兜底定时器。它**不改变判定**(判定永远重新查库),只把「刚产出了工件」
+ *     这件事告诉排空器。
+ *
+ * ⚠️ **这是「事件只是 nudge,判定永远重新查库」的直接兑现,别把事件变成判据。**
+ * 加这一条**不许**顺带在任何规则的 `if` 里开始读 `artifacts` —— 一旦哪条规则去读
+ * 工件的存在性/正文,「不需要大模型判断」就退化成规则在做语义猜测(§2.11.3)。
  */
 export const NUDGE_CAPABILITIES: readonly Capability[] = [
   "project.open",
@@ -206,6 +244,9 @@ export const NUDGE_CAPABILITIES: readonly Capability[] = [
   "collab.convene", "collab.meeting.respond", "collab.meeting.conclude",
   "change.propose", "change.review",
   "blocker.open", "blocker.update",
+  // 产出工件 = 「工件推动流程」的**触发侧**(§2.11.2):门铃响一下,排空器重新查库。
+  // 它今天不点亮任何一条规则(`on` 里没有 `artifact_inserted`)—— 这正是纪律本身。
+  "blackboard.write",
 ];
 
 // ── 判定:纯查询 ─────────────────────────────────────────────────
@@ -295,17 +336,427 @@ function isImmediateEvent(db: Database.Database, e: DispatchEventRow): boolean {
   return IMMEDIATE_BLOCKER_SEVERITIES.has(found.severity);
 }
 
+// ── 规则表:8 条分支的形状(设计 1 §2.11.4)───────────────────────
+//
+// ── 为什么把它做成表,而不是继续写 8 个分支 ──────────────────────
+//
+// 用户的原话(§2.11 的来源):「项目从立项-拆解-干活-质检-交付……这个过程需要
+// **依赖于工程架构来推动,并不是依赖于 agent 来推动**,工程架构推动的基础是在于
+// **标准的领域模型**,每个角色的产出「**工件**」即**可以推动这个流程往下走**,
+// 这里面**不需要大模型判断**(可能就是一些规则)」。
+//
+// 「一些规则」要能被逐条读、逐条审、逐条替换 —— 所以判据从 `collectTodos` 的
+// 8 个分支搬进这张表,而 `collectTodos` 只剩三件事:**物化现场 → 跑规则 → 记预算**。
+// 行为**逐字不变**:`tests/platform/dispatcher.test.ts` 一字不改全绿就是判据。
+
+/**
+ * 触发集(**闭合**,设计 1 §2.11.4)。
+ *
+ * 它描述的是「哪一类**新事实**值得让这条规则重查一遍」,而**不是**输入:
+ * `collectTodos` 仍然只收 `(db, projectId, now, 预算)` —— 它**不知道**是哪个触发
+ * 把它叫起来的。`on` 今天**没有生产读者**(没有东西按触发筛规则;门铃只是一个
+ * 布尔「去查一下」),守它形状的是 `tests/platform/dispatcher-rules.test.ts`。
+ *
+ * 判据是「这一类新事实**能改变**这条规则的输出」——**建**算,**收口**也算:
+ * 一次作答会让「等它的提问」少一条(集合变了 ⇒ 待办的 key 也变了 ⇒ 预算换新的),
+ * 所以 `ask_answered` 与 `ask_opened` 一样值得写进 `on`。
+ *
+ * ⚠️ **它与 `NUDGE_CAPABILITIES` 不是同一张表、也不必一一对应。** 那张表是
+ * 「这次调用值不值得敲一下门铃」,这张表是「这条规则的输出会因为什么而变」。
+ * 缺口是**已知**的:立项 / 建工作项 / 改派 / 建会 / 登记阻塞都只能敲铃而说不出
+ * 触发名(所以它们在 `RULES` 里表现为「只靠 `tick`」)。今天无害 —— 门铃不筛规则;
+ * 哪天按触发筛规则,这几条 nudge 会打空,那时得先给闭合集补名(一次显式评审)。
+ */
+export const TRIGGERS = [
+  "artifact_inserted",
+  "work_status_changed",
+  "ask_opened",
+  "ask_answered",
+  "meeting_concluded",
+  "change_decided",
+  /** 兜底:兜底定时器的每一次 tick。**每条规则的 `on` 都必须含它**(见 `RULES`) */
+  "tick",
+] as const;
+
+export type Trigger = (typeof TRIGGERS)[number];
+
+/**
+ * 花名册里的**一个人** + 他此刻的结构化现场。
+ *
+ * `pending` 是 `collectPendingWork` 的纯查询结果(结构化投影)。规则只许读它的
+ * **计数量 / id / 状态 / 时间戳**,不许读正文(`question` / `topic` / `rationale`)——
+ * 一旦哪条规则去读正文,「不需要大模型判断」就失效了,而失效的表现是
+ * **规则开始做语义猜测**(§2.11.3,本项目最贵的一类 bug)。
+ */
+export interface RuleMember {
+  readonly agentId: string;
+  readonly role: ProjectRole;
+  readonly pending: PendingWork;
+  /** 角色上界含 `change.review` 吗 —— 与 `hasActionableWork` 同源,不另立一份判据 */
+  readonly canReviewChange: boolean;
+}
+
+/**
+ * 规则能读到的**全部**事实。
+ *
+ * ⚠️ 刻意**不给 `db` 句柄**:规则因此拿不到别的东西,于是「规则的 `if` 只读
+ * 结构化的列、不读 `body`」是一处**结构上的**事实,而不是一句靠自觉维持的约定 ——
+ * 想绕过它得先改这个接口,而改接口是一次显式评审。库里的读全部在
+ * `collectRuleFacts` 里做完。
+ */
+export interface RuleFacts {
+  readonly projectId: string;
+  readonly now: number;
+  /** 花名册(与 `loadProjectRoster` 同序),只含 `isProjectRole` 的人 */
+  readonly members: readonly RuleMember[];
+  /** 非终态、且负责人**不存在或不是 worker** 的工作项(与成员无关,按项目算一次) */
+  readonly strandedWorks: readonly WorkRow[];
+  /** outbox 里未消费的下游事件(`created_at, seq` 升序 —— `[0]` 就是最老的那条) */
+  readonly events: readonly DispatchEventRow[];
+  /** 上面那批里有没有**绕过合并窗口**的(失败 / 高危阻塞)。预先判好,规则不查库 */
+  readonly immediateEvent: boolean;
+  /** `works.status='done' AND review_state='pending'` */
+  readonly pendingReview: readonly WorkRow[];
+  readonly reportBatchSize: number;
+  readonly reportMaxDelayMs: number;
+}
+
+/** 一条规则产出的待办(还没挂上库里的尝试预算)。 */
+export type TodoDraft = Omit<DriverTodo, "attempts" | "projectId">;
+
+/**
+ * 规则要叫醒的**角色**。
+ *
+ * `"roster"` = 「花名册里与那条记录相关的人」—— 具体是谁由库里的行决定,
+ * 不是某个固定角色:被提问的那个人(`asks.to_agent_id`)、被邀参会且还没表态的
+ * 那个人(`meeting_participants`)、持 `change.review` 的那个人。
+ */
+export type RuleTargetRole = ProjectRole | "roster";
+
+export interface Rule {
+  readonly id: string;
+  /** 哪一类新事实值得重查(闭合集)。**每条都必须含 `tick`** —— 见 `RULES` 说明 */
+  readonly on: readonly Trigger[];
+  /** 条件侧:纯函数,只读 `RuleFacts`。可含状态/集合谓词,**不许读 `body`** */
+  readonly if: (q: RuleFacts) => readonly TodoDraft[];
+  /** 动作:`TodoKind` + 目标角色 */
+  readonly then: { readonly kind: TodoKind; readonly targetRole: RuleTargetRole };
+  /** 这条规则补的是**哪一环** / 有事故见证的现场 */
+  readonly why: string;
+}
+
+/**
+ * 8 条规则 —— 原来的 8 个分支,行为逐字不变。
+ *
+ * ── ⚠️ 每条 `on` 都含 `tick`,这是刻意的、也是必须的 ─────────────
+ *
+ * 今天 `collectTodos` 是**纯查询**:任何触发(门铃 / 定时器)都会重新跑**全部**规则。
+ * 所以:
+ *
+ *   1. `tick` 是**重启后补跑**那条性质的载体 —— 哪天真的按触发筛规则,漏了 `tick`
+ *      的规则会静默停掉,而它的表现正是「重启之后没人补跑」。
+ *   2. `tick` 之外的那些取值说的是「这条规则会**因为什么**而变」。
+ *      **只**写 `tick` 的规则同样诚实:它的条件在闭合触发集里没有对应的新事实
+ *      (建会 / 建工作项 / 改派负责人 / 登记阻塞 / 立项都不在闭合集里,见 §2.11.4
+ *      的 `Trigger`)—— 那几件事今天靠 10 秒的兜底定时器接住。
+ *
+ * 一句话判据:**闭合触发集里没有任何取值能让它变 ⇒ 老实写 `tick`。**
+ *
+ * ── ⚠️ 与原来那 8 个分支的两处结构差别(都不改变输出)────────────
+ *
+ *   1. **成员循环里那句 `if (!hasActionableWork(pw) && stranded.length === 0) continue;`
+ *      整块删掉了。** 它是**短路优化**,不是判据:它列的条件与下面各条规则的判据
+ *      一一对应(asks / meetings / `canReviewChange` 的变更 / worker 的工作项 /
+ *      `needsDecomposition`),唯一的例外 `stranded` 由 `fix_stranded_assignment`
+ *      自己按角色认领。删掉之后输出逐字相同 —— 试比较:guard 为假时,原来一个
+ *      todo 也不会 push。
+ *   2. **`stranded` 从「每个 project_manager 算一遍」改成「按项目算一次」**
+ *      (`RuleFacts.strandedWorks`)。它是纯读、与成员无关,结果一样;规则的
+ *      `m.role === "project_manager"` 才是原判据里那个角色条件。
+ *
+ * 排序也不受影响:输出仍按 `(PRIORITY[kind], key)` 排,而**同 kind 同 key 的并列**
+ * (一场会议里的多个参会方 / 持 `change.review` 的多个角色)在原实现里就是
+ * **花名册序**,这里同样是花名册序(规则内层遍历 `q.members`)。
+ */
+export const RULES: readonly Rule[] = [
+  {
+    id: "answer_pending_ask",
+    // 建(有新问)与收口(作答沿 `parent_ask_id` 链回填父问)都会改变这个集合。
+    on: ["ask_opened", "ask_answered", "tick"],
+    if: (q) => {
+      const out: TodoDraft[] = [];
+      for (const m of q.members) {
+        const ids = m.pending.asksToAnswer.map((a) => a.id).sort();
+        if (ids.length === 0) continue;
+        out.push({
+          agentId: m.agentId, role: m.role, kind: "answer_ask",
+          key: `answer_ask:${ids.join("+")}`, target: null, refs: ids, targetState: null,
+          label: `回答 ${ids.length} 条等它的提问`,
+        });
+      }
+      return out;
+    },
+    then: { kind: "answer_ask", targetRole: "roster" },
+    why:
+      "7-L 的现场:提问者进 blocked 之后**收到方不会主动知道**有东西在等它,于是整条" +
+      "升级链在真机上停摆 —— 而单元测试全绿(测试都显式调 `ask_list`)。这条规则就是" +
+      "那个「告诉它」的机械版本;它也是唯一一条「有人因为我停着」的待办,所以排最前(§5.1)。",
+  },
+  {
+    id: "attend_pending_meeting",
+    // 「建会」在闭合触发集里没有取值(那是 `collab.convene` 的门铃);只有「收尾」有。
+    on: ["meeting_concluded", "tick"],
+    if: (q) => {
+      const out: TodoDraft[] = [];
+      for (const m of q.members) {
+        const ids = m.pending.meetingsToRespond.map((x) => x.id).sort();
+        if (ids.length === 0) continue;
+        out.push({
+          agentId: m.agentId, role: m.role, kind: "attend_meeting",
+          key: `attend_meeting:${ids.join("+")}`, target: null, refs: ids, targetState: null,
+          label: `对 ${ids.length} 场会议表态`,
+        });
+      }
+      return out;
+    },
+    then: { kind: "attend_meeting", targetRole: "roster" },
+    why:
+      "会议是异步的:不阻塞、不产出,也没有任何东西会提醒你 —— 漏掉一次表态不会有报错," +
+      "只会在纪要里表现为静默(§5.4)。判据是 `meeting_participants.responded_at IS NULL`" +
+      "且会议还在 `convened|in_progress`(`pendingMeetingsFor`)。",
+  },
+  {
+    id: "review_pending_change",
+    // 变更的每一步迁移(`proposed→under_review→accepted→implemented`)都改这一列 ——
+    // 但闭合集里只有「已决」有取值,「提出」没有(`change.propose` 只是门铃)。
+    on: ["change_decided", "tick"],
+    if: (q) => {
+      const out: TodoDraft[] = [];
+      for (const m of q.members) {
+        // 变更只有持 `change.review` 的角色推得动(业务经理只有 `change.read`)。
+        // 这个谓词与 `hasActionableWork` 同源:`RuleMember.canReviewChange`。
+        if (!m.canReviewChange) continue;
+        const ids = m.pending.pendingChanges.map((c) => c.id).sort();
+        if (ids.length === 0) continue;
+        out.push({
+          agentId: m.agentId, role: m.role, kind: "review_change",
+          key: `review_change:${ids.join("+")}`, target: null, refs: ids, targetState: null,
+          label: `评审 ${ids.length} 条变更`,
+        });
+      }
+      return out;
+    },
+    then: { kind: "review_change", targetRole: "roster" },
+    why:
+      "真机跑出来过:项目经理把变更推到 `under_review` 之后**没有任何人会被叫醒**,那条变更" +
+      "永久停在那儿,而日志里一切正常(没有待办了)。判据因此含**非终态的全部状态**" +
+      "(`proposed` / `under_review` / `accepted`),不只是 `proposed`。",
+  },
+  {
+    id: "decompose_empty_project",
+    // 立项(`project.open`)与第一件工作项(`work.create`)都不在闭合触发集里 ——
+    // 而 §9.4 明写「接待会话里那次立项**刻意不 nudge**」,所以这条只可能靠 tick。
+    on: ["tick"],
+    if: (q) => {
+      const out: TodoDraft[] = [];
+      for (const m of q.members) {
+        if (!m.pending.needsDecomposition) continue;
+        out.push({
+          agentId: m.agentId, role: m.role, kind: "decompose_project",
+          key: `decompose_project:${q.projectId}`, target: null, refs: [], targetState: null,
+          label: "把项目拆成工作项",
+        });
+      }
+      return out;
+    },
+    then: { kind: "decompose_project", targetRole: "project_manager" },
+    why:
+      "批次 21 之前的真机形态:`projects=1, works=0` —— 立项之后组织停在那儿," +
+      "`project_manager` 与 `quality_reviewer` **从来没有被叫醒过**(§9.4)。判据是" +
+      "「项目 `active` 且一个工作项都没有」(`needsDecomposition`):「拆完了」与「没拆过」" +
+      "必须能区分,所以它看的是**总数**,不是「有没有 open 的」。",
+  },
+  {
+    id: "execute_assigned_work",
+    // 前置满足是**别的**工作项的状态迁移(所以这条真的会被 `work_status_changed` 点亮);
+    // 「建工作项 / 改派」在闭合集里没有取值。
+    on: ["work_status_changed", "tick"],
+    if: (q) => {
+      const out: TodoDraft[] = [];
+      for (const m of q.members) {
+        // 执行只有 worker 能做 —— `runWorkItem.checkRunnable` 会在角色不对时拒绝,
+        // 与其浪费一次唤醒,不如在这里就只认 worker。
+        if (m.role !== "worker") continue;
+        for (const w of m.pending.myOpenWorks) {
+          out.push({
+            agentId: m.agentId, role: m.role, kind: "execute_work",
+            key: `execute_work:${w.id}`, target: w.id, refs: [w.id], targetState: w.updatedAt,
+            label: `执行工作项 ${w.id}「${w.title}」`,
+          });
+        }
+      }
+      return out;
+    },
+    then: { kind: "execute_work", targetRole: "worker" },
+    why:
+      "`myOpenWorks` 曾经**不存在**:注入面的字段里没有「派给我的活」,于是 worker 的待办" +
+      "在系统里根本不存在,它只能靠主动 `work_list` 才看得到自己有活 —— 「测试通过但系统" +
+      "不动」的典型形态(`pendingWork.ts` 的字段注释)。判据含 `in_progress`(重跑一条" +
+      "已经在跑的工作项是合法的),不只是 `open`。",
+  },
+  {
+    id: "fix_stranded_assignment",
+    on: ["work_status_changed", "tick"],
+    if: (q) => {
+      const ids = q.strandedWorks.map((w) => w.id).sort();
+      if (ids.length === 0) return [];
+      const out: TodoDraft[] = [];
+      for (const m of q.members) {
+        if (m.role !== "project_manager") continue;
+        out.push({
+          agentId: m.agentId, role: m.role, kind: "fix_work_assignment",
+          key: `fix_work_assignment:${ids.join("+")}`, target: null, refs: ids, targetState: null,
+          label: `处置 ${ids.length} 条没人能执行的工作项`,
+        });
+      }
+      return out;
+    },
+    then: { kind: "fix_work_assignment", targetRole: "project_manager" },
+    why:
+      "真机现场:项目经理把「与甲方对齐业务场景」派给了**业务经理**,那条工作项至今 `open`" +
+      " —— 平台不执行非 worker 的负责人,`needsDecomposition` 也不为真(项目里确实有工作项)," +
+      "于是它谁也不叫醒。这条规则是**存量数据**的自愈路径(新数据由 `work_create` / " +
+      "`work_assign` 的调用期门直接拒收)。",
+  },
+  {
+    id: "review_done_works",
+    // `review_state` 的唯一写口就是 `works.status` 的唯一写口(`updateWorkStatus`),
+    // 所以「刚做完」在这里表现为一次工作项状态迁移。
+    on: ["work_status_changed", "tick"],
+    if: (q) => {
+      const qa = q.members.find((m) => m.role === "quality_reviewer");
+      if (qa === undefined || q.pendingReview.length === 0) return [];
+      const ids = q.pendingReview.map((w) => w.id).sort();
+      return [{
+        agentId: qa.agentId, role: "quality_reviewer", kind: "review_work",
+        key: `review_work:${ids.join("+")}`, target: null, refs: ids, targetState: null,
+        label: `审查 ${ids.length} 个已完成的工作项`,
+      }];
+    },
+    then: { kind: "review_work", targetRole: "quality_reviewer" },
+    why:
+      "批次 20 的判据是**级联观察到的内存事件**(「工作项刚变成 done」)—— 不持久、" +
+      "**重启后不补跑**(本文件头注释 ① 的第 2 个洞)。migration 013 把 `review_state`" +
+      "落成库里的真状态之后,它退化成**一条查询**:`works.status='done' AND " +
+      "review_state='pending'`。",
+  },
+  {
+    id: "report_downstream_events",
+    // 事件由 `updateWorkStatus`(done/failed/blocked/cancelled)与 `insertBlocker` 写;
+    // 后者的 `blocker.open` 在闭合触发集里没有取值。
+    on: ["work_status_changed", "tick"],
+    if: (q) => {
+      const bm = q.members.find((m) => m.role === "business_manager");
+      if (bm === undefined || q.events.length === 0) return [];
+      // ── 合并唤醒:攒够 N 条、或最老的那条等到 T,才叫醒一次 ──────────
+      //
+      // 加这两个条件的**唯一**理由是用户的原话:「业务经理干的事情太多了……
+      // 聊天记录里面的一长串,真真甲方不关心这些」。真机库是扁平结构,写入侧的
+      // 「只留根」那条判据**全部命中**(每条工作项都是根),所以「每条终态都叫醒
+      // 一次」这件事只能在这里收窄。见本文件头注释。
+      //
+      // ⚠️ `events` 是**升序**(`created_at, seq`),所以 `events[0]` 就是最老的那条
+      // —— 「最老的等了多久」不需要另查一次,它就在这一次查询里。
+      const oldest = q.events[0]!.createdAt;
+      const waitedMs = q.now - oldest;
+      const enough = q.events.length >= q.reportBatchSize;
+      const waited = waitedMs >= q.reportMaxDelayMs;
+      if (!q.immediateEvent && !enough && !waited) return [];
+      // 叫醒的理由要能被看见 —— 否则「为什么这次只叫了一次」在事后无从回答
+      const reason = q.immediateEvent
+        ? "其中有该立刻说的(失败 / 高危阻塞)"
+        : enough
+          ? `已攒够 ${q.events.length} 条(阈值 ${q.reportBatchSize})`
+          : `最老的一条等了 ${Math.round(waitedMs / 1000)}s(上界 ${Math.round(q.reportMaxDelayMs / 1000)}s)`;
+      const version = Math.max(...q.events.map((e) => e.seq));
+      return [{
+        agentId: bm.agentId, role: "business_manager", kind: "report_downstream",
+        key: `report_downstream:${version}`, target: null, refs: [], targetState: version,
+        label: `向甲方交代下游的 ${q.events.length} 条结果(${reason})`,
+      }];
+    },
+    then: { kind: "report_downstream", targetRole: "business_manager" },
+    why:
+      "批次 20 真机跑出来过「工作项做完了而**没有人向甲方汇报**」—— 撞上 `maxRounds` 时" +
+      "那一路攒的结果随调用消失(本文件头注释 ① 的第 1 个洞)。下游结果现在落在 outbox" +
+      "(`dispatch_events`)里,所以这条规则重启之后照样查得出来;它**收窄的是时机,不是资格**" +
+      "(没到阈值的行根本没被消费,`consumed_at` 不因合并而撒谎,§9.4)。",
+  },
+];
+
+/**
+ * 把规则要读的结构化事实**一次性**从库里查出来(纯查询,查完规则就没有别的读法)。
+ *
+ * 为什么先物化:①规则因此拿不到 `db`(见 `RuleFacts`);②每个成员只算一次
+ * `collectPendingWork`(8 条规则各查一遍会把它变成 8 倍)—— 而这是**同一次调用内的
+ * 缓存**,不是跨调用状态:它随 `collectTodos` 的返回一起消失,下一次 tick 重新查库。
+ */
+function collectRuleFacts(
+  db: Database.Database,
+  projectId: string,
+  now: number,
+  opts: CollectTodosOptions,
+): RuleFacts {
+  const members: RuleMember[] = [];
+  for (const m of loadProjectRoster(db, projectId)) {
+    if (!isProjectRole(m.role)) continue;
+    const role = m.role;
+    members.push({
+      agentId: m.id,
+      role,
+      pending: collectPendingWork(db, m.id, projectId, now),
+      canReviewChange: ROLE_SPECS[role].ceiling.includes("change.review"),
+    });
+  }
+
+  /**
+   * 派给非 worker(或负责人已不存在)的**非终态**工作项 —— `fix_stranded_assignment`
+   * 的判据。它与成员无关,所以按项目算一次;角色条件留在规则里。
+   */
+  const strandedWorks = listWorks(db, projectId).filter((w) => {
+    if (isTerminalWorkStatus(w.status)) return false;
+    const a = getAgent(db, w.assigneeAgentId);
+    return a === null || a.role !== "worker";
+  });
+
+  const events = listPendingDispatchEvents(db, projectId);
+  return {
+    projectId,
+    now,
+    members,
+    strandedWorks,
+    events,
+    // 查库的活在这里做完 —— `isImmediateEvent` 要看 `blockers.severity`,规则拿不到 db
+    immediateEvent: events.some((e) => isImmediateEvent(db, e)),
+    pendingReview: listWorksPendingReview(db, projectId),
+    reportBatchSize: opts.reportBatchSize ?? DEFAULT_REPORT_BATCH_SIZE,
+    reportMaxDelayMs: opts.reportMaxDelayMs ?? DEFAULT_REPORT_MAX_DELAY_MS,
+  };
+}
+
 /**
  * 扫一遍这个项目,列出**此刻真的有人能动手**的待办。
  *
  * ⚠️ 这是全系统**唯一**一处「下一步该谁跑」的判定,所以它的纯度是这套设计的
  * 地基:入参只有 `(db, projectId, now, 预算上限)`,不读任何进程内状态、
- * 不接收「上次发生了什么」。每个 tick、每次门铃都从库重新算。
+ * 不接收「上次发生了什么」。每个 tick、每次门铃都从库重新算 —— 它**不知道**
+ * 是哪个触发把它叫起来的。
  *
- * 只考虑项目的**活跃成员**(花名册),并且逐条按角色的 ceiling 过一遍 ——
- * 库里挂着而我的工具面够不着的事(例如业务经理推不动变更)不该把我叫醒:
- * 叫醒了也只能空转一轮。这与 `hasActionableWork` 同源,只是这里要逐条判定,
- * 不能再合并成一个布尔。
+ * 三件事,没有第四件:
+ *   ① 物化现场 `collectRuleFacts`(纯查询)
+ *   ② 跑规则表 `RULES`(纯函数,只读 ① 的结果)。**判定只有一处** —— 逻辑散在
+ *      `collectTodos` 里就又会变回「8 个分支」,规则表也不该有第二个真相源
+ *   ③ 挂上库里的尝试预算,按优先级排好
  */
 export function collectTodos(opts: CollectTodosOptions): TodoBoard {
   const { db, projectId, now } = opts;
@@ -313,139 +764,9 @@ export function collectTodos(opts: CollectTodosOptions): TodoBoard {
   const project = getProjectRow(db, projectId);
   if (project === null) return { projectId, runnable: [], exhausted: [] };
 
-  const roster = loadProjectRoster(db, projectId);
-  const todos: Omit<DriverTodo, "attempts" | "projectId">[] = [];
-
-  for (const m of roster) {
-    if (!isProjectRole(m.role)) continue;
-    const role = m.role;
-    const pw = collectPendingWork(db, m.id, projectId, now);
-    /**
-     * 派给非 worker 的工作项**平台不会执行**(`runWorkItem.checkRunnable` 拒绝),
-     * 而它也不会让 `needsDecomposition` 为真(项目里确实有工作项)——
-     * 于是它谁也不叫醒,永远停在那儿。真机现场就是这样:项目经理把
-     * 「与甲方对齐业务场景」派给了业务经理,那条工作项至今 `open`。
-     *
-     * 现在的处置分两层:
-     *   - **调用期** `work_create` / `work_assign` 直接拒收非 worker 的负责人
-     *   - **存量数据**(那条已经躺在库里的工作项)由这条待办兜住:叫醒派活的人
-     *     去改派或关掉它。可见,可处置,不静默。
-     */
-    const stranded =
-      role === "project_manager"
-        ? listWorks(db, projectId).filter((w) => {
-            if (isTerminalWorkStatus(w.status)) return false;
-            const a = getAgent(db, w.assigneeAgentId);
-            return a === null || a.role !== "worker";
-          })
-        : [];
-
-    // 库里挂着但我的工具面够不着的事,不叫醒我(与 `hasActionableWork` 同源:
-    // 叫醒了也只能空转一轮)。「没人能执行的存量工作项」是唯一的例外 ——
-    // 它恰恰**不**在 actionable 里(执行不是项目经理的能力),但必须有人处置。
-    if (!hasActionableWork(pw) && stranded.length === 0) continue;
-
-    if (pw.asksToAnswer.length > 0) {
-      const ids = pw.asksToAnswer.map((a) => a.id).sort();
-      todos.push({
-        agentId: m.id, role, kind: "answer_ask",
-        key: `answer_ask:${ids.join("+")}`, target: null, refs: ids, targetState: null,
-        label: `回答 ${ids.length} 条等它的提问`,
-      });
-    }
-    if (pw.meetingsToRespond.length > 0) {
-      const ids = pw.meetingsToRespond.map((x) => x.id).sort();
-      todos.push({
-        agentId: m.id, role, kind: "attend_meeting",
-        key: `attend_meeting:${ids.join("+")}`, target: null, refs: ids, targetState: null,
-        label: `对 ${ids.length} 场会议表态`,
-      });
-    }
-    // 变更只有持 `change.review` 的角色推得动(业务经理只有 change.read),
-    // 而 `hasActionableWork` 已经按 ceiling 判过这一条。
-    if (pw.pendingChanges.length > 0 && ROLE_SPECS[role].ceiling.includes("change.review")) {
-      const ids = pw.pendingChanges.map((c) => c.id).sort();
-      todos.push({
-        agentId: m.id, role, kind: "review_change",
-        key: `review_change:${ids.join("+")}`, target: null, refs: ids, targetState: null,
-        label: `评审 ${ids.length} 条变更`,
-      });
-    }
-    if (pw.needsDecomposition) {
-      todos.push({
-        agentId: m.id, role, kind: "decompose_project",
-        key: `decompose_project:${projectId}`, target: null, refs: [], targetState: null,
-        label: "把项目拆成工作项",
-      });
-    }
-    // 执行只有 worker 能做 —— `runWorkItem.checkRunnable` 会在角色不对时拒绝,
-    // 与其浪费一次唤醒,不如在这里就只认 worker。
-    if (role === "worker") {
-      for (const w of pw.myOpenWorks) {
-        todos.push({
-          agentId: m.id, role, kind: "execute_work",
-          key: `execute_work:${w.id}`, target: w.id, refs: [w.id], targetState: w.updatedAt,
-          label: `执行工作项 ${w.id}「${w.title}」`,
-        });
-      }
-    }
-    if (stranded.length > 0) {
-      const ids = stranded.map((w) => w.id).sort();
-      todos.push({
-        agentId: m.id, role, kind: "fix_work_assignment",
-        key: `fix_work_assignment:${ids.join("+")}`, target: null, refs: ids, targetState: null,
-        label: `处置 ${ids.length} 条没人能执行的工作项`,
-      });
-    }
-  }
-
-  // ── 由库里的真状态(而不是级联事件)触发的两条 ──
-  const bm = roster.find((m) => m.role === "business_manager");
-  const events = listPendingDispatchEvents(db, projectId);
-  if (bm !== undefined && events.length > 0) {
-    const version = Math.max(...events.map((e) => e.seq));
-    /**
-     * ── 合并唤醒:攒够 N 条、或最老的那条等到 T,才叫醒一次 ──────────
-     *
-     * 加这两个条件的**唯一**理由是用户的原话:「业务经理干的事情太多了……
-     * 聊天记录里面的一长串,真真甲方不关心这些」。真机库是扁平结构,写入侧的
-     * 「只留根」那条判据**全部命中**(每条工作项都是根),所以「每条终态都叫醒
-     * 一次」这件事只能在这里收窄。见本文件头注释。
-     *
-     * ⚠️ `events` 是**升序**(`created_at, seq`),所以 `events[0]` 就是最老的那条
-     * —— 「最老的等了多久」不需要另查一次,它就在这一次查询里。
-     */
-    const reportBatchSize = opts.reportBatchSize ?? DEFAULT_REPORT_BATCH_SIZE;
-    const reportMaxDelayMs = opts.reportMaxDelayMs ?? DEFAULT_REPORT_MAX_DELAY_MS;
-    const immediate = events.some((e) => isImmediateEvent(db, e));
-    const oldest = events[0]!.createdAt;
-    const waitedMs = now - oldest;
-    const enough = events.length >= reportBatchSize;
-    const waited = waitedMs >= reportMaxDelayMs;
-    if (immediate || enough || waited) {
-      // 叫醒的理由要能被看见 —— 否则「为什么这次只叫了一次」在事后无从回答
-      const why = immediate
-        ? "其中有该立刻说的(失败 / 高危阻塞)"
-        : enough
-          ? `已攒够 ${events.length} 条(阈值 ${reportBatchSize})`
-          : `最老的一条等了 ${Math.round(waitedMs / 1000)}s(上界 ${Math.round(reportMaxDelayMs / 1000)}s)`;
-      todos.push({
-        agentId: bm.id, role: "business_manager", kind: "report_downstream",
-        key: `report_downstream:${version}`, target: null, refs: [], targetState: version,
-        label: `向甲方交代下游的 ${events.length} 条结果(${why})`,
-      });
-    }
-  }
-  const qa = roster.find((m) => m.role === "quality_reviewer");
-  const pendingReview = listWorksPendingReview(db, projectId);
-  if (qa !== undefined && pendingReview.length > 0) {
-    const ids = pendingReview.map((w) => w.id).sort();
-    todos.push({
-      agentId: qa.id, role: "quality_reviewer", kind: "review_work",
-      key: `review_work:${ids.join("+")}`, target: null, refs: ids, targetState: null,
-      label: `审查 ${ids.length} 个已完成的工作项`,
-    });
-  }
+  const facts = collectRuleFacts(db, projectId, now, opts);
+  const todos: TodoDraft[] = [];
+  for (const rule of RULES) todos.push(...rule.if(facts));
 
   // ── 尝试预算:唯一的「不再叫醒」判据,而且它在库里 ──
   const ledger = listAttempts(db, projectId);
@@ -464,7 +785,6 @@ export function collectTodos(opts: CollectTodosOptions): TodoBoard {
     exhausted: sorted.filter((t) => t.attempts >= maxAttempts),
   };
 }
-
 // ── 任务描述 ────────────────────────────────────────────────────
 
 /**

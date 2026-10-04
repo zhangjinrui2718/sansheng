@@ -332,7 +332,7 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
     appendSessionMessage(db, {
       id: userMessageId, sessionId, agentId: null, kind: "user", content, createdAt: at,
     });
-    hub.emitMessageStart(projectId, userMessageId, "user");
+    hub.emitMessageStart(projectId, userMessageId, "user", null);
     hub.emitDelta(projectId, userMessageId, content);
     hub.emitMessageEnd(projectId, userMessageId);
 
@@ -534,7 +534,9 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
     const session = got.session;
     const sessionId = ensureSession(db, projectId, now(), newId);
     const messageId = newId("msg");
-    hub.emitMessageStart(projectId, messageId, "assistant");
+    // 建轮那一刻就把说话人钉住 —— 这一条是**跑这个回合的那个 agent**(参数,不是常量):
+    // `handleUserMessage` 传业务经理,排空器传项目经理 / 质检(见 `drainOne` 的回调)。
+    hub.emitMessageStart(projectId, messageId, "assistant", agentId);
     const textBuf: string[] = [];
     const thinkBuf: string[] = [];
 
@@ -569,7 +571,7 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
           ? { wallClockTimeoutMs: opts.turnWallClockMs }
           : {}),
         onEvent: (ev) => {
-          bridge(ev, projectId, messageId, hub, textBuf, thinkBuf);
+          bridge(ev, projectId, messageId, agentId, hub, textBuf, thinkBuf);
         },
       });
       // 助手消息落库(项目活过会话)。落的是**真正说话的那个 agent**,不是写死 bm。
@@ -656,7 +658,9 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
     const session = got.session;
     const sessionId = ensureSession(db, projectId, now(), newId);
     const messageId = newId("msg");
-    hub.emitMessageStart(projectId, messageId, "assistant");
+    // 执行那条路的说话人是 `agentId`(worker,或派活的角色)—— 不是写死的 bm:
+    // 它由 `drainOne` 的 `runWork` 回调按待办把 agent 传进来。
+    hub.emitMessageStart(projectId, messageId, "assistant", agentId);
     const textBuf: string[] = [];
     const thinkBuf: string[] = [];
     let aborted = false;
@@ -680,7 +684,7 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
           : {}),
         // 让 worker 这一回合也流式上屏 —— 否则它在界面上是一段没有反应的等待
         onEvent: (ev) => {
-          bridge(ev, projectId, messageId, hub, textBuf, thinkBuf);
+          bridge(ev, projectId, messageId, agentId, hub, textBuf, thinkBuf);
         },
       });
       const text = execution.turn.text.trim() !== ""
@@ -1043,6 +1047,7 @@ function bridge(
   ev: AgentSessionEvent,
   projectId: string | null,
   messageId: string,
+  agentId: string,
   hub: PlatformHub,
   textBuf: string[],
   thinkBuf: string[],
@@ -1061,9 +1066,11 @@ function bridge(
     return;
   }
   if (ev.type === "tool_execution_start") {
+    // `tool_start` 也能建轮(前端),所以它同样要带说话人 —— 与 `bridge` 的
+    // `message_start` 用的是同一个 agent(见 §2.10.2)
     hub.emitToolStart(projectId, messageId, {
       id: ev.toolCallId, name: ev.toolName, args: ev.args,
-    });
+    }, agentId);
     return;
   }
   if (ev.type === "tool_execution_end") {

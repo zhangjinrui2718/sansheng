@@ -415,11 +415,36 @@ export interface WsToolInfo {
  * 「这条流是接待对话」还是「这条流不属于任何对话」。
  * `eventProjectId()` 对接待会话返回 `null`(与无项目事件一致)—— 因为前端对
  * 接待流的处置与「无项目」是一致的:它只按当前上下文累积,不做项目分派。
+ *
+ * ── 说话者身份(`agentId`)只出现在**能建轮**的两个事件上 ──────────
+ *
+ * `message_start` 与 `tool_start` 带**必填**的 `agentId`;`delta` /
+ * `thinking_delta` / `message_end` / `tool_end` **不带** —— 它们全部追加到
+ * 「当前那一轮」,而那一轮是被前两个事件建出来的 ⇒ **身份在建轮那一刻就定了**,
+ * 再加一遍没有读者。
+ *
+ * 语义与取值域**不新造**:`agentId: string | null`,`null` = 甲方 ——
+ * 与 `SessionMessageView.agentId`(本文件)以及 `session_messages.agent_id`
+ * 的注释逐字同义(`migrations/009_collaboration.sql:45`:「NULL = 甲方(用户)
+ * 说的话」)。
+ *
+ * **类型上必填,不是可选**:可选 = 漏填也编译得过,而漏填的表现是前端把它当成
+ * 一个**无名助手**(静默);必填之后每个构造点都必须显式说清是谁,TS 会把它们
+ * 全部点出来。为什么不加 `speakerRole` / `channel`、以及 §2.10.3 那条
+ * 「回合中途播报吞字」的已知缺陷(与本字段无关,靠它救不了),
+ * 见 `docs/DESIGN-PLATFORM.md` §2.10.2 / §2.10.3。
  */
 export type ServerEvent =
   | { type: "ready"; modelId: string | null; provider: string | null; cwd: string }
   | { type: "pong"; ts: number }
-  | { type: "message_start"; projectId: string | null; messageId: string; role: "user" | "assistant" }
+  | {
+      type: "message_start";
+      projectId: string | null;
+      messageId: string;
+      role: "user" | "assistant";
+      /** 谁在说话。**`null` = 甲方**(与 `SessionMessageView.agentId` 同义) */
+      agentId: string | null;
+    }
   | { type: "delta"; projectId: string | null; messageId: string; text: string }
   /**
    * 内部推理。**与 delta 是两条流,永不混流** ——
@@ -433,7 +458,14 @@ export type ServerEvent =
       messageId: string;
       usage?: { input: number; output: number };
     }
-  | { type: "tool_start"; projectId: string | null; messageId: string; tool: WsToolInfo }
+  | {
+      type: "tool_start";
+      projectId: string | null;
+      messageId: string;
+      /** 谁在调这个工具。取值域与 `message_start` 同源(`null` = 甲方);实际调用方总是某个角色 */
+      agentId: string | null;
+      tool: WsToolInfo;
+    }
   | { type: "tool_end"; projectId: string | null; messageId: string; tool: WsToolInfo }
   | { type: "agent_end"; projectId: string | null; ts: number }
   /**

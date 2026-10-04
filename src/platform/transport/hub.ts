@@ -180,8 +180,21 @@ export class PlatformHub {
 
   // ── 事件发射(host 与工具共用)────────────────────────────────
 
-  emitMessageStart(projectId: string | null, messageId: string, role: "user" | "assistant"): void {
-    this.broadcast({ type: "message_start", projectId, messageId, role });
+  /**
+   * 「某条消息开始流了」——**它同时是前端唯一能建轮的事件之一**,所以
+   * `agentId` 必填(见 `shared/types/platform.ts` 的 ServerEvent 说明):
+   * 漏填不会报错,只会让前端把这条流当成一个**无名助手**(静默)。
+   *
+   * `agentId === null` = **甲方**(用户在说话),与 `session_messages.agent_id`
+   * 同义。**不给默认值**是刻意的:默认值会让漏传的调用点编译通过。
+   */
+  emitMessageStart(
+    projectId: string | null,
+    messageId: string,
+    role: "user" | "assistant",
+    agentId: string | null,
+  ): void {
+    this.broadcast({ type: "message_start", projectId, messageId, role, agentId });
   }
   emitDelta(projectId: string | null, messageId: string, text: string): void {
     this.broadcast({ type: "delta", projectId, messageId, text });
@@ -193,8 +206,17 @@ export class PlatformHub {
   emitMessageEnd(projectId: string | null, messageId: string, usage?: { input: number; output: number }): void {
     this.broadcast({ type: "message_end", projectId, messageId, ...(usage !== undefined ? { usage } : {}) });
   }
-  emitToolStart(projectId: string | null, messageId: string, tool: WsToolInfo): void {
-    this.broadcast({ type: "tool_start", projectId, messageId, tool });
+  /**
+   * 「某个工具开始跑了」。`tool_start` **自己也能建轮**
+   * (`get().currentTurn ?? newTurn(e.messageId, ...)`)⇒ 同样必填 `agentId`。
+   */
+  emitToolStart(
+    projectId: string | null,
+    messageId: string,
+    tool: WsToolInfo,
+    agentId: string | null,
+  ): void {
+    this.broadcast({ type: "tool_start", projectId, messageId, agentId, tool });
   }
   emitToolEnd(projectId: string | null, messageId: string, tool: WsToolInfo): void {
     this.broadcast({ type: "tool_end", projectId, messageId, tool });
@@ -249,20 +271,22 @@ export class PlatformHub {
         this.emitClientQuestion(toClientQuestionView(this.deps.db, row, (id) => nameOf(this.deps.db, id)));
       },
 
-      tell: async ({ projectId, message }) => {
-        // 播报也要落库:项目活过会话,只广播的话刷新就没了
+      tell: async ({ projectId, message, agentId }) => {
+        // 播报也要落库:项目活过会话,只广播的话刷新就没了。
+        // **作者是调用方给的真实 agent id** —— 从前这里写死成业务经理的 id,
+        // 今天恰好对(只有它会播报),但组织表换 id 的那一刻就**静默归错人**。
         const at = this.deps.now();
         const sessionId = ensureSession(this.deps.db, projectId, at, this.deps.newId);
         appendSessionMessage(this.deps.db, {
           id: this.deps.newId("m"),
           sessionId,
-          agentId: "bm",
+          agentId,
           kind: "assistant",
           content: message,
           createdAt: at,
         });
         const messageId = this.deps.newId("msg");
-        this.emitMessageStart(projectId, messageId, "assistant");
+        this.emitMessageStart(projectId, messageId, "assistant", agentId);
         this.emitDelta(projectId, messageId, message);
         this.emitMessageEnd(projectId, messageId);
       },

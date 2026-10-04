@@ -133,7 +133,9 @@ const tellClient: PlatformTool = {
     const text = requireString(args, "text");
     if (!text.ok) return text.result;
     try {
-      await channel.tell({ projectId: proj.project.id, message: text.value });
+      // 作者是**调用这个工具的 agent**(`ctx.agent.id`),不是通道自己猜的:
+      // 从前通道实现里写死了业务经理的 id —— 组织表换 id 就静默归错人(§2.10.2 末)。
+      await channel.tell({ projectId: proj.project.id, message: text.value, agentId: ctx.agent.id });
     } catch (err) {
       return fail("internal", `播报失败:${err instanceof Error ? err.message : String(err)}`);
     }
