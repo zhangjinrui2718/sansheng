@@ -428,6 +428,20 @@ export const useChatStore = create<ChatState>((set, get) => ({
         set({ status: "error", error: e.error });
         return;
       }
+
+      case "cascade_stopped": {
+        // 驱动者循环在异常位置停下了。**不能当成普通 idle** —— 界面回到 idle
+        // 而用户以为「还在跑」或「已经做完了」,这两种误解都会让他在错误的时刻
+        // 做决定。服务端同时落了一条 system 会话消息(刷新后还在),
+        // 这里只负责把两个 revision 推一推,让那条消息和列表尽快出现在屏幕上。
+        const pid = eventProjectId(e);
+        const active = get().projectId;
+        set((s) => ({
+          projectsRevision: s.projectsRevision + 1,
+          projectRevision: s.projectRevision + (pid === null || pid === active ? 1 : 0),
+        }));
+        return;
+      }
     }
   },
 }));

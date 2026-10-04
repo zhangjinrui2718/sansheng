@@ -464,6 +464,27 @@ export type ServerEvent =
    */
   | { type: "overdue_asks"; projectId: string; askIds: readonly string[]; count: number }
   /**
+   * **驱动者循环停在了异常的位置** —— 撞上单次级联上限,或检测到「同一个待办
+   * 在项目状态没变的情况下被反复唤醒」。
+   *
+   * 为什么必须有这条事件:级联到界时**不能静默停** —— 界面会回到 `idle`,而用户
+   * 会以为「还在跑」或者「已经做完了」。这两种误解都会让他在错误的时刻做决定。
+   *
+   * `reason`:
+   *   - `max_rounds`:跑得动但没跑完(项目太大,或某个角色原地打转)
+   *   - `no_progress`:同一个待办重复出现而项目状态没变 —— 再叫也不会不同
+   *
+   * 收到它该做的是让用户看见,由他判断继续还是插手。
+   * **平台不替他决定再跑一轮。**
+   */
+  | {
+      type: "cascade_stopped";
+      projectId: string;
+      rounds: number;
+      reason: "max_rounds" | "no_progress";
+      detail: string;
+    }
+  /**
    * `projectId` 三态:字符串 = 该项目;**`null` = 接待会话**;
    * 缺省 = 与任何上下文无关(如 JSON 解析失败)。
    */

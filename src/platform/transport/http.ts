@@ -26,12 +26,12 @@ import type Database from "better-sqlite3";
 import { join } from "node:path";
 import { readFileSync } from "node:fs";
 import {
-  listProjects, getProjectRow, insertProject, addMember,
+  listProjects, getProjectRow, insertProject,
 } from "../storage/repo/projects.js";
 import { getWork } from "../storage/repo/works.js";
 import { getArtifact } from "../storage/repo/artifacts.js";
 import { resolveClientQuestion } from "../tools/client.js";
-import { ORG, ensureOrg, orgReady } from "../runtime/org.js";
+import { ensureOrg, ensureProjectOrg, orgReady } from "../runtime/org.js";
 import { loadPromptUnits, unitPath } from "../runtime/promptAssembly.js";
 import { solveToolset } from "../harness/authorize.js";
 import { resolveToolSet, strayToolSetFiles, toolSetDir } from "../harness/toolSet.js";
@@ -148,7 +148,8 @@ export function createPlatformApp(deps: HttpDeps): Hono {
       status: "active",
       createdAt: at,
     });
-    for (const m of ORG) addMember(db, id, m.id, at);
+    // 整个组织一起进来 —— 单一落点,与 project_open 走同一个 helper
+    ensureProjectOrg(db, id, at);
 
     const row = getProjectRow(db, id);
     if (row === null) return c.json(err("internal", "项目刚建好却读不到", 500).body, 500);

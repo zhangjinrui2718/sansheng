@@ -90,7 +90,22 @@ program
   .option("--cwd <path>", "会话工作目录(代码工具的根)")
   .option("--data <path>", "数据目录(默认 ~/.sansheng)")
   .option("--open", "起好后打开浏览器", false)
-  .action(async (opts: { host: string; port: string; cwd?: string; data?: string; open: boolean }) => {
+  .option(
+    "--max-cascade-rounds <n>",
+    "单次级联最多跑几个 agent 回合(烧 token 的硬上界;默认 8)",
+    "8",
+  )
+  .option(
+    "--scheduler-interval <ms>",
+    "调度器扫描间隔(毫秒;同时是驱动者循环的周期入口;默认 60000)",
+    "60000",
+  )
+  .action(async (opts: {
+    host: string; port: string; cwd?: string; data?: string; open: boolean;
+    maxCascadeRounds: string; schedulerInterval: string;
+  }) => {
+    const rounds = Number(opts.maxCascadeRounds);
+    const interval = Number(opts.schedulerInterval);
     await runPlatformServe({
       dataDir: opts.data ?? dataDir(),
       host: opts.host,
@@ -98,6 +113,9 @@ program
       ...(opts.cwd !== undefined ? { cwd: opts.cwd } : {}),
       version: "0.1.0",
       open: opts.open,
+      // 非法值不静默退回默认 —— 那会让「我调了上界」和「它根本没生效」长得一样
+      maxCascadeRounds: Number.isFinite(rounds) && rounds > 0 ? rounds : 8,
+      schedulerIntervalMs: Number.isFinite(interval) && interval > 0 ? interval : 60_000,
     });
   });
 

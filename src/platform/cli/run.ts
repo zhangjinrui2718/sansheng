@@ -24,8 +24,8 @@ import { bootPlatform, type BootedPlatform } from "../runtime/boot.js";
 import { createPlatformSession } from "../runtime/session.js";
 import { runWorkItem, renderExecutionReport } from "../runtime/execution.js";
 import { getAgent, listAgents } from "../storage/repo/agents.js";
-import { ORG, ensureOrg, pickWorker } from "../runtime/org.js";
-import { insertProject, addMember, getProjectRow } from "../storage/repo/projects.js";
+import { ensureOrg, ensureProjectOrg, pickWorker } from "../runtime/org.js";
+import { insertProject, getProjectRow } from "../storage/repo/projects.js";
 import { insertWork, type WorkRow } from "../storage/repo/works.js";
 import type { Specialization } from "../identity/role.js";
 
@@ -89,7 +89,7 @@ export async function runPlatformRun(opts: PlatformRunOptions): Promise<boolean>
         status: "active",
         createdAt: at,
       });
-      for (const m of ORG) addMember(booted.deps.db, projectId, m.id, at);
+      ensureProjectOrg(booted.deps.db, projectId, at);
       out(`  新建项目 ${projectId}「${opts.task.slice(0, 40)}」`);
     } else {
       const p = getProjectRow(booted.deps.db, projectId);
@@ -98,8 +98,8 @@ export async function runPlatformRun(opts: PlatformRunOptions): Promise<boolean>
         return false;
       }
       out(`  使用已有项目 ${projectId}「${p.name}」(状态 ${p.status})`);
-      // 确保组织成员在项目里
-      for (const m of ORG) addMember(booted.deps.db, projectId, m.id, at);
+      // 确保组织成员在项目里(幂等)
+      ensureProjectOrg(booted.deps.db, projectId, at);
     }
 
     // ── 工作项 ──

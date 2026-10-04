@@ -33,6 +33,7 @@ import type Database from "better-sqlite3";
 import {
   collectPendingWork, renderPendingWork, summarizePendingWork,
 } from "./pendingWork.js";
+import { renderProjectContext } from "./projectContext.js";
 
 /** 一次工具调用的现场记录。 */
 export interface ToolCallRecord {
@@ -63,6 +64,19 @@ export interface TurnResult {
    */
   readonly openedProjectIds: readonly string[];
   readonly pending: {
+    readonly injected: boolean;
+    readonly summary: string;
+  };
+  /**
+   * **我在哪个项目** —— 与 `pending` 同级的现场记录。
+   *
+   * 没有它,「业务经理说当前没有在跑的项目」这类事故在事后只能靠翻库复原
+   * (而那正是它第一次发生时没人看出来的原因)。接待会话下 `injected` 为 false。
+   *
+   * **可选**:手工构造 `TurnResult` 字面量的地方(测试、`emptyTurn`)可以不带它,
+   * 渲染侧按「未记录」如实呈现 —— 不假装有一份空的项目上下文。
+   */
+  readonly projectContext?: {
     readonly injected: boolean;
     readonly summary: string;
   };
@@ -236,7 +250,14 @@ export async function runTurn(opts: RunTurnOptions): Promise<TurnResult> {
       : pid === null
         ? "(接待会话:没有项目待办)"
         : "(未注入)";
-  const payload = composeTurnMessage(pendingBlock, opts.message);
+
+  // ── 项目上下文注入(A)──
+  // **与待办同一个位置、同一条理由**:都是「每回合现算的现场」。拼进系统提示
+  // 会把建立那一刻的快照当成永久事实(理由全文见 projectContext.ts 文件头)。
+  // 接待会话返回空串,这里无脑拼接 —— 那条路径的行为与改动前完全一致。
+  const ctx = renderProjectContext(opts.db, opts.agentId, pid);
+  const body = composeTurnMessage(pendingBlock, opts.message);
+  const payload = ctx.text === "" ? body : `${ctx.text}\n\n${body}`;
 
   const unsub = opts.session.subscribe((ev: AgentSessionEvent) => {
     try {
@@ -304,6 +325,7 @@ export async function runTurn(opts: RunTurnOptions): Promise<TurnResult> {
     toolCalls,
     openedProjectIds,
     pending: { injected: pendingBlock.trim() !== "", summary: pendingSummary },
+    projectContext: { injected: ctx.text.trim() !== "", summary: ctx.summary },
     settled: !timedOut,
     timedOut,
   };
@@ -316,6 +338,12 @@ export async function runTurn(opts: RunTurnOptions): Promise<TurnResult> {
  */
 export function renderTurnReport(r: TurnResult): string {
   const lines: string[] = [];
+  const pc = r.projectContext;
+  lines.push(
+    `项目上下文: ${
+      pc === undefined ? "未记录" : pc.injected ? pc.summary : "无(接待会话)"
+    }`,
+  );
   lines.push(`待办注入: ${r.pending.injected ? r.pending.summary : "无"}`);
   if (r.toolCalls.length > 0) {
     lines.push(`工具调用 ${r.toolCalls.length} 次:`);

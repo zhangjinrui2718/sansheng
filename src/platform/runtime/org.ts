@@ -9,6 +9,7 @@
  */
 import type Database from "better-sqlite3";
 import { insertAgent, getAgent, listAgents, type AgentRow } from "../storage/repo/agents.js";
+import { addMember } from "../storage/repo/projects.js";
 import type { ProjectRole, Specialization } from "../identity/role.js";
 
 export interface OrgMember {
@@ -56,6 +57,45 @@ export function ensureOrg(db: Database.Database, at: number): string[] {
 /** 组织是否已就位(HTTP 路由用它决定要不要报「先跑一次 CLI」)。 */
 export function orgReady(db: Database.Database): boolean {
   return ORG.every((m) => getAgent(db, m.id) !== null);
+}
+
+/**
+ * 把一个项目**应有的组织**放进项目成员表。幂等。
+ *
+ * ── 为什么必须有这一条(这是驱动者循环的前置)─────────────────────
+ *
+ * `project_open` 原本只把**立项人**(业务经理)加成成员。后果不是「少几个人看」,
+ * 是**组织根本动不起来**:
+ *
+ *   - `buildToolContext` 对非成员返回 `agent_not_assigned` → 项目经理/worker/质检
+ *     的会话**建不出来**,驱动者循环第一步就撞墙(实测形态:`projects=1, works=0`)
+ *   - `resolveAssignee` 走 `loadProjectRoster` → 项目经理 `work_create` 时
+ *     「项目里没有 worker 角色的成员」,**拆解当场失败**
+ *
+ * 也就是说「立项之后组织自动接手」这件事在此之前**结构上不可能发生** ——
+ * 而它不会以报错的形式出现,只会以「什么都没发生」的形式出现。
+ *
+ * 与 `ensureOrg` 同一条理由:幂等不等于静默,这里返回本次真正加了谁。
+ */
+export function ensureProjectOrg(
+  db: Database.Database,
+  projectId: string,
+  at: number,
+): string[] {
+  const added: string[] = [];
+  for (const m of ORG) {
+    if (getAgent(db, m.id) === null) {
+      // 组织还没播种(例如 project_open 直接在空库上跑)——
+      // 在这里补种,而不是让项目带着一个不存在的成员。
+      insertAgent(db, {
+        id: m.id, role: m.role, specialization: m.spec,
+        displayName: m.name, createdAt: at,
+      });
+      added.push(m.id);
+    }
+    addMember(db, projectId, m.id, at);
+  }
+  return added;
 }
 
 export function findAgentByRole(db: Database.Database, role: ProjectRole): AgentRow | null {

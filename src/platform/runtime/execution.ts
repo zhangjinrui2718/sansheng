@@ -28,7 +28,7 @@
  * 调用方要能看出「它调了 6 次工具都没卒」而不是只看到一句「未收敛」。
  */
 import type Database from "better-sqlite3";
-import type { AgentSession } from "@earendil-works/pi-coding-agent";
+import type { AgentSession, AgentSessionEvent } from "@earendil-works/pi-coding-agent";
 import {
   getWork, updateWorkStatus, type WorkRow,
 } from "../storage/repo/works.js";
@@ -66,6 +66,16 @@ export interface RunWorkOptions {
   readonly workId: string;
   readonly timeoutMs?: number;
   readonly injectPending?: boolean;
+  /**
+   * 逐事件观察(宿主用来把这一回合**流式**推给前端)。
+   *
+   * ⚠️ 这个参数是真机跑出来才补上的:在此之前 `runWorkItem` 内部调 `runTurn`
+   * 时**没有传 onEvent**,于是 worker 干活的那几分钟在前端是**全黑**的 ——
+   * 只有回合结束时的 `work_changed` 与一条消息。CLI 那条路看不出来(它本来就
+   * 是跑完打印报告),但常驻宿主下它意味着用户盯着一个没有反应的屏幕。
+   * 抛错的处理与 `runTurn` 一致:观察者出错不影响回合。
+   */
+  readonly onEvent?: (ev: AgentSessionEvent) => void;
 }
 
 /** 工作项的可执行性前置检查。**不满足就拒绝,不硬跑。** */
@@ -143,6 +153,8 @@ export async function runWorkItem(opts: RunWorkOptions): Promise<ExecutionResult
     message: composeWorkPrompt(before),
     ...(opts.timeoutMs !== undefined ? { timeoutMs: opts.timeoutMs } : {}),
     ...(opts.injectPending !== undefined ? { injectPending: opts.injectPending } : {}),
+    // 观察者透传 —— 不传的话 worker 干活的这几分钟在前端是全黑的
+    ...(opts.onEvent !== undefined ? { onEvent: opts.onEvent } : {}),
   });
 
   const after = getWork(opts.db, before.id) ?? before;
@@ -188,6 +200,7 @@ function emptyTurn(): TurnResult {
     toolCalls: [],
     openedProjectIds: [],
     pending: { injected: false, summary: "(未执行)" },
+    projectContext: { injected: false, summary: "(未执行)" },
     settled: true,
     timedOut: false,
   };

@@ -15,6 +15,7 @@ import {
   WORK_STATUSES, type WorkStatus,
 } from "../storage/repo/works.js";
 import { getAgent } from "../storage/repo/agents.js";
+import { ensureProjectOrg } from "../runtime/org.js";
 import { resolveAssignee } from "./resolve.js";
 import {
   fail, ok, requireProject, requireString, readString, readStringArray, readNumber,
@@ -74,8 +75,13 @@ const projectOpen: PlatformTool = {
       id, name: name.value, client: client.value, goal: goal.value,
       status: "active", createdAt: at,
     });
-    // 立项人自动成为项目成员 —— 否则业务经理建完项目反而不在里面
+    // 立项人自动成为项目成员 —— 否则业务经理建完项目反而不在里面。
     addMember(ctx.db, id, ctx.agent.id, at);
+    // **整个组织一起进来**,不是只进立项人。
+    // 少了这一行,项目经理/worker/质检不是成员 → 他们的会话建不出来
+    // (buildToolContext 的 agent_not_assigned)、`work_create` 也解析不出负责人
+    // → 「立项之后组织接手」结构上不可能发生(见 runtime/org.ts 的注释)。
+    ensureProjectOrg(ctx.db, id, at);
     // ── 结构化 id 走 `data`,不靠解析 `text` ──────────────────────
     //
     // 宿主必须知道「新项目叫什么 id」:它要把接待会话的消息迁进新项目、让前端

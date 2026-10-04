@@ -8,17 +8,18 @@
 - **Sansheng(三生)** = 单用户本机常驻 Node 服务:Pi SDK 驱动**四个角色的 agent 组织**,SQLite 持久化,HTTP + WS + 托管前端。
 - **组织架构是一等数据**:`agents` / `projects` / `project_assignments` 在库里,**角色属性在代码里**(`ROLE_SPECS`)。制品是工件(`artifacts` 表),不是聊天记录。
 - 默认 `127.0.0.1:2719`;数据目录默认 `~/.sansheng/`,可用 `--data` 或 `SANSHENG_DATA` 覆盖。
-- 基线:**600 passed / 21 test files** · 两条 typecheck 0 error · `check:design` E1–E14 全绿。
+- 基线:**645 passed / 22 test files** · 两条 typecheck 0 error · `check:design` E1–E14 全绿。
 - 日志只走 stdout:`~/.sansheng/logs/sansheng.log` 恒为 0 字节,别去 tail 它。
 
-## 源码地图(`find src -name '*.ts' | wc -l` = 53)
+## 源码地图(`find src -name '*.ts' | wc -l` = 55)
 
 ```
 src/cli/                 CLI 入口(index.ts + paths.ts)
 src/platform/cli/        smoke / run 两个子命令的实现
 src/platform/host/       常驻宿主:serve / scheduler / reset
 src/platform/transport/  传输:http(API)/ hub(WS 广播)/ views
-src/platform/runtime/    boot session turn execution assembly promptAssembly pendingWork org sdkAdapter
+src/platform/runtime/    boot session turn execution assembly promptAssembly pendingWork
+                         projectContext driver org sdkAdapter
 src/platform/tools/      工具层:9 个文件、34 个平台工具定义 + registry.ts 的 dispatch()
 src/platform/harness/    授权:capability(能力↔工具表)/ authorize(三道门)/ toolSet(L2 集合文件读盘)/ write(提示词写盘)
 src/platform/identity/   角色:role.ts 的 ROLE_SPECS
@@ -69,6 +70,28 @@ shared/types/            跨端协议类型(platform.ts / settings.ts)
 >
 > 坏文件**不会**被当成空 allowlist(那等于悄悄收回全部权限),而是退化成出厂行为(按 ceiling 全集)+ 在 `GET /api/harness` 与启动日志里如实报出。可见性的落点:`RoleHarnessView.toolSet`(`state` / `removedByToolSet` / `problem`)。
 
+## 驱动者循环:谁被唤醒(批次 20)
+
+**四个角色此前只有两个驱动者**:`host/serve.ts` 跑业务经理(用户消息触发)、`cli/run.ts` 跑 worker(手工 CLI)。`project_manager` 与 `quality_reviewer` **从来没有被叫醒过** —— 立项之后 `projects=1, works=0`,组织不动。
+
+现在判定与执行都在 `src/platform/runtime/driver.ts`:
+
+| 角色 | 待办判据 | 判据从哪来 |
+|---|---|---|
+| `business_manager` | 有人升级给它 / 下游刚出结果要它向甲方交代 | 库里的 `open` ask + **本层级联观察到的事件** |
+| `project_manager` | 有人问它 / 有变更待评 / **项目零工作项** | `pendingWork.ts`(`needsDecomposition` 只在 active 项目 + 零 work 时为真) |
+| `worker` | **分派给它、前置已满足、还没终态**的工作项 | `pendingWork.ts` 的 `myOpenWorks` |
+| `quality_reviewer` | 有人问它 / 有变更待评 / **刚有工作项做完** | 库查询 + **本层级联观察到的事件** |
+
+> ⚠️ **「等待审查」这个状态在数据模型里不存在**(`works.status` 无 review 态、无 `reviews` 关联、质检也不持 `work.update`)。所以质检那一条**不是从库里查出来的判据**,而是级联自己观察到的「工作项刚变成 done」—— 它不持久,重启后不补跑。**不要把它写成一条 SQL 查询**,那是硬编一个语义为假的判据。
+
+**三个入口/边界**:① 用户消息的回合结束后链式跑;② 调度器 tick 时按项目扫一遍(`host/serve.ts` 的 `scanForActionableWork`,`IntervalMs` 可配);③ **接待会话里那次立项不级联** —— 用户刚被切进新项目,还没看过目标就自动开工等于在他确认之前花他的 token。
+
+**一定会停**三层:硬上界 `maxRounds`(默认 8,`--max-cascade-rounds` 可配)、级联内「同一 `(待办, 项目状态签名)`」重复即停、**跨级联** `stallStore`(同一待办在同一项目状态下已被叫醒过且无变化 → 以后不再叫醒 —— 没有它周期扫描每 60 秒会重叫一次)。撞上界 / 无进展**不静默**:广播 `cascade_stopped` + 落一条 `system` 会话消息。
+
+> 会话池的键是 `(上下文, agent)` 而不是上下文 —— 一个项目里四个角色各要一条自己的会话(工具面不同)。原先 BM 独占,键是 `string | null`。
+
+
 ## 数据与存储
 
 - 迁移在 `migrations/`:**007–010 建平台表**,**011 把旧系统的 7 张表 DROP**(`blackboards` / `conversations` / `messages` / `fragments` / `user_profile` / `agent_states` / `fragments_vec`)。
@@ -107,7 +130,7 @@ help
 ```
 npx tsc -p tsconfig.server.json --noEmit
 npx tsc -p tsconfig.web.json --noEmit
-npm test                  # 600 passed / 21 files
+npm test                  # 645 passed / 22 files
 npm run build
 npm run check:design      # 设计一致性 E1–E14
 ```

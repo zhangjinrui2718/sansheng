@@ -26,7 +26,12 @@ import { listAsks, askedByMeOpen, listOverdueAsks, type AskRow } from "../storag
 import { pendingMeetingsFor, type MeetingRow } from "../storage/repo/meetings.js";
 import { getAgent } from "../storage/repo/agents.js";
 import { listBlockers, type BlockerRow } from "../storage/repo/blockers.js";
-import { listChanges, type ChangeRequestRow } from "../storage/repo/changes.js";
+import { isChangeTerminal, listChanges, type ChangeRequestRow } from "../storage/repo/changes.js";
+import {
+  listWorks, depsSatisfied, type WorkRow,
+} from "../storage/repo/works.js";
+import { getProjectRow } from "../storage/repo/projects.js";
+import { ROLE_SPECS, isProjectRole, type ProjectRole } from "../identity/role.js";
 
 export interface PendingWork {
   /** 在等我答的提问 —— **最高优先级**,有人因为我停着 */
@@ -39,8 +44,41 @@ export interface PendingWork {
   overdueAsks: readonly AskRow[];
   /** 该项目未解决的阻塞 —— 供业务经理向甲方交代状况 */
   openBlockers: readonly BlockerRow[];
-  /** 待评审的变更 */
+  /**
+   * **待推进的变更**(非终态的:proposed / under_review / accepted)。
+   *
+   * 为什么不是只列 `proposed`:变更的状态机是
+   * `proposed → under_review → accepted → implemented`,每一步都要有人推。
+   * 只把 `proposed` 当待办,后果是真机跑出来过的形态 —— 项目经理把变更推到
+   * `under_review` 之后**没有任何人会被叫醒**,那条变更永久停在那儿,
+   * 而日志里一切正常(没有待办了)。
+   */
   pendingChanges: readonly ChangeRequestRow[];
+  /**
+   * **分派给我、现在就能开工**的工作项(负责人是我、状态 `open`、前置全部满足)。
+   *
+   * 这一条此前是缺的 —— 25 个字段里没有「派给我的活」,于是 worker 的待办在
+   * 注入面里**根本不存在**:它只能靠主动 `work_list` 才看得到自己有活。
+   * 而「谁手上有可执行的待办就唤醒谁」这条驱动规则正需要它(见 `runtime/driver.ts`)。
+   */
+  myOpenWorks: readonly WorkRow[];
+  /**
+   * 分派给我、但**前置还没满足**的工作项 —— 不在 actionable 里,只做可见性。
+   *
+   * 为什么单独列出来:`myOpenWorks` 把它们排除掉之后,「这条工作项为什么一直没跑」
+   * 在界面上就没有答案了(7-N:见不到的现场等于没有现场)。
+   */
+  myWaitingWorks: readonly WorkRow[];
+  /**
+   * 我负责拆解、但这个项目里**一个工作项都还没有**。
+   *
+   * 只有 `project_manager` 且项目 `active` 时才为真 —— 这是项目经理被唤醒的
+   * 起点(新立项、零工作项)。已经拆过(哪怕拆出来的都做完了)就不再为真:
+   * 「拆完了」和「没拆过」是两件事,后者的判据必须能区分它们。
+   */
+  needsDecomposition: boolean;
+  /** 我这个 agent 的当前角色(从库里现读)。找不到时 `null`。 */
+  readonly role: ProjectRole | null;
 }
 
 /** 收集一个 agent 在某项目里的全部待办。纯查询,无副作用。 */
@@ -50,22 +88,70 @@ export function collectPendingWork(
   projectId: string,
   now: number,
 ): PendingWork {
+  const row = getAgent(db, agentId);
+  const role = row !== null && isProjectRole(row.role) ? row.role : null;
+
+  // 分派给我的工作项,按前置是否满足分两堆。终态的不算待办。
+  const assigned = listWorks(db, projectId, { assigneeAgentId: agentId }).filter(
+    (w) => w.status === "open" || w.status === "in_progress",
+  );
+  const myOpenWorks: WorkRow[] = [];
+  const myWaitingWorks: WorkRow[] = [];
+  for (const w of assigned) {
+    if (depsSatisfied(db, w.id)) myOpenWorks.push(w);
+    else myWaitingWorks.push(w);
+  }
+
+  // 项目还没拆过:只有项目经理该管这件事,且只在 active 项目上。
+  const project = getProjectRow(db, projectId);
+  const noWorksYet = listWorks(db, projectId).length === 0;
+  const needsDecomposition =
+    role === "project_manager" && project !== null && project.status === "active" && noWorksYet;
+
   return {
     asksToAnswer: listAsks(db, projectId, { toAgentId: agentId, actionableOnly: true }),
     meetingsToRespond: pendingMeetingsFor(db, agentId),
     myBlockedAsks: askedByMeOpen(db, agentId),
     overdueAsks: listOverdueAsks(db, now, projectId),
     openBlockers: listBlockers(db, projectId, { unresolvedOnly: true }),
-    pendingChanges: listChanges(db, projectId, { status: "proposed" }),
+    // 非终态的变更都算待办 —— 但**只对持 `change.review` 的角色**算
+    // (由 hasActionableWork 按 ceiling 过滤;业务经理只有 change.read)
+    pendingChanges: listChanges(db, projectId).filter((c) => !isChangeTerminal(c.status)),
+    myOpenWorks,
+    myWaitingWorks,
+    needsDecomposition,
+    role,
   };
 }
 
-/** 有没有任何需要该 agent 动手的事。用于决定「要不要注入」。 */
+/**
+ * 有没有任何需要该 agent **动手**的事。用于决定「要不要注入 / 要不要唤醒」。
+ *
+ * ── 为什么要按角色的 ceiling 过滤(批次 20 的行为变更)────────────
+ *
+ * 一件事在库里挂着、而你的工具面根本够不着它,那就不该把你叫醒 ——
+ * 叫醒了你也只能空转一轮然后被无进展检测停掉(见 `runtime/driver.ts` 的 ③)。
+ *
+ * 具体差在哪:全组织里只有 `project_manager` / `worker` / `quality_reviewer`
+ * 持 `change.review`,业务经理只有 `change.read` —— 一条 `proposed` 变更对他是
+ * 「看得见但推不动」,不该成为唤醒理由。
+ *
+ * 角色取自**库里现读的那一份**(`PendingWork.role`),不另收参数 ——
+ * 两个来源迟早会漂,而「这个 agent 是什么角色」只有一个真相。
+ * 角色读不出来(`null`)时不猜:退回「库里挂着就算」的宽判。
+ */
 export function hasActionableWork(w: PendingWork): boolean {
+  const role = w.role;
+  const canReviewChange = role === null || ROLE_SPECS[role].ceiling.includes("change.review");
+  // 执行只有 worker 能做(`runWorkItem` 的 checkRunnable 会拒绝别的角色),
+  // 所以派给别人的工作项不算「他此刻能动的事」。
+  const canExecuteWork = role === null || role === "worker";
   return (
     w.asksToAnswer.length > 0 ||
     w.meetingsToRespond.length > 0 ||
-    w.pendingChanges.length > 0
+    (canReviewChange && w.pendingChanges.length > 0) ||
+    (canExecuteWork && w.myOpenWorks.length > 0) ||
+    w.needsDecomposition
   );
 }
 
@@ -74,7 +160,9 @@ export function summarizePendingWork(w: PendingWork): string {
   const parts: string[] = [];
   if (w.asksToAnswer.length > 0) parts.push(`${w.asksToAnswer.length} 条等你答`);
   if (w.meetingsToRespond.length > 0) parts.push(`${w.meetingsToRespond.length} 场会等表态`);
-  if (w.pendingChanges.length > 0) parts.push(`${w.pendingChanges.length} 条变更待评审`);
+  if (w.pendingChanges.length > 0) parts.push(`${w.pendingChanges.length} 条变更待推进`);
+  if (w.myOpenWorks.length > 0) parts.push(`${w.myOpenWorks.length} 个工作项可开工`);
+  if (w.needsDecomposition) parts.push("项目还没拆解");
   if (w.myBlockedAsks.length > 0) parts.push(`你自己卡着 ${w.myBlockedAsks.length} 条`);
   if (w.overdueAsks.length > 0) parts.push(`${w.overdueAsks.length} 条已超时`);
   if (w.openBlockers.length > 0) parts.push(`${w.openBlockers.length} 个未解决阻塞`);
@@ -108,7 +196,10 @@ export function renderPendingWork(db: Database.Database, w: PendingWork): string
     w.pendingChanges.length > 0 ||
     w.myBlockedAsks.length > 0 ||
     w.overdueAsks.length > 0 ||
-    w.openBlockers.length > 0;
+    w.openBlockers.length > 0 ||
+    w.myOpenWorks.length > 0 ||
+    w.myWaitingWorks.length > 0 ||
+    w.needsDecomposition;
   if (!hasAnything) return "";
   const lines: string[] = ["## 当前待办"];
 
@@ -126,6 +217,37 @@ export function renderPendingWork(db: Database.Database, w: PendingWork): string
     );
   }
 
+  if (w.needsDecomposition) {
+    lines.push(
+      "",
+      "### 这个项目还没有任何工作项 —— 拆解是你的第一件事",
+      "业务经理已经把甲方诉求收敛成了项目目标(见上面「你所在的项目」)。",
+      "先 `board_list` 看黑板上有没有人已经做过什么,再用 `work_create` 拆出",
+      "**能各自独立开工**的工作项,每个都给负责人与可验证的判据。",
+      "拆完之后**不要**自己动手做 —— 你不持 `code.*`。",
+    );
+  }
+
+  if (w.myOpenWorks.length > 0) {
+    lines.push(
+      "",
+      `### 分派给你、可以开工的工作项(${w.myOpenWorks.length})`,
+      "用 `work_read` 看完整目标与依赖现场。**一次做完一个再开下一个。**",
+      ...w.myOpenWorks.map(
+        (x) => `- ${x.id} [${x.status}] ${x.title}(更新于 ${new Date(x.updatedAt).toISOString()})`,
+      ),
+    );
+  }
+
+  if (w.myWaitingWorks.length > 0) {
+    lines.push(
+      "",
+      `### 分派给你、但前置还没满足(${w.myWaitingWorks.length})`,
+      "这些**还不能开工**(前置未完成或已失败)。先 `work_read` 确认在等谁。",
+      ...w.myWaitingWorks.map((x) => `- ${x.id} ${x.title}(状态 ${x.status})`),
+    );
+  }
+
   if (w.meetingsToRespond.length > 0) {
     lines.push(
       "",
@@ -138,9 +260,10 @@ export function renderPendingWork(db: Database.Database, w: PendingWork): string
   if (w.pendingChanges.length > 0) {
     lines.push(
       "",
-      `### 待评审的变更(${w.pendingChanges.length})`,
-      "用 `change_read` 看理由与影响面,`change_review` 推进状态。",
-      ...w.pendingChanges.map((c) => `- ${c.id}:${c.title}`),
+      `### 待推进的变更(${w.pendingChanges.length})`,
+      "变更的状态机是 `proposed → under_review → accepted → implemented`,**每一步都要有人推**。",
+      "用 `change_read` 看理由与影响面,`change_review` 推进到下一个状态。",
+      ...w.pendingChanges.map((c) => `- [${c.status}] ${c.id}:${c.title}`),
     );
   }
 

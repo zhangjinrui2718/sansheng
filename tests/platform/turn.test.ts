@@ -242,10 +242,16 @@ describe("runTurn · 待办注入", () => {
     expect(fake.prompts[0]).toContain("做点事");
   });
 
-  it("没有待办 → 不注入,消息就是原话", async () => {
-    const { result, fake } = await turn((emit) => emit(textDelta("好")));
+  it("没有待办 → 不注入待办段,任务原话在末尾", async () => {
+    // 用 worker 而不是 fixture 默认的 pm:p1 里一个工作项都没有,而「项目还没拆解」
+    // 现在**是**项目经理的一条待办(见 pendingWork.ts 的 needsDecomposition)。
+    // 这条测试要验的是「一条待办都没有时不注入」,所以挑一个手上真的空的角色。
+    const { result, fake } = await turn((emit) => emit(textDelta("好")), { agentId: "wk" });
     expect(result.pending.injected).toBe(false);
-    expect(fake.prompts[0]).toBe("做点事");
+    // 项目上下文(A)现在**每回合都注入** —— 它不属于「待办」,所以这里断言的是
+    // 「没有待办段」而不是「整条消息只有原话」(见 runtime/projectContext.ts)。
+    expect(fake.prompts[0]).not.toContain("## 当前待办");
+    expect(fake.prompts[0]?.endsWith("做点事")).toBe(true);
   });
 
   it("injectPending:false 时即便有待办也不注入", async () => {
@@ -255,7 +261,18 @@ describe("runTurn · 待办注入", () => {
     });
     const { result, fake } = await turn((emit) => emit(textDelta("好")), { injectPending: false });
     expect(result.pending.injected).toBe(false);
-    expect(fake.prompts[0]).toBe("做点事");
+    expect(fake.prompts[0]).not.toContain("## 当前待办");
+    expect(fake.prompts[0]?.endsWith("做点事")).toBe(true);
+  });
+
+  it("项目会话里**每回合都注入项目上下文** —— 它必须知道自己在哪个项目", async () => {
+    const { result, fake } = await turn((emit) => emit(textDelta("好")));
+    expect(result.projectContext?.injected).toBe(true);
+    expect(result.projectContext?.summary).toContain("p1");
+    expect(fake.prompts[0]).toContain("## 你所在的项目");
+    expect(fake.prompts[0]).toContain("测试");
+    expect(fake.prompts[0]).toContain("项目经理");
+    expect(fake.prompts[0]).toContain("`pm`");
   });
 });
 
