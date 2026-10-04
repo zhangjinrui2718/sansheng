@@ -22,7 +22,7 @@ import {
 } from "../storage/repo/artifacts.js";
 import { isArtifactKind, ARTIFACT_KINDS, type ArtifactKind } from "../identity/role.js";
 import {
-  fail, ok, requireString, readString, readStringArray,
+  fail, ok, requireString, requireProject, readString, readStringArray,
   type PlatformTool, type ToolResult,
 } from "./types.js";
 
@@ -39,20 +39,22 @@ const boardList: PlatformTool = {
     limit: Type.Optional(Type.Number()),
   }),
   run(args, ctx): ToolResult {
-    const pid = readString(args, "projectId") ?? ctx.project.id;
+    const proj = requireProject(ctx, "board_list");
+    if (!proj.ok) return proj.result;
+    const pid = readString(args, "projectId") ?? proj.project.id;
     // **跨项目写要拦**。首跑真机实测:模型对着一个可选参数**自己猜了一个
     // projectId**,撞上 project_id 外键,报出来的却是一句裸的
     // "FOREIGN KEY constraint failed" —— 既没说哪条外键,也没说猜错了。
     //
     // 一次会话属于一个项目(ctx.project),往别的项目写几乎总是错的:
     // 要么是猜的(本例),要么是拿错了 id。真需要跨项目时那该是另一个会话。
-    if (pid !== ctx.project.id) {
+    if (pid !== proj.project.id) {
       // 拒绝而不是「查一下你够不够格」:一次会话属于一个项目,往别的项目写
       // 几乎总是拿错了 id。真需要跨项目时那该是另一个会话 —— 让这条约束
       // 简单到不需要解释,比给它开一个需要判断的例外更安全。
       return fail(
         "denied",
-        `本次会话属于项目 ${ctx.project.id},不能往 ${pid} 写。` +
+        `本次会话属于项目 ${proj.project.id},不能往 ${pid} 写。` +
           `要写当前项目就别传 projectId(它是可选的,缺省即当前项目)。`,
       );
     }
@@ -139,20 +141,22 @@ const boardWrite: PlatformTool = {
     ),
   }),
   run(args, ctx): ToolResult {
-    const pid = readString(args, "projectId") ?? ctx.project.id;
+    const proj = requireProject(ctx, "board_write");
+    if (!proj.ok) return proj.result;
+    const pid = readString(args, "projectId") ?? proj.project.id;
     // **跨项目写要拦**。首跑真机实测:模型对着一个可选参数**自己猜了一个
     // projectId**,撞上 project_id 外键,报出来的却是一句裸的
     // "FOREIGN KEY constraint failed" —— 既没说哪条外键,也没说猜错了。
     //
     // 一次会话属于一个项目(ctx.project),往别的项目写几乎总是错的:
     // 要么是猜的(本例),要么是拿错了 id。真需要跨项目时那该是另一个会话。
-    if (pid !== ctx.project.id) {
+    if (pid !== proj.project.id) {
       // 拒绝而不是「查一下你够不够格」:一次会话属于一个项目,往别的项目写
       // 几乎总是拿错了 id。真需要跨项目时那该是另一个会话 —— 让这条约束
       // 简单到不需要解释,比给它开一个需要判断的例外更安全。
       return fail(
         "denied",
-        `本次会话属于项目 ${ctx.project.id},不能往 ${pid} 写。` +
+        `本次会话属于项目 ${proj.project.id},不能往 ${pid} 写。` +
           `要写当前项目就别传 projectId(它是可选的,缺省即当前项目)。`,
       );
     }

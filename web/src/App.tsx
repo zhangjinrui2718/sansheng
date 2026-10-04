@@ -64,6 +64,7 @@ export function App() {
   const status = useChatStore((s) => s.status);
   const projectsRevision = useChatStore((s) => s.projectsRevision);
   const loadProjects = useChatStore((s) => s.loadProjects);
+  const decideInitialContext = useChatStore((s) => s.decideInitialContext);
 
   // App 级 socket 单例 —— mount 即连接,生命周期与 App 相同,路由切换不断流。
   // initAppSocket 幂等(StrictMode 双 effect 安全);无 cleanup —— 单例常驻。
@@ -75,6 +76,21 @@ export function App() {
   useEffect(() => {
     void loadProjects();
   }, [loadProjects, projectsRevision]);
+
+  /**
+   * 首屏上下文:**一个项目都没有 → 直接进接待会话**。
+   *
+   * 这是本批次补上的那个架构缺口:在此之前,没有项目时用户无处可去 ——
+   * 界面只能摆一张 name / client / goal 表单,提交时撞上 `project_open` 的参数校验
+   * 报「goal 不能为空」。而正确形态是:用户与**业务经理**聊,由业务经理立项。
+   *
+   * 判断落在 store 里(`decideInitialContext`),因为**必须等列表拉回来再决定**;
+   * 写成依赖 `projectsLoading` 的 effect 会读到本次渲染的旧值,把有项目的用户也
+   * 丢进接待会话。有项目时它什么都不做(保持「未选项目」的旧行为)。
+   */
+  useEffect(() => {
+    void decideInitialContext();
+  }, [decideInitialContext]);
 
   useEffect(() => {
     getConfig()

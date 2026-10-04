@@ -52,6 +52,16 @@ export interface TurnResult {
   readonly thinking: string;
   /** **现场**:这一回合调了哪些工具、哪些失败了 */
   readonly toolCalls: readonly ToolCallRecord[];
+  /**
+   * 这一回合里**新立项的项目 id**(按调用顺序)。
+   *
+   * 来源是工具结果的结构化 `details.data.projectId`(见 `project_open` 与
+   * `sdkAdapter.ts`),**不是正则抠文本** —— 文案改一个字就会让文本解析静默失效,
+   * 而这条通道本来就是判工具成败用的(见下面的 `toolCallFailed`)。
+   *
+   * 宿主靠它把接待会话切到新项目。空数组 = 这一回合没有立项。
+   */
+  readonly openedProjectIds: readonly string[];
   readonly pending: {
     readonly injected: boolean;
     readonly summary: string;
@@ -66,10 +76,15 @@ export interface RunTurnOptions {
   readonly session: AgentSession;
   readonly db: Database.Database;
   readonly agentId: string;
-  readonly projectId: string;
+  /**
+   * 当前项目。**`null` = 接待会话**(还没有项目,见 migrations/012)。
+   *
+   * 接待会话没有项目可查待办,所以此时**不注入**待办段(而不是拼一个空壳)。
+   */
+  readonly projectId: string | null;
   /** 本次要它做的事 */
   readonly message: string;
-  /** 是否把待办拼进消息(默认 true) */
+  /** 是否把待办拼进消息(默认 true;接待会话下强制不注入) */
   readonly injectPending?: boolean;
   readonly timeoutMs?: number;
   /** 逐事件观察(调试/日志)。抛错会被吞掉,不影响回合 */
@@ -116,6 +131,27 @@ function toolCallFailed(ev: { isError?: unknown; result?: unknown }): boolean {
     return (details as { ok?: unknown }).ok === false;
   }
   return resultText(ev.result).startsWith("[工具失败:");
+}
+
+/**
+ * 从一次工具调用的结果里取出它声明的「新立项项目 id」。
+ *
+ * **只在 `project_open` 上读**:`ToolResult.data` 是通用逃逸口,它的含义由工具自己
+ * 决定 —— 别的工具完全可能带一个 `projectId`(比如「我刚读的是哪个项目」)。
+ * 不按工具名过滤的话,那种数据会被当成立项,而宿主会据此**迁移接待会话**。
+ * 这里宁可写死一个工具名,也不留下那个误判面。
+ *
+ * **读结构化 details,不解析文本** —— 理由见 `TurnResult.openedProjectIds`。
+ * 形状不认识时返回 null(不抛):一个读不出来的结果不该让整轮对话崩掉。
+ */
+function openedProjectIdOf(ev: { toolName?: unknown; result?: unknown }): string | null {
+  if (ev.toolName !== "project_open") return null;
+  const details = (ev.result as { details?: unknown } | null | undefined)?.details;
+  if (details === null || typeof details !== "object") return null;
+  const data = (details as { data?: unknown }).data;
+  if (data === null || typeof data !== "object") return null;
+  const id = (data as { projectId?: unknown }).projectId;
+  return typeof id === "string" && id !== "" ? id : null;
 }
 
 /** 从工具结果里抠出文本。形状不认识就退化成 JSON,不抛。 */
@@ -179,18 +215,27 @@ export async function runTurn(opts: RunTurnOptions): Promise<TurnResult> {
   const text: string[] = [];
   const thinking: string[] = [];
   const toolCalls: ToolCallRecord[] = [];
+  const openedProjectIds: string[] = [];
   // toolCallId → 开始时间 + 参数摘要。**参数必须在 start 时抓** ——
   // end 事件只给结果,不回头带参数,而「它拿什么参数调的」正是排查时最需要的现场。
   const inflight = new Map<string, { startedAt: number; argsSummary: string }>();
   let settled = false;
 
   // ── 待办注入 ──
-  const inject = opts.injectPending !== false;
-  const work = inject
-    ? collectPendingWork(opts.db, opts.agentId, opts.projectId, Date.now())
-    : null;
+  // 接待会话(projectId === null)**不注入**:还没有项目,没有项目内的待办可列;
+  // 拼一个空壳只会白占 context 并让模型以为「系统替我列过了」。
+  const pid = opts.projectId;
+  const work =
+    opts.injectPending !== false && pid !== null
+      ? collectPendingWork(opts.db, opts.agentId, pid, Date.now())
+      : null;
   const pendingBlock = work !== null ? renderPendingWork(opts.db, work) : "";
-  const pendingSummary = work !== null ? summarizePendingWork(work) : "(未注入)";
+  const pendingSummary =
+    work !== null
+      ? summarizePendingWork(work)
+      : pid === null
+        ? "(接待会话:没有项目待办)"
+        : "(未注入)";
   const payload = composeTurnMessage(pendingBlock, opts.message);
 
   const unsub = opts.session.subscribe((ev: AgentSessionEvent) => {
@@ -227,6 +272,10 @@ export async function runTurn(opts: RunTurnOptions): Promise<TurnResult> {
         resultSummary: truncate(resultText(ev.result), 300),
         durationMs: started !== undefined ? Date.now() - started.startedAt : 0,
       });
+      // 立项是**流程状态变更**,必须单独留痕:宿主靠它做「接待会话 → 新项目」
+      // 的切换。失败的结果不会带 data(见 sdkAdapter 的失败分支)。
+      const opened = openedProjectIdOf(ev);
+      if (opened !== null) openedProjectIds.push(opened);
       inflight.delete(ev.toolCallId);
       return;
     }
@@ -253,6 +302,7 @@ export async function runTurn(opts: RunTurnOptions): Promise<TurnResult> {
     text: text.join(""),
     thinking: thinking.join(""),
     toolCalls,
+    openedProjectIds,
     pending: { injected: pendingBlock.trim() !== "", summary: pendingSummary },
     settled: !timedOut,
     timedOut,
@@ -278,6 +328,9 @@ export function renderTurnReport(r: TurnResult): string {
     }
   } else {
     lines.push("工具调用: 无");
+  }
+  if (r.openedProjectIds.length > 0) {
+    lines.push(`本回合立项: ${r.openedProjectIds.join(", ")}`);
   }
   if (r.thinking !== "") lines.push(`(另有 ${r.thinking.length} 字符内部推理,未混入正文)`);
   if (r.timedOut) lines.push("⚠️ 回合超时收尾 —— 结果可能不完整");

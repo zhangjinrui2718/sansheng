@@ -107,7 +107,11 @@ export type PlatformSessionResult =
   | PlatformSessionFailure;
 
 /**
- * 为一个 agent 在某项目里建立会话。
+ * 为一个 agent 在某个项目里建立会话。
+ *
+ * `projectId === null` = **接待会话**(第一个项目之前,见 migrations/012):
+ * 工具面由 `planAgentSession(deps, agentId, null)` 决定 —— 只有
+ * `project_open` / `memory_*`,项目内工具根本进不了 SDK 的名单。
  *
  * **失败一律显式返回**,不抛异常 —— 会话建立是启动路径,异常会以栈回溯的形式
  * 出现,而调用方本可以给出一句可读的原因。
@@ -115,7 +119,7 @@ export type PlatformSessionResult =
 export async function createPlatformSession(
   deps: RuntimeDeps,
   agentId: string,
-  projectId: string,
+  projectId: string | null,
   opts: PlatformSessionOptions,
 ): Promise<PlatformSessionResult> {
   // 1. 规划
@@ -145,7 +149,8 @@ export async function createPlatformSession(
   const customTools = toSdkTools(split.platformTools, (tool, args) => {
     const c = buildToolContext(deps, agentId, projectId);
     if (!c.ok) {
-      // 逐调用重新校验 —— 项目可能在会话中途被关闭,或把该 agent 移出
+      // 逐调用重新校验 —— 项目可能在会话中途被关闭,或把该 agent 移出;
+      // 接待会话则可能在同一条会话里刚被 project_open 建出了项目。
       return {
         ok: false as const,
         code: "denied" as const,

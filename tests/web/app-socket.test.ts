@@ -101,3 +101,126 @@ describe("App 级 socket 单例", () => {
     expect(seen).toEqual(["agent_end"]);
   });
 });
+
+// ── 首屏上下文:有项目 → 不动;没有项目 → 进接待会话 ──────────────
+//
+// 这是本批次补上的架构缺口的**界面侧一半**:一个项目都没有时,首屏必须是
+// 「与业务经理的接待对话」,而不是一张「创建项目」表单。
+// 反过来的一半同样重要 —— **有项目时绝不能把用户丢进接待会话**(那会让他以为
+// 自己的项目没了)。这一半最容易写错:靠在 effect 里读 projectsLoading 判断,
+// 读到的是本次渲染的旧值(false),于是有项目的用户也进接待会话。
+//
+// 所以判断落在 store 的 decideInitialContext() 上,这里直接测它。
+describe("首屏上下文 · decideInitialContext", () => {
+  /** 桩掉 fetch:api.ts 是唯一的网络出口,所以这里只需认路径。 */
+  function stubApi(routes: Record<string, unknown>): void {
+    vi.stubGlobal("fetch", async (url: string) => {
+      const path = String(url).replace("/api", "");
+      if (!(path in routes)) {
+        return { ok: false, status: 404, statusText: "Not Found", text: async () => "{}" };
+      }
+      return {
+        ok: true,
+        status: 200,
+        statusText: "OK",
+        text: async () => JSON.stringify(routes[path]),
+      };
+    });
+  }
+
+  function resetStore(): void {
+    useChatStore.setState({
+      projects: [],
+      projectsLoading: false,
+      projectId: null,
+      intakeActive: false,
+      contextDecided: false,
+      turns: [],
+      currentTurn: null,
+      error: null,
+      status: "idle",
+    });
+  }
+
+  it("一个项目都没有 → 进接待会话,并拉回那段历史", async () => {
+    resetStore();
+    stubApi({
+      "/projects": { projects: [] },
+      "/intake/messages": {
+        projectId: null,
+        messages: [
+          { id: "m1", projectId: null, agentId: null, agentName: null, kind: "user", content: "我想做点东西", createdAt: 1 },
+        ],
+      },
+    });
+    await useChatStore.getState().decideInitialContext();
+    const s = useChatStore.getState();
+    expect(s.intakeActive).toBe(true);
+    expect(s.projectId).toBeNull();
+    expect(s.turns.map((t) => t.role)).toEqual(["user"]);
+  });
+
+  it("**有项目 → 不进接待会话**(保持「未选项目」,不擅自替用户选)", async () => {
+    resetStore();
+    stubApi({
+      "/projects": {
+        projects: [
+          { id: "pj_1", name: "已有项目", client: "甲", goal: "g", status: "active", createdAt: 1,
+            counts: { works: 0, openWorks: 0, artifacts: 0, pendingQuestions: 0, openBlockers: 0 } },
+        ],
+      },
+    });
+    await useChatStore.getState().decideInitialContext();
+    const s = useChatStore.getState();
+    expect(s.projects.map((p) => p.id)).toEqual(["pj_1"]);
+    expect(s.intakeActive).toBe(false);
+    expect(s.projectId).toBeNull();
+  });
+
+  it("幂等:重复调用只决定一次(StrictMode 双 effect 安全)", async () => {
+    resetStore();
+    let listCalls = 0;
+    vi.stubGlobal("fetch", async (url: string) => {
+      const path = String(url).replace("/api", "");
+      if (path === "/projects") listCalls++;
+      const body = path === "/projects" ? { projects: [] } : { projectId: null, messages: [] };
+      return { ok: true, status: 200, statusText: "OK", text: async () => JSON.stringify(body) };
+    });
+    await useChatStore.getState().decideInitialContext();
+    await useChatStore.getState().decideInitialContext();
+    // 第一次:loadProjects + intake messages;第二次整体短路
+    expect(listCalls).toBe(1);
+    resetStore();
+  });
+
+  // ── 立项之后的前端切换(整条流程的另一半)──────────────────────────
+  it("**在接待会话里**收到 project_opened → 切到新项目并拉它的消息", async () => {
+    resetStore();
+    useChatStore.setState({ intakeActive: true, projectId: null, contextDecided: true });
+    stubApi({
+      "/projects/pj_new/messages": {
+        projectId: "pj_new",
+        messages: [
+          { id: "m1", projectId: "pj_new", agentId: null, agentName: null, kind: "user", content: "最初那句话", createdAt: 1 },
+        ],
+      },
+    });
+    useChatStore.getState().applyEvent({ type: "project_opened", projectId: "pj_new", name: "新项目" });
+    await new Promise((r) => setTimeout(r, 0));
+    const s = useChatStore.getState();
+    expect(s.projectId).toBe("pj_new");
+    expect(s.intakeActive).toBe(false);
+    // 那段对话的消息已被服务端迁进新项目 —— 切过去就该看得见
+    expect(s.turns.map((t) => t.role)).toEqual(["user"]);
+  });
+
+  it("**在别的项目里**收到 project_opened → 不把用户拽走(只刷新列表)", async () => {
+    resetStore();
+    useChatStore.setState({ intakeActive: false, projectId: "pj_a", contextDecided: true });
+    stubApi({});
+    useChatStore.getState().applyEvent({ type: "project_opened", projectId: "pj_b", name: "另一个" });
+    await new Promise((r) => setTimeout(r, 0));
+    expect(useChatStore.getState().projectId).toBe("pj_a");
+    expect(useChatStore.getState().intakeActive).toBe(false);
+  });
+});

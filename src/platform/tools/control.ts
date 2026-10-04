@@ -27,7 +27,7 @@ import {
 } from "../storage/repo/changes.js";
 import { getWork } from "../storage/repo/works.js";
 import {
-  fail, ok, requireString, readString, readStringArray,
+  fail, ok, requireProject, requireString, readString, readStringArray,
   type PlatformTool, type ToolResult,
 } from "./types.js";
 
@@ -46,7 +46,9 @@ const blockerOpen: PlatformTool = {
     blocksWorkIds: Type.Optional(Type.Array(Type.String(), { description: "被挡住的工作项" })),
   }),
   run(args, ctx): ToolResult {
-    const pid = readString(args, "projectId") ?? ctx.project.id;
+    const proj = requireProject(ctx, "blocker_open");
+    if (!proj.ok) return proj.result;
+    const pid = readString(args, "projectId") ?? proj.project.id;
     const title = requireString(args, "title");
     if (!title.ok) return title.result;
     const detail = requireString(args, "detail");
@@ -123,7 +125,9 @@ const blockerList: PlatformTool = {
     limit: Type.Optional(Type.Number()),
   }),
   run(args, ctx): ToolResult {
-    const pid = readString(args, "projectId") ?? ctx.project.id;
+    const proj = requireProject(ctx, "blocker_list");
+    if (!proj.ok) return proj.result;
+    const pid = readString(args, "projectId") ?? proj.project.id;
     const severity = readString(args, "severity");
     if (severity !== undefined && !isBlockerSeverity(severity)) {
       return fail("invalid_args", `未知严重度「${severity}」`, BLOCKER_SEVERITIES);
@@ -194,7 +198,9 @@ const changePropose: PlatformTool = {
     affectedWorkIds: Type.Optional(Type.Array(Type.String(), { description: "波及的工作项" })),
   }),
   run(args, ctx): ToolResult {
-    const pid = readString(args, "projectId") ?? ctx.project.id;
+    const proj = requireProject(ctx, "change_propose");
+    if (!proj.ok) return proj.result;
+    const pid = readString(args, "projectId") ?? proj.project.id;
     const title = requireString(args, "title");
     if (!title.ok) return title.result;
     const rationale = requireString(args, "rationale");
@@ -277,7 +283,9 @@ const changeList: PlatformTool = {
     limit: Type.Optional(Type.Number()),
   }),
   run(args, ctx): ToolResult {
-    const pid = readString(args, "projectId") ?? ctx.project.id;
+    const proj = requireProject(ctx, "change_list");
+    if (!proj.ok) return proj.result;
+    const pid = readString(args, "projectId") ?? proj.project.id;
     const status = readString(args, "status");
     if (status !== undefined && !isChangeStatus(status)) {
       return fail("invalid_args", `未知状态「${status}」`, CHANGE_STATUSES);

@@ -657,3 +657,69 @@ describe("端到端 · 立项 → 拆解 → 干活 → 阻塞 → 变更 → �
     expect(changesForWork(db, w)).toHaveLength(1);
   });
 });
+
+// ── 接待会话:调用期的作用域门 ────────────────────────────────────
+//
+// 求解期已经只把 project_open / memory_* 放进接待模式(见 authorize.test.ts),
+// 但**求解期给过的工具面不构成「调用一定合法」的理由** —— 同一条会话可能在
+// 中途刚被 project_open 建出了项目,那时它手上剩下的项目内工具必须当场失效。
+// 这里直接构造「接待模式的 ctx」调一个项目内工具,断言派发器自己拦得住 ——
+// 而不是靠 ctx.project.id 抛 TypeError(那会让模型只看到一片栈回溯)。
+
+function intakeCtxFor(agentId: string): ToolRunContext {
+  const agent = agents.get(agentId);
+  if (!agent) throw new Error(`未知 agent ${agentId}`);
+  // project: null = 接待会话(还没有任何项目)
+  return { db, agent, project: null, now: () => clock, newId: (prefix) => `${prefix}_new${++seq}` };
+}
+
+describe("派发器 · 接待会话(project === null)", () => {
+  it("项目内工具被拒,且拒绝信息可读、带合法清单", () => {
+    const r = dispatch("project_read", {}, intakeCtxFor(ids.bm!));
+    if (r instanceof Promise) throw new Error("project_read 是同步工具");
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.code).toBe("denied");
+      expect(r.message).toContain("接待会话");
+      // 回灌接待模式真正可用的能力 —— 模型的下一步动作靠它
+      expect(r.alternatives).toContain("project_open");
+      expect(r.alternatives).not.toContain("project_read");
+    }
+  });
+
+  it("接待模式下可用的工具照常工作:project_open 能立项", () => {
+    const r = dispatch(
+      "project_open",
+      { name: "接待会话里立的项目", client: "甲方", goal: "验证第一个项目之前的立项" },
+      intakeCtxFor(ids.bm!),
+    );
+    if (r instanceof Promise) throw new Error("project_open 是同步工具");
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      // 结构化 id:宿主靠它把接待会话切到新项目(不是解析文本)
+      expect(r.data).toMatchObject({ projectId: expect.stringMatching(/^pj_/) });
+      expect(r.text.startsWith("已立项 ")).toBe(true);
+    }
+  });
+
+  it("记忆工具在接待模式下可用(记忆是关于用户的,跨项目)", async () => {
+    const r = await dispatch("memory_search", { query: "偏好" }, intakeCtxFor(ids.bm!));
+    // 这个 ctx 没注入 MemoryPort → 工具如实报「装配错误」。**它必须是那个错误**,
+    // 而不是 denied:说明它过了作用域门(记忆能力在接待模式下是给过的)。
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.code).toBe("internal");
+      expect(r.message).toContain("记忆后端未注入");
+    }
+  });
+
+  it("项目内工具在 project 为空时不会因为解引用而崩(结构化失败而不是 TypeError)", () => {
+    // 这批工具都经 requireProject。任何一个漏了,这里会抛异常 —— 而
+    // 「模型只拿到一片栈回溯」正是要避免的形态。
+    for (const tool of ["project_read", "project_update", "project_close", "work_create", "work_list", "board_list", "blocker_list", "change_list", "ask_list", "ask_role", "convene"]) {
+      const r = dispatch(tool, {}, intakeCtxFor(ids.bm!));
+      if (r instanceof Promise) throw new Error(`${tool} 意外是异步的`);
+      expect(r.ok, `${tool} 在接待模式下应当被拒`).toBe(false);
+    }
+  });
+});

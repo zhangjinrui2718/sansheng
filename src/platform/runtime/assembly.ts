@@ -44,7 +44,12 @@ export type AssemblyFailure =
   | { readonly ok: false; readonly reason: "role_unknown"; readonly detail: string };
 
 export type AssemblyResult =
-  | { readonly ok: true; readonly ctx: ToolRunContext; readonly project: Project }
+  | {
+      readonly ok: true;
+      readonly ctx: ToolRunContext;
+      /** `null` = 接待会话(第一个项目之前)。见 `projectId` 的说明。 */
+      readonly project: Project | null;
+    }
   | AssemblyFailure;
 
 /**
@@ -84,6 +89,18 @@ function loadAgent(db: Database.Database, agentId: string): LoadAgentResult {
 /**
  * 组装一次工具调用所需的上下文。
  *
+ * ── `projectId === null` = 接待模式(第一个项目之前)────────────────
+ *
+ * 那条 `project_id IS NULL` 的接待会话还没有任何项目可校验,所以:
+ *   - **只校验 agent 存在**(以及它的角色能认出来);
+ *   - 跳过项目校验与成员校验(没有项目,也没有花名册);
+ *   - 返回的 ctx 里 `project` 为 `null`。
+ *
+ * 为什么这样是安全的:接待模式下能拿到的工具面由 `solveToolset(agent, null)` 决定,
+ * 只有 `project.open` / `memory.read` / `memory.write`(见 harness/authorize.ts 的
+ * `INTAKE_CAPABILITIES`);「成员校验」防的是「不属于该项目的 agent 拿到该项目的
+ * 工具面」,而接待模式根本没有项目可拿。
+ *
  * **失败一律显式返回原因,不做兜底**:
  *   - agent 不存在 / 角色未知 → no_such_agent / role_unknown
  *   - 项目不存在 → no_such_project
@@ -94,7 +111,7 @@ function loadAgent(db: Database.Database, agentId: string): LoadAgentResult {
 export function buildToolContext(
   deps: RuntimeDeps,
   agentId: string,
-  projectId: string,
+  projectId: string | null,
 ): AssemblyResult {
   const loaded = loadAgent(deps.db, agentId);
   if (loaded.kind === "missing") {
@@ -108,6 +125,19 @@ export function buildToolContext(
     };
   }
   const agent = loaded.agent;
+
+  const base = {
+    db: deps.db,
+    agent,
+    now: deps.now ?? (() => Date.now()),
+    newId: deps.newId ?? defaultNewId,
+    ...(deps.memory !== undefined ? { memory: deps.memory } : {}),
+    ...(deps.client !== undefined ? { client: deps.client } : {}),
+  } satisfies Omit<ToolRunContext, "project">;
+
+  if (projectId === null) {
+    return { ok: true, ctx: { ...base, project: null }, project: null };
+  }
 
   const project = loadProjectForAuthz(deps.db, projectId);
   if (project === null) {
@@ -125,16 +155,7 @@ export function buildToolContext(
     };
   }
 
-  const ctx: ToolRunContext = {
-    db: deps.db,
-    agent,
-    project,
-    now: deps.now ?? (() => Date.now()),
-    newId: deps.newId ?? defaultNewId,
-    ...(deps.memory !== undefined ? { memory: deps.memory } : {}),
-    ...(deps.client !== undefined ? { client: deps.client } : {}),
-  };
-  return { ok: true, ctx, project };
+  return { ok: true, ctx: { ...base, project }, project };
 }
 
 /** 默认 id 生成。nanoid 的替代 —— 避免为一次 id 引入依赖,且格式可控。 */
@@ -147,7 +168,8 @@ function defaultNewId(prefix: string): string {
 
 export interface AgentSessionPlan {
   readonly agent: Agent;
-  readonly project: Project;
+  /** `null` = 接待会话(第一个项目之前) */
+  readonly project: Project | null;
   /** 该会话可用的工具名(已过三重门控) */
   readonly tools: readonly ToolName[];
   /** 该会话的能力面(报告用) */
@@ -157,7 +179,7 @@ export interface AgentSessionPlan {
   readonly unknownTools: readonly string[];
   /** 该角色装载的提示词单元 id */
   readonly promptUnits: readonly string[];
-  /** 项目花名册(工具解析 {role,spec} 时用) */
+  /** 项目花名册(工具解析 {role,spec} 时用)。接待模式下为空 —— 还没有项目 */
   readonly roster: ReadonlyArray<{ id: string; role: string; displayName: string }>;
 }
 
@@ -170,11 +192,14 @@ export type PlanResult =
  *
  * **这是「接线」的核心一步** —— `solveToolset` 在这里第一次被真实调用。
  * 它与 `buildToolContext` 分开:规划是会话建立时做一次,ctx 组装是每次调用做。
+ *
+ * `projectId === null` = 接待会话:工具面由 `solveToolset(agent, null)` 决定,
+ * 花名册为空。技能上它与项目会话走**同一条**代码路径 —— 差别只在 project 是 null。
  */
 export function planAgentSession(
   deps: RuntimeDeps,
   agentId: string,
-  projectId: string,
+  projectId: string | null,
 ): PlanResult {
   const assembled = buildToolContext(deps, agentId, projectId);
   if (!assembled.ok) return assembled;
@@ -193,11 +218,14 @@ export function planAgentSession(
       blockedByScope: solved.blockedByScope.map((d) => d.subject),
       unknownTools: solved.unknownTools.map((d) => d.subject),
       promptUnits: ROLE_SPECS[ctx.agent.role].promptUnits,
-      roster: loadProjectRoster(deps.db, projectId).map((m) => ({
-        id: m.id,
-        role: m.role,
-        displayName: m.displayName,
-      })),
+      roster:
+        projectId === null
+          ? []
+          : loadProjectRoster(deps.db, projectId).map((m) => ({
+              id: m.id,
+              role: m.role,
+              displayName: m.displayName,
+            })),
     },
   };
 }

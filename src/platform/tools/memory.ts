@@ -89,8 +89,10 @@ const memoryRemember: PlatformTool = {
         content: content.value,
         kind,
         ...(importance !== undefined ? { importance } : {}),
-        // 记来源项目:关于某个项目的背景知识,项目没了它也该失效
-        sourceProjectId: ctx.project.id,
+        // 记来源项目:关于某个项目的背景知识,项目没了它也该失效。
+        // **接待会话没有项目** —— 此时省略来源,而不是记一个假 id:
+        // 关于用户的偏好/事实本来就跨项目(设计 1 §4.3),来源留空是如实的。
+        ...(ctx.project !== null ? { sourceProjectId: ctx.project.id } : {}),
       });
       return ok(`已记住(${kind})${id}:${content.value}`);
     } catch (err) {

@@ -155,7 +155,7 @@ describe("runTurn · 文本与推理**永不混流**(7-I)", () => {
 
   it("报告里如实说明推理未混入正文", () => {
     const r: TurnResult = {
-      text: "答", thinking: "想", toolCalls: [],
+      text: "答", thinking: "想", toolCalls: [], openedProjectIds: [],
       pending: { injected: false, summary: "" }, settled: true, timedOut: false,
     };
     expect(renderTurnReport(r)).toContain("内部推理");
@@ -215,6 +215,7 @@ describe("runTurn · 工具调用现场", () => {
         name: "board_write", argsSummary: "kind=note", isError: true,
         resultSummary: "[工具失败:internal] 外键", durationMs: 3,
       }],
+      openedProjectIds: [],
       pending: { injected: false, summary: "" }, settled: true, timedOut: false,
     };
     const rep = renderTurnReport(r);
@@ -305,5 +306,93 @@ describe("runTurn · 超时与会话生命周期", () => {
     });
     expect(result.text).toBe("照常");
     expect(result.toolCalls, "后续事件仍要被处理").toHaveLength(1);
+  });
+});
+
+// ── 立项的现场(openedProjectIds)─────────────────────────────────
+//
+// 宿主靠它做「接待会话 → 新项目」的切换:`project_open` 成功之后要把接待会话的
+// 消息迁进新项目、让前端切过去、并丢掉那条接待会话。**读的是结构化 details,
+// 不是解析给模型的文本** —— 文案改一个字就会让文本解析静默失效。
+
+describe("runTurn · 立项现场(openedProjectIds)", () => {
+  it("从 details.data.projectId 收集,按调用顺序", async () => {
+    const { result } = await turn((emit) => {
+      emit(toolStart("c1", "project_open", { name: "甲" }));
+      emit(toolEnd("c1", "project_open", {
+        content: [{ type: "text", text: "已立项 pj_a「甲」" }],
+        details: { ok: true, data: { projectId: "pj_a" } },
+      }));
+      emit(toolStart("c2", "project_open", { name: "乙" }));
+      emit(toolEnd("c2", "project_open", {
+        content: [{ type: "text", text: "已立项 pj_b「乙」" }],
+        details: { ok: true, data: { projectId: "pj_b" } },
+      }));
+    });
+    expect(result.openedProjectIds).toEqual(["pj_a", "pj_b"]);
+  });
+
+  it("失败的结果没有 data → 不进 openedProjectIds(不许把失败当成立项)", async () => {
+    const { result } = await turn((emit) => {
+      emit(toolStart("c1", "project_open", {}));
+      emit(toolEnd("c1", "project_open", {
+        content: [{ type: "text", text: "[工具失败:invalid_args] 缺少必填参数 goal" }],
+        details: { ok: false, code: "invalid_args" },
+      }));
+    });
+    expect(result.openedProjectIds).toEqual([]);
+    expect(result.toolCalls[0]!.isError).toBe(true);
+  });
+
+  it("**只认 project_open** —— 别的工具带 projectId 不算立项", async () => {
+    // `ToolResult.data` 是通用逃逸口,别的工具完全可能带一个 projectId
+    // (「我刚读的是哪个项目」)。放进 openedProjectIds 会让宿主**误迁移接待会话**,
+    // 所以这里把工具名过滤钉住。
+    const { result } = await turn((emit) => {
+      emit(toolStart("c1", "board_write", {}));
+      emit(toolEnd("c1", "board_write", {
+        content: [{ type: "text", text: "ok" }],
+        details: { ok: true, data: { projectId: "pj_x" } },
+      }));
+    });
+    expect(result.openedProjectIds).toEqual([]);
+  });
+
+  it("details 形状不认识时不抛,也不误判", async () => {
+    const { result } = await turn((emit) => {
+      emit(toolStart("c1", "project_open", {}));
+      emit(toolEnd("c1", "project_open", { details: { ok: true, data: "不是对象" } }));
+      emit(toolStart("c2", "project_open", {}));
+      emit(toolEnd("c2", "project_open", { details: { ok: true, data: { projectId: 42 } } }));
+      emit(toolStart("c3", "project_open", {}));
+      emit(toolEnd("c3", "project_open", "纯文本结果"));
+    });
+    expect(result.openedProjectIds).toEqual([]);
+  });
+
+  it("报告里如实写出本回合立了哪些项目", () => {
+    const r: TurnResult = {
+      text: "", thinking: "", toolCalls: [], openedProjectIds: ["pj_a"],
+      pending: { injected: false, summary: "" }, settled: true, timedOut: false,
+    };
+    expect(renderTurnReport(r)).toContain("本回合立项: pj_a");
+  });
+});
+
+// ── 接待会话的待办注入 ───────────────────────────────────────────
+
+describe("runTurn · 接待会话(projectId null)", () => {
+  it("不注入待办,并如实说明为什么(而不是拼一个空壳)", async () => {
+    const { result } = await turn(() => {}, { projectId: null, agentId: "pm" });
+    expect(result.pending.injected).toBe(false);
+    expect(result.pending.summary).toContain("接待会话");
+  });
+
+  it("接待会话里也能跑完一个回合(不需要项目存在)", async () => {
+    const { result } = await turn((emit) => {
+      emit(textDelta("你想做什么?"));
+    }, { projectId: null, agentId: "pm" });
+    expect(result.text).toBe("你想做什么?");
+    expect(result.settled).toBe(true);
   });
 });

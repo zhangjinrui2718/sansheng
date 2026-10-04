@@ -41,6 +41,7 @@ import type {
   ClientQuestionView,
   HarnessView,
   HealthResponse,
+  IntakeMessagesResponse,
   MemberView,
   MemoryFragmentView,
   MessagesResponse,
@@ -178,18 +179,18 @@ export function listProjects(status?: ProjectStatus): Promise<{ projects: Projec
   return request<{ projects: ProjectSummary[] }>(`/projects${q}`);
 }
 
-/** 立项的唯一出口。返回 `{ project: ProjectSummary }`(201)—— 详情要另拉。 */
-export function createProject(input: {
-  name: string;
-  client: string;
-  goal: string;
-}): Promise<{ project: ProjectSummary }> {
-  return request<{ project: ProjectSummary }>("/projects", {
-    method: "POST",
-    body: JSON.stringify(input),
-  });
-}
-
+/**
+ * ⚠️ **这里刻意没有 `createProject`。**
+ *
+ * 后端仍有 `POST /api/projects`(契约里注明:API / 维护用途),但**界面不许调它**:
+ * 立项是**业务经理**的动作,不是甲方的动作。甲方做的只有一件事 —— 在接待会话里
+ * 与业务经理把诉求谈清楚,谈拢之后由业务经理调 `project_open`,
+ * 服务端广播 `project_opened`(见 `@shared/types/platform`)。
+ *
+ * 上一版界面放了一张 name / client / goal 的表单,用户提交时撞上参数校验报
+ * 「goal 不能为空」—— 那正是「让甲方替业务经理立项」的形态。包装函数一并删掉,
+ * 免得下一次又有人把它接回界面。
+ */
 export function getProject(id: string): Promise<{ project: ProjectDetail }> {
   return request<{ project: ProjectDetail }>(`/projects/${encodeURIComponent(id)}`);
 }
@@ -197,6 +198,17 @@ export function getProject(id: string): Promise<{ project: ProjectDetail }> {
 /** 项目的一条连续对话。 */
 export function getProjectMessages(id: string): Promise<MessagesResponse> {
   return request<MessagesResponse>(`/projects/${encodeURIComponent(id)}/messages`);
+}
+
+/**
+ * **接待会话**(第一个项目之前)的一条连续对话。
+ *
+ * 与 `getProjectMessages` 是**同一个后端读函数**,只是没有 projectId 可传。
+ * 它存在的理由:那条对话也是真的 —— 它落库、它有历史,刷新之后必须还在。
+ * 没有接待会话时后端返回空列表(不是 404),所以首屏不会显示成一次错误。
+ */
+export function getIntakeMessages(): Promise<IntakeMessagesResponse> {
+  return request<IntakeMessagesResponse>("/intake/messages");
 }
 
 /**

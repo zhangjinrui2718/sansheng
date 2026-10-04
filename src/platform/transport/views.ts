@@ -214,10 +214,12 @@ export function toChangeView(row: ChangeRequestRow): ChangeView {
 export function toMessageView(
   row: SessionMessageRow,
   name: (id: string) => string,
+  /** 这条消息属于哪个项目;`null` = 接待会话。**必须显式传入** —— 行里只有 sessionId */
+  projectId: string | null,
 ): SessionMessageView {
   return {
     id: row.id,
-    projectId: "", // 由调用方补齐(行里只有 sessionId)
+    projectId,
     agentId: row.agentId,
     agentName: row.agentId !== null ? name(row.agentId) : null,
     kind: row.kind,
@@ -226,16 +228,23 @@ export function toMessageView(
   };
 }
 
+/**
+ * 一条会话(项目会话**或接待会话**)的全部消息,按时间归并。
+ *
+ * `projectId === null` = 接待会话(第一个项目之前,见
+ * `migrations/012_intake_session.sql`)。走同一个函数是有意的:接待会话与项目会话
+ * 是**同一种东西**,只是前者还没有项目 —— 两套读法迟早会漂。
+ */
 export function listProjectMessages(
   db: Database.Database,
-  projectId: string,
+  projectId: string | null,
   limit = 200,
 ): SessionMessageView[] {
   const name = agentNameCache(db);
   const out: SessionMessageView[] = [];
   for (const s of listSessions(db, projectId)) {
     for (const m of listSessionMessages(db, s.id, limit)) {
-      out.push({ ...toMessageView(m, name), projectId });
+      out.push(toMessageView(m, name, projectId));
     }
   }
   // 多个会话时按时间归并 —— 虽然当前是「每项目一条连续对话」,

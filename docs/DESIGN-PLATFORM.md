@@ -664,7 +664,10 @@ change_affects(change_id, work_id)                -- ← 修订补入(取代 aff
 
 -- ⚠️ 表名**不能**叫 conversations / messages:001 已占用这两个名字,而
 --    CREATE TABLE IF NOT EXISTS 撞名时静默无操作(见批次 5 报告)
-project_sessions(id PK, project_id, created_at)
+project_sessions(id PK, project_id NULL, created_at)
+--   ↑ project_id **可空**:那条 NULL 的会话就是**接待会话**(第一个项目之前,
+--     全局唯一一条 —— 见 §9.3 与 migrations/012)。非空行不受影响:
+--     「一个项目一条连续对话」仍是常态,表结构允许多条只是不为它加约束。
 session_messages(id PK, session_id, agent_id, kind, content, created_at)
 
 -- BC7 Memory:本设计只定契约,存储形态可替换(见 §8.3)
@@ -783,6 +786,31 @@ AgentRuntime
 4. **甲方那道门只有一个把手。** 横向沟通再自由,`client.*` 仍然只有业务经理有 —— 这是唯一不可协商的一条。
 
 **一处实话**:这个组织图里没有画「项目经理向 worker 分派」的箭头细节 —— 分派是通过 `work.create(assignee)` 落成数据,不是一次通信。分派之后 worker 若有疑问,走的是横向 `ask_role` 回来。
+
+### 9.3 第一个项目之前:接待会话
+
+**§9.2 画的是一个项目内部的拓扑,它没有回答更前面的那个问题:项目还不存在时,甲方与谁说话?**
+
+这是一个**设计的空白**,不是 UI 的疏忽。它的后果在接口面上很具体:每条用户消息都要 `projectId`(`handleUserMessage(projectId, content)`),`solveToolset` 的作用域门要求项目 `active`,而项目本身只能由 `project_open` 建 —— 于是「第一个项目」这件事在结构上无从发生。上一版前端的临时处置是摆一张 name / client / goal 表单,用户提交时撞上 `project_open` 的参数校验报「goal 不能为空」。**那等于让甲方替业务经理立项** —— 而业务经理是唯一 clientFacing 的角色(§4.3),在这条路上它没有位置。
+
+所以这一段被正式建模,而不是给它开一个后门:
+
+**1. 接待会话 = `project_id IS NULL` 的那条会话,全局唯一一条。**
+数据的形状不加新表:同一条 `project_sessions`、同一张 `session_messages`,只是那一条没有项目。唯一性落在**部分唯一索引**上(见 migrations/012)。⚠️ 索引的表达式必须是非空值 —— 写成 `ON project_sessions(project_id) WHERE project_id IS NULL` 是**拦不住的**:UNIQUE 索引里 NULL 互不相等,而部分索引收录的每一行 `project_id` 都是 NULL,于是约束永不触发(实测:连插三条 NULL 会话全部成功)。索引建在 `(project_id IS NULL)` 上才真正约束「接待会话只能有一条」,且非空行不进这个索引 —— 「一个项目一条会话」不受影响。
+
+**2. 接待模式的能力面是「不需要项目」的那几条,不是「除了项目之外的」。**
+`project.open`(立项这件事本身就是接待模式的出口)、`memory.read` / `memory.write`(记忆关于**用户**,项目无关)。项目内能力(`work.*` / `blackboard.*` / `collab.*` / `change.*` / `blocker.*` / `project.read|update|close`)全部被 scope 门挡下。
+
+**3. `client.ask` / `client.message` 在接待阶段不可用 —— 这是刻意的。**
+`ask_client` 落的 `client_question` 是**工件**,而工件必须挂 `project_id`(§6)。所以接待阶段的澄清走**正常对话**:「一次只问一件事、带候选项、带你的倾向」这套纪律不变,变的是通道。它是 `business_manager.align` 里明写的规则 —— 那条规约原本只说「问题必须走 `ask_client`」,在接待阶段并不成立。
+
+**4. 立项是业务经理的动作,不是甲方的动作。**
+对齐谈拢之后由业务经理调 `project_open`。工具结果**结构化地带回新项目 id**(`ToolResult.data.projectId` → SDK `details` → `runTurn` 的 `openedProjectIds`),宿主据此收口:把接待会话的消息**迁进**新项目的会话、丢掉接待会话、广播 `project_opened` 让前端切过去。不走「解析工具返回的文本抠 id」—— 文案改一个字就会让那条路径静默失效。
+
+**5. 前端没有「创建项目」表单。**
+一个项目都没有时首屏就是接待对话;左栏的「+ 新建」等于「和业务经理谈一个新项目」。立项完成后前端自动切到那个项目,并在那里看见刚才谈过的全部内容(消息已迁入)。
+
+**这条界线的意义**:甲方从第一句话起就只与业务经理打交道 —— 包括**第一个项目还不存在**的时候。§4.3 的「甲方那道门只有一个把手」因此没有例外段。
 
 ---
 

@@ -25,7 +25,11 @@ export function isSessionMessageKind(v: unknown): v is SessionMessageKind {
 
 export interface SessionRow {
   id: string;
-  projectId: string;
+  /**
+   * `null` = **接待会话**(第一个项目之前,见 `migrations/012_intake_session.sql`)。
+   * 全局只有一条 —— 由迁移里的部分唯一索引机械保证。
+   */
+  projectId: string | null;
   createdAt: number;
 }
 
@@ -41,7 +45,7 @@ export interface SessionMessageRow {
 
 interface RawConversation {
   id: string;
-  project_id: string;
+  project_id: string | null;
   created_at: number;
 }
 
@@ -56,7 +60,7 @@ interface RawMessage {
 
 export function insertSession(
   db: Database.Database,
-  row: { id: string; projectId: string; createdAt: number },
+  row: { id: string; projectId: string | null; createdAt: number },
 ): void {
   db.prepare(
     `INSERT INTO project_sessions (id, project_id, created_at) VALUES (?, ?, ?)`,
@@ -72,10 +76,23 @@ export function getSession(db: Database.Database, id: string): SessionRow | null
     : null;
 }
 
-export function listSessions(db: Database.Database, projectId: string): SessionRow[] {
-  const rows = db
-    .prepare(`SELECT * FROM project_sessions WHERE project_id = ? ORDER BY created_at DESC`)
-    .all(projectId) as RawConversation[];
+/**
+ * 某个项目(或接待会话)的全部会话,新的在前。
+ *
+ * `projectId === null` 要写成 `IS NULL` —— SQL 里 `project_id = NULL` 恒为
+ * unknown,一条也查不出来。这不是风格问题:写成 `= ?` 的话接待会话的历史会
+ * **静默变成空列表**,而「空列表」和「这段对话真的没有消息」在接口上长得一样。
+ */
+export function listSessions(db: Database.Database, projectId: string | null): SessionRow[] {
+  const rows = (
+    projectId === null
+      ? db
+          .prepare(`SELECT * FROM project_sessions WHERE project_id IS NULL ORDER BY created_at DESC`)
+          .all()
+      : db
+          .prepare(`SELECT * FROM project_sessions WHERE project_id = ? ORDER BY created_at DESC`)
+          .all(projectId)
+  ) as RawConversation[];
   return rows.map((r) => ({ id: r.id, projectId: r.project_id, createdAt: r.created_at }));
 }
 

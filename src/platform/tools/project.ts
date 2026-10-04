@@ -17,7 +17,7 @@ import {
 import { getAgent } from "../storage/repo/agents.js";
 import { resolveAssignee } from "./resolve.js";
 import {
-  fail, ok, requireString, readString, readStringArray, readNumber,
+  fail, ok, requireProject, requireString, readString, readStringArray, readNumber,
   type PlatformTool, type ToolRunContext, type ToolResult,
 } from "./types.js";
 
@@ -54,7 +54,7 @@ const projectOpen: PlatformTool = {
   name: "project_open",
   capability: "project.open",
   description:
-    "立项。把一个已与甲方对齐的目标落成正式项目,产出项目根工件。**这是甲方诉求进入系统的唯一入口** —— 立项之后的一切都发生在项目内,不再需要甲方在场。",
+    "立项。把一个已与甲方对齐的目标落成正式项目,产出项目根工件。**这是甲方诉求进入系统的唯一入口** —— 立项之后的一切都发生在项目内,不再需要甲方在场。**接待会话(还没有项目)里也带着它** —— 与甲方谈拢之后就用它,不要要求甲方去填任何表单。",
   parameters: Type.Object({
     name: Type.String({ description: "项目名(简短可辨识)" }),
     client: Type.String({ description: "甲方标识" }),
@@ -76,7 +76,20 @@ const projectOpen: PlatformTool = {
     });
     // 立项人自动成为项目成员 —— 否则业务经理建完项目反而不在里面
     addMember(ctx.db, id, ctx.agent.id, at);
-    return ok(`已立项 ${id}「${name.value}」(甲方:${client.value})\n目标:${goal.value}`);
+    // ── 结构化 id 走 `data`,不靠解析 `text` ──────────────────────
+    //
+    // 宿主必须知道「新项目叫什么 id」:它要把接待会话的消息迁进新项目、让前端
+    // 切过去、并**丢掉接待会话**(否则那条会话还留着接待模式的工具面)。
+    // 从下面这行文本里正则抠 id 是脆的(文案改一个字就静默失效),所以走
+    // `ToolResult.data` → SDK `details` → `runTurn` 的既有结构化通道
+    // (判工具成败本来就是读 details,见 runtime/turn.ts)。
+    // 文本仍以 id 开头,人读日志时第一眼也能看到它。
+    return ok(`已立项 ${id}「${name.value}」(甲方:${client.value})\n目标:${goal.value}`, {
+      projectId: id,
+      name: name.value,
+      client: client.value,
+      goal: goal.value,
+    });
   },
 };
 
@@ -89,7 +102,9 @@ const projectRead: PlatformTool = {
     projectId: Type.Optional(Type.String({ description: "缺省 = 当前项目" })),
   }),
   run(args, ctx): ToolResult {
-    const pid = readString(args, "projectId") ?? ctx.project.id;
+    const proj = requireProject(ctx, "project_read");
+    if (!proj.ok) return proj.result;
+    const pid = readString(args, "projectId") ?? proj.project.id;
     const row = getProjectRow(ctx.db, pid);
     if (row === null) return fail("not_found", `找不到项目 ${pid}`);
 
@@ -132,7 +147,9 @@ const projectUpdate: PlatformTool = {
     ),
   }),
   run(args, ctx): ToolResult {
-    const pid = readString(args, "projectId") ?? ctx.project.id;
+    const proj = requireProject(ctx, "project_update");
+    if (!proj.ok) return proj.result;
+    const pid = readString(args, "projectId") ?? proj.project.id;
     if (getProjectRow(ctx.db, pid) === null) return fail("not_found", `找不到项目 ${pid}`);
     const status = readString(args, "status");
     if (status !== undefined && status !== "active" && status !== "paused") {
@@ -164,7 +181,9 @@ const projectClose: PlatformTool = {
     reason: Type.Optional(Type.String({ description: "放弃原因(abandoned 时应给)" })),
   }),
   run(args, ctx): ToolResult {
-    const pid = readString(args, "projectId") ?? ctx.project.id;
+    const proj = requireProject(ctx, "project_close");
+    if (!proj.ok) return proj.result;
+    const pid = readString(args, "projectId") ?? proj.project.id;
     const outcome = readString(args, "outcome");
     if (outcome !== "done" && outcome !== "abandoned") {
       return fail("invalid_args", `outcome 只能是 done 或 abandoned(收到「${String(outcome)}」)`, [
@@ -199,7 +218,9 @@ const workCreate: PlatformTool = {
     parentWorkId: Type.Optional(Type.String({ description: "父工作项(做工作分解树时给)" })),
   }),
   run(args, ctx): ToolResult {
-    const pid = readString(args, "projectId") ?? ctx.project.id;
+    const proj = requireProject(ctx, "work_create");
+    if (!proj.ok) return proj.result;
+    const pid = readString(args, "projectId") ?? proj.project.id;
     const title = requireString(args, "title");
     if (!title.ok) return title.result;
     const goal = requireString(args, "goal");
@@ -320,8 +341,10 @@ const workList: PlatformTool = {
     limit: Type.Optional(Type.Number()),
   }),
   run(args, ctx): ToolResult {
+    const proj = requireProject(ctx, "work_list");
+    if (!proj.ok) return proj.result;
     {
-      const pid = readString(args, "projectId") ?? ctx.project.id;
+      const pid = readString(args, "projectId") ?? proj.project.id;
       const status = readString(args, "status");
       if (status !== undefined && !isWorkStatus(status)) {
         return fail("invalid_args", `未知状态「${status}」`, WORK_STATUSES);

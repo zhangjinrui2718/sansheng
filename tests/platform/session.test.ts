@@ -279,3 +279,48 @@ describe("不变式 · 交出去的工具必须都有实现", () => {
     }
   });
 });
+
+// ── 接待会话(projectId === null)──────────────────────────────────
+//
+// 这是本项目补上的架构缺口:第一个项目存在之前,用户**无法**与业务经理对话 ——
+// 每条用户消息都要 projectId,而项目还不存在;前端只好摆一张「创建项目」表单。
+// 现在有一条 `project_id IS NULL` 的接待会话(见 migrations/012),业务经理在
+// 里面与甲方谈诉求,谈拢了由**它**调 project_open 立项。
+
+describe("createPlatformSession · 接待会话(还没有项目)", () => {
+  it("工具面只有 project_open + 记忆,项目内工具一个都进不去", async () => {
+    const cap: Capture = { opts: null };
+    const r = await createPlatformSession(deps, ids.bm, null, { ...OPTS, createSession: fakeSdk(cap) });
+    if (!r.ok) throw new Error(r.detail);
+
+    expect(r.plan.project).toBeNull();
+    expect([...r.wiring.customToolNames].sort()).toEqual([
+      "memory_remember", "memory_search", "project_open",
+    ]);
+    // 沟通工具必须缺席:client_question 是工件,工件要挂 project_id
+    expect(r.wiring.customToolNames).not.toContain("ask_client");
+    expect(r.wiring.customToolNames).not.toContain("tell_client");
+    // 交给 SDK 的名单与求解结果一致(少给 = 声称有实际没有;多给 = 越权)
+    expect([...(cap.opts?.tools ?? [])].sort()).toEqual([...r.plan.tools].sort());
+    // 接待模式没有任何 SDK 内置工具(业务经理本来就不持 code.*)
+    expect(cap.opts?.tools ?? []).not.toContain("bash");
+  });
+
+  it("接待模式不校验项目与成员,只校验 agent 存在", async () => {
+    const ok = await createPlatformSession(deps, ids.bm, null, { ...OPTS, createSession: fakeSdk({ opts: null }) });
+    expect(ok.ok).toBe(true);
+
+    const missing = await createPlatformSession(deps, "ag_不存在", null, {
+      ...OPTS, createSession: fakeSdk({ opts: null }),
+    });
+    expect(missing.ok).toBe(false);
+    if (!missing.ok && missing.reason === "assembly") expect(missing.detail).toContain("no_such_agent");
+  });
+
+  it("接待模式下花名册为空 —— 还没有项目,没有参与方", async () => {
+    const planned = planAgentSession(deps, ids.bm, null);
+    if (!planned.ok) throw new Error(planned.detail);
+    expect(planned.plan.roster).toEqual([]);
+    expect(planned.plan.project).toBeNull();
+  });
+});

@@ -16,12 +16,13 @@
  * 执行侧必须能独立判定,否则「改了配置但旧会话还开着」就是个越权窗口。
  */
 import type Database from "better-sqlite3";
-import { authorizeCall, capabilityOfTool } from "../harness/authorize.js";
+import { authorizeCall, capabilityOfTool, intakeCapabilities, isIntakeCapability } from "../harness/authorize.js";
 import { ROLE_SPECS, factoryToolset, type ProjectRole } from "../identity/role.js";
 import {
   ALL_TOOLS,
   CAPABILITIES,
   CAPABILITY_TOOLS,
+  expandCapabilities,
   isSdkToolName,
   isToolName,
   type Capability,
@@ -122,6 +123,26 @@ export function dispatch(
       `角色 ${ctx.agent.role} 的架构上界不含「${tool.capability}」—— ` +
         `放开上界是改 ROLE_SPECS 的代码动作,不是改集合文件`,
       implementedToolNames(),
+    );
+  }
+
+  // ── 2.5 作用域:**接待会话**里只有项目无关的能力 ──
+  //
+  // 与求解期的 scope 门同源(`authorize.isIntakeCapability`),理由与第 2 步一样:
+  // 工具面的存在不等于调用的合法。接待会话的工具面是会话建立时算的,而
+  // **项目可能在同一轮里刚被 project_open 建出来** —— 那之后这次会话就是旧形态了,
+  // 它手上剩下的项目内工具必须当场失效(宿主随后会 dispose 掉这条会话,
+  // 但不能指望「随后」:这一轮里模型还可能继续调工具)。
+  if (ctx.project === null && !isIntakeCapability(tool.capability)) {
+    return fail(
+      "denied",
+      `工具「${toolName}」(能力 ${tool.capability})需要项目作用域,` +
+        `而这次调用发生在接待会话 —— 接待阶段能用的只有:${intakeCapabilities().join(" / ")}。` +
+        `先与甲方把诉求谈清楚,再用 project_open 立项`,
+      // 回灌**接待模式下真正可用的工具**,不是「已实现的全部工具」——
+      // 8-F 的教训是拒绝必须让模型能据此自纠;列一份它此刻用不了的名字,
+      // 等于把它指向另一条死路。
+      expandCapabilities(intakeCapabilities()),
     );
   }
 

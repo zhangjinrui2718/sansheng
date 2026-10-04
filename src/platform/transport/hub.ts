@@ -46,17 +46,25 @@ export interface HubDeps {
 }
 
 export interface HubHandlers {
-  /** 用户在一个项目里说了句话 —— host 负责建会话 / 跑回合 */
-  readonly onUserMessage: (projectId: string, content: string) => Promise<void>;
+  /**
+   * 用户在一个项目(或**接待会话**,`null`)里说了句话 —— host 负责建会话 / 跑回合。
+   */
+  readonly onUserMessage: (projectId: string | null, content: string) => Promise<void>;
   /** 用户答了一个 client_question */
   readonly onAnswerQuestion: (questionId: string, answer: string) => Promise<void>;
-  readonly onInterrupt: (projectId: string) => void;
+  readonly onInterrupt: (projectId: string | null) => void;
 }
 
 export class PlatformHub {
   private readonly clients = new Set<WebSocket>();
-  /** 每个项目当前正在跑的回合(用于 interrupt 与「忙」状态) */
-  private readonly busy = new Set<string>();
+  /**
+   * 每个上下文当前正在跑的回合(用于 interrupt 与「忙」状态)。
+   *
+   * 键是 `string | null` —— `null` 就是**接待会话**。不引入哨兵字符串是有意的:
+   * 哨兵要么在前后端各写一份字面量(迟早漂),要么得从 `@shared` 值导入
+   * (server 侧禁止,见 AGENTS.md)。`null` 本身就是「还没有项目」的诚实表示。
+   */
+  private readonly busy = new Set<string | null>();
 
   constructor(
     private readonly deps: HubDeps,
@@ -67,11 +75,11 @@ export class PlatformHub {
     return this.clients.size;
   }
 
-  isBusy(projectId: string): boolean {
+  isBusy(projectId: string | null): boolean {
     return this.busy.has(projectId);
   }
 
-  setBusy(projectId: string, v: boolean): void {
+  setBusy(projectId: string | null, v: boolean): void {
     if (v) this.busy.add(projectId);
     else this.busy.delete(projectId);
   }
@@ -140,7 +148,12 @@ export class PlatformHub {
         }
       }
     } catch (e) {
-      const projectId = "projectId" in cmd && typeof cmd.projectId === "string" ? cmd.projectId : undefined;
+      // 错误要带上下文。`projectId: null` 是**接待会话**;字段整个缺席是
+      // 「与任何上下文无关」(如 JSON 解析失败)—— 前端据此决定弹在哪。
+      const projectId =
+        "projectId" in cmd && (typeof cmd.projectId === "string" || cmd.projectId === null)
+          ? cmd.projectId
+          : undefined;
       this.sendTo(ws, {
         type: "error",
         ...(projectId !== undefined ? { projectId } : {}),
@@ -167,27 +180,37 @@ export class PlatformHub {
 
   // ── 事件发射(host 与工具共用)────────────────────────────────
 
-  emitMessageStart(projectId: string, messageId: string, role: "user" | "assistant"): void {
+  emitMessageStart(projectId: string | null, messageId: string, role: "user" | "assistant"): void {
     this.broadcast({ type: "message_start", projectId, messageId, role });
   }
-  emitDelta(projectId: string, messageId: string, text: string): void {
+  emitDelta(projectId: string | null, messageId: string, text: string): void {
     this.broadcast({ type: "delta", projectId, messageId, text });
   }
   /** 内部推理走**独立**事件 —— 与 delta 永不混流(7-I 的现场)。 */
-  emitThinking(projectId: string, messageId: string, text: string): void {
+  emitThinking(projectId: string | null, messageId: string, text: string): void {
     this.broadcast({ type: "thinking_delta", projectId, messageId, text });
   }
-  emitMessageEnd(projectId: string, messageId: string, usage?: { input: number; output: number }): void {
+  emitMessageEnd(projectId: string | null, messageId: string, usage?: { input: number; output: number }): void {
     this.broadcast({ type: "message_end", projectId, messageId, ...(usage !== undefined ? { usage } : {}) });
   }
-  emitToolStart(projectId: string, messageId: string, tool: WsToolInfo): void {
+  emitToolStart(projectId: string | null, messageId: string, tool: WsToolInfo): void {
     this.broadcast({ type: "tool_start", projectId, messageId, tool });
   }
-  emitToolEnd(projectId: string, messageId: string, tool: WsToolInfo): void {
+  emitToolEnd(projectId: string | null, messageId: string, tool: WsToolInfo): void {
     this.broadcast({ type: "tool_end", projectId, messageId, tool });
   }
-  emitAgentEnd(projectId: string): void {
+  emitAgentEnd(projectId: string | null): void {
     this.broadcast({ type: "agent_end", projectId, ts: this.deps.now() });
+  }
+
+  /**
+   * 业务经理刚在接待会话里立起了项目。
+   *
+   * **由 host 在回合结束后调用**,不由工具直接广播:工具在回合中间执行,
+   * 那时候广播会让前端在一条正在流的回合里换上下文(半个回合的输出落错面板)。
+   */
+  emitProjectOpened(projectId: string, name: string): void {
+    this.broadcast({ type: "project_opened", projectId, name });
   }
 
   /** 新工件落库后调用 —— 前端据此刷新黑板。 */
@@ -254,14 +277,24 @@ function nameOf(db: Database.Database, agentId: string): string {
   return a !== null ? a.displayName : agentId;
 }
 
-/** 拿该项目的第一条会话,没有就建一条。**每个项目一条连续对话**(经校准的裁决)。 */
+/**
+ * 拿那个上下文的第一条会话,没有就建一条。**每个项目一条连续对话**(经校准的裁决)。
+ *
+ * `projectId === null` = **接待会话**:全局只有那一条(`project_id IS NULL`)。
+ * 这里不额外做「只能有一条」的判定 —— 那条不变量在 **schema 层**由
+ * `idx_session_single_intake` 机械保证(见 `migrations/012_intake_session.sql`),
+ * 应用层再判一次只会多一处会漂的真相。
+ *
+ * ⚠️ 接待会话**不校验项目存在**(没有项目可校验);项目会话必须校验 —— 往不存在的
+ * 项目里写消息会让那条对话永远读不出来。
+ */
 export function ensureSession(
   db: Database.Database,
-  projectId: string,
+  projectId: string | null,
   at: number,
   newId: (p: string) => string,
 ): string {
-  if (getProjectRow(db, projectId) === null) {
+  if (projectId !== null && getProjectRow(db, projectId) === null) {
     throw new Error(`项目 ${projectId} 不存在 —— 不能往不存在的项目里写消息`);
   }
   const existing = listSessions(db, projectId);

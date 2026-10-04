@@ -186,6 +186,7 @@ function emptyTurn(): TurnResult {
     text: "",
     thinking: "",
     toolCalls: [],
+    openedProjectIds: [],
     pending: { injected: false, summary: "(未执行)" },
     settled: true,
     timedOut: false,

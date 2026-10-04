@@ -416,3 +416,73 @@ describe("工具面收窄的整体行为", () => {
     }
   });
 });
+
+// ── 接待模式(project === null)────────────────────────────────────
+//
+// 设计 1 §9.2 只写了「一个项目的会话拓扑」,**没写「第一个项目之前」**。
+// 那一段就是接待模式:`project_id IS NULL` 的那条会话(见 migrations/012)。
+// 这几条断言守的是「用户在与项目无关的阶段仍然能与业务经理对话」这件事 ——
+// 它此前不存在,前端的临时处置是一张「创建项目」表单(用户明确反对)。
+
+describe("接待模式 · 工具面只含项目无关的能力", () => {
+  it("业务经理在接待模式下拿到 project_open + 记忆工具", () => {
+    const r = solveToolset(BM, null);
+    // `tools` 是排序后的(见 solveToolset),所以这里是字典序
+    expect(r.tools).toEqual(["memory_remember", "memory_search", "project_open"]);
+    expect(r.capabilities).toEqual(["project.open", "memory.read", "memory.write"]);
+    expect(r.blockedByCeiling).toEqual([]);
+  });
+
+  it("**client.* 在接待模式下不可用** —— client_question 是工件,工件必须挂项目", () => {
+    const r = solveToolset(BM, null);
+    expect(r.tools).not.toContain("ask_client");
+    expect(r.tools).not.toContain("tell_client");
+    const denied = r.blockedByScope.find((d) => d.subject === "client.ask");
+    expect(denied, "client.ask 应当被 scope 门挡下,并且可见").toBeDefined();
+    expect(denied!.reason).toContain("工件");
+  });
+
+  it("项目内能力在接待模式下全部被挡,且每条都有理由(可见性纪律)", () => {
+    const r = solveToolset(BM, null);
+    expect(r.blockedByScope.length).toBeGreaterThan(0);
+    for (const d of r.blockedByScope) {
+      expect(d.code).toBe("scope");
+      expect(d.reason.length).toBeGreaterThan(5);
+    }
+    // 逐条核对:ceiling 里除了那三条,其余都该落在 blockedByScope
+    const allowed = new Set(r.capabilities);
+    for (const cap of ROLE_SPECS.business_manager.ceiling) {
+      if (allowed.has(cap)) continue;
+      expect(r.blockedByScope.map((d) => d.subject)).toContain(cap);
+    }
+  });
+
+  it("只有业务经理能在接待模式下立项(其余角色的 ceiling 不含 project.open)", () => {
+    for (const role of PROJECT_ROLES) {
+      const r = solveToolset(agent(role), null);
+      if (role === "business_manager") expect(r.tools).toContain("project_open");
+      else expect(r.tools).not.toContain("project_open");
+    }
+  });
+
+  it("接待模式只减不增:工具面是同一角色 active 项目下的子集", () => {
+    for (const role of PROJECT_ROLES) {
+      const a = agent(role);
+      const inProject = new Set(solveToolset(a, ACTIVE).tools);
+      for (const t of solveToolset(a, null).tools) {
+        expect(inProject, `${role} 在接待模式下拿到了项目内也没有的 ${t}`).toContain(t);
+      }
+    }
+  });
+});
+
+describe("调用期 · 接待模式下的参数级门", () => {
+  it("指定项目内通信目标时如实拒绝(而不是拿 null 去查成员)", () => {
+    const v = authorizeCall("collab.ask", { targetAgentId: "agent-pm" }, { agent: BM, project: null });
+    expect(v.ok).toBe(false);
+    if (!v.ok) {
+      expect(v.denial.code).toBe("scope");
+      expect(v.denial.reason).toContain("接待会话");
+    }
+  });
+});

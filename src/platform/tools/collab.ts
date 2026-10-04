@@ -37,7 +37,7 @@ const ARTIFACT_ACCEPTED: ArtifactStatus = "accepted";
 import { resolveAssignee } from "./resolve.js";
 import { getAgent } from "../storage/repo/agents.js";
 import { ESCALATION_TARGET } from "../harness/authorize.js";
-import { fail, ok, requireString, readString, readStringArray, readNumber,
+import { fail, ok, requireProject, requireString, readString, readStringArray, readNumber,
   type PlatformTool, type ToolResult, type ToolRunContext } from "./types.js";
 
 /** 一条 ask 的渲染行 —— 列表与详情统一,避免两处漂移。 */
@@ -79,6 +79,8 @@ const askRole: PlatformTool = {
     })),
   }),
   run(args, ctx): ToolResult {
+    const proj = requireProject(ctx, "ask_role");
+    if (!proj.ok) return proj.result;
     const targetRole = requireString(args, "targetRole");
     if (!targetRole.ok) return targetRole.result;
     const question = requireString(args, "question");
@@ -92,7 +94,7 @@ const askRole: PlatformTool = {
     }
 
     const resolved = resolveAssignee(
-      ctx.db, ctx.project.id, targetRole.value, args["targetSpec"],
+      ctx.db, proj.project.id, targetRole.value, args["targetSpec"],
     );
     if (!resolved.ok) {
       return fail("not_found", `无法确定提问对象:${resolved.message}`, resolved.alternatives);
@@ -108,7 +110,7 @@ const askRole: PlatformTool = {
     try {
       insertAsk(ctx.db, {
         id,
-        projectId: ctx.project.id,
+        projectId: proj.project.id,
         fromAgentId: ctx.agent.id,
         toAgentId: resolved.agentId,
         question: question.value,
@@ -217,7 +219,9 @@ const askList: PlatformTool = {
     limit: Type.Optional(Type.Number()),
   }),
   run(args, ctx): ToolResult {
-    const pid = readString(args, "projectId") ?? ctx.project.id;
+    const proj = requireProject(ctx, "ask_list");
+    if (!proj.ok) return proj.result;
+    const pid = readString(args, "projectId") ?? proj.project.id;
     const status = readString(args, "status");
 
     if (args["askedByMe"] === true) {
@@ -368,11 +372,13 @@ const escalate: PlatformTool = {
 
 /** 按 ESCALATION_TARGET 在项目内找上一级的 agent。 */
 function resolveEscalationAgent(ctx: ToolRunContext, fromAgentId: string): string | null {
+  const proj = requireProject(ctx, "escalate");
+  if (!proj.ok) return null; // 接待会话里没有项目,也就没有上一级可升级
   const fromAgent = getAgent(ctx.db, fromAgentId);
   if (fromAgent === null) return null;
   const targetRole = ESCALATION_TARGET[fromAgent.role];
   if (targetRole === null) return null;
-  const r = resolveAssignee(ctx.db, ctx.project.id, targetRole);
+  const r = resolveAssignee(ctx.db, proj.project.id, targetRole);
   return r.ok ? r.agentId : null;
 }
 
@@ -396,7 +402,9 @@ const convene: PlatformTool = {
     agenda: Type.Optional(Type.Array(Type.String(), { description: "议程条目" })),
   }),
   run(args, ctx): ToolResult {
-    const pid = readString(args, "projectId") ?? ctx.project.id;
+    const proj = requireProject(ctx, "convene");
+    if (!proj.ok) return proj.result;
+    const pid = readString(args, "projectId") ?? proj.project.id;
     const topic = requireString(args, "topic");
     if (!topic.ok) return topic.result;
 

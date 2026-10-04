@@ -93,13 +93,19 @@ export class PlatformSocket {
     }
   }
 
-  /** 对某个项目的业务经理说一句话。 */
-  sendToProject(projectId: string, content: string): void {
+  /**
+   * 对某个项目的业务经理说一句话。
+   *
+   * **`null` = 接待会话**(第一个项目之前,见 `@shared/types/platform` 的
+   * `ClientCommand`)。那一段里与你说话的是业务经理,它的工具面只有
+   * `project_open` 与 `memory_*` —— 谈拢之后它自己立项并广播 `project_opened`。
+   */
+  sendToProject(projectId: string | null, content: string): void {
     this.send({ type: "send", projectId, content });
   }
 
-  /** 中断某个项目正在跑的一轮。 */
-  interrupt(projectId: string): void {
+  /** 中断某个上下文正在跑的一轮(`null` = 接待会话)。 */
+  interrupt(projectId: string | null): void {
     this.send({ type: "interrupt", projectId });
   }
 

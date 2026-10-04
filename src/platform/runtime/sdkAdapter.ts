@@ -47,6 +47,15 @@ export interface PlatformToolDetails {
   readonly ok: boolean;
   /** 失败时的错误码(ok=false 才有) */
   readonly code?: string;
+  /**
+   * 工具自己带回的结构化结果(`ToolResult.data`)。**给宿主读,不给模型读。**
+   *
+   * 目前的唯一读者是 `project_open` 的 `{ projectId }`:宿主靠它做
+   * 「接待会话 → 新项目」的切换。放在这里而不是解析给模型的文本,是因为
+   * 文案改一个字就会让解析静默失效 —— 而这条通道本来就是判成败用的,
+   * 加一个字段不会引入第二套机制。
+   */
+  readonly data?: Readonly<Record<string, unknown>>;
 }
 
 /**
@@ -70,7 +79,10 @@ function toAgentToolResult(r: ToolResult): {
   details: PlatformToolDetails;
 } {
   if (r.ok) {
-    return { content: [{ type: "text", text: r.text }], details: { ok: true } };
+    return {
+      content: [{ type: "text", text: r.text }],
+      details: { ok: true, ...(r.data !== undefined ? { data: r.data } : {}) },
+    };
   }
   const text =
     `[工具失败:${r.code}] ${r.message}` +

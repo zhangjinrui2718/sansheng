@@ -108,9 +108,12 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
     log.muted(`platform: 模型已重新解析 → ${currentModel !== null ? `${p.provider}/${p.modelId}` : "(失败)"}`);
   }
 
-  // ── 常驻会话(每个项目一个)────────────────────────────────────
-  const sessions = new Map<string, AgentSession>();
-  const inflight = new Map<string, AbortController>();
+  // ── 常驻会话(每个项目一个 + 接待会话那一个)──────────────────
+  //
+  // 键是 `string | null`:**`null` 就是接待会话**(第一个项目之前)。
+  // 不引入哨兵字符串 —— 见 transport/hub.ts 里 busy 集合的说明。
+  const sessions = new Map<string | null, AgentSession>();
+  const inflight = new Map<string | null, AbortController>();
 
   const hub = new PlatformHub(
     { db, now, newId },
@@ -155,19 +158,30 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
     return row?.p ?? null;
   }
 
-  /** 用户在一个项目里说了一句话 → 业务经理跑一个回合,全程流式推给前端。 */
-  async function handleUserMessage(projectId: string, content: string): Promise<void> {
-    const project = getProjectRow(db, projectId);
-    if (project === null) {
-      hub.broadcast({ type: "error", projectId, error: { code: "not_found", message: "项目不存在" } });
-      return;
-    }
-    if (project.status === "done" || project.status === "abandoned") {
-      hub.broadcast({
-        type: "error", projectId,
-        error: { code: "project_closed", message: `项目已${project.status === "done" ? "完成" : "废弃"},不能再对话` },
-      });
-      return;
+  /**
+   * 用户在某个上下文里说了一句话 → 业务经理跑一个回合,全程流式推给前端。
+   *
+   * `projectId === null` = **接待会话**(第一个项目之前)。此时没有项目可校验,
+   * 那条会话就是 `project_id IS NULL` 的全局唯一会话(见
+   * `migrations/012_intake_session.sql`)。业务经理在这里与甲方谈诉求 ——
+   * 谈拢之后由**它**调 `project_open`,本函数在回合结束后收口:
+   * 把接待会话的消息迁进新项目、丢掉接待会话、广播 `project_opened` 让前端切过去。
+   * **用户从不需要填「创建项目」表单**:立项是业务经理的动作。
+   */
+  async function handleUserMessage(projectId: string | null, content: string): Promise<void> {
+    if (projectId !== null) {
+      const project = getProjectRow(db, projectId);
+      if (project === null) {
+        hub.broadcast({ type: "error", projectId, error: { code: "not_found", message: "项目不存在" } });
+        return;
+      }
+      if (project.status === "done" || project.status === "abandoned") {
+        hub.broadcast({
+          type: "error", projectId,
+          error: { code: "project_closed", message: `项目已${project.status === "done" ? "完成" : "废弃"},不能再对话` },
+        });
+        return;
+      }
     }
 
     ensureOrg(db, now());
@@ -216,7 +230,11 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
       }
       session = created.session;
       sessions.set(projectId, session);
-      log.muted(`platform: 为项目 ${projectId} 建了业务经理会话`);
+      log.muted(
+        projectId === null
+          ? `platform: 建了业务经理的**接待会话**(工具面 ${created.plan.tools.join(", ")})`
+          : `platform: 为项目 ${projectId} 建了业务经理会话`,
+      );
     }
 
     // 3. 跑回合,事件桥到前端
@@ -225,6 +243,8 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
     hub.emitMessageStart(projectId, messageId, "assistant");
     const textBuf: string[] = [];
     const thinkBuf: string[] = [];
+    /** 这一回合立起来的项目(按调用顺序)。**来自工具的结构化结果,不是解析文本** */
+    let openedProjectIds: readonly string[] = [];
 
     try {
       const turn = await runTurn({
@@ -237,6 +257,7 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
           bridge(ev, projectId, messageId, hub, textBuf, thinkBuf);
         },
       });
+      openedProjectIds = turn.openedProjectIds;
 
       // 4. 助手消息落库(项目活过会话)
       const text = turn.text.trim() !== "" ? turn.text : textBuf.join("");
@@ -264,6 +285,73 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
       hub.setBusy(projectId, false);
       inflight.delete(projectId);
     }
+
+    // 5. 立项 → 收口。**必须在回合结束之后做** —— 回合中途换上下文会让半个
+    //    回合的输出落进另一个面板(前端此刻还在接待流上)。
+    if (openedProjectIds.length > 0) {
+      // 一个回合里立了多个项目是病态输入;如实记账,并只迁到最后一个
+      // (不静默挑一个:事后要能看出当时发生了什么)。
+      const newProjectId = openedProjectIds[openedProjectIds.length - 1]!;
+      if (openedProjectIds.length > 1) {
+        log.warn(
+          `platform: 一个回合里立了 ${openedProjectIds.length} 个项目 ` +
+            `(${openedProjectIds.join(", ")})—— 接待会话只迁进最后那个 ${newProjectId}`,
+        );
+      }
+      const row = getProjectRow(db, newProjectId);
+      if (row === null) {
+        // 工具说立项成功、库里却没有 —— 这是装配/写入事故,必须响亮
+        log.error(`platform: project_open 报回 ${newProjectId},但库里读不到它 —— 不切换`);
+      } else {
+        const fromIntake = projectId === null;
+        if (fromIntake) {
+          // 顺序有讲究:**先迁消息,再广播,最后才丢会话**。
+          //   迁 → 前端收到事件后立刻拉新项目的 messages,那时消息必须已经在了
+          //       (否则用户会看到一段空对话)
+          //   广播 → 放在 dispose 之前:dispose 是 SDK 的调用,不该由它决定
+          //       用户多久才看到切换
+          //   丢 → 接待会话的工具面是接待模式的,留着会让下一条消息继续用它
+          adoptIntakeMessages(sessionId, newProjectId);
+        }
+        hub.emitProjectOpened(newProjectId, row.name);
+        if (fromIntake) disposeSession(null, "立项后接待会话结束");
+        log.ok(
+          `platform: 已立项 ${newProjectId}「${row.name}」` +
+            (fromIntake ? "(接待会话的消息已迁入)" : `(在项目 ${projectId} 的会话里立的)`),
+        );
+      }
+    }
+  }
+
+  /**
+   * 把接待会话的消息迁进新项目的会话,然后删掉接待会话行。
+   *
+   * **迁而不是留**:那段对话就是新项目的立项背景,它该跟着项目走 —— 甲方刷新
+   * 之后在新项目里还看得见当初说过什么。删掉接待会话行是有意的:留着它就是一条
+   * 空会话,而「全局只有一条接待会话」由 schema 的部分唯一索引保证
+   * (见 migrations/012);下次点「新建项目」时会建一条干净的。
+   */
+  function adoptIntakeMessages(intakeSessionId: string, newProjectId: string): void {
+    const target = ensureSession(db, newProjectId, now(), newId);
+    const moved = db
+      .prepare(`UPDATE session_messages SET session_id = ? WHERE session_id = ?`)
+      .run(target, intakeSessionId).changes;
+    // 消息已经全部迁走,这里删掉的只是一条空会话(级联删不到东西)
+    db.prepare(`DELETE FROM project_sessions WHERE id = ?`).run(intakeSessionId);
+    log.muted(`platform: 接待会话 ${intakeSessionId} 的 ${moved} 条消息 → 项目 ${newProjectId} 的会话 ${target}`);
+  }
+
+  /** 丢掉某个上下文的常驻会话(不存在时静默 —— 幂等调用点用它)。 */
+  function disposeSession(projectId: string | null, why: string): void {
+    const s = sessions.get(projectId);
+    if (s === undefined) return;
+    try {
+      s.dispose();
+    } catch {
+      /* dispose 失败不影响「这条会话已经不该再用」这个事实 */
+    }
+    sessions.delete(projectId);
+    log.muted(`platform: 已丢弃${projectId === null ? "接待" : `项目 ${projectId}`}会话(${why})`);
   }
 
   // ── HTTP ──────────────────────────────────────────────────────
@@ -296,7 +384,7 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
             /* dispose 失败不影响设置已保存这个事实 */
           }
           sessions.delete(pid);
-          log.muted(`platform: 设置变更,已丢弃项目 ${pid} 的常驻会话(下次对话用新模型重建)`);
+          log.muted(`platform: 设置变更,已丢弃${channelLabel(pid)}的常驻会话(下次对话用新模型重建)`);
         }
         return { ok: true as const, settings: toPublicSettings(r.settings) };
       },
@@ -317,7 +405,7 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
           /* dispose 失败不影响数据已清空这个事实 */
         }
         sessions.delete(pid);
-        log.muted(`platform: 重置,已丢弃项目 ${pid} 的常驻会话`);
+        log.muted(`platform: 重置,已丢弃${channelLabel(pid)}的常驻会话`);
       }
       const report = resetPlatformData(db);
       log.ok(`platform: 数据已重置,清空 ${report.totalRows} 行(${report.cleared.length} 张表)`);
@@ -372,9 +460,14 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
 
 // ── 事件桥 ──────────────────────────────────────────────────────
 
+/** 日志里怎么称呼一个上下文通道。`null` = 接待会话(见 migrations/012)。 */
+function channelLabel(projectId: string | null): string {
+  return projectId === null ? "接待会话" : `项目 ${projectId}`;
+}
+
 function bridge(
   ev: AgentSessionEvent,
-  projectId: string,
+  projectId: string | null,
   messageId: string,
   hub: PlatformHub,
   textBuf: string[],

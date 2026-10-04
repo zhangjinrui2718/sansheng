@@ -62,6 +62,17 @@ export interface ChatState {
   projectsLoading: boolean;
   /** 当前项目 = 当前上下文(项目即上下文容器)。 */
   projectId: string | null;
+  /**
+   * 是否正在**接待会话**(第一个项目之前那段,见 `@shared/types/platform`)。
+   *
+   * 为什么不把「接待中」直接编码成 `projectId === null`:null 在此之前就已经有
+   * 一个含义 —— **还没选项目**(有项目但用户没点)。两者混成一个值,界面就再也
+   * 分不清「该显示接待对话」还是「该显示『先选一个项目』」。
+   * 合法组合只有三种:`(true, null)` 接待中、`(false, null)` 未选、`(false, id)` 项目内。
+   */
+  intakeActive: boolean;
+  /** 首屏上下文是否已经决定过(见 `decideInitialContext`)。 */
+  contextDecided: boolean;
   /** 当前项目的工作项 / 工件 / 提问发生变更 —— 详情页据此回查。 */
   projectRevision: number;
   /** 项目列表本身的变更(新建 / 状态变化 / 待答问题数变化)。 */
@@ -82,7 +93,30 @@ export interface ChatState {
 
   loadProjects(): Promise<void>;
   selectProject(id: string): Promise<void>;
-  createProject(input: { name: string; client: string; goal: string }): Promise<string | null>;
+  /**
+   * **首屏上下文**:拉项目列表,一个项目都没有就进接待会话;有项目就什么都不做
+   * (保持原来的「未选项目」,不擅自替用户选中某个项目)。
+   *
+   * 做成 store 动作而不是 App 里的 effect,有两个具体理由:
+   *   1. 它必须**等列表拉回来**再决定。写成 `useEffect` 靠 `projectsLoading`
+   *      判断会读到那次渲染的旧值(false)—— 有项目的用户会先被丢进接待会话,
+   *      而且再也没人把他切回来。
+   *   2. 这样它可以在 node 里被直接测(见 tests/web/app-socket.test.ts)——
+   *      「有项目时**不**进接待会话」是这件事最容易写错、也最难在界面上发现的一半。
+   *
+   * 幂等:`contextDecided` 置起后再调直接返回(StrictMode 双 effect 安全)。
+   */
+  decideInitialContext(): Promise<void>;
+  /**
+   * 切到**接待会话**:与业务经理谈一个新项目。
+   *
+   * 这是「新建项目」按钮现在做的事 —— 它不再打开一张 name / client / goal 表单。
+   * 立项由业务经理在谈拢之后执行(`project_open`),前端只负责显示这段对话;
+   * 服务端随后广播 `project_opened`,本 store 自动切到新项目。
+   */
+  startIntake(): Promise<void>;
+  /** 拉接待会话的历史(首屏没有项目时、以及刷新之后)。 */
+  loadIntakeMessages(): Promise<void>;
   sendMessage(text: string): void;
   sendInterrupt(): void;
   /** 回答问题(HTTP POST;WS 也有等价命令,前端统一走 HTTP 有回执)。 */
@@ -135,6 +169,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
   projects: [],
   projectsLoading: false,
   projectId: null,
+  intakeActive: false,
+  contextDecided: false,
   projectRevision: 0,
   projectsRevision: 0,
 
@@ -166,6 +202,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   async selectProject(id) {
     set({
       projectId: id,
+      intakeActive: false,
       turns: [],
       currentTurn: null,
       error: null,
@@ -186,33 +223,59 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
   },
 
-  async createProject(input) {
+  async decideInitialContext() {
+    if (get().contextDecided) return;
+    set({ contextDecided: true });
+    // **先等列表回来再决定** —— 这正是不能写成 `useEffect` 靠 projectsLoading
+    // 判断的原因(那时读到的是本次渲染的旧值 false,有项目的用户会被丢进接待会话)
+    await get().loadProjects();
+    if (get().projects.length === 0) await get().startIntake();
+  },
+
+  async startIntake() {
+    set({
+      projectId: null,
+      intakeActive: true,
+      turns: [],
+      currentTurn: null,
+      error: null,
+      status: "idle",
+    });
+    await get().loadIntakeMessages();
+  },
+
+  async loadIntakeMessages() {
     try {
-      // 契约:POST /api/projects → { project: ProjectSummary }(201)。
-      // 详情要另拉 —— selectProject 会去打 messages,详情页自己打 getProject。
-      const { project } = await api.createProject(input);
-      await get().loadProjects();
-      set((s) => ({ projectsRevision: s.projectsRevision + 1 }));
-      await get().selectProject(project.id);
-      return project.id;
+      const res = await api.getIntakeMessages();
+      // 拉取期间用户可能已经切到某个项目 —— 迟到的响应不许覆盖当前上下文。
+      if (!get().intakeActive) return;
+      set({
+        turns: (res.messages ?? []).map(messageToTurn),
+        currentTurn: null,
+        status: "idle",
+      });
     } catch (e) {
-      set({ error: { code: "project_create_failed", message: errorMessage(e) } });
-      return null;
+      if (!get().intakeActive) return;
+      set({ error: { code: "messages_load_failed", message: errorMessage(e) }, status: "error" });
     }
   },
 
   sendMessage(text) {
-    const { projectId, socket } = get();
-    if (!projectId || !socket) return;
+    const { projectId, intakeActive, socket } = get();
+    if (!socket) return;
+    // 既没选项目、也不在接待会话 —— 没有可发送的上下文(而不是发进 void)
+    if (projectId === null && !intakeActive) return;
     const t = newTurn(`u_${Date.now().toString(36)}`, "user");
     set((s) => ({ turns: [...s.turns, { ...t, blocks: [{ kind: "text", text }] }] }));
-    socket.sendToProject(projectId, text);
+    // 接待会话发送 `projectId: null` —— 契约里这就是「第一个项目之前」那条会话
+    socket.sendToProject(intakeActive ? null : projectId, text);
   },
 
   sendInterrupt() {
-    const { projectId, socket } = get();
-    if (!projectId || !socket) return;
-    socket.interrupt(projectId);
+    const { projectId, intakeActive, socket } = get();
+    if (!socket) return;
+    if (projectId === null && !intakeActive) return;
+    socket.interrupt(intakeActive ? null : projectId);
   },
 
   async answerQuestion(questionId, answer) {
@@ -327,6 +390,19 @@ export const useChatStore = create<ChatState>((set, get) => ({
           projectRevision: s.projectRevision + 1,
           projectsRevision: s.projectsRevision + 1,
         }));
+        return;
+      }
+
+      case "project_opened": {
+        // 业务经理在**接待会话**里把项目立起来了(契约 `ServerEvent.project_opened`)。
+        // 列表要重拉(左栏多一条);如果用户此刻就坐在接待会话里,直接切到新项目 ——
+        // 那条对话的消息已经被服务端迁进新项目了,留在原地会看到一段空对话。
+        //
+        // **只在接待中才切**:同一事件也可能来自「用户在项目 A 里让业务经理又立了一个
+        // 项目 B」,那时把用户从 A 拽走比让他自己点过去更糟。
+        const onIntake = get().intakeActive;
+        set((s) => ({ projectsRevision: s.projectsRevision + 1 }));
+        if (onIntake) void get().selectProject(e.projectId);
         return;
       }
 

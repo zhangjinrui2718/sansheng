@@ -145,6 +145,61 @@ const TARGETED_CAPS: ReadonlySet<Capability> = new Set<Capability>([
   "collab.escalate",
 ]);
 
+// ── 接待模式:第一个项目之前 ─────────────────────────────────────
+
+/**
+ * **接待模式** = `project === null`,即「会话还没有项目」。
+ *
+ * 它对应的是那条 `project_id IS NULL` 的接待会话(全局唯一一条,见
+ * `migrations/012_intake_session.sql`):甲方在这里与业务经理把诉求谈清楚,
+ * 谈拢了由**业务经理**调 `project_open` 立项 —— 而不是让甲方填一张
+ * 「创建项目」表单(那等于让甲方替业务经理立项,业务经理在整件事里没有位置)。
+ *
+ * ── 这份名单是怎么定的(不是照抄谁)────────────────────────────
+ *
+ * 判据只有一条:**这个能力的工具需不需要 `ctx.project`**。
+ * 四个 `ROLE_SPECS[*].ceiling` 里,业务经理是唯一 clientFacing、也是唯一持有
+ * `project.open` 的角色,所以实际的接待工具面就是下面这三个能力的展开:
+ *
+ *   - `project.open`   —— 立项这个动作本身就是接待模式的出口。它只需要
+ *                         db / newId / now / ctx.agent,**不读 ctx.project**
+ *                         (见 tools/project.ts 的 project_open)。
+ *   - `memory.read` / `memory.write` —— 记忆是关于**用户**的、跨项目
+ *                         (设计 1 §4.3 明写 `memory.*` 项目无关)。
+ *
+ * 被排除的,以及为什么(全部逐个核对过 `ctx.project` 的使用):
+ *   - `project.read/update/close` —— 缺省目标就是 `ctx.project.id`;
+ *     `project_close` 更是「关掉当前项目」,没有当前项目时语义不成立。
+ *   - `work.*` / `blackboard.*` / `change.*` / `blocker.*` / `collab.*` ——
+ *     全部按 project_id 归属,`needsActiveProject()` 已把这一类挡住。
+ *   - `client.ask` / `client.message` —— **这一条是刻意的**:`ask_client` 落的
+ *     `client_question` 是**工件**,而 `artifacts.project_id` 是 NOT NULL。
+ *     接待阶段没有项目可挂,所以澄清只能走**正常对话**。
+ *     (「候选项 + 倾向」那套纪律是**项目内**结构化决策的纪律,不是接待阶段的。)
+ *   - `code.*` —— 业务经理的 ceiling 里没有它,而接待会话的 agent 固定是业务经理
+ *     (宿主接线),所以这一族不在接待模式的实际工具面上。
+ */
+const INTAKE_CAPABILITIES: ReadonlySet<Capability> = new Set<Capability>([
+  "project.open",
+  "memory.read",
+  "memory.write",
+]);
+
+/**
+ * 接待模式下这条能力可用吗。
+ *
+ * **导出**是为了让 `tools/registry.ts` 的调用期门用同一份判定 —— 求解期给过的
+ * 工具面不构成「调用一定合法」的理由(会话可能是旧形态下建的)。
+ */
+export function isIntakeCapability(cap: Capability): boolean {
+  return INTAKE_CAPABILITIES.has(cap);
+}
+
+/** 接待模式的能力面(报告 / 报错文案用;顺序稳定,便于断言)。 */
+export function intakeCapabilities(): readonly Capability[] {
+  return CAPABILITIES.filter((c) => INTAKE_CAPABILITIES.has(c));
+}
+
 // ── 工具 → 能力 反查 ─────────────────────────────────────────────
 
 /** 反查表。工具名全局唯一(conformance 测试守护 E4),所以这个映射无歧义。 */
@@ -164,6 +219,10 @@ export function capabilityOfTool(tool: string): Capability | undefined {
 
 /**
  * 求解一个 Agent 在某个项目里的有效工具面。
+ *
+ * `project === null` = **接待模式**(第一个项目之前,见 `INTAKE_CAPABILITIES`)。
+ * 此时 scope 门只放行项目无关的能力,`project.open` 是其中之一 —— 否则
+ * 业务经理永远开不了第一个项目。
  *
  * ── 粒度:工具级,不是能力级 ────────────────────────────────────
  *
@@ -185,7 +244,7 @@ export function capabilityOfTool(tool: string): Capability | undefined {
  */
 export function solveToolset(
   agent: Agent,
-  project: Project,
+  project: Project | null,
   userToolSet?: ToolSetFile,
 ): SolveResult {
   const spec = ROLE_SPECS[agent.role];
@@ -268,8 +327,41 @@ export function solveToolset(
 }
 
 /** 求解期 scope 判定:不依赖调用参数的规则。 */
-function scopeGateAtSolve(cap: Capability, agent: Agent, project: Project): CallVerdict {
+function scopeGateAtSolve(
+  cap: Capability,
+  agent: Agent,
+  project: Project | null,
+): CallVerdict {
   const spec = ROLE_SPECS[agent.role];
+
+  // 规则 0:**接待模式**(还没有项目)。
+  // 只放行项目无关的能力 —— 名单与理由见 INTAKE_CAPABILITIES。
+  if (project === null) {
+    if (INTAKE_CAPABILITIES.has(cap)) return { ok: true };
+    if (cap === "client.ask" || cap === "client.message") {
+      return {
+        ok: false,
+        denial: {
+          code: "scope",
+          subject: cap,
+          reason:
+            `接待会话里还没有项目,不能调「${cap}」—— ask_client 落的 client_question 是` +
+            `**工件**,而工件必须挂 project_id。接待阶段的澄清直接写在回复里(那是正常对话),` +
+            `谈拢之后用 project_open 立项,项目内的结构化决策再走 ask_client`,
+        },
+      };
+    }
+    return {
+      ok: false,
+      denial: {
+        code: "scope",
+        subject: cap,
+        reason:
+          `能力「${cap}」需要项目作用域,而当前是接待会话(还没有项目)。` +
+          `接待模式可用的能力只有:${intakeCapabilities().join(" / ")}`,
+      },
+    };
+  }
 
   // 规则 1:client.* 是本角色**固有属性**,与项目无关
   if (cap === "client.ask" || cap === "client.message") {
@@ -307,7 +399,13 @@ function scopeGateAtSolve(cap: Capability, agent: Agent, project: Project): Call
 
 export interface CallContext {
   readonly agent: Agent;
-  readonly project: Project;
+  /**
+   * 当前项目。**可空** = 接待会话(第一个项目之前)。
+   *
+   * 这里不写「不可达」的假设:调用期门必须自己处理 `project === null`,
+   * 而不是依赖「求解期已经挡过了」—— 那正是求解期与调用期分两道的理由。
+   */
+  readonly project: Project | null;
 }
 
 /**
@@ -374,6 +472,19 @@ export function authorizeCall(
           code: "scope",
           subject: String(target),
           reason: `targetAgentId 必须是字符串`,
+        },
+      };
+    }
+    // 接待会话里没有项目,也就没有「项目内的目标」可指。
+    // 这一条在今天的接待能力面上不可达(INTAKE_CAPABILITIES 不含 collab.*),
+    // 但门必须自己判断,而不是假设调用方不会走到这里。
+    if (ctx.project === null) {
+      return {
+        ok: false,
+        denial: {
+          code: "scope",
+          subject: capability,
+          reason: `接待会话里没有项目,无法指定项目内的通信目标`,
         },
       };
     }

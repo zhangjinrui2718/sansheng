@@ -263,7 +263,14 @@ describe("假 SDK 契约测试 · 装配 → 调用 → 结果 全链", () => {
     // SDK 的 AgentToolResult 没有 isError 字段,execute 不抛异常时事件里的
     // isError 恒为 false;而我们的工具把失败作为文本返回(好让模型能自纠)。
     // 于是「这次调用到底成没成」只能靠 details 传出来。
-    expect(r.details).toEqual({ ok: true });
+    //
+    // 立项还额外带回 `data.projectId` —— 宿主靠它把**接待会话**切到新项目
+    // (见 runtime/turn.ts 的 `openedProjectIds`)。一并钉住:少了它,
+    // 「业务经理建成项目之后前端切过去」就只能退回去解析文本,而那是脆的。
+    expect(r.details).toMatchObject({
+      ok: true,
+      data: { projectId: expect.stringMatching(/^pj_/) },
+    });
   });
 
   it("worker 写证据经适配壳成功", async () => {

@@ -31,8 +31,19 @@ export interface ToolRunContext {
   readonly db: Database.Database;
   /** 调用者。授权判定与审计都要用它 —— 工具不许「自己猜是谁在调」。 */
   readonly agent: Agent;
-  /** 当前项目。工具的作用域全部挂在它上面。 */
-  readonly project: Project;
+  /**
+   * 当前项目。工具的作用域全部挂在它上面。
+   *
+   * **可空** = 接待会话(`project_id IS NULL` 的那条,见
+   * `migrations/012_intake_session.sql`):第一个项目还不存在时,甲方先与业务经理
+   * 在接待会话里把诉求谈清楚。接待模式下工具面只剩 `project_open` 与 `memory_*`
+   * (见 `harness/authorize.ts` 的 `INTAKE_CAPABILITIES`),项目内工具根本拿不到。
+   *
+   * 需要项目的工具**必须**用 `requireProject(ctx, ...)` 显式处理这一种情况 ——
+   * 不许用 `!` 或断言糊过去:接待模式下真发生调用时,那个断言会把一次本该
+   * 结构化报错的调用变成一次崩溃(模型的下一步因此失去依据)。
+   */
+  readonly project: Project | null;
   /** 时钟注入:让输出可复现 */
   readonly now: () => number;
   /** id 生成注入:`newId("wk")` → "wk_xxx" */
@@ -50,6 +61,34 @@ export interface ToolRunContext {
   readonly client?: ClientChannel;
 }
 
+/**
+ * 取「当前项目」。接待会话下没有项目 —— 此时如实返回结构化失败。
+ *
+ * 为什么不直接 `ctx.project!.id`:接待模式下 `project` 真的是 null,断言会让
+ * 一次本该可读的拒绝(「这个工具需要项目」)变成 `TypeError`,而模型只能靠错误
+ * 信息决定下一步(7-D/7-M:不要惩罚不携带错误信息的偏差)。
+ *
+ * 调用点在**项目内工具**里;接待模式下它们进不了工具面,所以这里的失败分支
+ * 是**纵深防御**,不是常规路径 —— 但它必须存在且可读。
+ */
+export function requireProject(
+  ctx: ToolRunContext,
+  toolName: string,
+): { readonly ok: true; readonly project: Project } | { readonly ok: false; readonly result: ToolResult } {
+  if (ctx.project === null) {
+    return {
+      ok: false,
+      result: fail(
+        "denied",
+        `工具「${toolName}」需要当前项目,而这次调用发生在**接待会话**(还没有任何项目)。` +
+          `接待阶段只做两件事:与甲方把诉求谈清楚,然后用 project_open 立项 —— ` +
+          `立项之后这些工具才会出现在你的工具面上`,
+      ),
+    };
+  }
+  return { ok: true, project: ctx.project };
+}
+
 export type ToolErrorCode =
   | "denied" // 被授权门拒绝(ceiling / scope / writeKind)
   | "invalid_args" // 参数不合法
@@ -58,7 +97,21 @@ export type ToolErrorCode =
   | "internal"; // 意外错误
 
 export type ToolResult =
-  | { readonly ok: true; readonly text: string }
+  | {
+      readonly ok: true;
+      readonly text: string;
+      /**
+       * 结构化结果。**给观察者(宿主)读,不给模型读** —— 模型读 `text`。
+       *
+       * 为什么需要它:`project_open` 成功后,宿主必须知道「新项目叫什么 id」
+       * 才能把接待会话的消息迁进新项目、并让前端切过去。从 `text` 里正则抠 id
+       * 是脆的(改一个字就静默失效);回调注入则要在 `ToolRunContext` 上开一个
+       * 事件通道。这里走的是**已经存在的那条结构化通道**:适配壳
+       * (`runtime/sdkAdapter.ts`)把它原样放进 SDK 的 `details`,
+       * 而 `runTurn` 已经在读 `details`(判工具成败就是靠它)。
+       */
+      readonly data?: Readonly<Record<string, unknown>>;
+    }
   | {
       readonly ok: false;
       readonly code: ToolErrorCode;
@@ -71,8 +124,8 @@ export type ToolResult =
       readonly alternatives?: readonly string[];
     };
 
-export function ok(text: string): ToolResult {
-  return { ok: true, text };
+export function ok(text: string, data?: Readonly<Record<string, unknown>>): ToolResult {
+  return data !== undefined ? { ok: true, text, data } : { ok: true, text };
 }
 
 export function fail(

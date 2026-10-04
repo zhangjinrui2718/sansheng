@@ -1,9 +1,13 @@
 /**
  * 对话输入区
  *
- * 与旧版的差别:去掉了 `noKernel` 这一档。旧系统有「kernel 未就绪 → 发一条会
- * 自动 start」的状态,新契约里**没有 kernel 会话**(对话就是项目),也就没有
- * 「未连接 kernel」可显示。剩下的三档都是真实存在的:未选项目 / 没配 Key / 推演中。
+ * 与旧版的差别:
+ *   - 去掉了 `noKernel` 这一档。旧系统有「kernel 未就绪 → 发一条会自动 start」的
+ *     状态,新契约里**没有 kernel 会话**(对话就是项目),也就没有「未连接 kernel」
+ *     可显示。
+ *   - 去掉了 `noProject` 这一档(本批次):`ClientCommand.send.projectId` 现在可为
+ *     `null`,那是**接待会话** —— 第一个项目之前也能说话。剩下的两档都是真实存在
+ *     的:没配 Key / 推演中;「有项目但没选」是第三种情况,由 `noContext` 表示。
  *
  * Esc 中断的接线保持原样(window keydown,因为推演中 textarea 是 disabled,
  * 绑在它上面永远收不到按键)。
@@ -16,7 +20,7 @@ interface Props {
   onSubmit: (text: string) => void;
   onInterrupt?: () => void;
   disabled?: boolean;
-  reason?: "streaming" | "noProject" | "noKey";
+  reason?: "streaming" | "noContext" | "noKey";
   placeholder?: string;
 }
 
@@ -106,8 +110,8 @@ export function ChatComposer({
           style={{ padding: "6px 14px" }}
         >
           {disabled
-            ? reason === "noProject"
-              ? "先选项目"
+            ? reason === "noContext"
+              ? "先选上下文"
               : reason === "noKey"
                 ? "未配 API Key"
                 : "推演中…"
@@ -118,8 +122,8 @@ export function ChatComposer({
       <div className="mt-1.5 flex items-center gap-2 ss-meta">
         <span>
           {disabled
-            ? reason === "noProject"
-              ? "左栏还没有选中的项目"
+            ? reason === "noContext"
+              ? "左栏选一个项目,或点「+ 新建」和业务经理聊聊"
               : reason === "noKey"
                 ? "请先在「设置」配置 API Key"
                 : "推演中 · Esc 中断"

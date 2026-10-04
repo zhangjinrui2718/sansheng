@@ -24,7 +24,7 @@ import {
   listArtifacts, type ArtifactStatus,
 } from "../storage/repo/artifacts.js";
 import type { ClientChannel } from "../client/port.js";
-import { fail, ok, requireString, readString, readStringArray,
+import { fail, ok, requireProject, requireString, readString, readStringArray,
   type PlatformTool, type ToolResult, type ToolRunContext } from "./types.js";
 
 const OPEN: ArtifactStatus = "open";
@@ -45,6 +45,8 @@ const askClient: PlatformTool = {
     })),
   }),
   async run(args, ctx): Promise<ToolResult> {
+    const proj = requireProject(ctx, "ask_client");
+    if (!proj.ok) return proj.result;
     const channel = optionalChannel(ctx);
     if (channel === null) {
       return fail(
@@ -65,7 +67,7 @@ const askClient: PlatformTool = {
     try {
       insertArtifact(ctx.db, {
         id,
-        projectId: ctx.project.id,
+        projectId: proj.project.id,
         conversationId: null,
         kind: "client_question",
         status: OPEN,
@@ -90,7 +92,7 @@ const askClient: PlatformTool = {
     try {
       await channel.ask({
         questionId: id,
-        projectId: ctx.project.id,
+        projectId: proj.project.id,
         question: question.value,
         ...(options.length > 0 ? { options } : {}),
         ...(lean !== undefined ? { lean } : {}),
@@ -122,6 +124,8 @@ const tellClient: PlatformTool = {
     text: Type.String({ description: "要播报的内容" }),
   }),
   async run(args, ctx): Promise<ToolResult> {
+    const proj = requireProject(ctx, "tell_client");
+    if (!proj.ok) return proj.result;
     const channel = optionalChannel(ctx);
     if (channel === null) {
       return fail("internal", "甲方通道未注入 —— 这是装配错误,不是工具坏了");
@@ -129,7 +133,7 @@ const tellClient: PlatformTool = {
     const text = requireString(args, "text");
     if (!text.ok) return text.result;
     try {
-      await channel.tell({ projectId: ctx.project.id, message: text.value });
+      await channel.tell({ projectId: proj.project.id, message: text.value });
     } catch (err) {
       return fail("internal", `播报失败:${err instanceof Error ? err.message : String(err)}`);
     }

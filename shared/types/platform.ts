@@ -165,7 +165,15 @@ export interface ArtifactView {
 
 export interface SessionMessageView {
   id: string;
-  projectId: string;
+  /**
+   * 这条消息属于哪个项目;**`null` = 接待会话**。
+   *
+   * 接待会话是那条 `project_id IS NULL` 的会话(全局唯一一条,见
+   * `migrations/012_intake_session.sql`):甲方在第一个项目存在之前先与业务经理
+   * 在这里把诉求谈清楚。它不是「没有项目的消息」,而是一个**有身份的**会话 ——
+   * 只是它的身份不是项目。
+   */
+  projectId: string | null;
   /** null = 甲方说的话 */
   agentId: string | null;
   agentName: string | null;
@@ -309,6 +317,17 @@ export interface MessagesResponse {
   messages: SessionMessageView[];
 }
 
+/**
+ * `GET /api/intake/messages` —— **接待会话**(第一个项目之前)的一条连续对话。
+ *
+ * `projectId` 恒为 `null`:那不是「缺失」,而是这条会话的身份(它还不属于任何项目)。
+ * 前端据此把这段对话渲染在接待面板里,而不是某个项目面板里。
+ */
+export interface IntakeMessagesResponse {
+  projectId: null;
+  messages: SessionMessageView[];
+}
+
 // ── WS 协议 ─────────────────────────────────────────────────────
 
 /**
@@ -319,11 +338,19 @@ export interface MessagesResponse {
  * (计划由项目经理拆成工作项、总线已删、对话就是项目)。
  */
 export type ClientCommand =
-  /** 对某个项目的业务经理说一句话 */
-  | { type: "send"; projectId: string; content: string }
+  /**
+   * 对某个项目的业务经理说一句话。
+   *
+   * **`projectId: null` = 接待会话**(第一个项目之前)。此时与你说话的是业务经理,
+   * 它的工具面只有 `project_open` 与 `memory_*` —— 谈拢之后它自己立项,
+   * 服务端随即广播 `project_opened`。**不需要用户先填一张「创建项目」表单**:
+   * 立项是业务经理的动作,不是甲方的动作。
+   */
+  | { type: "send"; projectId: string | null; content: string }
   /** 回答一个等甲方拍板的问题 —— 走 resolveClientQuestion,落 decision 工件 */
   | { type: "answer_client_question"; questionId: string; answer: string }
-  | { type: "interrupt"; projectId: string }
+  /** `null` = 中断接待会话正在跑的那一轮 */
+  | { type: "interrupt"; projectId: string | null }
   | { type: "ping" };
 
 export interface WsToolInfo {
@@ -340,27 +367,44 @@ export interface WsToolInfo {
  *
  * 每条带项目的事件都有 `projectId` —— 前端据此把流分派到正确的项目面板
  * (jev:按项目分组呈现)。
+ *
+ * ⚠️ **`projectId: null` 的含义是「接待会话」,不是「没有项目」** ——
+ * 无项目上下文的事件(`ready` / `pong` / `client_question`)根本没有这个字段。
+ * 这个区分是刻意的:接待会话是**一条真的会话**(它的消息落库、它有自己的历史),
+ * 只是它还不属于任何项目;把它与「没有项目上下文」混成一个值,前端就再也分不清
+ * 「这条流是接待对话」还是「这条流不属于任何对话」。
+ * `eventProjectId()` 对接待会话返回 `null`(与无项目事件一致)—— 因为前端对
+ * 接待流的处置与「无项目」是一致的:它只按当前上下文累积,不做项目分派。
  */
 export type ServerEvent =
   | { type: "ready"; modelId: string | null; provider: string | null; cwd: string }
   | { type: "pong"; ts: number }
-  | { type: "message_start"; projectId: string; messageId: string; role: "user" | "assistant" }
-  | { type: "delta"; projectId: string; messageId: string; text: string }
+  | { type: "message_start"; projectId: string | null; messageId: string; role: "user" | "assistant" }
+  | { type: "delta"; projectId: string | null; messageId: string; text: string }
   /**
    * 内部推理。**与 delta 是两条流,永不混流** ——
    * 7-I 的现场:判据写成了不存在的 "thinking",1853 字符推理落进 content
    * 被当成正式回复展示给用户。
    */
-  | { type: "thinking_delta"; projectId: string; messageId: string; text: string }
+  | { type: "thinking_delta"; projectId: string | null; messageId: string; text: string }
   | {
       type: "message_end";
-      projectId: string;
+      projectId: string | null;
       messageId: string;
       usage?: { input: number; output: number };
     }
-  | { type: "tool_start"; projectId: string; messageId: string; tool: WsToolInfo }
-  | { type: "tool_end"; projectId: string; messageId: string; tool: WsToolInfo }
-  | { type: "agent_end"; projectId: string; ts: number }
+  | { type: "tool_start"; projectId: string | null; messageId: string; tool: WsToolInfo }
+  | { type: "tool_end"; projectId: string | null; messageId: string; tool: WsToolInfo }
+  | { type: "agent_end"; projectId: string | null; ts: number }
+  /**
+   * **业务经理在接待会话里把项目立起来了** —— 前端应刷新项目列表并切到它。
+   *
+   * 这条事件是「第一个项目之前」那段流程的收口:接待会话的使命到此结束
+   * (它已把消息迁进新项目),之后在 `projectId` 那条流上继续。
+   * 它由**服务端**在回合结束后发出 —— 不是工具直接广播:
+   * 中途广播会让前端在一条正在流的回合里换上下文,半个回合的输出会落错面板。
+   */
+  | { type: "project_opened"; projectId: string; name: string }
   /** 业务经理向甲方提了一个问题 —— 前端应弹出来让用户答 */
   | { type: "client_question"; question: ClientQuestionView }
   /** 该问题已被回答(可能是本端答的,也可能是别处答的) */
@@ -379,12 +423,20 @@ export type ServerEvent =
    * 收到它该做的是:前端把该项目的待办标注为超时并置顶。**不自动替用户决定。**
    */
   | { type: "overdue_asks"; projectId: string; askIds: readonly string[]; count: number }
-  | { type: "error"; projectId?: string; error: { code: string; message: string } };
+  /**
+   * `projectId` 三态:字符串 = 该项目;**`null` = 接待会话**;
+   * 缺省 = 与任何上下文无关(如 JSON 解析失败)。
+   */
+  | { type: "error"; projectId?: string | null; error: { code: string; message: string } };
 
-/** 事件是否属于某个项目(前端分派用)。 */
+/**
+ * 事件属于哪个上下文。返回 `null` = 不属于任何项目
+ * (无项目事件,或**接待会话** —— 见上面 `ServerEvent` 的说明)。
+ */
 export function eventProjectId(ev: ServerEvent): string | null {
   return "projectId" in ev && typeof ev.projectId === "string" ? ev.projectId : null;
 }
+
 
 // ── HTTP 接口面(冻结于 2026-10-04)────────────────────────────────
 //
@@ -393,6 +445,10 @@ export function eventProjectId(ev: ServerEvent): string | null {
 //
 // 设计原则(与两条经校准的裁决一致):
 //   - **项目为中心**:没有 `/api/conversations*`。对话就是项目的。
+//     **唯一的例外是 `GET /api/intake/messages`** —— 它是「第一个项目之前」那条
+//     接待会话的历史。它没有项目可以挂,所以不能走 `/api/projects/:id/messages`;
+//     但它也不是「对话可以独立于项目存在」的翻案:全局**只有一条**接待会话
+//     (由迁移 012 的部分唯一索引机械保证),项目一旦立起来它就结束了。
 //   - **harness 只读**(scope=readonly,p=0.990):只有 GET,没有 PUT / reset。
 //   - **每项目一条连续对话**(chat=one,p=0.82):没有「新建会话」这个动作。
 //
@@ -403,7 +459,11 @@ export function eventProjectId(ev: ServerEvent): string | null {
 //   GET    /api/providers                     → { providers: ProviderInfo[] } (shared/types/settings.ts)
 //   ── 项目 ──
 //   GET    /api/projects                      → { projects: ProjectSummary[] }
-//   POST   /api/projects                      → { project: ProjectSummary } [201] ← 立项唯一出口
+//   POST   /api/projects                      → { project: ProjectSummary } [201]
+//                                                ⚠️ **不是 UI 的立项路径**。立项的
+//                                                正常动作是业务经理在接待会话里调
+//                                                `project_open`(见 WS 的 project_opened)。
+//                                                这条端点留着供 API/维护用途,前端不调它。
 //   GET    /api/projects/:id                  → { project: ProjectDetail }
 //   GET    /api/projects/:id/works            → { works: WorkView[] }
 //   GET    /api/projects/:id/artifacts        → { artifacts: ArtifactView[] }
@@ -412,6 +472,10 @@ export function eventProjectId(ev: ServerEvent): string | null {
 //   GET    /api/projects/:id/blockers         → { blockers: BlockerView[] }
 //   GET    /api/projects/:id/changes          → { changes: ChangeView[] }
 //   GET    /api/projects/:id/members          → { members: MemberView[] }
+//   ── 接待会话(第一个项目之前)──
+//   GET    /api/intake/messages               → IntakeMessagesResponse
+//                                                无需先建项目就能拉到与业务经理的
+//                                                那一段对话历史(刷新不丢上下文)。
 //   ── 工件 ──
 //   GET    /api/artifacts/:id                 → { artifact: ArtifactView }
 //   ── 待甲方答的问题(跨项目;左栏徽标用它)──

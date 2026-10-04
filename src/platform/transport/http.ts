@@ -187,6 +187,19 @@ export function createPlatformApp(deps: HttpDeps): Hono {
     return c.json({ projectId: id, messages: listProjectMessages(db, id) });
   });
 
+  // ── 接待会话(第一个项目之前)──────────────────────────────────
+  //
+  // 与 `/api/projects/:id/messages` **同一个读函数**,只是 projectId 传 null。
+  // 接待会话没有项目可挂,所以它不能走上面那条带 :id 的路由;但它也不是
+  // 「对话可以脱离项目独立存在」的翻案 —— 全局只有一条接待会话,项目一立起来
+  // 它就结束(消息迁进新项目)。
+  //
+  // 没有接待会话时返回空列表而不是 404:那正是「还没聊过」的如实回答,
+  // 而 404 会让前端把首屏显示成一次错误。
+  app.get("/api/intake/messages", (c) =>
+    c.json({ projectId: null, messages: listProjectMessages(db, null) }),
+  );
+
   app.get("/api/projects/:id/asks", (c) => {
     const id = c.req.param("id");
     if (getProjectRow(db, id) === null) return c.json(err("not_found", "项目不存在", 404).body, 404);
@@ -427,12 +440,16 @@ export function buildHarnessView(db: Database.Database, dataDir: string): Harnes
       return { id: unitId, loaded: isLoaded, chars: content.length, content, path };
     });
 
-    // 工具面:取一个"最宽松"的项目来求解,只为了展示 ceiling 的效果
+    // 工具面:有项目就取第一个项目求解(展示 ceiling 在项目内的效果);
+    // **一个项目都没有时按接待模式求解**(project = null),而不是报一个空工具面 ——
+    // 那时候业务经理确实拿得到 `project_open` 与记忆工具(见
+    // harness/authorize.ts 的 INTAKE_CAPABILITIES),报 0 个工具会让用户以为
+    // 它在第一个项目之前什么都做不了。
     const anyProject = listProjects(db)[0];
     const project = anyProject !== undefined ? loadProjectForAuthz(db, anyProject.id) : null;
     const agent = listAgents(db).find((a) => a.role === role);
     const solved =
-      project !== null && agent !== undefined
+      agent !== undefined
         ? solveToolset(
             {
               id: agent.id, role, displayName: agent.displayName,

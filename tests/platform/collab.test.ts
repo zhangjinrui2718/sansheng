@@ -671,3 +671,52 @@ describe("端到端 · 7-L 场景:worker 卡住 → 沟通员判断 → 能自�
     expect(askedByMeOpen(db, ids.wk)).toEqual([]);
   });
 });
+
+// ── 接待会话(project_id NULL)────────────────────────────────────
+//
+// 第一个项目之前的那条会话。它的身份就是 `project_id IS NULL`,而且**全局唯一**
+// (由迁移 012 的部分唯一索引保证)。这里守两件事:仓储读得出来(不能写成
+// `project_id = NULL`,那恒为 unknown),以及唯一性是 schema 兜的而不是靠自觉。
+
+describe("BC2 接待会话(project_id NULL)", () => {
+  it("insertSession 接受 null;listSessions(null) 用 IS NULL 查得出来", () => {
+    insertSession(db, { id: "s_intake", projectId: null, createdAt: clock });
+    insertSession(db, { id: "s_proj", projectId: "pj_1", createdAt: clock });
+    expect(listSessions(db, null).map((s) => s.id)).toEqual(["s_intake"]);
+    expect(listSessions(db, "pj_1").map((s) => s.id)).toEqual(["s_proj"]);
+    // 读回来的行也要如实说「它不属于任何项目」
+    expect(listSessions(db, null)[0]!.projectId).toBeNull();
+  });
+
+  it("接待会话的消息按 session_id 归属,与项目会话用同一张表", () => {
+    insertSession(db, { id: "s_intake", projectId: null, createdAt: clock });
+    appendSessionMessage(db, {
+      id: "m1", sessionId: "s_intake", agentId: null, kind: "user", content: "我想做点东西", createdAt: clock,
+    });
+    expect(listSessionMessages(db, "s_intake")).toHaveLength(1);
+  });
+
+  it("**接待会话全局只能有一条** —— 不变量在 schema 层,不靠应用层自觉", () => {
+    insertSession(db, { id: "s_intake", projectId: null, createdAt: clock });
+    expect(() => insertSession(db, { id: "s_intake2", projectId: null, createdAt: clock + 1 })).toThrow(
+      /UNIQUE/i,
+    );
+    // 但同一个项目的多条会话必须照样允许(部分索引不该误伤非空行)
+    insertSession(db, { id: "s_a", projectId: "pj_1", createdAt: clock });
+    insertSession(db, { id: "s_b", projectId: "pj_1", createdAt: clock + 1 });
+    expect(listSessions(db, "pj_1")).toHaveLength(2);
+  });
+
+  it("删除项目仍会级联删掉该项目的会话与消息(重建表没把外键弄丢)", () => {
+    insertSession(db, { id: "s_proj", projectId: "pj_1", createdAt: clock });
+    appendSessionMessage(db, {
+      id: "m1", sessionId: "s_proj", agentId: null, kind: "user", content: "x", createdAt: clock,
+    });
+    insertSession(db, { id: "s_intake", projectId: null, createdAt: clock });
+    db.prepare(`DELETE FROM projects WHERE id = ?`).run("pj_1");
+    expect(listSessions(db, "pj_1")).toEqual([]);
+    expect(listSessionMessages(db, "s_proj")).toEqual([]);
+    // 接待会话不随项目消失
+    expect(listSessions(db, null).map((s) => s.id)).toEqual(["s_intake"]);
+  });
+});
