@@ -81,6 +81,25 @@ export interface ChatState {
   // ── 对话 ──
   turns: Turn[];
   currentTurn: Turn | null;
+  /**
+   * server 回显「用户自己那条消息」时用的 messageId。
+   *
+   * 后端对用户消息**也**广播 `message_start(user)` + `delta` + `message_end`
+   * (协议是统一信封,见 `host/serve.ts`);而前端在 sendMessage 里已经把用户那句话
+   * 乐观上屏了,所以 `message_start(user)` 直接 return。
+   *
+   * **但那个 return 曾经漏掉一件事:没记住「这个 messageId 是用户的」。**
+   * 于是紧随其后的 `delta(用户原文)` 走到 `currentTurn ?? newTurn(..., "assistant")`
+   * ——`currentTurn` 是 null(user 轮进了 `turns`,不在 `currentTurn`)——
+   * **用户自己的话被建成一个助手轮**。
+   *
+   * happy path 下它只是几秒的重复显示(助手 `message_start` 到达时覆盖掉);
+   * 但若这一轮在助手 `message_start` 之前失败或被中断,`agent_end` 会把这个幽灵轮
+   * append 进 `turns` —— **用户的字就永久变成一条助手消息**。
+   *
+   * 真机证据:某轮 WS 收到的 delta 累计 543 字符 = 落库助手正文 458 + 用户那句 85。
+   */
+  lastUserEchoId: string | null;
 
   // ── 运行态 ──
   modelId: string | null;
@@ -176,6 +195,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   turns: [],
   currentTurn: null,
+  lastUserEchoId: null,
 
   modelId: null,
   provider: null,
@@ -320,7 +340,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
       case "message_start": {
         // 用户那条消息在 sendMessage 里已乐观上屏,server 的 message_start
         // 再上一条就是重复。助手消息才是流式的载体。
-        if (e.role === "user") return;
+        //
+        // ⚠️ **必须记住这个 id 再 return** —— 否则紧随其后的用户 delta 会被
+        // 误建成助手轮(见 `lastUserEchoId` 的注释)。
+        if (e.role === "user") {
+          set({ lastUserEchoId: e.messageId });
+          return;
+        }
         set({
           currentTurn: { ...newTurn(e.messageId, "assistant"), isStreaming: true },
           status: "streaming",
@@ -329,7 +355,18 @@ export const useChatStore = create<ChatState>((set, get) => ({
         return;
       }
       case "delta": {
-        const cur = get().currentTurn ?? newTurn(e.messageId, "assistant");
+        // ① 已知是 server 对用户消息的回显 —— 乐观上屏时显示过了,不能再建一条
+        if (e.messageId === get().lastUserEchoId) return;
+        // ② 没人告诉过我们「开始一条消息」→ **不猜角色,直接丢**。
+        //
+        //    `delta` 的语义是「往刚才 message_start 宣布的那条消息上追加」。
+        //    没有 currentTurn 就意味着我们没有那条消息 —— 此时唯一安全的动作是
+        //    什么也不做。原实现是 `?? newTurn(e.messageId, "assistant")`:
+        //    **它替 server 猜了一个角色**,而猜错的代价是用户自己的话被冒充成助手
+        //    (真机踩过,见 `lastUserEchoId` 的注释)。丢一个 delta 最多少几个字,
+        //    猜错角色则是把用户的话永久写进助手侧。
+        const cur = get().currentTurn;
+        if (!cur) return;
         const blocks = [...cur.blocks];
         const last = blocks[blocks.length - 1];
         if (last && last.kind === "text") blocks[blocks.length - 1] = { kind: "text", text: last.text + e.text };
@@ -340,7 +377,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
       case "thinking_delta": {
         // 推理与正文是两条流,永不混流(契约注释里的 7-I 现场)。这里靠 block
         // 的 kind 分开累积 —— 与正文各自的「最后一个同类块」拼接。
-        const cur = get().currentTurn ?? newTurn(e.messageId, "assistant");
+        if (e.messageId === get().lastUserEchoId) return;
+        const cur = get().currentTurn;
+        if (!cur) return;
         const blocks = [...cur.blocks];
         const last = blocks[blocks.length - 1];
         if (last && last.kind === "thinking") {
