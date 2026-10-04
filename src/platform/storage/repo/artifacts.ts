@@ -57,7 +57,25 @@ export interface ArtifactRow {
   metadataJson: string | null;
   createdAt: number;
   updatedAt: number;
+  /**
+   * **产出这条工件的工作项**(provenance,migration 014)。
+   *
+   * `null` = 这条工件不是任何工作项的执行产出:立项书 / 会议纪要 / 变更记录 /
+   * 甲方问答 / 质检意见。**这是合法状态,不是缺参数**。
+   *
+   * 为什么它是**一条边**而不是「当前工作项」:一次会话会连跑多个工作项,
+   * 而 `ToolRunContext` 是建会话时构造一次的 —— 放在那里会过期。
+   */
+  workId: string | null;
 }
+
+/**
+ * 插入用的一行。`workId` 可省:多数工件的产出者不是「某条工作项」。
+ *
+ * 与 `repo/works.ts` 的 `NewWorkRow` 同一个形状理由 —— 读出来的一行必须
+ * 答得出「谁产出了它」,写入方却不必知道这条边。
+ */
+export type NewArtifactRow = Omit<ArtifactRow, "workId"> & { readonly workId?: string | null };
 
 interface RawArtifact {
   id: string;
@@ -71,6 +89,7 @@ interface RawArtifact {
   metadata_json: string | null;
   created_at: number;
   updated_at: number;
+  work_id: string | null;
 }
 
 /** 行 → 领域对象。边界处校验闭合集,不让未定义的 kind/status 冒充类型。 */
@@ -93,19 +112,23 @@ function rowToArtifact(raw: RawArtifact): ArtifactRow {
     metadataJson: raw.metadata_json,
     createdAt: raw.created_at,
     updatedAt: raw.updated_at,
+    // `?? null`:014 之前建的库(还没跑迁移)读出来是 undefined —— 如实当成
+    // 「没有产出工作项」,不让字段名缺失变成类型层的一句谎话。
+    workId: raw.work_id ?? null,
   };
 }
 
 // ── artifacts ───────────────────────────────────────────────────
 
-export function insertArtifact(db: Database.Database, row: ArtifactRow): void {
+export function insertArtifact(db: Database.Database, row: NewArtifactRow): void {
   db.prepare(
     `INSERT INTO artifacts (id, project_id, conversation_id, kind, status, author_agent_id,
-                            title, body, metadata_json, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                            title, body, metadata_json, created_at, updated_at, work_id)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     row.id, row.projectId, row.conversationId, row.kind, row.status, row.authorAgentId,
     row.title, row.body, row.metadataJson, row.createdAt, row.updatedAt,
+    row.workId ?? null,
   );
 }
 
@@ -122,6 +145,14 @@ export interface ListArtifactsFilter {
   authorAgentId?: string;
   /** 只要某条工件的子件(rel='parent') */
   parentOf?: string;
+  /**
+   * 只要**某条工作项产出的**工件(migration 014 的产出边)。
+   *
+   * 这是「这条工作项产出了什么」在模型里的唯一答案 —— 在 014 之前它只能靠
+   * 「回合前后整个项目的集合差」算(`runtime/execution.ts` 的旧判据),
+   * 那个判据连 `author_agent_id` 都不读,同项目两回合交叠时会互相认领。
+   */
+  workId?: string;
   limit?: number;
 }
 
@@ -141,6 +172,11 @@ export function listArtifacts(
   if (filter.authorAgentId !== undefined) {
     where.push("a.author_agent_id = ?");
     vals.push(filter.authorAgentId);
+  }
+  if (filter.workId !== undefined) {
+    // 走 014 的部分索引 idx_artifacts_work(WHERE work_id IS NOT NULL)
+    where.push("a.work_id = ?");
+    vals.push(filter.workId);
   }
   if (filter.parentOf !== undefined) {
     where.push(

@@ -21,6 +21,7 @@ import {
   type ArtifactStatus, type ArtifactLinkRel,
 } from "../storage/repo/artifacts.js";
 import { isArtifactKind, ARTIFACT_KINDS, type ArtifactKind } from "../identity/role.js";
+import { getWork } from "../storage/repo/works.js";
 import {
   fail, ok, requireString, requireProject, readString, readStringArray,
   type PlatformTool, type ToolResult,
@@ -30,12 +31,17 @@ const boardList: PlatformTool = {
   name: "board_list",
   capability: "blackboard.read",
   description:
-    "列项目黑板上的工件(decision / evidence / hypothesis / note / 各类简报)。**这是你了解「别人已经做了什么」的主要途径** —— 同项目里其他人的产出都在这里。作用域是项目,不是当前对话。",
+    "列项目黑板上的工件(decision / evidence / hypothesis / note / 各类简报)。**这是你了解「别人已经做了什么」的主要途径** —— 同项目里其他人的产出都在这里。作用域是项目,不是当前对话。要问「某条工作项产出了什么」就传 workId。",
   parameters: Type.Object({
     projectId: Type.Optional(Type.String({ description: "缺省 = 当前项目" })),
     kind: Type.Optional(Type.String({ description: ARTIFACT_KINDS.join(" | ") })),
     status: Type.Optional(Type.String({ description: ARTIFACT_STATUSES.join(" | ") })),
     authorAgentId: Type.Optional(Type.String()),
+    workId: Type.Optional(
+      Type.String({
+        description: "只要这条工作项产出的工件(产出边,见 board_write 的 workId)",
+      }),
+    ),
     limit: Type.Optional(Type.Number()),
   }),
   run(args, ctx): ToolResult {
@@ -71,6 +77,9 @@ const boardList: PlatformTool = {
       ...(status !== undefined ? { status: status as ArtifactStatus } : {}),
       ...(readString(args, "authorAgentId") !== undefined
         ? { authorAgentId: readString(args, "authorAgentId")! }
+        : {}),
+      ...(readString(args, "workId") !== undefined
+        ? { workId: readString(args, "workId")! }
         : {}),
       ...(typeof args["limit"] === "number" ? { limit: args["limit"] } : {}),
     });
@@ -109,6 +118,7 @@ const boardRead: PlatformTool = {
         `- 项目:${a.projectId}`,
         `- 作者:${a.authorAgentId}`,
         `- 创建:${new Date(a.createdAt).toISOString()}`,
+        ...(a.workId !== null ? [`- 产出工作项:${a.workId}`] : []),
         ...(out.length > 0 ? [`- 指向:${out.join(", ")}`] : []),
         ...(inb.length > 0 ? [`- 被指向:${inb.join(", ")}`] : []),
         ...(a.metadataJson !== null ? [`- metadata:${a.metadataJson}`] : []),
@@ -131,6 +141,15 @@ const boardWrite: PlatformTool = {
     body: Type.String({ description: "正文。要能被事后独立读懂 —— 见不到现场等于没有现场。" }),
     status: Type.Optional(Type.String({ description: `${ARTIFACT_STATUSES.join(" | ")}(默认 open)` })),
     metadata: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
+    workId: Type.Optional(
+      Type.String({
+        description:
+          "产出这条工件的工作项 id(产出边)。**每次调用自己显式给** —— 平台不提供" +
+          "「当前工作项」默认值:一次会话会连跑多个工作项,那个默认值会过期。" +
+          "不传 = 这条工件不是任何工作项的执行产出(立项书 / 纪要 / 变更记录 /" +
+          "甲方问答 / 质检意见),这是合法状态。必须与本次会话同项目。",
+      }),
+    ),
     links: Type.Optional(
       Type.Array(
         Type.Object({
@@ -174,6 +193,36 @@ const boardWrite: PlatformTool = {
       return fail("invalid_args", `未知状态「${statusRaw}」`, ARTIFACT_STATUSES);
     }
 
+    // ── 产出边(migration 014)─────────────────────────────────────
+    //
+    // **每次调用显式指名**。不用会话级的「当前工作项」默认值:一条会话会连跑
+    // 多个工作项(`runtime/execution.ts` 的注释),而 `ToolRunContext` 是建会话时
+    // 构造一次的 —— 放了默认值它会过期,于是产出边会记到**上一条**工作项头上。
+    // 一条填错的边比一条空边糟得多:空边是「不知道」,错边是「知道错了」。
+    //
+    // 平台校验两件事:存在、且同项目 —— 写进去的外键只保证前者(`works(id)`),
+    // 而跨项目引用在库里完全合法,只能在这里拦。
+    const workIdRaw = readString(args, "workId");
+    let workId: string | null = null;
+    if (workIdRaw !== undefined) {
+      const w = getWork(ctx.db, workIdRaw);
+      if (w === null) {
+        return fail(
+          "not_found",
+          `找不到工作项 ${workIdRaw} —— 产出边不能指向不存在的工作项。` +
+            `要么改成正确的工作项 id,要么不传 workId(表示这条工件不是任何工作项的执行产出)。`,
+        );
+      }
+      if (w.projectId !== pid) {
+        return fail(
+          "not_found",
+          `工作项 ${workIdRaw} 属于项目 ${w.projectId},不是本次会话的项目 ${pid}。` +
+            `产出边只记同一项目内的工作项;不传 workId 表示这条工件不是任何工作项的执行产出。`,
+        );
+      }
+      workId = workIdRaw;
+    }
+
     const id = ctx.newId("art");
     const at = ctx.now();
     const metadata = args["metadata"];
@@ -190,6 +239,7 @@ const boardWrite: PlatformTool = {
         metadataJson: metadata !== undefined ? JSON.stringify(metadata) : null,
         createdAt: at,
         updatedAt: at,
+        workId,
       });
     } catch (err) {
       // 外键失败必须**指名道姓** —— 裸的 "FOREIGN KEY constraint failed" 不说是哪条,
@@ -223,7 +273,10 @@ const boardWrite: PlatformTool = {
 
     return ok(
       `已写工件 ${id}(${kind} · ${statusRaw})「${title.value}」` +
-        (warnings.length > 0 ? `\n⚠️ 部分关联未建立:${warnings.join(";")}` : ""),
+        (warnings.length > 0 ? `\n⚠️ 部分关联未建立:${warnings.join(";")}` : "") +
+        // 把产出边如实回灌给模型 —— 否则它无法从工具输出里确认自己填对了,
+        // 而下一次「这条工作项产出了什么」正是靠这行字。
+        (workId !== null ? `\n产出工作项:${workId}` : ""),
     );
   },
 };

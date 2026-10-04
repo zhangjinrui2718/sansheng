@@ -11,7 +11,7 @@
  * 真模型那条路由 `tests/platform/session.test.ts` 的契约测试与
  * `sansheng platform smoke` 覆盖。
  */
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import type Database from "better-sqlite3";
 import type { AgentSession, AgentSessionEvent } from "@earendil-works/pi-coding-agent";
 import { openPlatformMemoryDb } from "../../src/platform/storage/index.js";
@@ -40,6 +40,10 @@ interface FakeSession {
   session: AgentSession;
   /** 每次 prompt 收到的文本 */
   prompts: string[];
+  /** 每次 `abort()` 的调用 —— 序号即「第几次」,序内位置见 `calls` */
+  aborts: number;
+  /** 调用顺序日志(`prompt:start` / `prompt:end` / `abort`)—— 用来钉住「登记在 await 之前」 */
+  calls: string[];
   disposed: boolean;
 }
 
@@ -49,11 +53,23 @@ interface FakeSession {
  */
 function fakeSession(
   script: (emit: (ev: AgentSessionEvent) => void, promptText: string) => void | "never",
-  opts: { throwOnSubscribeFn?: boolean } = {},
+  opts: {
+    throwOnSubscribeFn?: boolean;
+    /** `prompt()` 会一直挂着,直到 `abort()` 被调到(死接线在这条剧本下永不结束) */
+    holdPromptUntilAbort?: boolean;
+    /** `prompt()` 永远不返回,`abort()` 也放不掉它(测「宽限到点就不再等」) */
+    holdPromptForever?: boolean;
+    /** 被 abort 放掉之后 `prompt()` 抛错(测「打断时抛错不是回合故障」) */
+    throwAfterAbort?: boolean;
+    /** `abort()` 自己抛错(测「abort 失败不静默」) */
+    abortThrows?: boolean;
+  } = {},
 ): FakeSession {
   const listeners: Array<(ev: AgentSessionEvent) => void> = [];
   const prompts: string[] = [];
-  const state = { disposed: false };
+  const calls: string[] = [];
+  const state = { disposed: false, aborts: 0 };
+  let release: (() => void) | null = null;
 
   const session = {
     subscribe(fn: (ev: AgentSessionEvent) => void) {
@@ -65,6 +81,7 @@ function fakeSession(
     },
     async prompt(text: string) {
       prompts.push(text);
+      calls.push("prompt:start");
       const emit = (ev: AgentSessionEvent) => {
         for (const l of [...listeners]) l(ev);
       };
@@ -75,6 +92,21 @@ function fakeSession(
       if (r !== "never") {
         emit({ type: "agent_settled" });
       }
+      if (opts.holdPromptForever === true) {
+        await new Promise<void>(() => {});
+      } else if (opts.holdPromptUntilAbort === true) {
+        await new Promise<void>((res) => { release = res; });
+      }
+      calls.push("prompt:end");
+      if (opts.throwAfterAbort === true && state.aborts > 0) {
+        throw new Error("aborted by platform");
+      }
+    },
+    async abort() {
+      state.aborts += 1;
+      calls.push("abort");
+      release?.();
+      if (opts.abortThrows === true) throw new Error("abort 炸了");
     },
     dispose() {
       state.disposed = true;
@@ -84,7 +116,13 @@ function fakeSession(
     },
   };
 
-  return { session: session as unknown as AgentSession, prompts, get disposed() { return state.disposed; } } as FakeSession;
+  return {
+    session: session as unknown as AgentSession,
+    prompts,
+    calls,
+    get aborts() { return state.aborts; },
+    get disposed() { return state.disposed; },
+  } as FakeSession;
 }
 
 // 事件构造小工具(只填 runTurn 真正读的字段)
@@ -411,5 +449,181 @@ describe("runTurn · 接待会话(projectId null)", () => {
     }, { projectId: null, agentId: "pm" });
     expect(result.text).toBe("你想做什么?");
     expect(result.settled).toBe(true);
+  });
+});
+
+// ── 墙钟上界:超时必须**真的打断**回合 ────────────────────────────
+//
+// 缺陷现场(真机):一个 worker 回合跑了 **16 分钟**还没完,watcher 15 分钟窗口
+// 里它一直在 `bash` curl 阿里云文档。`timeoutMs` 完全没拦住它 —— 那个定时器
+// 只置 `settled`,而 `settled` 只在 `await session.prompt()` resolve 之后被读到,
+// `prompt()` 自己不会被打断。后果不只是花钱:排空器下它一直占着该项目的 busy 闩。
+//
+// 这一组测试钉住三件事:**abort 真的被调到** / **登记在第一次 await 之前** /
+// **现场带得回来**。全部用假会话 + 短上界(百毫秒级)驱动,不真等 10 分钟。
+
+describe("runTurn · 墙钟上界真的打断回合", () => {
+  it("到点调用 session.abort() —— 不是继续等一个不会收敛的 prompt()", async () => {
+    const { result, fake } = await turn(() => "never", {
+      timeoutMs: 10_000, wallClockTimeoutMs: 120,
+    });
+    expect(fake.aborts, "abort() 必须真的被调到").toBe(1);
+    expect(result.timedOut).toBe(true);
+    expect(result.timeout?.abortRequested).toBe(true);
+    expect(result.timeout?.limitMs).toBe(120);
+  });
+
+  it("**登记在第一次 await 之前** —— prompt 还挂着时 abort 已经到了(死接线的反面)", async () => {
+    // 批次 19 的教训:登记放在 `await runTurn(...)` 之后等于永远登记不上。
+    // 这条剧本里 `prompt()` 一直挂着,只有 abort 能放它走 —— 如果定时器是在
+    // prompt 之后才登记的,这个回合**永远不会结束**(而死接线看起来一切正常)。
+    const fake = fakeSession(() => "never", { holdPromptUntilAbort: true });
+    const result = await runTurn({
+      session: fake.session, db, agentId: "pm", projectId: "p1",
+      message: "做点事", timeoutMs: 10_000, wallClockTimeoutMs: 100,
+    });
+    expect(fake.aborts).toBe(1);
+    expect(fake.calls, "abort 必须发生在 prompt 返回之前").toEqual([
+      "prompt:start", "abort", "prompt:end",
+    ]);
+    expect(result.timeout?.promptReturned, "abort 之后 prompt 收尾了").toBe(true);
+  });
+
+  it("打断瞬间**正在跑的工具**进现场(7-N:只写「超时了」等于没有现场)", async () => {
+    const { result } = await turn((emit) => {
+      emit(toolStart("c1", "bash", { command: "curl https://help.aliyun.com/..." }));
+      return "never";
+    }, { timeoutMs: 10_000, wallClockTimeoutMs: 120 });
+
+    expect(result.timeout?.interruptedTool?.name).toBe("bash");
+    expect(result.timeout?.interruptedTool?.argsSummary).toContain("curl https://help.aliyun.com");
+    expect(result.timeout?.completedToolCalls, "它还没结束,不算已完成").toBe(0);
+  });
+
+  it("打断前已经收到的正文与已完成的工具照样带回(现场不丢)", async () => {
+    const { result } = await turn((emit) => {
+      emit(textDelta("说了一半"));
+      emit(toolStart("c1", "board_write", { kind: "note" }));
+      emit(toolEnd("c1", "board_write", { details: { ok: true } }));
+      emit(toolStart("c2", "bash", { command: "curl 文档" }));
+      return "never";
+    }, { timeoutMs: 10_000, wallClockTimeoutMs: 120 });
+
+    expect(result.text).toBe("说了一半");
+    expect(result.toolCalls).toHaveLength(1);
+    expect(result.timeout?.completedToolCalls).toBe(1);
+    expect(result.timeout?.interruptedTool?.name).toBe("bash");
+    expect(result.timeout?.elapsedMs).toBeGreaterThanOrEqual(100);
+  });
+
+  it("abort 之后 prompt 仍不返回 —— 宽限到点就不再等它(排空器不被一个回合钉住)", async () => {
+    const fake = fakeSession(() => "never", { holdPromptForever: true });
+    const t0 = Date.now();
+    const result = await runTurn({
+      session: fake.session, db, agentId: "pm", projectId: "p1",
+      message: "做点事", timeoutMs: 10_000, wallClockTimeoutMs: 80, abortGraceMs: 60,
+    });
+    const took = Date.now() - t0;
+
+    expect(fake.aborts).toBe(1);
+    expect(result.timeout?.promptReturned, "如实报「abort 之后没收敛」").toBe(false);
+    expect(took, "宽限到点必须返回,不许无限等").toBeLessThan(2000);
+  });
+
+  it("打断让 prompt() 抛错**不是回合故障** —— 不抛给调用方,但错误进现场", async () => {
+    const fake = fakeSession(() => "never", {
+      holdPromptUntilAbort: true, throwAfterAbort: true,
+    });
+    const result = await runTurn({
+      session: fake.session, db, agentId: "pm", projectId: "p1",
+      message: "做点事", timeoutMs: 10_000, wallClockTimeoutMs: 80,
+    });
+    expect(result.timedOut).toBe(true);
+    expect(result.timeout?.promptReturned).toBe(true);
+    expect(result.timeout?.promptError).toContain("aborted by platform");
+  });
+
+  it("报告里带得出墙钟现场(上界 / abort / 打断瞬间在跑什么)", async () => {
+    const { result } = await turn((emit) => {
+      emit(toolStart("c1", "bash", { command: "curl 文档" }));
+      return "never";
+    }, { timeoutMs: 10_000, wallClockTimeoutMs: 120 });
+    const rep = renderTurnReport(result);
+    expect(rep).toContain("墙钟上界");
+    expect(rep).toContain("session.abort()");
+    expect(rep).toContain("打断瞬间在跑:bash");
+    expect(rep).toContain("curl 文档");
+  });
+
+  it("超时**不静默**:WARN 级日志带上界、耗时与打断瞬间在跑什么", async () => {
+    const lines: string[] = [];
+    const spy = vi.spyOn(console, "log").mockImplementation((...args: unknown[]) => {
+      lines.push(args.map((a) => String(a)).join(" "));
+    });
+    try {
+      await turn((emit) => {
+        emit(toolStart("c1", "bash", { command: "curl 文档" }));
+        return "never";
+      }, { timeoutMs: 10_000, wallClockTimeoutMs: 100 });
+    } finally {
+      spy.mockRestore();
+    }
+    const warn = lines.find((l) => l.includes("墙钟上界"));
+    expect(warn, "必须有一条超时日志(不许静默)").toBeDefined();
+    expect(warn).toContain("warn");
+    expect(warn).toContain("bash");
+    expect(warn).toContain("curl 文档");
+  });
+
+  it("abort() 自己失败也留现场(不静默)—— 错误进现场,回合照常收尾", async () => {
+    const fake = fakeSession(() => "never", {
+      holdPromptUntilAbort: true, abortThrows: true,
+    });
+    const result = await runTurn({
+      session: fake.session, db, agentId: "pm", projectId: "p1",
+      message: "做点事", timeoutMs: 10_000, wallClockTimeoutMs: 80,
+    });
+    expect(fake.aborts).toBe(1);
+    expect(result.timeout?.abortError, "abort 的失败必须能看见").toContain("abort 炸了");
+  });
+});
+
+// ── 两个上界是两件事:旧语义不许被改坏 ───────────────────────────
+//
+// `timeoutMs` 护的是「`prompt()` resolve 之后等 agent_settled 那段收尾等待」,
+// 它**不打断**任何东西;`wallClockTimeoutMs` 才是回合时长上界。
+// 这两条测试钉住「新上界没有把旧语义顶掉」。
+
+describe("runTurn · timeoutMs 的旧语义(收尾等待)没有被改坏", () => {
+  it("prompt 正常返回但永不 settle → 旧定时器收尾,**不 abort**、也没有墙钟现场", async () => {
+    const { result, fake } = await turn(() => "never", {
+      timeoutMs: 120, wallClockTimeoutMs: 10_000,
+    });
+    expect(result.timedOut).toBe(true);
+    expect(result.settled).toBe(false);
+    expect(fake.aborts, "收尾等待超时不该打断会话").toBe(0);
+    expect(result.timeout, "没有墙钟现场 = 不是墙钟打断的").toBeUndefined();
+  });
+
+  it("非正数的墙钟上界不生效,退回默认(坏值取默认,而不是「0 = 不设上界」)", async () => {
+    const { result, fake } = await turn((emit) => emit(textDelta("正常")), {
+      wallClockTimeoutMs: 0,
+    });
+    expect(result.text).toBe("正常");
+    expect(result.timedOut).toBe(false);
+    expect(result.timeout).toBeUndefined();
+    expect(fake.aborts).toBe(0);
+  });
+
+  it("普通失败照旧抛给调用方(新上界不许把真错误吞掉)", async () => {
+    const fake = fakeSession(() => {
+      throw new Error("provider 炸了");
+    });
+    await expect(
+      runTurn({
+        session: fake.session, db, agentId: "pm", projectId: "p1",
+        message: "做点事", timeoutMs: 10_000, wallClockTimeoutMs: 10_000,
+      }),
+    ).rejects.toThrow("provider 炸了");
   });
 });

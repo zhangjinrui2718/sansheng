@@ -21,9 +21,14 @@ import {
 import {
   insertWork, getWork, listWorks, updateWorkStatus, assignWork,
   addDep, removeDep, listDeps, listDependents, createsCycle, depState,
-  depsSatisfied, isWorkStatus, isTerminalWorkStatus,
+  depsSatisfied, isWorkStatus, isTerminalWorkStatus, deleteWork,
   type WorkRow,
 } from "../../src/platform/storage/repo/works.js";
+import {
+  insertArtifact, getArtifact, listArtifacts,
+} from "../../src/platform/storage/repo/artifacts.js";
+import { dispatch } from "../../src/platform/tools/registry.js";
+import type { ToolRunContext } from "../../src/platform/tools/types.js";
 import { solveToolset } from "../../src/platform/harness/authorize.js";
 import type { ProjectRole, Specialization } from "../../src/platform/identity/role.js";
 
@@ -613,5 +618,134 @@ describe("接缝 · loadProjectForAuthz 喂给 solveToolset", () => {
 
   it("项目不存在 → null(调用方显式处理)", () => {
     expect(loadProjectForAuthz(db, "nope")).toBeNull();
+  });
+});
+
+// ── 014 · 工件 → 工作项的产出边(migration 014 + board_write 的 workId)────
+//
+// 这条边补的是「这条工作项产出了什么」—— 在此之前它只能靠**项目级集合差**算
+// (`runtime/execution.ts` 的回合前后差集),那个判据连 author_agent_id 都不读,
+// 同项目两回合交叠时会互相认领对方的产出。
+//
+// 这里钉三件事:
+//   ① 写入路径真的能落这条边(而且只能落**同项目**的工作项);
+//   ② 不传 = null 是**合法状态**,不是缺参数;
+//   ③ 删工作项**不删产出**(SET NULL),而且从 work id 反查得到。
+
+describe("014 · 产出边(board_write 的 workId)", () => {
+  function ctxFor(agentId: string, projectId: string): ToolRunContext {
+    const row = getAgent(db, agentId)!;
+    return {
+      db,
+      agent: {
+        id: row.id,
+        role: row.role,
+        displayName: row.displayName,
+        ...(row.specialization !== null ? { specialization: row.specialization } : {}),
+      },
+      project: loadProjectForAuthz(db, projectId),
+      now: () => T0,
+      newId: (prefix) => `${prefix}_${++seq}`,
+    };
+  }
+
+  const write = (agentId: string, projectId: string, args: Record<string, unknown>) =>
+    dispatch("board_write", args, ctxFor(agentId, projectId));
+
+  /** 一个活跃项目 + 一个 worker 成员 + 一条分派给它的工作项 */
+  function scene(): { pid: string; wk: string; workId: string } {
+    const pid = mkProject("active");
+    const wk = mkAgent("worker", "algorithm");
+    addMember(db, pid, wk, T0);
+    const workId = mkWork(pid, wk);
+    return { pid, wk, workId };
+  }
+
+  it("带 workId 写入 → 边真的落库,且能从 work id 反查回来", async () => {
+    const { pid, wk, workId } = scene();
+    const r = await write(wk, pid, { kind: "evidence", title: "证据", body: "现场", workId });
+    expect(r.ok, r.ok ? "" : `${r.code}: ${r.message}`).toBe(true);
+    if (!r.ok) return;
+    expect(r.text).toContain(`产出工作项:${workId}`);
+
+    const arts = listArtifacts(db, pid, { workId });
+    expect(arts).toHaveLength(1);
+    expect(arts[0]!.workId).toBe(workId);
+    // 正负样本对照:不过滤时项目里还有别的工件吗?这里只有这一条 ——
+    // 所以再加一条**没有**产出工作项的工件,证明过滤真的在筛。
+    await write(wk, pid, { kind: "note", title: "随手记", body: "b" });
+    expect(listArtifacts(db, pid)).toHaveLength(2);
+    expect(listArtifacts(db, pid, { workId })).toHaveLength(1);
+    expect(getArtifact(db, arts[0]!.id)!.workId).toBe(workId);
+  });
+
+  it("不传 workId = **合法状态**(work_id 为 null,不是填空缺)", async () => {
+    const { pid, wk } = scene();
+    const r = await write(wk, pid, { kind: "note", title: "立项笔记", body: "b" });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const a = listArtifacts(db, pid)[0]!;
+    expect(a.workId).toBeNull();
+    expect(r.text).not.toContain("产出工作项");
+  });
+
+  it("workId 不存在 → not_found,且**不静默写出工件**", async () => {
+    const { pid, wk } = scene();
+    const r = await write(wk, pid, { kind: "evidence", title: "证据", body: "b", workId: "wk_ghost" });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.code).toBe("not_found");
+    expect(r.message).toContain("wk_ghost");
+    expect(listArtifacts(db, pid)).toHaveLength(0);
+  });
+
+  it("workId 属于**别的项目** → not_found(库里这条边是合法的,只能在工具层拦)", async () => {
+    const { pid, wk } = scene();
+    const other = mkProject("active");
+    const otherWork = mkWork(other, wk);
+    const r = await write(wk, pid, { kind: "evidence", title: "证据", body: "b", workId: otherWork });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.code).toBe("not_found");
+    expect(r.message).toContain(other);
+    expect(listArtifacts(db, pid)).toHaveLength(0);
+    // 库里确实不拦跨项目引用 —— 所以这条校验是工具层独有的,别删
+    expect(() =>
+      insertArtifact(db, {
+        id: `art_raw_${++seq}`, projectId: pid, conversationId: null, kind: "note",
+        status: "open", authorAgentId: wk, title: "t", body: "b", metadataJson: null,
+        createdAt: T0, updatedAt: T0, workId: otherWork,
+      }),
+    ).not.toThrow();
+  });
+
+  it("删掉工作项后:工件仍在,work_id 变 null(SET NULL,不是 CASCADE)", async () => {
+    const { pid, wk, workId } = scene();
+    await write(wk, pid, { kind: "evidence", title: "证据", body: "现场", workId });
+    const before = listArtifacts(db, pid, { workId });
+    expect(before).toHaveLength(1);
+
+    deleteWork(db, workId);
+    const all = listArtifacts(db, pid);
+    expect(all, "删工作项把产出一起删了 —— 那是 CASCADE 的形态").toHaveLength(1);
+    expect(all[0]!.id).toBe(before[0]!.id);
+    expect(all[0]!.body).toBe("现场");
+    expect(all[0]!.workId).toBeNull();
+    expect(listArtifacts(db, pid, { workId })).toHaveLength(0);
+    expect(db.pragma("foreign_key_check")).toEqual([]);
+  });
+
+  it("workId 过滤不跨项目串(作用域仍然是 projectId,不是 workId)", async () => {
+    const { pid, wk, workId } = scene();
+    await write(wk, pid, { kind: "evidence", title: "本项目产出", body: "b", workId });
+    const other = mkProject("active");
+    // 另一项目里一条**没有**产出边的工件
+    insertArtifact(db, {
+      id: `art_x_${++seq}`, projectId: other, conversationId: null, kind: "evidence",
+      status: "open", authorAgentId: wk, title: "别项目产出", body: "b", metadataJson: null,
+      createdAt: T0, updatedAt: T0,
+    });
+    expect(listArtifacts(db, pid, { workId }).map((a) => a.title)).toEqual(["本项目产出"]);
+    expect(listArtifacts(db, other, { workId })).toEqual([]);
   });
 });

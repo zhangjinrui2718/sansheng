@@ -19,6 +19,8 @@ import { insertProject, addMember } from "../../src/platform/storage/repo/projec
 import { insertWork, getWork, updateWorkStatus, type WorkRow } from "../../src/platform/storage/repo/works.js";
 import { insertArtifact } from "../../src/platform/storage/repo/artifacts.js";
 import { insertBlocker } from "../../src/platform/storage/repo/blockers.js";
+import { listPendingDispatchEvents } from "../../src/platform/storage/repo/dispatch.js";
+import { collectPendingWork } from "../../src/platform/runtime/pendingWork.js";
 import {
   runWorkItem, composeWorkPrompt, renderExecutionReport, type ExecutionResult,
 } from "../../src/platform/runtime/execution.js";
@@ -295,5 +297,143 @@ describe("composeWorkPrompt · 告诉它怎么算完成", () => {
     expect(p).toContain("工件就是你的交付物");
     expect(p).toContain("work.update");
     expect(p).toContain("blocker_open");
+  });
+});
+
+// ── 墙钟超时的**处置**(缺陷的第二半:不能只打断,还要收口)──────────
+//
+// 真机现场:一个 worker 回合跑了 16 分钟还在 curl 文档,而工作项留在
+// `in_progress`。那是个**静默死**:排空器会把它当 `execute_work` 待办反复叫醒,
+// 直到尝试预算用尽,然后它既不在待办里、也没有任何 outbox 事件 ——
+// 业务经理因此永远不会向甲方交代,也没有人重试。每次叫醒还要再买一个上界。
+//
+// 现在的处置:平台把它记 `failed`(终态),经 `updateWorkStatus` 这个唯一写口
+// 写出 `work_failed` outbox 事件。要人介入,而不是自动重跑一段卡死行为。
+
+interface AbortableSession {
+  session: AgentSession;
+  /** `abort()` 被调了几次 —— 「打断真的到达会话」的判据 */
+  readonly aborts: number;
+}
+
+/** 假会话:prompt() 一直挂着(模拟卡死的回合),只有 abort() 能放它走。 */
+function hangingSession(
+  script: (ctx: { emit: (ev: AgentSessionEvent) => void; text: string }) => void = () => {},
+): AbortableSession {
+  const listeners: Array<(ev: AgentSessionEvent) => void> = [];
+  const state = { aborts: 0 };
+  let release: (() => void) | null = null;
+  const session = {
+    subscribe(fn: (ev: AgentSessionEvent) => void) {
+      listeners.push(fn);
+      return () => { const i = listeners.indexOf(fn); if (i >= 0) listeners.splice(i, 1); };
+    },
+    async prompt(text: string) {
+      const emit = (ev: AgentSessionEvent) => { for (const l of [...listeners]) l(ev); };
+      script({ emit, text });
+      await new Promise<void>((res) => { release = res; });
+    },
+    async abort() {
+      state.aborts += 1;
+      release?.();
+    },
+    dispose() {},
+    getActiveToolNames() { return []; },
+  };
+  return {
+    session: session as unknown as AgentSession,
+    get aborts() { return state.aborts; },
+  } as AbortableSession;
+}
+
+/** 跑一个工作项,墙钟上界压到 100ms(不真等 10 分钟)。 */
+async function runWithWallClock(
+  workId: string, session: AgentSession, wallClockTimeoutMs = 100,
+): Promise<ExecutionResult> {
+  return runWorkItem({
+    session, db, workId, timeoutMs: 10_000, wallClockTimeoutMs, injectPending: false,
+  });
+}
+
+describe("runWorkItem · 墙钟超时后的处置(不静默、留现场)", () => {
+  it("超时 → 记 failed(终态)**并写出可查的下游事件**:不再自动重跑,甲方也会被告知", async () => {
+    const w = mkWork();
+    const s = hangingSession(); // 卡在什么工具上都不做 —— 与真机的 curl 死循环同形
+    const r = await runWithWallClock(w.id, s.session);
+
+    expect(s.aborts, "abort() 必须真的被调到").toBe(1);
+    expect(r.outcome).toBe("timed_out");
+    expect(r.timeoutDisposition).toBe("marked_failed");
+    expect(getWork(db, w.id)!.status).toBe("failed");
+    expect(r.work.status).toBe("failed");
+
+    // 落点①:outbox —— 业务经理的汇报待办由它查出来(甲方可见,重启不丢)
+    expect(listPendingDispatchEvents(db, "p1").map((e) => e.kind)).toEqual(["work_failed"]);
+
+    // 落点②:它不再是一个 `execute_work` 待办 —— 「不再重复烧钱」的机器表达
+    expect(
+      collectPendingWork(db, "wk", "p1", AT).myOpenWorks.map((x) => x.id),
+      "failed 是终态,排空器不会再叫醒它",
+    ).toEqual([]);
+
+    // 落点③:现场(跑了多久 / 打断瞬间在跑什么)带得回来
+    expect(r.turn.timeout?.abortRequested).toBe(true);
+    expect(r.turn.timeout?.elapsedMs).toBeGreaterThanOrEqual(80);
+  });
+
+  it("打断瞬间正在跑的工具进现场(事后分得清「原地打转」与「真在跑长活」)", async () => {
+    const w = mkWork();
+    const s = hangingSession(({ emit }) => {
+      emit({
+        type: "tool_execution_start", toolCallId: "c1", toolName: "bash",
+        args: { command: "curl https://help.aliyun.com/document_detail/..." },
+      } as unknown as AgentSessionEvent);
+    });
+    const r = await runWithWallClock(w.id, s.session);
+    expect(r.turn.timeout?.interruptedTool?.name).toBe("bash");
+    expect(r.turn.timeout?.interruptedTool?.argsSummary).toContain("curl https://help.aliyun.com");
+  });
+
+  it("超时前它自己已经到达终态 → **不覆盖**它的判定,如实报 left_terminal", async () => {
+    const w = mkWork();
+    const s = hangingSession(() => updateWorkStatus(db, w.id, "done", AT + 5));
+    const r = await runWithWallClock(w.id, s.session);
+    expect(r.timeoutDisposition).toBe("left_terminal");
+    expect(r.outcome, "done 是它自己的判定,超时不该把它改写成 timed_out").toBe("converged");
+    expect(getWork(db, w.id)!.status).toBe("done");
+  });
+
+  it("超时前它自己登记了阻塞(blocked)→ **不覆盖**,如实报 left_blocked", async () => {
+    const w = mkWork();
+    const s = hangingSession(() => updateWorkStatus(db, w.id, "blocked", AT + 5));
+    const r = await runWithWallClock(w.id, s.session);
+    expect(r.timeoutDisposition).toBe("left_blocked");
+    expect(r.outcome).toBe("blocked");
+    expect(getWork(db, w.id)!.status).toBe("blocked");
+  });
+
+  it("报告写清「上界 / 打断 / 处置」—— 不静默(7-N)", async () => {
+    const w = mkWork();
+    const s = hangingSession(({ emit }) => {
+      emit({
+        type: "tool_execution_start", toolCallId: "c1", toolName: "bash",
+        args: { command: "curl 文档" },
+      } as unknown as AgentSessionEvent);
+    });
+    const rep = renderExecutionReport(await runWithWallClock(w.id, s.session));
+    expect(rep).toContain("墙钟上界");
+    expect(rep).toContain("session.abort()");
+    expect(rep).toContain("打断瞬间在跑:bash");
+    expect(rep).toContain("记为 failed");
+    expect(rep).toContain("超时处置");
+  });
+
+  it("没有超时的未收敛**不**留下超时处置(新路径只对超时生效,不误伤普通回合)", async () => {
+    const w = mkWork();
+    const r = await run(w.id, saidDone("我做完了(但没改状态)"));
+    expect(r.outcome).toBe("unconverged");
+    expect(r.timeoutDisposition).toBeUndefined();
+    expect(getWork(db, w.id)!.status).toBe("in_progress");
+    expect(listPendingDispatchEvents(db, "p1"), "没超时就不该有下游事件").toEqual([]);
   });
 });

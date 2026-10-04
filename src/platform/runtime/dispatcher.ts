@@ -34,8 +34,16 @@
  * 重启后照样查得出来。
  *
  * 「下游发生了什么、还没向甲方交代」同理落进 `dispatch_events`(outbox):
- * 工作项迁入 done/failed/blocked、或登记了新阻塞时写一行,业务经理的汇报待办
+ * 工作项迁入终态、或登记了新阻塞时写一行,业务经理的汇报待办
  * 就是「这个项目还有没被交代的事件吗」。撞上界丢不掉它 —— 它在库里。
+ *
+ * ⚠️ **但这一层不再收「全部状态迁移」**:outbox 从「事件流水」缩成了
+ * 「待交代队列」—— 写入侧的**可打扰判据**(根工作项 / 里程碑 / failed /
+ * high|critical 的阻塞)在 `repo/works.ts` 的 `updateWorkStatus` 与
+ * `repo/dispatch.ts` 的 `insertDispatchEvent`,**不在判定侧收窄**。
+ * 为什么必须是写入侧:消费是全量的(`consumePendingDispatchEvents` 无差别标记
+ * 全部未消费行),一次可打扰事件会把一串不可打扰事件一起标记为已交代,
+ * 于是 `consumed_at` 开始撒谎。理由与代价见 `repo/works.ts` 那段长注释。
  */
 import type Database from "better-sqlite3";
 import { collectPendingWork, hasActionableWork } from "./pendingWork.js";
@@ -364,6 +372,8 @@ export function renderTask(db: Database.Database, todo: DriverTodo): string {
         "2. 用 `work_create` 拆出**能各自独立开工**的工作项;每个都给负责人与" +
         "**可验证的判据**,依赖关系用 `dependsOn` 显式写出来\n" +
         "   —— 负责人只能是 **worker**(执行角色),别的角色不执行工作项\n" +
+        "   多件产出同属**一个交付物**时,用 `parentWorkId` 把它们挂到一条根工作项下面\n" +
+        "   —— 中间工作项的完成只对项目内部可见,整个交付物收口才向甲方交代一次\n" +
         "3. 拆完**不要自己动手做** —— 你不持 `code.*`,执行是 worker 的事\n\n" +
         "工作项一旦建出来,worker 会被自动唤醒去跑它们 —— 你不需要再去催。"
       );
@@ -383,7 +393,9 @@ export function renderTask(db: Database.Database, todo: DriverTodo): string {
         renderDownstream(db, todo) +
         "\n\n值得让他知道的,用 `tell_client` 播报;**不值得打扰他的,就不要播**" +
         "(他的注意力是稀缺资源)。有分量的结论仍然要 `board_write` —— " +
-        "播报不替代落库。"
+        "播报不替代落库。\n\n" +
+        "下面这些事件**已经过写入侧的筛子**(只留根工作项 / 里程碑 / 失败 / " +
+        "高severity 阻塞)—— 但「库里记了一笔」不等于「值得播报」:整批可以合成一句,也可以不播。"
       );
     case "execute_work":
       // worker 那条不走这里 —— `runWorkItem` 自己拼 `composeWorkPrompt`。
@@ -396,6 +408,7 @@ const EVENT_LABEL: Readonly<Record<string, string>> = {
   work_done: "工作项完成",
   work_failed: "工作项失败",
   work_blocked: "工作项受阻",
+  work_cancelled: "工作项取消",
   blocker_opened: "新登记阻塞",
 };
 

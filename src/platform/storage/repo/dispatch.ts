@@ -19,19 +19,61 @@
  *
  * 本模块只做读写,不做判定。「谁此刻该动」的判定在 `runtime/dispatcher.ts`
  * 的 `collectTodos` —— 那里是唯一一处,而且它只读库、不读任何进程内状态。
+ *
+ * **例外且只有一条**:`insertDispatchEvent` 会判「这个 kind 当前 schema 允不允许」
+ * (见 `InsertDispatchEventResult`)。那不是「谁该动」的判定,而是「这句话现在
+ * 落不落得下去」—— 落不下去时必须**如实说**,不能静默丢。
  */
 import type Database from "better-sqlite3";
 
 // ── ① 下游事件 ──────────────────────────────────────────────────
+//
+// ⚠️ **这个 outbox 不是「事件流水」,是「待交代队列」。** 一行 = 一件业务经理
+// 该主动向甲方交代的事。写入侧的**可打扰判据**在 `repo/works.ts` 的
+// `updateWorkStatus`(判据是库里的一个事实:这条工作项在工作分解树里的位置),
+// 不在判定侧收窄 —— 消费是**全量**的(`consumePendingDispatchEvents` 无差别标记
+// 全部未消费行),一次可打扰事件会把一串不可打扰事件一起标记为已交代,
+// 于是 `consumed_at` 开始撒谎。理由与代价见 `works.ts` 里那段长注释。
 
-export type DispatchEventKind = "work_done" | "work_failed" | "work_blocked" | "blocker_opened";
+/**
+ * 事件种类。
+ *
+ * `work_cancelled` 是**写入侧新增**的(设计 §12 #10):取消此前不写任何事件,
+ * 于是「这条工作项被取消了」业务经理与质检都不知道 —— 而它正是下游依赖悬空的
+ * 来源(真机事故的起点)。
+ *
+ * ⚠️ `migrations/013` 给 `dispatch_events.kind` 的 CHECK 闭集**只有前 4 个取值**,
+ * 而 CHECK 只能靠**重建表**放宽(SQLite 的 `ADD CONSTRAINT` 只能收紧)。那笔迁移
+ * 是 015(见 `DISPATCH_EVENT_KIND_MIGRATION`)。在那之前写 `work_cancelled`
+ * 会被 SQL 拒绝 —— 见下面 `insertDispatchEvent` 的**显式降级**:拒绝要能被看见,
+ * 但不许把工具调用打崩。
+ */
+export type DispatchEventKind =
+  | "work_done"
+  | "work_failed"
+  | "work_blocked"
+  | "blocker_opened"
+  | "work_cancelled";
 
 export const DISPATCH_EVENT_KINDS: readonly DispatchEventKind[] = [
   "work_done",
   "work_failed",
   "work_blocked",
   "blocker_opened",
+  "work_cancelled",
 ];
+
+/**
+ * 哪些 kind 需要一笔**还没落地**的迁移才能写进库。
+ *
+ * 这张表是「代码可以先走、schema 随后放宽」的**唯一**落点:015 落地之后
+ * 这里清空即可(或者留着也无害 —— 写成功了就不会走到那个分支)。
+ */
+export const DISPATCH_EVENT_KIND_MIGRATION: Readonly<
+  Partial<Record<DispatchEventKind, string>>
+> = {
+  work_cancelled: "015_dispatch_event_kinds",
+};
 
 export function isDispatchEventKind(v: unknown): v is DispatchEventKind {
   return typeof v === "string" && (DISPATCH_EVENT_KINDS as readonly string[]).includes(v);
@@ -76,6 +118,104 @@ function rowToEvent(raw: RawDispatchEvent): DispatchEventRow {
   };
 }
 
+/**
+ * 写一条下游事件的结果。
+ *
+ * **`ok: false` 不是「库里出错了」,而是「这句实话当前 schema 记不下来」** ——
+ * 它必须能被调用方看见并如实上报。这一条的由来:
+ *
+ * `dispatch_events.kind` 的 CHECK 是闭集,而 013 只放了 4 个取值。写入侧新增
+ * `work_cancelled`(任务 4 / 设计 §12 #10)之后,在 015 落地之前**每一条取消
+ * 根工作项的调用都会撞 CHECK**。写口在工具调用路径上(`work_update` / `report`),
+ * 抛出去就是「一次合法的取消把整轮对话打崩」—— 那比不写事件坏得多。
+ *
+ * 所以这里**只吞掉那一个已知的、可预期的失败**(窄匹配 `kind IN` 那条 CHECK),
+ * 其余任何错误一律原样抛出:把别的原因也吞掉,就成了本项目反复栽过的
+ * 「检查本身静默出错」。
+ */
+export type InsertDispatchEventResult =
+  | { readonly ok: true; readonly written: true }
+  | {
+      /**
+       * **刻意不写**,不是出错:这条事件判进了「不值得打扰甲方」那一类。
+       * (用户抱怨的那一长串就是这么消掉的 —— 但它必须在**进门**时判,
+       * 不能在读取端过滤,理由见 `repo/works.ts` 那段长注释。)
+       */
+      readonly ok: false;
+      readonly written: false;
+      readonly reason: "not_worth_interrupting";
+      readonly kind: DispatchEventKind;
+      readonly detail: string;
+    }
+  | {
+      readonly ok: false;
+      readonly written: false;
+      readonly reason: "kind_not_enabled_by_schema";
+      readonly kind: DispatchEventKind;
+      /** 放宽 CHECK 需要的那笔迁移(015 落地后这里不会再出现) */
+      readonly needsMigration: string;
+      readonly detail: string;
+    };
+
+/**
+ * 阻塞严重度里**值得打断**的那两档。`low` / `medium` 是项目内的日常噪音 ——
+ * 业务经理不需要为它们去占用甲方的注意力(它们照样在 `blocker_list` 里查得到,
+ * 只是不写 outbox、不把业务经理叫醒)。
+ */
+const INTERRUPTING_BLOCKER_SEVERITIES: ReadonlySet<string> = new Set(["high", "critical"]);
+
+/**
+ * 「这条事件值得打断吗」——**只对需要额外事实才能判的那些 kind**。
+ *
+ * 今天只有 `blocker_opened`:它的可打扰性取决于 `blockers.severity`,而 severity
+ * 不在事件行里。工作项的判据(根 / 里程碑)在 `repo/works.ts` —— 那里才有
+ * 工作分解树的知识,不把它搬到这里。
+ *
+ * **为什么判在门上而不是各个调用方**:outbox 只有这一个写口
+ * (`insertDispatchEvent`),可打扰判据就该长在门上 —— 散到调用方去,
+ * 迟早有一条路漏掉,而漏掉的表现是静默的(与 `updateWorkStatus` 是
+ * `works.status` 唯一写口同一条纪律)。
+ *
+ * 查不到阻塞行时**放行**(宁可多写一条,不能静默少写一条):这是 at-least-once
+ * 的方向,与 `consumePendingDispatchEvents` 的取舍一致。
+ */
+function worthInterrupting(
+  db: Database.Database,
+  row: { kind: DispatchEventKind; subjectId: string },
+): { readonly ok: true } | { readonly ok: false; readonly severity: string; readonly detail: string } {
+  if (row.kind !== "blocker_opened") return { ok: true };
+  const found = db
+    .prepare(`SELECT severity FROM blockers WHERE id = ?`)
+    .get(row.subjectId) as { severity: string } | undefined;
+  if (found === undefined) return { ok: true };
+  if (INTERRUPTING_BLOCKER_SEVERITIES.has(found.severity)) return { ok: true };
+  return {
+    ok: false,
+    severity: found.severity,
+    detail:
+      `阻塞 ${row.subjectId} 的 severity 是「${found.severity}」—— ` +
+      `只有 high / critical 值得打扰甲方(它照样在 blocker_list 里查得到)`,
+  };
+}
+
+/**
+ * 只认那一条 CHECK:`dispatch_events.kind` 的闭集。
+ *
+ * 判据是 `code` + 错误原文里的 `kind IN`(实测原文:
+ * `CHECK constraint failed: kind IN (\n 'work_done', ...)`)。**故意写窄** ——
+ * 将来这张表上多一条 CHECK(或别的表 CHECK 失败)时,这里判不出来、原样抛出,
+ * 不会被当成「schema 落后」悄悄咽掉。
+ */
+function isDispatchKindCheckFailure(err: unknown): boolean {
+  if (typeof err !== "object" || err === null) return false;
+  const e = err as { code?: unknown; message?: unknown };
+  return (
+    e.code === "SQLITE_CONSTRAINT_CHECK" &&
+    typeof e.message === "string" &&
+    e.message.includes("kind IN")
+  );
+}
+
 export function insertDispatchEvent(
   db: Database.Database,
   row: {
@@ -85,12 +225,36 @@ export function insertDispatchEvent(
     summary: string;
     createdAt: number;
   },
-): void {
-  db.prepare(
-    `INSERT INTO dispatch_events (project_id, kind, subject_id, summary, created_at,
-                                  consumed_at, consumed_by)
-     VALUES (?, ?, ?, ?, ?, NULL, NULL)`,
-  ).run(row.projectId, row.kind, row.subjectId, row.summary, row.createdAt);
+): InsertDispatchEventResult {
+  const worth = worthInterrupting(db, row);
+  if (!worth.ok) {
+    return {
+      ok: false, written: false, reason: "not_worth_interrupting",
+      kind: row.kind, detail: worth.detail,
+    };
+  }
+  try {
+    db.prepare(
+      `INSERT INTO dispatch_events (project_id, kind, subject_id, summary, created_at,
+                                    consumed_at, consumed_by)
+       VALUES (?, ?, ?, ?, ?, NULL, NULL)`,
+    ).run(row.projectId, row.kind, row.subjectId, row.summary, row.createdAt);
+    return { ok: true, written: true };
+  } catch (err) {
+    if (!isDispatchKindCheckFailure(err)) throw err;
+    const needs = DISPATCH_EVENT_KIND_MIGRATION[row.kind] ?? "(未登记的迁移)";
+    return {
+      ok: false,
+      written: false,
+      reason: "kind_not_enabled_by_schema",
+      kind: row.kind,
+      needsMigration: needs,
+      detail:
+        `dispatch_events.kind 的 CHECK 还不允许「${row.kind}」` +
+        `(migrations/013 的闭集只有 work_done / work_failed / work_blocked / blocker_opened;` +
+        `放宽只能靠重建表 = ${needs})。事件**没有落库**。`,
+    };
+  }
 }
 
 /** 还没被交代出去的事件,**按时间升序**(先发生的先汇报)。 */

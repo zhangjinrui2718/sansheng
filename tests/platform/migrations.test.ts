@@ -402,3 +402,122 @@ describe("013 排空器状态(一个 ADD COLUMN + 两张新表)", () => {
     db.close();
   });
 });
+
+/**
+ * 014 是**纯加法**(一个 ADD COLUMN + 一条部分索引),纯到**不需要登记任何例外**
+ * —— 它不建表,所以没有 `CREATE TABLE IF NOT EXISTS` 撞名的面;它不 DROP,
+ * 所以没有批次 18 那条静默删数据的路。
+ *
+ * 但它的两条设计选择各自对着一次真实事故,都不能靠注释保证:
+ *   - `ON DELETE SET NULL` 而不是 `CASCADE` —— 用 CASCADE 就是「删工作项 = 删产出」,
+ *     而工件是审计面,必须比产生它的东西活得久;
+ *   - 部分索引而不是全表索引 —— 多数工件的 work_id 是 NULL。
+ * 所以这里钉住:文件形态、列的可空性与外键动作、旧行不受影响、删工作项不删产出。
+ */
+describe("014 产出边(纯 ADD COLUMN + 部分索引)", () => {
+  async function upTo013Then014(apply14 = true) {
+    const Database = (await import("better-sqlite3")).default;
+    const db = new Database(":memory:");
+    db.pragma("foreign_keys = ON");
+    for (const f of FILES) {
+      if (f.version >= 14) break;
+      try {
+        db.exec(f.sql);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        if (f.version === 2 && /vec0|no such module/i.test(msg)) continue;
+        throw err;
+      }
+    }
+    db.exec(`INSERT INTO agents (id,role,specialization,display_name,created_at)
+             VALUES ('wk','worker','engineering','工人',1)`);
+    db.exec(`INSERT INTO projects (id,name,client,goal,status,created_at)
+             VALUES ('pj_1','语音机器人调研','甲方','目标','active',1)`);
+    db.exec(`INSERT INTO projects (id,name,client,goal,status,created_at)
+             VALUES ('pj_2','另一个项目','甲方','目标','active',1)`);
+    db.exec(`INSERT INTO project_assignments (project_id,agent_id,added_at) VALUES ('pj_1','wk',1)`);
+    db.exec(`INSERT INTO works (id,project_id,parent_work_id,title,goal,status,assignee_agent_id,created_at,updated_at)
+             VALUES ('w_1','pj_1',NULL,'做','g','in_progress','wk',1,1)`);
+    db.exec(`INSERT INTO works (id,project_id,parent_work_id,title,goal,status,assignee_agent_id,created_at,updated_at)
+             VALUES ('w_2','pj_2',NULL,'别人家的','g','open','wk',1,1)`);
+    // 014 之前就存在的工件(要逐字活下来)
+    db.exec(`INSERT INTO artifacts (id,project_id,conversation_id,kind,status,author_agent_id,title,body,metadata_json,created_at,updated_at)
+             VALUES ('a_old','pj_1',NULL,'evidence','open','wk','旧证据','现场','{"k":1}',1,1)`);
+    const m14 = FILES.find((f) => f.version === 14);
+    expect(m14, "014 迁移文件缺失").toBeDefined();
+    if (apply14) db.exec(m14!.sql);
+    return db;
+  }
+
+  it("迁移文件是纯加法:一行 DROP 都没有,也没有 CREATE TABLE(撞名面为零)", () => {
+    const m14 = FILES.find((f) => f.version === 14);
+    expect(m14, "014 迁移文件缺失").toBeDefined();
+    expect(stripSqlComments(m14!.sql)).not.toMatch(/\bDROP\b/i);
+    expect(createdTables(m14!.sql)).toEqual([]);
+  });
+
+  it("列就位且**可空 / 无 DEFAULT**(不传 workId 是合法状态,不是缺参数)", async () => {
+    const colOf = (d: Awaited<ReturnType<typeof upTo013Then014>>) =>
+      (d.prepare(`PRAGMA table_info(artifacts)`).all() as Array<{
+        name: string; type: string; notnull: number; dflt_value: unknown;
+      }>).find((c) => c.name === "work_id");
+
+    // 负样本:014 之前这一列不存在(证明下面的断言不是恒真)
+    const before = await upTo013Then014(false);
+    expect(colOf(before)).toBeUndefined();
+    before.close();
+
+    const db = await upTo013Then014();
+    const col = colOf(db);
+    expect(col, "artifacts.work_id 没建出来").toBeDefined();
+    expect(col!.type).toBe("TEXT");
+    expect(col!.notnull).toBe(0);
+    expect(col!.dflt_value).toBeNull();
+    db.close();
+  });
+
+  it("外键是 works(id) 且动作为 **SET NULL** —— 不是 CASCADE、也不是 RESTRICT", async () => {
+    const db = await upTo013Then014();
+    const fks = (db.prepare(`PRAGMA foreign_key_list(artifacts)`).all() as Array<{
+      table: string; from: string; to: string; on_delete: string;
+    }>).filter((k) => k.from === "work_id");
+    expect(fks).toEqual([
+      expect.objectContaining({ table: "works", to: "id", on_delete: "SET NULL" }),
+    ]);
+    // 悬空 work_id 真的被拦(负样本:外键不是摆设)
+    expect(() =>
+      db.exec(`INSERT INTO artifacts (id,project_id,conversation_id,kind,status,author_agent_id,title,body,metadata_json,created_at,updated_at,work_id)
+               VALUES ('a_ghost','pj_1',NULL,'note','open','wk','孤儿','b',NULL,2,2,'w_ghost')`),
+    ).toThrow(/FOREIGN KEY/i);
+    db.close();
+  });
+
+  it("部分索引就位:idx_artifacts_work 带 WHERE work_id IS NOT NULL", async () => {
+    const db = await upTo013Then014();
+    const row = db.prepare(`SELECT sql FROM sqlite_master WHERE type='index' AND name='idx_artifacts_work'`)
+      .get() as { sql: string } | undefined;
+    expect(row, "idx_artifacts_work 没建出来").toBeDefined();
+    expect(row!.sql).toMatch(/WHERE\s+work_id\s+IS\s+NOT\s+NULL/i);
+    db.close();
+  });
+
+  it("旧行逐字不变、一条不少;删工作项**不删产出**(SET NULL 不是 CASCADE)", async () => {
+    const db = await upTo013Then014();
+    const before = db.prepare(`SELECT * FROM artifacts WHERE id='a_old'`).get();
+    expect(before).toEqual({
+      id: "a_old", project_id: "pj_1", conversation_id: null, kind: "evidence", status: "open",
+      author_agent_id: "wk", title: "旧证据", body: "现场", metadata_json: '{"k":1}',
+      created_at: 1, updated_at: 1, work_id: null,
+    });
+
+    db.exec(`UPDATE artifacts SET work_id='w_1' WHERE id='a_old'`);
+    db.exec(`DELETE FROM works WHERE id='w_1'`);
+    const after = db.prepare(`SELECT * FROM artifacts WHERE id='a_old'`).get();
+    expect(after, "删工作项把产出一起删了 —— 这是 CASCADE 的形态,不是本迁移的语义").toEqual({
+      ...(before as Record<string, unknown>), work_id: null,
+    });
+    expect(db.pragma("foreign_key_check")).toEqual([]);
+    expect(db.pragma("integrity_check")[0]).toEqual({ integrity_check: "ok" });
+    db.close();
+  });
+});

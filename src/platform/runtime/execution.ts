@@ -26,16 +26,38 @@
  * 如果回合结束了而工作项还是 `in_progress`,**不猜**、不替它判成功 ——
  * 如实记为「未收敛」并把现场带回。7-N 的现场原则在这里的落点就是这件事:
  * 调用方要能看出「它调了 6 次工具都没卒」而不是只看到一句「未收敛」。
+ *
+ * ── 墙钟超时是一个**例外**,它必须由平台处置(不能只报「未收敛」)──────
+ *
+ * 一个回合被墙钟上界打断时,「未收敛」这个如实描述**不够**:真机现场是
+ * 一个 worker 回合跑了 16 分钟还在 curl 文档,而它留在 `in_progress` ——
+ * 而 `in_progress` 的工作项在排空器里有两条死路:
+ *
+ *   1. 它**不在**任何 outbox 事件里(`updateWorkStatus` 只对 done/failed/blocked
+ *      写事件),所以业务经理永远不会向甲方交代「这条活没做完」;
+ *   2. 它会作为 `execute_work` 待办被反复叫醒,直到尝试预算(`dispatch_attempts`,
+ *      默认 3 次)用尽 —— 每次叫醒都可能再烧掉一个完整的墙钟上界,
+ *      然后那条待办**再也不会被叫醒**,工作项就永久停在 `in_progress`:
+ *      不在待办里、没有事件、没有人重试。
+ *
+ * 所以超时由平台显式处置(见 `disposeTimeout`):记 `failed`(终态)。
+ * 终态的选择不是「替模型判失败」,而是「**不再自动重跑**」—— 被打断的回合
+ * 拼不出可信的产出,自动重跑只会把同一段卡死行为再买一遍;而 `failed`
+ * 会经 `updateWorkStatus` 写出 `work_failed` 事件 → 业务经理的汇报待办 →
+ * 甲方可见。要人(项目经理)介入才能继续,这是对的失效方向。
  */
 import type Database from "better-sqlite3";
 import type { AgentSession, AgentSessionEvent } from "@earendil-works/pi-coding-agent";
 import {
-  getWork, updateWorkStatus, type WorkRow,
+  getWork, updateWorkStatus, isTerminalWorkStatus, type WorkRow,
 } from "../storage/repo/works.js";
 import { listArtifacts, type ArtifactRow } from "../storage/repo/artifacts.js";
 import { listBlockers } from "../storage/repo/blockers.js";
 import { getAgent } from "../storage/repo/agents.js";
-import { runTurn, type TurnResult } from "./turn.js";
+import {
+  runTurn, renderTimeoutScene, type TurnResult, type TurnTimeoutScene,
+} from "./turn.js";
+import { log } from "../../shared/log.js";
 
 export type ExecutionOutcome =
   /** 工作项被推到了终态(done / failed / cancelled) */
@@ -45,7 +67,25 @@ export type ExecutionOutcome =
   /** 工作项状态是 blocked —— 它如实登记了阻塞,这是合法结局 */
   | "blocked"
   /** 工作项根本不该被执行(状态/归属不对) */
-  | "refused";
+  | "refused"
+  /**
+   * 回合被**墙钟上界**打断,工作项由平台记为 `failed`(见文件头与
+   * `disposeTimeout`)。与 `converged` 分开,是因为「到达终态」与
+   * 「被强制中止后再记为终态」在事后必须能区分 —— 后者才需要人介入。
+   */
+  | "timed_out";
+
+/**
+ * 墙钟超时之后工作项被怎么处置了。**必须回报**,否则调用方看不出
+ * 「超时了但工作项还活着」与「超时了且已经收口」的区别。
+ */
+export type TimeoutDisposition =
+  /** 平台把它记成了 failed(终态,写出 `work_failed` 事件) */
+  | "marked_failed"
+  /** 超时前它已经自己到达终态(done/failed/cancelled)—— 不覆盖它 */
+  | "left_terminal"
+  /** 它自己登记了阻塞(blocked)—— 那是合法结局,不覆盖它 */
+  | "left_blocked";
 
 export interface ExecutionResult {
   readonly outcome: ExecutionOutcome;
@@ -58,13 +98,30 @@ export interface ExecutionResult {
   readonly raisedBlockers: readonly string[];
   /** outcome=refused 时说明原因 */
   readonly refusalReason?: string;
+  /**
+   * 墙钟超时后的处置。**可选**:非超时的执行结果不带它
+   * (与 `TurnResult.projectContext` 同一个理由 —— 手工构造的地方不必假装
+   * 记录过一份处置)。
+   */
+  readonly timeoutDisposition?: TimeoutDisposition;
 }
 
 export interface RunWorkOptions {
   readonly session: AgentSession;
   readonly db: Database.Database;
   readonly workId: string;
+  /** 收尾等待的上界(透传给 `runTurn.timeoutMs`)。**不是**回合时长上界 */
   readonly timeoutMs?: number;
+  /**
+   * **一个工作项回合的墙钟上界**(透传给 `runTurn.wallClockTimeoutMs`)。
+   * 缺省交给 `runTurn` 的 `DEFAULT_WALL_CLOCK_TIMEOUT_MS`(10 分钟)。
+   *
+   * 宿主/CLI 要调它,只需把这个字段接出去 —— 判定与打断逻辑都在这条调用链上,
+   * 不需要另写一份超时。
+   */
+  readonly wallClockTimeoutMs?: number;
+  /** `abort()` 之后等 SDK 收尾的宽限(透传;测试 seam) */
+  readonly abortGraceMs?: number;
   readonly injectPending?: boolean;
   /**
    * 逐事件观察(宿主用来把这一回合**流式**推给前端)。
@@ -152,12 +209,23 @@ export async function runWorkItem(opts: RunWorkOptions): Promise<ExecutionResult
     projectId: before.projectId,
     message: composeWorkPrompt(before),
     ...(opts.timeoutMs !== undefined ? { timeoutMs: opts.timeoutMs } : {}),
+    ...(opts.wallClockTimeoutMs !== undefined
+      ? { wallClockTimeoutMs: opts.wallClockTimeoutMs }
+      : {}),
+    ...(opts.abortGraceMs !== undefined ? { abortGraceMs: opts.abortGraceMs } : {}),
     ...(opts.injectPending !== undefined ? { injectPending: opts.injectPending } : {}),
     // 观察者透传 —— 不传的话 worker 干活的这几分钟在前端是全黑的
     ...(opts.onEvent !== undefined ? { onEvent: opts.onEvent } : {}),
   });
 
-  const after = getWork(opts.db, before.id) ?? before;
+  // ── 墙钟超时:平台必须处置,而不是留一句「未收敛」(见文件头)──
+  let after = getWork(opts.db, before.id) ?? before;
+  let timeoutDisposition: TimeoutDisposition | undefined;
+  if (turn.timeout !== undefined) {
+    timeoutDisposition = disposeTimeout(opts.db, after, turn.timeout);
+    after = getWork(opts.db, before.id) ?? after;
+  }
+
   const producedArtifacts = listArtifacts(opts.db, before.projectId).filter(
     (a) => !artifactsBefore.has(a.id),
   );
@@ -166,12 +234,56 @@ export async function runWorkItem(opts: RunWorkOptions): Promise<ExecutionResult
     .map((b) => b.id);
 
   return {
-    outcome: classify(after),
+    outcome: timeoutDisposition === "marked_failed" ? "timed_out" : classify(after),
     work: after,
     turn,
     producedArtifacts,
     raisedBlockers,
+    ...(timeoutDisposition !== undefined ? { timeoutDisposition } : {}),
   };
+}
+
+/**
+ * 墙钟超时之后把这个工作项收口。返回**实际做了什么**(必须回报,不静默)。
+ *
+ * 为什么是 `failed`(而不是 blocked,也不是留在 in_progress):
+ *
+ *  - **留在 `in_progress` = 静默死**(真机现场就是这个):排空器会把它当
+ *    `execute_work` 待办反复叫醒,直到尝试预算用尽,然后它既不在待办里、
+ *    也没有任何 outbox 事件(业务经理因此永远不会向甲方交代),没有人重试。
+ *    而每次叫醒都要再买一个完整的墙钟上界。修 abort 只是让每回合有上界,
+ *    留着这个状态等于让「3 × 上界」的账单重复发生,最后还是死。
+ *  - **blocked 是假的**:`blocked` 在这个系统里的语义是「已登记阻塞」
+ *    (`works.repo` 的注释、`ExecutionOutcome.blocked`、界面上的 `openBlockers`
+ *    都这么读)。平台在这里并没有一条阻塞记录可指 —— 写 blocked 会让
+ *    「阻塞列表」与工作项状态互相矛盾,而矛盾的状态比没有状态更难排查。
+ *  - **failed 是终态里唯一诚实的落点**:它不假装成功(`done`)、不假装有人
+ *    登记过阻塞(`blocked`)、也不假装还活着(`in_progress`)。它经
+ *    `updateWorkStatus` 这个**唯一写口**写出 `work_failed` outbox 事件
+ *    → 业务经理的汇报待办 → 甲方被告知。要人介入才能继续,这是对的失效方向:
+ *    一次卡到墙钟的回合,自动重跑只是把同一段卡死行为再买一遍。
+ *
+ * 不动已经到达终态 / 已 blocked 的工作项:那是它自己在回合里做出的、更权威的
+ * 判定(7-M/BC6:「不替它判」)。
+ */
+function disposeTimeout(
+  db: Database.Database,
+  work: WorkRow,
+  scene: TurnTimeoutScene,
+): TimeoutDisposition {
+  if (isTerminalWorkStatus(work.status)) return "left_terminal";
+  if (work.status === "blocked") return "left_blocked";
+
+  updateWorkStatus(db, work.id, "failed", Date.now());
+  log.warn(
+    `execution: 工作项 ${work.id}「${work.title}」的回合被墙钟上界打断 ` +
+      `(${scene.elapsedMs}ms ≥ ${scene.limitMs}ms · ` +
+      (scene.interruptedTool === null
+        ? "打断瞬间没有正在跑的工具"
+        : `最后在跑 ${scene.interruptedTool.name}(${scene.interruptedTool.runningMs}ms)`) +
+      `) —— 记为 failed:不再自动重跑,并写一条 work_failed 事件让业务经理向甲方交代`,
+  );
+  return "marked_failed";
 }
 
 /**
@@ -233,6 +345,10 @@ export function renderExecutionReport(r: ExecutionResult): string {
         (t.resultSummary !== "" ? `\n      结果:${t.resultSummary}` : ""),
     );
   }
+  if (r.turn.timeout !== undefined) lines.push(...renderTimeoutScene(r.turn.timeout));
+  if (r.timeoutDisposition !== undefined) {
+    lines.push(`超时处置: ${TIMEOUT_DISPOSITION_LABEL[r.timeoutDisposition]}`);
+  }
   if (r.turn.timedOut) lines.push("⚠️ 回合超时收尾 —— 结局判定可能不准");
   if (r.turn.text.trim() !== "") {
     lines.push("", "它最后说:", r.turn.text.trim());
@@ -245,4 +361,11 @@ const OUTCOME_LABEL: Readonly<Record<ExecutionOutcome, string>> = {
   unconverged: "未收敛(工作项仍在进行中 —— 不替它判成功)",
   blocked: "受阻(已登记阻塞)",
   refused: "拒绝执行(前置条件不满足)",
+  timed_out: "墙钟超时中断(平台打断并记为 failed —— 需要人介入,不再自动重跑)",
+};
+
+const TIMEOUT_DISPOSITION_LABEL: Readonly<Record<TimeoutDisposition, string>> = {
+  marked_failed: "记为 failed(终态 · 写出 work_failed 事件 · 不会自动重跑)",
+  left_terminal: "它自己在超时前已到达终态 —— 不覆盖",
+  left_blocked: "它自己登记了阻塞 —— 不覆盖",
 };

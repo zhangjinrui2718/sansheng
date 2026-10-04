@@ -11,14 +11,14 @@ import {
 } from "../storage/repo/projects.js";
 import {
   insertWork, getWork, listWorks, updateWorkStatus, assignWork,
-  addDep, listDeps, depState, isWorkStatus,
-  WORK_STATUSES, type WorkStatus,
+  setWorkDeps, checkWorkTransition, listDeps, listDependents, depState, isWorkStatus,
+  WORK_STATUSES, type WorkStatus, type WorkStatusChange,
 } from "../storage/repo/works.js";
 import { getAgent } from "../storage/repo/agents.js";
 import { ensureProjectOrg } from "../runtime/org.js";
 import { resolveAssignee } from "./resolve.js";
 import {
-  fail, ok, requireProject, requireString, readString, readStringArray, readNumber,
+  fail, ok, requireProject, requireString, readString, readNumber,
   type PlatformTool, type ToolRunContext, type ToolResult,
 } from "./types.js";
 
@@ -210,6 +210,105 @@ const projectClose: PlatformTool = {
 // ── work_* ──────────────────────────────────────────────────────
 
 /**
+ * 依赖入参的**严格**读法(刻意不用 `readStringArray`)。
+ *
+ * 两个坑:
+ *   1. `readStringArray` 会把非字符串元素**静默过滤掉** —— 模型传
+ *      `dependsOn: [123]` 会得到 `[]`,看起来像「依赖清空了」。
+ *   2. `dependsOn: "wk_1"`(忘了包成数组)会退化成 `undefined` = 「**没提供**」,
+ *      于是「改依赖」的调用静默变成「只改状态」—— 模型以为改好了,库里没动。
+ *
+ * 所以这里必须区分三件事:**没提供**(`undefined`)/**提供了但不合法**(结构化拒绝)
+ * / **合法**(原样交给 `setWorkDeps`,由它去重)。
+ */
+type DepsArg =
+  | { readonly ok: true; readonly value: readonly string[] | undefined }
+  | { readonly ok: false; readonly result: ToolResult };
+
+function readDepsArg(args: Readonly<Record<string, unknown>>): DepsArg {
+  const raw = args["dependsOn"];
+  if (raw === undefined) return { ok: true, value: undefined };
+  if (!Array.isArray(raw)) {
+    return {
+      ok: false,
+      result: fail(
+        "invalid_args",
+        `dependsOn 必须是字符串数组(收到 ${JSON.stringify(raw)})—— ` +
+          `给空数组 [] 表示清空依赖;不要给单个字符串`,
+      ),
+    };
+  }
+  const out: string[] = [];
+  for (const x of raw) {
+    if (typeof x !== "string" || x.length === 0) {
+      return {
+        ok: false,
+        result: fail(
+          "invalid_args",
+          `dependsOn 的每个元素都必须是非空字符串(收到 ${JSON.stringify(x)})`,
+        ),
+      };
+    }
+    out.push(x);
+  }
+  return { ok: true, value: out };
+}
+
+/**
+ * 把写口 `updateWorkStatus` 的结构化结果翻译成给模型看的几行。
+ *
+ * `work_update` 与 `report` **共用**这一段 —— 理由与写口共用一个理由:
+ * 两处各写一遍,迟早一处漏掉「迁移被拒」或「事件没落库」,而漏掉的表现是静默的。
+ */
+function statusNote(r: Extract<WorkStatusChange, { ok: true }>): string[] {
+  const lines: string[] = [];
+  if (!r.changed) lines.push(`(已经是「${r.to}」,没有变化)`);
+  for (const d of r.deferred) {
+    lines.push(
+      `⚠️ 本应记入「待交代队列」的事件(${d.kind})**没有落库**:${d.detail}` +
+        ` —— 代码侧已经写出来了,要等那笔迁移放宽 CHECK`,
+    );
+  }
+  return lines;
+}
+
+/** 写口拒绝时的翻译:非法迁移回灌合法下一跳(8-F),其余按原因给码。 */
+function statusChangeFailure(r: Extract<WorkStatusChange, { ok: false }>): ToolResult {
+  if (r.reason === "not_found") return fail("not_found", r.message);
+  return fail("conflict", r.message, r.allowed);
+}
+
+/**
+ * 「取消一个有后继依赖的工作项」时的**非阻塞警告**(任务 1.2 的落点)。
+ *
+ * **是警告不是拒绝** —— 拒绝会挡住合法的「这块不要了」(§2.8 的语义就是范围缩掉,
+ * 不是失败)。但下游必须被告知:它们的 `depState.cancelled` 会多一条(取消不阻塞
+ * 开工,但要可见),而且 —— 如果它们等的其实是**新的那一份** —— 现在可以用
+ * `work_update` 的 `dependsOn` 把边指过去。
+ *
+ * 这最后一句正是真机事故里项目经理当时做不到的事:依赖边改不了,于是只能
+ * 「取消旧的 + 新建一份」,而重建时把 `dependsOn` 写成了刚取消的那个旧 id,
+ * 留下一条指向 `cancelled` 的悬空边(用户数据已复核)。
+ */
+function cancelWarning(db: ToolRunContext["db"], workId: string): string[] {
+  const dependents = listDependents(db, workId);
+  if (dependents.length === 0) return [];
+  const lines = [
+    "",
+    `⚠️ **非阻塞警告**:有 ${dependents.length} 条工作项依赖着它 —— ` +
+      `取消**不会**自动改它们(取消照样生效,这里只是告诉你):`,
+    ...dependents.map((id) => {
+      const w = getWork(db, id);
+      return w === null ? `- ${id}(已不存在?)` : `- [${w.status}] ${w.id} · ${w.title}`;
+    }),
+    "它们的前置从此是「已取消」:不阻塞开工,但下游会看到「前置被取消、输入少了一块」。",
+    "**若它们等的其实是另一份工作项**,用 `work_update` 的 `dependsOn` 把边指过去 —— " +
+      "依赖边现在可以改了,不需要「取消旧的 + 新建一份」。",
+  ];
+  return lines;
+}
+
+/**
  * 负责人只能是 **worker**(执行角色)。
  *
  * ── 为什么在调用期拒收,而不是让它建出来 ─────────────────────────
@@ -265,6 +364,11 @@ const workCreate: PlatformTool = {
     const roleError = requireExecutorRole(args);
     if (roleError !== null) return roleError;
 
+    // 依赖参数**先读后建**:参数形状不对时不该先造出一条没有依赖的工作项。
+    const depsArg = readDepsArg(args);
+    if (!depsArg.ok) return depsArg.result;
+    const deps = depsArg.value ?? [];
+
     const resolved = resolveAssignee(
       ctx.db, pid, args["assigneeRole"], args["assigneeSpec"],
     );
@@ -289,29 +393,18 @@ const workCreate: PlatformTool = {
       return fail("internal", err instanceof Error ? err.message : String(err));
     }
 
-    // 依赖逐条加,**环检测在 repo 层**。成环时把已加的回滚掉,不留半成品。
-    const deps = readStringArray(args, "dependsOn") ?? [];
-    const added: string[] = [];
-    for (const d of deps) {
-      const r = addDep(ctx.db, id, d);
-      if (!r.ok) {
-        for (const a of added) {
-          ctx.db.prepare(`DELETE FROM work_deps WHERE work_id = ? AND depends_on_work_id = ?`).run(id, a);
-        }
-        const why =
-          r.reason === "cycle" ? `依赖 ${d} 会成环`
-          : r.reason === "self" ? `不能依赖自己`
-          : r.reason === "duplicate" ? `依赖 ${d} 重复`
-          : `找不到前置工作项 ${d}`;
-        ctx.db.prepare(`DELETE FROM works WHERE id = ?`).run(id);
-        return fail("conflict", `创建工作项失败:${why}(已回滚)`);
-      }
-      added.push(d);
+    // 依赖**与 `work_update` 共用同一段代码**(`setWorkDeps`)—— 环检测、跨项目、
+    // 不存在三种拒绝在两处必须是同一套判据,否则创建时拦得住的环,改依赖时放过去。
+    // `setWorkDeps` 失败时**一个字节都没写**(先判后写),所以这里只需要删掉工作项本身。
+    const depResult = setWorkDeps(ctx.db, id, deps);
+    if (!depResult.ok) {
+      ctx.db.prepare(`DELETE FROM works WHERE id = ?`).run(id);
+      return fail("conflict", `创建工作项失败:${depResult.message}(已回滚)`);
     }
 
     return ok(
       `已创建 ${id}「${title.value}」→ 负责 ${resolved.agentId}` +
-        (added.length > 0 ? `\n前置:${added.join(", ")}` : ""),
+        (depResult.added.length > 0 ? `\n前置:${depResult.added.join(", ")}` : ""),
     );
   },
 };
@@ -320,22 +413,78 @@ const workUpdate: PlatformTool = {
   name: "work_update",
   capability: "work.update",
   description:
-    "改工作项状态。open → in_progress → (blocked) → done|failed|cancelled。**状态变更是 report 的前置** —— 只口头汇报不落库,进度就只存在于对话里。",
+    "改工作项的**状态**或**依赖边**(至少给一个)。" +
+    `状态闭集:${WORK_STATUSES.join(" | ")},而且**迁移必须合法**:` +
+    "open / in_progress / blocked 三态互通、也都能直接到任一终态;" +
+    "done 只能退回 in_progress(审查后打回重做);failed 只能退回 in_progress(重试);" +
+    "cancelled 是**终态,没有出边** —— 范围重新需要时新建一条,不要复活旧的。" +
+    "`dependsOn` 是**整体替换**(给 [] = 清空依赖),环检测与 work_create 同一套;" +
+    "**改依赖不需要「取消旧的 + 新建一份」**。" +
+    "**状态变更是 report 的前置** —— 只口头汇报不落库,进度就只存在于对话里。",
   parameters: Type.Object({
     workId: Type.String(),
-    status: Type.String({ description: WORK_STATUSES.join(" | ") }),
+    status: Type.Optional(Type.String({ description: WORK_STATUSES.join(" | ") })),
+    dependsOn: Type.Optional(
+      Type.Array(Type.String(), {
+        description: "整体替换这条工作项的前置工作项 id 集合(给 [] 清空依赖)",
+      }),
+    ),
   }),
   run(args, ctx): ToolResult {
     const workId = requireString(args, "workId");
     if (!workId.ok) return workId.result;
     const found = loadWorkOrFail(ctx, workId.value);
     if (isToolResult(found)) return found;
-    const status = readString(args, "status");
-    if (status === undefined || !isWorkStatus(status)) {
-      return fail("invalid_args", `未知状态「${String(status)}」`, WORK_STATUSES);
+
+    const statusArg = readString(args, "status");
+    if (statusArg !== undefined && !isWorkStatus(statusArg)) {
+      return fail("invalid_args", `未知状态「${statusArg}」`, WORK_STATUSES);
     }
-    updateWorkStatus(ctx.db, workId.value, status as WorkStatus, ctx.now());
-    return ok(`工作项 ${workId.value} → ${status}`);
+    const depsArg = readDepsArg(args);
+    if (!depsArg.ok) return depsArg.result;
+    if (statusArg === undefined && depsArg.value === undefined) {
+      return fail(
+        "invalid_args",
+        "work_update 至少要给 status 或 dependsOn 之一 —— 两个都不给等于什么都不改",
+      );
+    }
+
+    const before = getWork(ctx.db, workId.value)!;
+    const status = statusArg as WorkStatus | undefined;
+
+    // ── 顺序:先判(纯读)→ 再写依赖 → 最后写状态 ──
+    // 先判一次迁移合法性(用写口那同一个 `checkWorkTransition`,规则不复制),
+    // 于是「状态非法」时**一个字节都不写** —— 否则会留下「依赖改了、状态没改」
+    // 这种事后看不出来的半成品。
+    if (status !== undefined) {
+      const check = checkWorkTransition(workId.value, before.status, status);
+      if (!check.ok) return fail("conflict", check.message, check.allowed);
+    }
+
+    const lines: string[] = [];
+    if (depsArg.value !== undefined) {
+      const r = setWorkDeps(ctx.db, workId.value, depsArg.value);
+      if (!r.ok) {
+        return fail(
+          "conflict",
+          `依赖没有改动(一个字节都没写):${r.message}`,
+          listDeps(ctx.db, workId.value),
+        );
+      }
+      lines.push(
+        `依赖已整体替换:${r.deps.length > 0 ? r.deps.join(", ") : "(无前置)"}` +
+          `(新增 ${r.added.length} · 移除 ${r.removed.length})`,
+      );
+    }
+
+    if (status !== undefined) {
+      const r = updateWorkStatus(ctx.db, workId.value, status, ctx.now());
+      if (!r.ok) return statusChangeFailure(r);
+      lines.unshift(`工作项 ${workId.value} → ${status}`);
+      lines.push(...statusNote(r));
+      if (status === "cancelled") lines.push(...cancelWarning(ctx.db, workId.value));
+    }
+    return ok(lines.join("\n"));
   },
 };
 
@@ -467,11 +616,17 @@ const report: PlatformTool = {
     if (!summary.ok) return summary.result;
 
     const status = readString(args, "status");
+    const lines = [`已记录 ${workId.value} 的进度报告:${summary.value}`];
     if (status !== undefined) {
       if (!isWorkStatus(status)) return fail("invalid_args", `未知状态「${status}」`, WORK_STATUSES);
-      updateWorkStatus(ctx.db, workId.value, status as WorkStatus, ctx.now());
+      // 走**同一个写口** —— 于是 report 与 work_update 受同一张迁移表约束
+      // (设计 §2.7:状态机此前只是「一个闭集 + 一个写口」,两个工具都能绕过限制)。
+      const r = updateWorkStatus(ctx.db, workId.value, status, ctx.now());
+      if (!r.ok) return statusChangeFailure(r);
+      lines.push(`工作项 ${workId.value} → ${status}`, ...statusNote(r));
+      if (status === "cancelled") lines.push(...cancelWarning(ctx.db, workId.value));
     }
-    return ok(`已记录 ${workId.value} 的进度报告:${summary.value}`);
+    return ok(lines.join("\n"));
   },
 };
 

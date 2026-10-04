@@ -1,0 +1,67 @@
+-- 014 · 工件 → 工作项的产出边(provenance)
+--
+-- ── 它补的是什么 ────────────────────────────────────────────────
+--
+-- 「这条工作项产出了什么」在本次迁移之前**在模型里答不出来**:`artifacts`
+-- 没有指向 `works` 的列(`repo/artifacts.ts` 里 grep 不到 work_id)。落到运行时
+-- 只剩一条**项目级集合差**:
+--
+--   回合前  artifactsBefore = set(listArtifacts(db, projectId))   ← 整个项目
+--   回合后  取新出现的 id                                          ← 就是「产出」
+--
+-- 落点 `runtime/execution.ts:143` 与 `:161`。**它连 `author_agent_id` 都不读** ——
+-- 所以同一项目里两个回合交叠时,两边都会把对方的工件认成自己的产出。今天宿主
+-- 有 per-project 忙闩(`host/serve.ts` 的 `hub.isBusy`)兜着,触发面只有
+-- 「常驻宿主 + platform-run CLI 同时跑一个项目」;**判据本身是错的,只是暂时
+-- 没有触发面。** 质检那一侧同样断:`review_work` 待办的 refs 是 work id
+-- (`runtime/dispatcher.ts:292`),而从 work id 查产出只能靠这条边。
+--
+-- ── 为什么是「工件加一列」而不是「artifact_links 加一个 rel 取值」──────
+--
+-- 方案 B(在 `artifact_links.rel` 的 CHECK 闭集里加 `produces`)结构上不成立,
+-- 三条实测证据(设计 1 §2.6):
+--   1. `artifact_links` **两端都是工件**,而这条边的一端是工作项 → 写入撞
+--      `FOREIGN KEY constraint failed`;
+--   2. `rel` 的 CHECK 闭集不放 produces → 撞 CHECK;
+--   3. 想放宽这个闭集只能重建表,而「加一条 CHECK 来放宽」会**无错应用却一点
+--      没放宽**(CHECK 之间是 AND 关系)—— 失败出现在很远的下游。
+--
+-- ── 本迁移只做加法 ──────────────────────────────────────────────
+--
+-- 一个可空列 + 一条部分索引。**没有 CREATE TABLE**(于是没有
+-- `CREATE TABLE IF NOT EXISTS` 撞名时静默无操作的面,AGENTS.md 静默失败 #1),
+-- **一行 DROP 都没有**(批次 18 的事故是 `DROP TABLE` + `ON DELETE CASCADE`
+-- 静默删光全部会话消息,012 的注释记着这条路)。守卫见
+-- `tests/platform/migrations.test.ts` 与 `tests/platform/storage.test.ts`。
+
+-- ── 产出边 ──────────────────────────────────────────────────────
+--
+-- 语义:**N:1**(N 个工件由 1 条工作项产出),**可空**。
+-- NULL = 这条工件不是任何工作项的执行产出:立项书 / 会议纪要 / 变更记录 /
+-- 甲方问答 / 质检意见。**不传 workId 是合法状态,不是缺参数** —— 所以这里
+-- 可空、且**不给 DEFAULT**(`ADD COLUMN` 带 `REFERENCES` 时默认值必须是常量;
+-- 而用一个占位值把「没有产出工作项」这个真事实掩盖掉更糟)。
+--
+-- **不表达「关于」**:工件「关于哪条工作项」是 M:N,是另一件事(设计 1 §12 #7,
+-- 现在不建 —— 没有读方的边表就是下一个 `fragments_vec`)。这条边只表达
+-- 「谁产出了它」。
+--
+-- **不表达「当前工作项」**:谁维护见 `tools/blackboard.ts` 的 `board_write` ——
+-- 每次调用由模型**显式指名**,不从会话取默认值。一条会话会连跑多个工作项
+-- (`runtime/execution.ts:118` 的注释),而 `ToolRunContext` 是建会话时构造
+-- 一次的(`runtime/assembly.ts:137`),放了默认值它会**过期**。
+--
+-- ⚠️ **`ON DELETE SET NULL`,不是 CASCADE。** 删掉一条工作项**不该删掉它的
+-- 产出**:工件是审计面(设计 2 §10.2 的判据:工件不衰减、必须比产生它的东西
+-- 活得久)。用 CASCADE 就是 012 那条静默删数据的路,只不过删的是工件。
+ALTER TABLE artifacts ADD COLUMN work_id TEXT REFERENCES works(id) ON DELETE SET NULL;
+
+-- ⚠️ **不能加 UNIQUE**(SQLite 实测拒绝 `Cannot add a UNIQUE column`),
+-- 而且「N 个工件由同一条工作项产出」本来就该允许。
+--
+-- 部分索引 `WHERE work_id IS NOT NULL`:现有多数工件(client_question /
+-- meeting_note / change_record)的 work_id 都是 NULL,不该进索引。
+-- 两个读法都走它:「这条工作项产出了什么」(`repo/artifacts.ts` 的 workId 过滤)
+-- 与质检那条待办的产出核对。
+CREATE INDEX IF NOT EXISTS idx_artifacts_work
+  ON artifacts(work_id) WHERE work_id IS NOT NULL;
