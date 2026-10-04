@@ -687,6 +687,14 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
           bridge(ev, projectId, messageId, agentId, hub, textBuf, thinkBuf);
         },
       });
+      // ⚠️ **这里刻意不读 `execution.producedArtifacts`**(B3 的裁决:它是**报告**,
+      // 不是**触发**。完整的证据链在那个字段的注释里,判据的机器形式在
+      // `tests/platform/b3-produced-artifacts.test.ts`)。
+      //
+      // 一句话:产出边只有 `board_write` 会写,而它本就在门铃清单里 —— 本回合的门铃
+      // **已经响过**;而 `drainProject` 每一回合都重新查库(`collectTodos` 的输入里
+      // 根本没有工件),所以拿它当布尔再敲一次铃查到的是同一份待办。要「被工件推动」,
+      // 加的是 `RULES` 的纯查询判据,不是这里的一个布尔。
       const text = execution.turn.text.trim() !== ""
         ? execution.turn.text
         : textBuf.join("");

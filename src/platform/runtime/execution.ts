@@ -99,6 +99,35 @@ export interface ExecutionResult {
   /**
    * 这一回合**沿 014 的产出边**采到的产出(见 `runWorkItem` 里那三条判据)。
    * 不是「项目里所有新工件」。
+   *
+   * ── ⚠️ 它是**报告**,不是**触发**(B3 的裁决,2026-10-04)──────────
+   *
+   * 设计 1 §2.12 的 B3 要「宿主读它」,理由是「它被算出来了但没有读者」。
+   * **那个前提不成立**,实测:
+   *
+   *   1. **读者在生产路径上**:`renderExecutionReport`(`:397`)把产出清单打进
+   *      报告,而它唯一的调用点是 `src/platform/cli/run.ts:169` —— `platform-run`
+   *      的命令描述原文就是「打印产出工件与工具调用现场」。B3 的 grep 找的是
+   *      **标识符** `producedArtifacts`,于是漏掉了**穿过另一个函数名**的那个读者
+   *      (与 §9.4 那次「grep 不到 ≠ 不存在」是同一个形状)。
+   *   2. 「宿主把它当**布尔**用」(B2 的后半句 / B3 的全部)可证明是**空转**:
+   *      ① `artifacts.work_id`(014 的产出边)今天**只有 `board_write` 会写**
+   *      (`workId` 参数只在它的 schema 里,`tools/blackboard.ts`),而
+   *      `blackboard.write` 在 `NUDGE_CAPABILITIES` 里 ⇒ 每个产出工件在被这里
+   *      采到之前,门铃**已经在同一个回合里响过一次**了(`tools/registry.ts` 的
+   *      `ringNudge`)—— 它给不出门铃给不出的触发信息。反过来说门铃**更宽**:
+   *      不挂边的 `board_write` 也响铃,而这个字段采不到它。
+   *      ② `collectTodos` 的输入里**根本没有工件**(纯度纪律;机器形式见
+   *      `tests/platform/dispatcher-rules.test.ts` 的「看板逐字相同」),而
+   *      `drainProject` **每一回合都重新查库** —— 宿主再敲一次铃,查出来的还是
+   *      同一份待办。
+   *
+   * ⇒ 宿主侧**刻意不读它**(`host/serve.ts` 的 `runWorkInSession` 有对应的现场):
+   * 「接上但依然没人读」不是接线,是第三种失败;而删它要删掉一个生产读者
+   * (`platform-run` 的产出清单)与 7 条语义断言。哪天要让流水线真「被工件推动」
+   * (§2.11.4 的 `integrate` / `handover`),入口是 `RULES` 的**纯查询判据** + 门铃,
+   * 不是这个报告字段。三条支柱的机器形式见
+   * `tests/platform/b3-produced-artifacts.test.ts`。
    */
   readonly producedArtifacts: readonly ArtifactRow[];
   /** 这一回合新登记的阻塞 */

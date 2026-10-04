@@ -71,7 +71,10 @@ export type ArtifactKind =
   | "meeting_note"
   | "review_finding"
   | "change_record"
-  | "client_question";
+  | "client_question"
+  // 交付物:项目经理在根工作项上写下的整合产物(设计 1 §2.11.5,C2 新增)。
+  // 顺序与 `identity/role.ts` 的 `ARTIFACT_KINDS` / `migrations/016` 的 CHECK 末尾一致。
+  | "deliverable";
 
 export type ArtifactStatus = "open" | "accepted" | "rejected" | "superseded";
 

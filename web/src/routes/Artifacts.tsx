@@ -13,7 +13,9 @@
  * 旧 KIND_LABEL 认的是 intent / todo / critique / reflection 这些**计划时代**的
  * kind(计划已删),新的 kind 闭集见契约 ArtifactKind(decision / note / evidence /
  * hypothesis / project_brief / work_brief / meeting_note / review_finding /
- * change_record / client_question),标签统一在 `lib/vocab.ts`。
+ * change_record / client_question / deliverable),标签统一在 `lib/vocab.ts`。
+ * ⚠️ 这份括号里的清单是**注释**,不是守卫 —— 真正的守卫是 `vocab.ts` 的
+ * `Record<ArtifactKind, …>`(漏一个 `tsconfig.web.json` 就红)。
  *
  * 呈现:先在页首**选定一个项目**(契约没有跨项目的 `/api/artifacts` ——
  * 「工件总是属于某个项目,提供平级列表等于邀请调用方绕过项目这个组织维度」),
@@ -61,6 +63,8 @@ const KIND_ORDER: ArtifactKind[] = [
   "decision",
   "project_brief",
   "work_brief",
+  // 交付物是整合的产物,与 decision / *_brief 同属「结论类」,排在过程类之前。
+  "deliverable",
   "evidence",
   "review_finding",
   "change_record",

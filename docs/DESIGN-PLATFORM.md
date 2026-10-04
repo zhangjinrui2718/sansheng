@@ -1193,6 +1193,7 @@ export type ArtifactKind =
   | "review_finding"    // 质检意见
   | "change_record"     // 变更记录(accepted 后)
   | "client_question"   // 向甲方提出的问题
+  | "deliverable"       // 交付物(项目经理在根工作项上整合产出;§2.11.5)
 ```
 
 ### 6.2 工件的两种来源
@@ -1200,7 +1201,7 @@ export type ArtifactKind =
 | 来源 | 工件 | 谁能产生 |
 |---|---|---|
 | **协议工具自动创建** | `client_question`(`ask_client` 副产物) · `decision`(`answer` 副产物) · `meeting_note`(`meeting_conclude` 副产物) · `change_record`(`change_review` 判定 accepted 副产物) | 不经 `board_write`,由工具在建记录时一并落库 |
-| **`board_write` 显式创建** | `project_brief` / `work_brief` / `evidence` / `hypothesis` / `review_finding` / `note` | 受该角色 `writeKinds` 白名单约束 |
+| **`board_write` 显式创建** | `project_brief` / `work_brief` / `evidence` / `hypothesis` / `review_finding` / `note` / `deliverable` | 受该角色 `writeKinds` 白名单约束 |
 
 **为什么分开**:凡「工具本身的语义就是一条通信」的场景(提问、应答、开会收尾、变更裁定),记录必须与动作**原子地**落库 —— 这正是 7-L 的纪律「用户回答与沟通员自答共用同一条落库路径,否则执行者会拿到一份没有 decision 工件的指令」。让模型自己去 `board_write` 一条 decision 就多了一个失败点。
 

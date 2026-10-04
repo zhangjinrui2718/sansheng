@@ -47,6 +47,16 @@ export const SPECIALIZATIONS = [
  * 产物**,不由模型手写,因此**不在任何角色的 writeKinds 里**(设计 1 §6.2)。
  * `decision` 是唯一例外 —— 问答流程会原子创建它,业务经理与项目经理也可以
  * 独立手写一条不来自问答的决策。
+ *
+ * `deliverable`(C2 新增,设计 1 §2.11.5)是**项目经理**在**根工作项**上写下的
+ * 整合产物 —— 它表达「这份交付已经整合完了」这个**结构化事实**,是 `integrate`
+ * 规则的终止判据(不是项目的终态,也不是 worker 的产出;设计 1 §2.11.5 明写
+ * 「交付物」有四个所指,不许单独写这三个字)。
+ *
+ * ⚠️ **本闭集与 `migrations/016` 的 `artifacts.kind` CHECK 必须恰好相等。**
+ * schema 侧先开、代码侧后跟的那段窗口里,读面是**关**的:`repo/artifacts.ts` 的
+ * `rowToArtifact` 用下面这个 `isArtifactKind` 对未定义 kind **硬抛** —— 一条
+ * schema 认、代码不认的行会让整个项目的 `getArtifact` / `listArtifacts` 全挂。
  */
 export type ArtifactKind =
   | "decision"
@@ -58,7 +68,8 @@ export type ArtifactKind =
   | "meeting_note"
   | "review_finding"
   | "change_record"
-  | "client_question";
+  | "client_question"
+  | "deliverable";
 
 export const ARTIFACT_KINDS = [
   "decision",
@@ -71,6 +82,7 @@ export const ARTIFACT_KINDS = [
   "review_finding",
   "change_record",
   "client_question",
+  "deliverable",
 ] as const satisfies readonly ArtifactKind[];
 
 /**
@@ -181,7 +193,9 @@ export const ROLE_SPECS: Readonly<Record<ProjectRole, RoleSpec>> = {
       "blocker.open", "blocker.update", "blocker.read",
       "memory.read", "work.report",
     ],
-    writeKinds: ["work_brief", "decision", "note"],
+    // `deliverable` 只给项目经理:它是**整合的产物**(把子项产出收成一份交付),
+    // 别的角色不加 —— worker 交付的是 `evidence`(执行产出),质检写 `review_finding`。
+    writeKinds: ["work_brief", "decision", "note", "deliverable"],
     promptUnits: [
       "project_manager.core", "project_manager.protocol",
       "collaboration.ask", "collaboration.convene",

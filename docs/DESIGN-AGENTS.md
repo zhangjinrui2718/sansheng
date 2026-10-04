@@ -159,7 +159,7 @@
 
 > 上表**全部写全名**,不用「`collab.ask` / `escalate` / `answer`」这种继承式简写 —— 这是实现者要照抄的规范列表,简写会让 `collab.meeting.*` 那几条看起来像独立命名空间。
 
-**writeKinds**:`["work_brief", "decision", "note"]`
+**writeKinds**:`["work_brief", "decision", "note", "deliverable"]`
 
 ### 3.4 出厂工具集合
 
@@ -412,7 +412,7 @@
 | 角色 | 可写工件 kind |
 |---|---|
 | 业务经理 | `project_brief` · `decision` · `note` |
-| 项目经理 | `work_brief` · `decision` · `note` |
+| 项目经理 | `work_brief` · `decision` · `note` · `deliverable` |
 | Worker | `evidence` · `hypothesis` · `work_brief` · `note` |
 | 质检审查员 | `review_finding` |
 

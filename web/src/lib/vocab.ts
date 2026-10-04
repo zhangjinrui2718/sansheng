@@ -86,6 +86,9 @@ export const ARTIFACT_KIND_LABEL: Record<ArtifactKind, string> = {
   review_finding: "评审发现",
   change_record: "变更记录",
   client_question: "甲方提问",
+  // 「交付物」有四个所指(设计 1 §2.11.5):这里专指 deliverable **工件** ——
+  // 不是 worker 产出、不是根工作项、也不是 projects.status='done'(那个读作「已交付」)。
+  deliverable: "交付物",
 };
 
 export const ARTIFACT_KIND_TONE: Record<ArtifactKind, Tone> = {
@@ -99,6 +102,7 @@ export const ARTIFACT_KIND_TONE: Record<ArtifactKind, Tone> = {
   review_finding: "ochre",
   change_record: "ochre",
   client_question: "amber",
+  deliverable: "bamboo",
 };
 
 export const ARTIFACT_STATUS_LABEL: Record<ArtifactStatus, string> = {

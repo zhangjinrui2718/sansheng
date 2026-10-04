@@ -486,3 +486,39 @@ describe("调用期 · 接待模式下的参数级门", () => {
     }
   });
 });
+
+// ── C2:新 kind `deliverable` 的写面(只给项目经理)──────────────
+
+/**
+ * `deliverable` 是**整合的产物**(设计 1 §2.11.5):项目经理在根工作项上写下它,
+ * 表达「这条交付已经整合完了」。别的角色不该有它 —— worker 交付的是 `evidence`
+ * (执行产出),质检写 `review_finding`。DAG 的下一环(C3 的 `handover` 规则)
+ * 就按「存在 kind='deliverable' 的工件」叫醒业务经理,所以**这一条是谁能写**
+ * 是那条规则的输入前提。
+ */
+describe("调用期 · deliverable 的 writeKind 门(C2)", () => {
+  it("项目经理写 deliverable → 放行", () => {
+    const v = authorizeCall("blackboard.write", { kind: "deliverable" }, { agent: PM, project: ACTIVE });
+    expect(v.ok, "项目经理是唯一被设计指定写交付物的角色").toBe(true);
+  });
+
+  it("其余三个角色写 deliverable → 都拒绝,且回灌的是它们各自的合法 kind", () => {
+    for (const a of [BM, WK, QA]) {
+      const v = authorizeCall("blackboard.write", { kind: "deliverable" }, { agent: a, project: ACTIVE });
+      expect(v.ok, `${a.role} 不该能写 deliverable`).toBe(false);
+      if (v.ok) continue;
+      expect(v.denial.code, `${a.role} 的拒绝理由该是 writeKind 而不是别的门`).toBe("writeKind");
+      expect(
+        v.denial.alternatives,
+        `${a.role} 的合法 kind 列表里不该出现 deliverable`,
+      ).not.toContain("deliverable");
+    }
+  });
+
+  it("项目经理的合法 kind 列表回灌里含 deliverable(模型不用猜)", () => {
+    // 用一个项目经理本来就不该写的 kind 触发回灌,顺便验证那份清单
+    const v = authorizeCall("blackboard.write", { kind: "made_up" }, { agent: PM, project: ACTIVE });
+    expect(v.ok).toBe(false);
+    if (!v.ok) expect(v.denial.alternatives).toContain("deliverable");
+  });
+});

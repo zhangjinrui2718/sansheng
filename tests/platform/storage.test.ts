@@ -864,3 +864,73 @@ describe("016 · deliverable 工件(真启动路径 + 仓储层)", () => {
     expect(sql.sql).toMatch(/WHERE\s+work_id\s+IS\s+NOT\s+NULL/i);
   });
 });
+
+/**
+ * C2 · `deliverable` 进了**代码侧**闭集 —— C1 留下的「写面开、读面关」豁口关掉了
+ *
+ * C1 的 016 把 schema 的 CHECK 放宽到 11 个取值,而代码侧 `ARTIFACT_KINDS` 还是
+ * 10 个;`repo/artifacts.ts` 的 `rowToArtifact` 用 `isArtifactKind` 对未定义 kind
+ * **硬抛**,所以那个窗口里**一条** `deliverable` 行会让整个项目的 `getArtifact` /
+ * `listArtifacts` 全挂(016 那个 describe 的头注释写明了这件事)。
+ *
+ * 这一组是豁口关闭之后的**读面**判据 —— 016 的测试当时只能用裸 SQL 读回,因为
+ * `insertArtifact(..., { kind: "deliverable" })` 连**编译**都过不去。
+ *
+ * 正/负样本自检(AGENTS.md §三类静默失败):① 一条真 `deliverable` 行必须读得回;
+ * ② 一条**schema 认、代码不认**的 kind 必须仍让读面响亮抛错 —— 用
+ * `PRAGMA ignore_check_constraints` 把那种行造出来(这正是 016↔C2 窗口的形态),
+ * 证明那条守卫没有因为「两个闭集恰好相等」而退化成永真。
+ */
+describe("C2 · deliverable 的读写面(设计 1 §2.11.5)", () => {
+  const A_COLS =
+    "id,project_id,conversation_id,kind,status,author_agent_id,title,body,metadata_json,created_at,updated_at,work_id";
+
+  it("仓储写入口收得下 deliverable,读入口读得回(豁口关了)", () => {
+    const pid = mkProject("active");
+    const pm = mkAgent("project_manager");
+    const rootWork = mkWork(pid, mkAgent("worker", "engineering"));
+    const id = `a_c2_${++seq}`;
+
+    // 这一行在 C2 之前**编译不过**(ArtifactKind 联合里没有 deliverable)——
+    // 类型层是第一道守卫,这条用例的存在本身就是它活着的证据。
+    insertArtifact(db, {
+      id, projectId: pid, conversationId: null, kind: "deliverable", status: "open",
+      authorAgentId: pm, title: "交付物", body: "整合后的交付", metadataJson: null,
+      createdAt: T0 + seq, updatedAt: T0 + seq, workId: rootWork,
+    });
+
+    const got = getArtifact(db, id);
+    expect(got, "deliverable 行读不回来 —— rowToArtifact 的 isArtifactKind 不认识它").not.toBeNull();
+    expect(got!.kind).toBe("deliverable");
+    expect(got!.authorAgentId, "交付物由项目经理写(不是 worker 的产出)").toBe(pm);
+    expect(got!.workId, "014 的产出边要跟着一起读回来").toBe(rootWork);
+    expect(listArtifacts(db, pid).map((a) => a.id), "整项目列表也必须读得动(不是只有单条)").toContain(id);
+  });
+
+  it("**负样本自检**:schema 认、代码不认的 kind 仍让读面响亮抛错(守卫没变成永真)", () => {
+    const pid = mkProject("active");
+    const pm = mkAgent("project_manager");
+    const id = `a_c2_probe_${++seq}`;
+    const insert = () =>
+      db.prepare(`INSERT INTO artifacts (${A_COLS}) VALUES (?,?,NULL,?,?,?,?,?,NULL,1,1,NULL)`)
+        .run(id, pid, "nonsense_kind", "open", pm, "标题", "正文");
+
+    // ① 正样本方向:不关 CHECK 就造不出这种行 —— 说明下面的行**只可能**来自
+    //    「schema 先开、代码后跟」那个窗口,而不是测试自己写错了 SQL。
+    expect(insert, "CHECK 没拦住 nonsense_kind —— 这条探针什么都没证明").toThrow(/CHECK/i);
+
+    // ② 关掉 CHECK 才塞得进去(这正是 016↔C2 窗口的形态)
+    db.pragma("ignore_check_constraints = ON");
+    insert();
+    db.pragma("ignore_check_constraints = OFF");
+    // 关回去之后 CHECK 必须仍然有牙(否则「关掉」那一步才是真凶,不是窗口)
+    expect(db.prepare(`SELECT COUNT(*) n FROM artifacts WHERE id = ?`).get(id)).toEqual({ n: 1 });
+    expect(() => db.prepare(
+      `INSERT INTO artifacts (${A_COLS}) VALUES (?,?,NULL,?,?,?,?,?,NULL,1,1,NULL)`,
+    ).run(`${id}_x`, pid, "nonsense_kind", "open", pm, "标题", "正文")).toThrow(/CHECK/i);
+
+    // ③ 读面必须抛 —— 这是「代码侧闭集是读面的唯一守卫」的活证据
+    expect(() => getArtifact(db, id), "未定义 kind 必须响亮抛错,不许静默透出").toThrow(/未定义 kind/);
+    expect(() => listArtifacts(db, pid), "一条坏行会让**整个项目**的列表挂掉 —— 这正是 C1 的硬 DAG 约束").toThrow(/未定义 kind/);
+  });
+});
