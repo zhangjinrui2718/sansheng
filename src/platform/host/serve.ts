@@ -1055,17 +1055,56 @@ export async function runPlatformServe(opts: ServeOptions): Promise<{ close: () 
     },
   ) as unknown as Server;
 
-  attachHub(server, host.hub);
+  const wss = attachHub(server, host.hub);
 
-  const shutdown = () => {
+  /**
+   * 优雅关闭。
+   *
+   * ── 为什么这段曾经关不掉(真机:用户连按 8 次 Ctrl-C 无反应)────────
+   *
+   * 原实现只有三行:`打印 → host.close() → server.close()`。三个问题叠在一起:
+   *
+   * ① **`server.close()` 不关闭已建立的连接** —— 它只停止接受新连接,然后等现有
+   *    连接结束。而浏览器那条 **WebSocket 是长连接**,永远不结束,于是它永远等下去。
+   * ② **没有 `process.exit()`** —— 所以「正在关闭」打完就卡在那儿。
+   * ③ **没有幂等保护** —— 每按一次 Ctrl-C 就重跑一遍,于是同一句话打印 8 次,
+   *    而观感上「它在响应」,实际什么也没推进。
+   *
+   * 现在:主动 terminate WS → 关宿主与 HTTP → **兜底超时自己退** →
+   * 第二次信号**立刻退**(连按 Ctrl-C 就是标准的「别等了」表达)。
+   */
+  let closing = false;
+  const shutdown = (signal: string) => {
+    if (closing) {
+      // 第二次信号 = 「别优雅了」。这条必须存在,否则一旦兜底也失效,
+      // 用户就只剩 kill -9 一条路。
+      log.muted(`再收到一次 ${signal} —— 直接退出`);
+      process.exit(130);
+    }
+    closing = true;
     log.muted("平台服务收到退出信号,正在关闭");
+
+    // ① 主动断开所有 WS。不做这一步,server.close() 的回调永远不会触发。
+    for (const ws of wss.clients) ws.terminate();
+
     host.close();
     server.close();
-  };
-  process.on("SIGTERM", shutdown);
-  process.on("SIGINT", shutdown);
 
-  return { close: shutdown };
+    // ② 兜底:优雅关闭仍可能被别的东西撑着(三方库自己的句柄等)。
+    //    到点自己退 —— 不把「能不能关掉」这件事交回给用户。
+    setTimeout(() => {
+      log.muted("优雅关闭超时(3s),直接退出");
+      process.exit(130);
+    }, 3000).unref();
+
+    // ③ 关干净了也显式退。让「关掉了」与「卡住了」在观感上可区分 ——
+    //    两者都只打印一行 muted 日志的话,用户分不出来。
+    server.on("close", () => process.exit(0));
+  };
+  process.on("SIGTERM", () => shutdown("SIGTERM"));
+  process.on("SIGINT", () => shutdown("SIGINT"));
+
+  return { close: () => shutdown("close()") };
 }
 
 // 让 `ServerEvent` 的 import 不被 tree-shake 掉(类型只在编译期存在,
