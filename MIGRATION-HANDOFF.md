@@ -3,7 +3,8 @@
 **v2 · 2026-10-01 14:08 CST · 迁移目标改为 DSH**(v1 曾以"恢复到新机 pi"为目标,已被本版取代;用户明确:不迁入本机 pi,迁入当前 DSH 环境)
 **迁移方向**:旧机 pi(Linux `/root/.pi/agent` + `/root/projects/sansheng`)→ 新机 **DSH(DeepSeek Harness)**(macOS `/Users/fuyao`,本文档所在会话即 DSH)
 **迁移分支**:`migration/setup-2026-10-01`(commit `2b3f1a4`,基于 master `4b280b0`)
-**配套阅读**:根目录 `AGENTS.md`(迁移产出的工作规范 single source of truth)、`HANDOFF.md`(v6.4 项目交接)、`ARCHITECTURE.md`、`docs/pi-memory/`(旧记忆全量归档)
+**配套阅读**:根目录 `AGENTS.md`(迁移产出的工作规范 single source of truth)、`HANDOFF.md`(v6.4 项目交接)、`docs/pi-memory/`(旧记忆全量归档)
+> **注**:本文提到的 `ARCHITECTURE.md` 已删(2026-10-04 批次 18)。它是迁移期的产物,描述的系统后来被整体替换。
 
 ---
 
@@ -142,7 +143,7 @@
 2. `HANDOFF.md` v6.4 — 项目动态状态与待办
 3. `docs/pi-memory/MEMORY.md` — 历史全量(派工标准演变、jev 方法论全文、M3+ 15 决策、技术教训原始记录)
 4. `docs/pi-memory/daily/2026-10-01.md` — 迁移前最后一个工作日日志(含 5-blocker 一锅端全程与 worker SIGKILL 教训)
-5. `ARCHITECTURE.md` / `PLAN.md` — 架构与总计划
+5. ~~`ARCHITECTURE.md`~~(**已删,批次 18**)/ `PLAN.md` — 架构与总计划。(现存结构文档:`docs/DESIGN-PLATFORM.md`)
 
 ---
 

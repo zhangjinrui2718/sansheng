@@ -3,7 +3,8 @@
 **生成时间**:2026-10-04 CST · **v9.0**(平台侧全量新建:BC0–BC7 + 工具层 + 接线 + BC6 执行 + 角色提示词,11 个批次)
 **上一版**:v8.0(批次 7-O harness 写面 + 8-A…8-D 角色职能核查迭代),见下。
 **适用**:下一会话(主对话 / worker)开盒即读
-**配套阅读**:`docs/DESIGN-PLATFORM.md`(目标架构)· `docs/DESIGN-AGENTS.md`(四个角色与 harness 配置)· `docs/ADR-001-harness-wiring.md`(接线决策与欠账)· `docs/TROUBLESHOOTING.md` · `ARCHITECTURE.md`(旧系统 12 层图,**描述的是被替换的那套**)
+**配套阅读**:`docs/DESIGN-PLATFORM.md`(目标架构)· `docs/DESIGN-AGENTS.md`(四个角色与 harness 配置)· `docs/ADR-001-harness-wiring.md`(接线决策与欠账)· `docs/TROUBLESHOOTING.md`
+> **注**:根目录 `ARCHITECTURE.md` 已删(批次 18)—— 它描述的旧系统已在批次 15 清场时删除。结构以 `docs/DESIGN-PLATFORM.md` 为准。
 
 > **v9.0 · 平台侧全量新建(2026-10-03 晚 → 10-04,DSH 会话,9 个批次)**
 >

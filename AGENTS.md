@@ -6,7 +6,8 @@
 ## 项目速览
 
 - **Sansheng(三生)** = 单用户本地 Node 服务:Pi SDK 驱动多 agent + Blackboard 体系,SQLite + sqlite-vec 持久化,fs/http/browser 三类行动能力。
-- **状态指针**(按优先级读):`HANDOFF.md`(当前进度/待办)→ `ARCHITECTURE.md`(12 层模块图)→ `PLAN.md`(v5 集成版)→ `MIGRATION-HANDOFF.md`(pi→DSH 迁移)。
+- **状态指针**(按优先级读):`HANDOFF.md`(当前进度/待办)→ `docs/DESIGN-PLATFORM.md`(**目标架构,现行**)→ `docs/DESIGN-AGENTS.md`(四个角色与 harness 配置)→ `PLAN.md`(v5 集成版,描述旧系统)→ `MIGRATION-HANDOFF.md`(pi→DSH 迁移,历史)。
+  ⚠️ 根目录 `ARCHITECTURE.md`(v1.0,12 层模块图)**已删除** —— 它描述的系统在批次 15 清场时整个删掉了。结构看 `docs/DESIGN-PLATFORM.md`。
 - **排查「跑出来不对/失败了/行为怪」** → 读 `docs/TROUBLESHOOTING.md` + 跑 `npm run diagnose`(只读;概览 / 单会话全量 / harness 提示词体检)。**关键事实:artifacts 存在 `blackboards.artifacts_json` 列里(没有独立表);`goal`/`plan_json`/`todos_json` 是恒空的遗留列,别被带偏;`logs/sansheng.log` 恒为 0 字节,日志只走 stdout。**
 - **基线**:723 passed / 1 skipped(84 files)· typecheck 0 error · build 产物在 `dist/src/server/`(**所有 dist 路径必须含 `src/` 前缀**,如 `dist/src/cli/index.js`)。*2026-10-03 批次 8-B(harness 写面 7-O + 角色职能核查迭代 8-A/8-B)收尾时点;此前数字(713/82 批次 7-O、682/81 批次 7-N、679/81 批次 7-L)以本行为准。*`tests/cli/daemon-start.test.ts > isAlive` 在 DSH 沙箱里恒绿,但在禁 `ps` 的环境下会因 `readPidComm` 返 null 而失败(见 commit `832870e`),是环境性失败不是回归。
 - **worker 升级的对象是沟通员,不是用户(批次 7-L)**:executor 卡住 → `handleExecutorCallback` → `Communicator.handleWorkerAsk` **先跑一轮判断轮**(`communicator.worker_ask` 提示词 + `makeWorkerAskAdjudicate`)。`verdict=answer` → 直接写 decision + `executor_resume`,**用户零打扰**;`verdict=escalate` → 沟通员**自己新起一个 `q-comm-*`** 问题问用户(带 lean + ruledOut),总线上如实记 `worker→comm` 与 `comm→user` 两级。**判断轮缺席/超时/解析失败一律退回升级**(fail-safe 到用户,不是 fail-open 到替用户拍板)。三条约束:①提问 payload **必须带 hypothesis 全文**,否则判断轮无从判断;②`onEscalate` 里要把 `pendingExecutorCallbacks` 改挂到新 id 并摘掉 `q-exec-*`,否则一次迟到的 cancel 能再杀一遍已恢复的 executor;③判断轮有独立卫生闸门 `SANSHENG_WORKER_ASK=0` + DI seam `workerAskLlmCall`。见 `tests/agents/worker-ask.test.ts` 与 `tests/server/worker-ask.test.ts`。
