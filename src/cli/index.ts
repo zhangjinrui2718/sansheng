@@ -6,6 +6,7 @@
 import { Command } from "commander";
 import { runStart, runStop, runStatus, runLogs, runReset, dataDir } from "./commands.js";
 import { runPlatformSmoke, parseRole } from "../platform/cli/smoke.js";
+import { runPlatformRun } from "../platform/cli/run.js";
 import { PROJECT_ROLES } from "../platform/identity/role.js";
 
 const program = new Command();
@@ -89,6 +90,33 @@ program
       cwd: opts.cwd ?? process.cwd(),
       keepTemp: opts.keepTemp,
       timeoutMs: Number(opts.timeout) || 120_000,
+    });
+    process.exitCode = ok ? 0 : 1;
+  });
+
+program
+  .command("platform-run")
+  .description(
+    "跑一个工作项(BC6 执行层)。播种组织(幂等)→ 建项目 → 拆工作项 → 派给 worker → " +
+      "真跑它 → 打印产出工件与工具调用现场。**写真实数据目录**。",
+  )
+  .requiredOption("-t, --task <text>", "要做什么(会成为工作项的目标)")
+  .option("--project <id>", "已有项目 id;不给就新建一个")
+  .option("--worker <id>", "指定 worker;不给就用第一个")
+  .option("--cwd <path>", "会话工作目录(代码工具的根)")
+  .option("--data <path>", "数据目录(默认 ~/.sansheng)")
+  .option("--timeout <ms>", "回合等待上限(毫秒)", "300000")
+  .action(async (opts: {
+    task: string; project?: string; worker?: string;
+    cwd?: string; data?: string; timeout: string;
+  }) => {
+    const ok = await runPlatformRun({
+      dataDir: opts.data ?? dataDir(),
+      task: opts.task,
+      ...(opts.project !== undefined ? { projectId: opts.project } : {}),
+      ...(opts.worker !== undefined ? { workerId: opts.worker } : {}),
+      cwd: opts.cwd ?? process.cwd(),
+      timeoutMs: Number(opts.timeout) || 300_000,
     });
     process.exitCode = ok ? 0 : 1;
   });

@@ -42,25 +42,42 @@ function sdkTool<T extends ToolDefinition>(t: T): T {
   return t;
 }
 
+/** 交给 SDK 的结构化结果详情。**观察者靠它判断成败**,不靠解析文本。 */
+export interface PlatformToolDetails {
+  readonly ok: boolean;
+  /** 失败时的错误码(ok=false 才有) */
+  readonly code?: string;
+}
+
 /**
  * 工具结果 → SDK 的结果形状。
  *
- * `details: null` 是刻意的:调用方是模型,给它的只有文本;恒为 null 也就绕开了
- * typebox 泛型「从第一个 return 反推 TDetails」那个坑(与 nativeTools.ts 同)。
+ * ── 失败为什么是**文本 + details**,而不是抛异常 ────────────────────
+ *
+ * SDK 的 `AgentToolResult` **没有 isError 字段** —— `ToolExecutionEndEvent.isError`
+ * 只在 `execute` 抛异常时为 true。而工具失败(参数非法、被门控拒绝)恰恰是
+ * 模型**最该读到并自纠**的信息:抛异常会中断这一轮,模型连错误都看不到。
+ *
+ * 首跑实测证明了这一点:worker 第一次 `board_write` 撞外键失败,它读到
+ * 「[工具失败:internal] FOREIGN KEY constraint failed」后**换了参数重试成功**。
+ * 抛异常就做不到这件事。
+ *
+ * 但纯文本让**观察者**无从判断成败 —— 首跑的工具日志把一次失败标成了 ✓。
+ * 所以结构化信息走 `details`,与给模型的文本分开:模型读文本自纠,日志读 details。
  */
 function toAgentToolResult(r: ToolResult): {
   content: { type: "text"; text: string }[];
-  details: null;
+  details: PlatformToolDetails;
 } {
-  const text = r.ok
-    ? r.text
-    : // 失败也要变成**文本**交给模型 —— 它需要读错误信息才能自纠。
-      // 把失败变成抛异常会让整轮对话崩掉,而模型本可以换个参数重试。
-      `[工具失败:${r.code}] ${r.message}` +
-      (r.alternatives !== undefined && r.alternatives.length > 0
-        ? `\n合法取值:${r.alternatives.join(" | ")}`
-        : "");
-  return { content: [{ type: "text", text }], details: null };
+  if (r.ok) {
+    return { content: [{ type: "text", text: r.text }], details: { ok: true } };
+  }
+  const text =
+    `[工具失败:${r.code}] ${r.message}` +
+    (r.alternatives !== undefined && r.alternatives.length > 0
+      ? `\n合法取值:${r.alternatives.join(" | ")}`
+      : "");
+  return { content: [{ type: "text", text }], details: { ok: false, code: r.code } };
 }
 
 /** 单条工具描述 → SDK 工具名(给模型看的标签用描述首句,避免再维护一份文案)。 */

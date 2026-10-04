@@ -40,6 +40,22 @@ const boardList: PlatformTool = {
   }),
   run(args, ctx): ToolResult {
     const pid = readString(args, "projectId") ?? ctx.project.id;
+    // **跨项目写要拦**。首跑真机实测:模型对着一个可选参数**自己猜了一个
+    // projectId**,撞上 project_id 外键,报出来的却是一句裸的
+    // "FOREIGN KEY constraint failed" —— 既没说哪条外键,也没说猜错了。
+    //
+    // 一次会话属于一个项目(ctx.project),往别的项目写几乎总是错的:
+    // 要么是猜的(本例),要么是拿错了 id。真需要跨项目时那该是另一个会话。
+    if (pid !== ctx.project.id) {
+      // 拒绝而不是「查一下你够不够格」:一次会话属于一个项目,往别的项目写
+      // 几乎总是拿错了 id。真需要跨项目时那该是另一个会话 —— 让这条约束
+      // 简单到不需要解释,比给它开一个需要判断的例外更安全。
+      return fail(
+        "denied",
+        `本次会话属于项目 ${ctx.project.id},不能往 ${pid} 写。` +
+          `要写当前项目就别传 projectId(它是可选的,缺省即当前项目)。`,
+      );
+    }
     const kind = readString(args, "kind");
     if (kind !== undefined && !isArtifactKind(kind)) {
       return fail("invalid_args", `未知工件 kind「${kind}」`, ARTIFACT_KINDS);
@@ -124,6 +140,22 @@ const boardWrite: PlatformTool = {
   }),
   run(args, ctx): ToolResult {
     const pid = readString(args, "projectId") ?? ctx.project.id;
+    // **跨项目写要拦**。首跑真机实测:模型对着一个可选参数**自己猜了一个
+    // projectId**,撞上 project_id 外键,报出来的却是一句裸的
+    // "FOREIGN KEY constraint failed" —— 既没说哪条外键,也没说猜错了。
+    //
+    // 一次会话属于一个项目(ctx.project),往别的项目写几乎总是错的:
+    // 要么是猜的(本例),要么是拿错了 id。真需要跨项目时那该是另一个会话。
+    if (pid !== ctx.project.id) {
+      // 拒绝而不是「查一下你够不够格」:一次会话属于一个项目,往别的项目写
+      // 几乎总是拿错了 id。真需要跨项目时那该是另一个会话 —— 让这条约束
+      // 简单到不需要解释,比给它开一个需要判断的例外更安全。
+      return fail(
+        "denied",
+        `本次会话属于项目 ${ctx.project.id},不能往 ${pid} 写。` +
+          `要写当前项目就别传 projectId(它是可选的,缺省即当前项目)。`,
+      );
+    }
     const kind = readString(args, "kind");
     if (kind === undefined || !isArtifactKind(kind)) {
       return fail("invalid_args", `未知工件 kind「${String(kind)}」`, ARTIFACT_KINDS);
@@ -156,7 +188,13 @@ const boardWrite: PlatformTool = {
         updatedAt: at,
       });
     } catch (err) {
-      return fail("internal", err instanceof Error ? err.message : String(err));
+      // 外键失败必须**指名道姓** —— 裸的 "FOREIGN KEY constraint failed" 不说是哪条,
+      // 事后无从判断是项目不存在还是作者不存在(首跑实测就撞上这条,只能靠猜)。
+      return fail(
+        "internal",
+        `${err instanceof Error ? err.message : String(err)}` +
+          `(写入上下文:project_id=${pid} · author_agent_id=${ctx.agent.id} · kind=${kind})`,
+      );
     }
 
     // 关联边逐条加。失败不回滚工件 —— 工件本身已经写成了,边是可选的补充;

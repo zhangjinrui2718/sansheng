@@ -50,6 +50,10 @@ export interface BootedPlatform {
   /** 解析出的模型;没配 provider 或模型不认识时为 null */
   readonly model: PlatformModel | null;
   readonly dbPath: string;
+  /** 时钟 —— bootPlatform 总会提供,这里提升为必填,免得调用方到处写 `?.()` */
+  readonly now: () => number;
+  /** id 生成 —— 同上 */
+  readonly newId: (prefix: string) => string;
   close(): void;
 }
 
@@ -113,6 +117,8 @@ export function bootPlatform(opts: BootOptions): BootedPlatform {
     provider,
     model,
     dbPath,
+    now: deps.now ?? (() => Date.now()),
+    newId: deps.newId ?? defaultNewId,
     close: () => db.close(),
   };
 }

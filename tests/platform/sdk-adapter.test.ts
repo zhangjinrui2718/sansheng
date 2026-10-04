@@ -259,7 +259,11 @@ describe("假 SDK 契约测试 · 装配 → 调用 → 结果 全链", () => {
       name: "经适配壳的项目", client: "甲", goal: "验证接线",
     });
     expect(r.text).toContain("已立项");
-    expect(r.details, "details 恒为 null(避开 typebox 泛型反推)").toBeNull();
+    // details 是**结构化**的成败信号 —— 不是 null。
+    // SDK 的 AgentToolResult 没有 isError 字段,execute 不抛异常时事件里的
+    // isError 恒为 false;而我们的工具把失败作为文本返回(好让模型能自纠)。
+    // 于是「这次调用到底成没成」只能靠 details 传出来。
+    expect(r.details).toEqual({ ok: true });
   });
 
   it("worker 写证据经适配壳成功", async () => {
@@ -267,6 +271,16 @@ describe("假 SDK 契约测试 · 装配 → 调用 → 结果 全链", () => {
       kind: "evidence", title: "证据", body: "结果 X",
     });
     expect(r.text).toContain("已写工件");
+  });
+
+  it("**失败时 details.ok=false**,日志不会把失败标成成功", async () => {
+    const r = await callViaAdapter(ids.wk, "board_write", {
+      kind: "evidence", title: "t", body: "b",
+      projectId: "pj_not_mine",
+    });
+    // 文本给模型读(它能自纠),details 给日志判(首跑实测:一次外键失败被标成 ✓)
+    expect(r.text).toContain("工具失败");
+    expect(r.details).toMatchObject({ ok: false });
   });
 
   it("**被门控拒绝时返回文本而不是抛异常** —— 模型要能读到错误才能自纠", async () => {
