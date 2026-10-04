@@ -558,6 +558,8 @@ Project:   draft → active → paused → done | abandoned
 ├─────────────────────────────────────────────────────────────┤
 │ L2  ToolSetFile               (harness/tools/{role}.json)   │
 │     用户可编辑的增减意图。永远突破不了 L1。                    │
+│     读取在 `harness/toolSet.ts`;坏文件退化成出厂行为并如实报出, │
+│     **不是**退化成空 allowlist(那等于悄悄收回全部权限)。       │
 ├─────────────────────────────────────────────────────────────┤
 │ L3  ProjectAssignment + Scope (运行时数据)                    │
 │     「当前在哪个项目、能对谁做」。L1/L2 管不了这一维。         │
@@ -568,18 +570,22 @@ Project:   draft → active → paused → done | abandoned
 
 L1/L2 沿用 7-E 的两层设计,已验证有效;**L3 与 writeKinds 是本次新增**。
 
-`RoleSpec` 的形状:
+`RoleSpec` 的形状(**以 `src/platform/identity/role.ts` 为准**):
 
 ```ts
 interface RoleSpec {
   role: ProjectRole;
+  clientFacing: boolean;                 // 仅业务经理为 true
   ceiling: readonly Capability[];        // 架构上界
   writeKinds: readonly ArtifactKind[];   // blackboard.write 的 kind 白名单
-  factorySet: ToolSetFile;               // 出厂集合(L2 的初值)
   promptUnits: readonly PromptUnitId[];  // 该角色装载哪些提示词单元
-  clientFacing: boolean;                 // 仅业务经理为 true
+  boundaryDeny: readonly ToolName[];     // 仅供 UI 展示,**不参与授权判定**
 }
 ```
+
+> **没有 `factorySet` 字段。** 出厂集合由 `ceiling` 推导(`factoryToolset`)——
+> 少一个真相源就少一处漂移(旧 `enabledTools` 字段就是这么烂掉的:它是一份独立名单,
+> 于是可以声称有而实际没有)。
 
 ### 7.2 提示词单元
 
@@ -610,10 +616,16 @@ harness/system_prompts/{role}.{unit}.md
 
 ### 7.4 写盘四规矩(7-O 沿用,不重新发明)
 
-1. **id 必须来自闭合注册表**(`PROMPT_UNIT_IDS` / `CAPABILITIES` / `TOOL_ROLES`),先查表再拼路径 —— 唯一挡路径穿越的地方
-2. **备份是写的前置**,落 `harness/backups/<facet>/<id>.<ts>.bak`(留最近 10 份),备份失败就不写
+实现落点:`src/platform/harness/write.ts`(提示词单元写面)。
+
+1. **id 必须来自闭合注册表**(`promptUnitIds()` / `PROJECT_ROLES` / `CAPABILITIES`),先查表再拼路径 —— 唯一挡路径穿越的地方
+2. **备份是写的前置**,落 `harness/backups/prompts/<unitId>.<ts>.bak`(留最近 10 份),备份失败就不写
 3. **报成功 = 真生效** —— 返回的是回读那份
 4. **恢复出厂 ≠ 删文件** —— 删文件 = empty 态,写回出厂字节 = default 态,且必须显式 confirm
+
+> L2 工具集合文件(`harness/tools/{role}.json`)复用第 1 条(文件名来自 `PROJECT_ROLES`
+> 这个闭合注册表,见 `harness/toolSet.ts`);它**本批不提供写面** —— 用户直接编辑文件,
+> 读取侧会如实报出它的状态与它收掉了什么。
 
 ---
 

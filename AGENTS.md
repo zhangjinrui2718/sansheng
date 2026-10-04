@@ -8,7 +8,7 @@
 - **Sansheng(三生)** = 单用户本机常驻 Node 服务:Pi SDK 驱动**四个角色的 agent 组织**,SQLite 持久化,HTTP + WS + 托管前端。
 - **组织架构是一等数据**:`agents` / `projects` / `project_assignments` 在库里,**角色属性在代码里**(`ROLE_SPECS`)。制品是工件(`artifacts` 表),不是聊天记录。
 - 默认 `127.0.0.1:2719`;数据目录默认 `~/.sansheng/`,可用 `--data` 或 `SANSHENG_DATA` 覆盖。
-- 基线:**535 passed / 19 test files** · 两条 typecheck 0 error · `check:design` E1–E14 全绿。
+- 基线:**600 passed / 21 test files** · 两条 typecheck 0 error · `check:design` E1–E14 全绿。
 - 日志只走 stdout:`~/.sansheng/logs/sansheng.log` 恒为 0 字节,别去 tail 它。
 
 ## 源码地图(`find src -name '*.ts' | wc -l` = 53)
@@ -20,7 +20,7 @@ src/platform/host/       常驻宿主:serve / scheduler / reset
 src/platform/transport/  传输:http(API)/ hub(WS 广播)/ views
 src/platform/runtime/    boot session turn execution assembly promptAssembly pendingWork org sdkAdapter
 src/platform/tools/      工具层:9 个文件、34 个平台工具定义 + registry.ts 的 dispatch()
-src/platform/harness/    授权:capability(能力↔工具表)/ authorize(三道门)/ write(提示词写盘)
+src/platform/harness/    授权:capability(能力↔工具表)/ authorize(三道门)/ toolSet(L2 集合文件读盘)/ write(提示词写盘)
 src/platform/identity/   角色:role.ts 的 ROLE_SPECS
 src/platform/storage/    db.ts + repo/ 下 9 个仓储
 src/platform/infra/      keyring / settings / settingsApply / providers / migrations
@@ -44,7 +44,7 @@ shared/types/            跨端协议类型(platform.ts / settings.ts)
 
 `docs/AGENT-AUDIT-2026-10-03.md` 是逐角色职能核查报告(旧结构,但角色职责部分仍有效)。
 
-> 三份设计文档**有已知的与代码不符处**(例如 §8.1 的表名仍写成 `fragments`/`user_profile`,§7.1 的 L2 集合文件、§7.4 的 `PROMPT_UNIT_IDS`)。**以代码为准,文档是意图**;改到相关结构时顺手把不符处改掉。
+> 三份设计文档**有已知的与代码不符处**(例如 §8.1 的表名仍写成 `fragments`/`user_profile`)。**以代码为准,文档是意图**;改到相关结构时顺手把不符处改掉 —— 批次 19 顺手修掉了 §7.1 的 `RoleSpec` 形状(它写了一个代码里不存在的 `factorySet` 字段)与 §7.4 的闭合注册表名(`PROMPT_UNIT_IDS` / `TOOL_ROLES` → 实际的 `promptUnitIds()` / `PROJECT_ROLES`)。
 
 ## 四个角色
 
@@ -65,13 +65,15 @@ shared/types/            跨端协议类型(platform.ts / settings.ts)
 
 真正拦住一次非法调用的还有 `src/platform/tools/registry.ts` 的 `dispatch()`:工具存在吗 → 角色的 ceiling 给过吗(**再判一次**,因为会话可能是旧配置下建的)→ 调用期门 → 执行。
 
-> ⚠️ **当前只有 ceiling 门与 scope 门在生产上真正生效。** `solveToolset` 的 `userToolSet` 参数在生产接线上**没人传**(`RuntimeDeps.toolSetFor` 只在测试里给过),所以 `~/.sansheng/harness/tools/*.json` **没有任何读者** —— 别以为改它能收权限。要收权限就改 `ROLE_SPECS` 的 `ceiling`。
+> **L2 集合文件现在真的有读者了(批次 19 接线)。** `bootPlatform` 把 `toolSetFor` 交给 `RuntimeDeps`,读盘在 `src/platform/harness/toolSet.ts`:`<dataDir>/harness/tools/{role}.json` 的 `allow` 在上界内**收窄**工具面,`deny` 优先。它**突破不了** `ROLE_SPECS` 的 `ceiling` —— 要放开上界仍然只能改代码。
+>
+> 坏文件**不会**被当成空 allowlist(那等于悄悄收回全部权限),而是退化成出厂行为(按 ceiling 全集)+ 在 `GET /api/harness` 与启动日志里如实报出。可见性的落点:`RoleHarnessView.toolSet`(`state` / `removedByToolSet` / `problem`)。
 
 ## 数据与存储
 
 - 迁移在 `migrations/`:**007–010 建平台表**,**011 把旧系统的 7 张表 DROP**(`blackboards` / `conversations` / `messages` / `fragments` / `user_profile` / `agent_states` / `fragments_vec`)。
 - `artifacts` 直接挂项目 —— **没有 blackboard 容器层**。记忆在 `memory_fragments` / `memory_profile`,不是 `fragments`:`fragments` 是旧名字,001 已占用。
-- 平台表**不得复用旧表名**:`CREATE TABLE IF NOT EXISTS` 撞名时静默无操作,新表根本建不出来(见下 §两类静默失败)。加表前先 `ls migrations/` 查名。
+- 平台表**不得复用旧表名**:`CREATE TABLE IF NOT EXISTS` 撞名时静默无操作,新表根本建不出来(见下 §三类静默失败)。加表前先 `ls migrations/` 查名。
 - 外键一律指向 `agent_id`,不存 `role` 字符串 —— 角色属性只有一处真相。
 - 存储形态可替换:上层只依赖 `src/platform/memory/port.ts` 的 `MemoryPort`;甲方通道同理走 `src/platform/client/port.ts` 的 `ClientChannel`。
 
@@ -81,6 +83,7 @@ shared/types/            跨端协议类型(platform.ts / settings.ts)
 - 运行时从**数据目录**读:`<dataDir>/harness/system_prompts/{unitId}.md`(`src/platform/runtime/promptAssembly.ts`)。
 - 角色→单元的声明在 `ROLE_SPECS[].promptUnits`:4 个角色共 **15 处声明**、12 个唯一单元。跨角色共享的只有两个 —— `collaboration.ask`(3 个角色)与 `collaboration.convene`(2 个角色)。
 - 系统提示 = 机械生成的角色简报(从 `ROLE_SPECS` 转写)+ 盘上真正装载到的单元。**盘上没有的单元如实报为 missing,不静默吞掉。**
+- **工具集合文件**在 `<dataDir>/harness/tools/{role}.json`(L2;文件名必须正好是角色名,写错了不会被读取,Harness 页会把落空的文件名列出来)。读取 = `src/platform/harness/toolSet.ts`,对用户可见 = `GET /api/harness` 每个角色的 `toolSet`。**不提供写面** —— 直接编辑文件即可,改完不用重启(每个新会话现读一次)。
 
 > ⚠️ **新数据目录不会自动播撒出厂单元。** 用 `--data <临时目录>` 首跑时,`platform smoke` 会打印「声明了但盘上没有」,模型只拿到角色简报。这是真实现状:**要用新目录就先把出厂单元放进 `<dataDir>/harness/system_prompts/`**,否则别声称「提示词已生效」。出厂副本的写回走 `src/platform/harness/write.ts` 的写面(HTTP 的 reset)。
 
@@ -97,14 +100,14 @@ help
 
 真机入口:`node dist/src/cli/index.js platform-serve --data <临时目录> --port <端口>`(provider 配置需把 `~/.sansheng/` 里的 settings 与 keyring 拷进临时目录),然后 `curl /api/health` 应返回 `{"ok":true,...}`。
 
-> ⚠️ `package.json` 里的 **`dev` / `start` 两个 script 指向已删除的旧入口,跑不通**;`dev:server` 指向的旧 server 文件不存在,`start` 也是未知命令。开发/验证一律用 `npm run build` + 上面的 CLI。
+> `package.json` 的三个入口(批次 19 修好,之前三个都指向不存在的文件/未知命令):`dev` = `dev:server`(`tsx watch src/cli/index.ts platform-serve`)+ `dev:web`(vite 5173);`start` = `node dist/src/cli/index.js platform-serve`。vite 的 `/api` 与 `/ws` 代理目标是 **2719**(`vite.config.ts` —— 曾错写成旧端口 2718)。
 
 ## 验证链(改完必须全过)
 
 ```
 npx tsc -p tsconfig.server.json --noEmit
 npx tsc -p tsconfig.web.json --noEmit
-npm test                  # 535 passed
+npm test                  # 600 passed / 21 files
 npm run build
 npm run check:design      # 设计一致性 E1–E14
 ```
@@ -144,25 +147,36 @@ npm run check:design      # 设计一致性 E1–E14
 ## 仍然成立的教训(与具体代码无关)
 
 1. **改提示词前先确认它真的到达模型**(7-B:提示词「落地了但没人读」)。现在由 `src/platform/runtime/promptAssembly.ts` 装载 + `platform smoke` 的缺失单元告警承载 —— 但注意上面的新数据目录警告。
-2. **「升级集合」与「解除架构约束」是两件事**(7-E 裁决):集合文件永远突破不了 ceiling。这条裁决落在 `src/platform/harness/authorize.ts`;但集合文件这一层当前**没有读者**(见 §核心机制)。
+2. **「升级集合」与「解除架构约束」是两件事**(7-E 裁决):集合文件永远突破不了 ceiling。判定落在 `src/platform/harness/authorize.ts`,读盘落在 `harness/toolSet.ts`,接线落在 `runtime/boot.ts` 的 `toolSetFor`。
+   **「代码里写了逻辑」不等于「它有读者」** —— 这套判定曾经完整、正确、**零生产调用方**,于是盘上那份 JSON 改了没有任何效果,而界面上只显示 ceiling,看不出来(批次 19 修掉)。
 3. **`thinking` 与 `text` 必须是两条流**(7-I):判据写错会让内部推理被当成正式回复展示给用户。现在 `src/platform/runtime/turn.ts` 显式分开,事件类型见 `shared/types/platform.ts`。
 4. **新写任何失败分支前先问:事后能不能从产物里看出当时发生了什么?**(7-N)。见不到的现场等于没有现场。
 5. **失败必须留现场,且不要惩罚「不携带错误信息的偏差」**(7-D/7-M:模型只是把信封摆错了外层,拿「解析不出来」惩罚它等于因为没贴邮票就烧信)。
 
-## 两类静默失败(真事故,永久警惕)
+## 三类静默失败(真事故,永久警惕)
 
 1. **`CREATE TABLE IF NOT EXISTS` 撞名时静默无操作** —— 新表根本不会建出来,报错落在下游(批次 5 真实事故:表没建成,错误报在索引上)。**加表前先查名。**
-2. **shell `&&` 短路、`python str.replace` 不匹配都会静默不执行**,而你打印的成功信息会是假的。**追加 / 替换类操作必须逐项验证结果,不能靠退出码或自述。**
+2. **shell `&&` 短路、`python str.replace` 不匹配都会静默不执行**,而你打印的成功信息会是假的。**追加 / 替换类操作必须逐项验证结果,不能靠退出码或自述。**(已复现:`"hello".replace("不存在的目标", "X")` 原样返回、脚本退出 0、一个字节都没改。)
+3. **检查 / 脚本本身也会静默出错 —— 一个坏掉的检查不等于「检查失败」,它可能返回一个看起来正常的错误答案。**
+   本项目的实例(2026-10-04 死文件检测,同一轮里错了两次):
+   - **工具/模式选错**:用交替模式去判「有没有引用」,模式在该 grep 构建上不报错、也不匹配 → 静默 0 命中 → 报出「80 个文件全都无引用」。**那个结论是假的,而它长得像一次成功的检查。**
+     ⚠️ 这条与机器有关:本机 `grep (BSD grep, GNU compatible) 2.6.0-FreeBSD` 实测**支持** `\|` 交替 —— 所以「换个环境跑同一条命令」也不能作为自检。
+   - **模式写错**:第二次换了模式,依然返回自信的 0 命中(已复现:对已知含 `ROLE_SPECS` 的文件,把模式写成 `ROLE_SPECSX` 就得到 0,且没有任何错误)。
+   - **静默不改**:`python str.replace` 找不到目标串时不报错、不写改动 → 你以为改了,文件其实没变。
+
+   **做法:每个诊断先拿一个已知答案的样本自检 —— 一个必须命中的正样本 + 一个必须不命中的负样本。两个都对上,才用它去看别的。**
+   判据不是「跑完了没报错」,是「它对已知样本给出了正确答案」。
 
 ## 明确不存在的东西(别再找)
 
-- **路径**:`src/server/`(目录壳还在,**内容已空**)、`tests/agents|cli|server|shared|storage|tools/`、根目录的 ARCHITECTURE.md 与 PLAN.md(都已删除)。
+- **路径**:`src/server/`(批次 19 已连空目录壳一起删掉)、`src/shared/jsonRepair.ts`、`shared/prompts/`(4 个 md / 536 行)、`scripts/diagnose.mjs` 与 `npm run diagnose`(批次 19 删)、`tests/agents|cli|server|shared|storage|tools/`、根目录的 ARCHITECTURE.md 与 PLAN.md(都已删除)。
 - **角色**:communicator / planner / executor / critic / harness_manager / memory / reflection。
 - **机制**:`ROLE_CEILING` / `FACTORY_SETS` / `LEGACY_TOOL_SETS` / `enabledTools` / `MessageBus` / `BlackboardScope` / `orchestrator` / `kernel` / `completeSimple` / `toolLoop` / `PI_OFFLINE` / `blackboards` 表 / `fragments_vec`。
 - 这些名字在 `src/` 里**只剩注释里的历史说明**,没有任何活代码。看到它们说明你在读注释,不是接口。
 
 ## 历史文档(读之前先知道它描述的是什么)
 
-- `README.md` 描述的是**已删除的旧系统**(port 2718、`sansheng start`、Communicator/MessageBus 七角色),其中的 PLAN.md 引用也已失效(PLAN.md 已删)。当历史读,**不要当操作手册**。
+- `README.md` 已于批次 19 **改写为现行系统**的说明(四个角色 / 2719 / `platform-serve` / 验证链)。它不再是历史文档。
+- `docs/TROUBLESHOOTING.md` 已于批次 19 改成一份**「已失效」说明**:原文描述旧系统(读 `blackboards` / `conversations`,那两张表已被 `011_drop_legacy.sql` DROP),配套的 `scripts/diagnose.mjs` 与 `npm run diagnose` 已删除。**不要照着它排查**,它现在只做两件事:标出失效原因、把仍然成立的教训指回本文。原文逐字在 git 历史里:`git show e3d2812:docs/TROUBLESHOOTING.md`。
+- `docs/PRODUCT-DESIGN-2026-10-02.md`、`docs/CODE-REVIEW-2026-10-01.md`、`docs/AGENT-AUDIT-2026-10-03.md`、`docs/SECURITY-NOTES.md`、`MIGRATION-HANDOFF.md` 是**带日期的历史记录**(描述当时发生了什么):里面的路径、测试名、表名多已不存在。当历史读,**不要当操作手册**;也不要改它们 —— 改了是篡改。
 - `MIGRATION-HANDOFF.md` 是 pi → DSH 的迁移记录;`docs/pi-memory/` 是旧记忆全量归档。
-- `docs/TROUBLESHOOTING.md` 与 `scripts/diagnose.mjs` **也属于旧系统**:`npm run diagnose` 读的是 `blackboards` / `conversations` 表,在任何新平台数据目录上会直接抛 `no such table: conversations`。**不要照着它排查,也不要把它写进报告当作证据。**

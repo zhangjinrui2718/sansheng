@@ -33,7 +33,7 @@ import { fileURLToPath } from "node:url";
 import type { Server } from "node:http";
 import type { AgentSession, AgentSessionEvent } from "@earendil-works/pi-coding-agent";
 import { bootPlatform, type BootedPlatform } from "../runtime/boot.js";
-import { createPlatformSession } from "../runtime/session.js";
+import { createPlatformSession, type CreateSessionFn } from "../runtime/session.js";
 import { runTurn } from "../runtime/turn.js";
 import { ORG, ensureOrg, orgReady } from "../runtime/org.js";
 import { createPlatformApp } from "../transport/http.js";
@@ -58,6 +58,12 @@ export interface ServeOptions {
   readonly version: string;
   /** 打开浏览器 */
   readonly open?: boolean;
+  /**
+   * 测试 seam:替换真实的 `createAgentSession`(与 `session.ts` 的 DI 同一条理由 ——
+   * 「到底把什么交给了 SDK」/「中断有没有到达会话」这类断言不该需要 provider 与网络)。
+   * 生产不传。
+   */
+  readonly createSession?: CreateSessionFn;
 }
 
 const HERE = fileURLToPath(new URL(".", import.meta.url));
@@ -113,7 +119,20 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
   // 键是 `string | null`:**`null` 就是接待会话**(第一个项目之前)。
   // 不引入哨兵字符串 —— 见 transport/hub.ts 里 busy 集合的说明。
   const sessions = new Map<string | null, AgentSession>();
-  const inflight = new Map<string | null, AbortController>();
+
+  /**
+   * **正在跑的回合**的登记表 —— `onInterrupt` 唯一能到达「那个回合」的路径。
+   *
+   * ⚠️ 这里曾经是一个 `Map<string | null, AbortController>`,而**从来没有人
+   * `set` 过它**(只有声明 / `get` / `delete`)。后果是前端的中断按钮与 Esc
+   * 一直是 no-op:`get()` 恒 undefined,可选链把整条链路吞得一声不响。
+   * 那是「死接线」的教科书形态 —— 代码看起来齐全,功能从来没有过。
+   *
+   * 修法不是「给 AbortController 加一个 set」:SDK 的取消入口是
+   * `AgentSession.abort()`(`AbortController` 根本传不进 `session.prompt`),
+   * 所以登记的就是**那个会话自己的 abort**。
+   */
+  const inflight = new Map<string | null, () => void>();
 
   const hub = new PlatformHub(
     { db, now, newId },
@@ -146,7 +165,16 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
         }
       },
       onInterrupt: (projectId) => {
-        inflight.get(projectId)?.abort();
+        const abort = inflight.get(projectId);
+        if (abort === undefined) {
+          // 幂等:没有正在跑的回合(用户连点两次、或回合刚好结束)不是错误。
+          // 但**必须留一行日志** —— 否则「中断按钮没反应」和「真的没有活可停」
+          // 在事后完全无法区分(7-N:见不到的现场等于没有现场)。
+          log.muted(`platform: 收到中断,但${channelLabel(projectId)}上没有正在跑的回合 —— 忽略`);
+          return;
+        }
+        log.ok(`platform: 中断${channelLabel(projectId)}正在跑的回合`);
+        abort();
       },
     },
   );
@@ -219,6 +247,7 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
         agentDir: booted.settings.agentDir ?? join(opts.dataDir, "agent"),
         model: currentModel,
           dataDir: opts.dataDir,
+          ...(opts.createSession !== undefined ? { createSession: opts.createSession } : {}),
         },
       );
       if (!created.ok) {
@@ -246,6 +275,27 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
     /** 这一回合立起来的项目(按调用顺序)。**来自工具的结构化结果,不是解析文本** */
     let openedProjectIds: readonly string[] = [];
 
+    /**
+     * 用户是否按了中断。必须在这里就位 —— `onInterrupt` 要能区分
+     * 「这一回合是用户停的」和「这一回合自己炸了」,两者的呈现完全不同。
+     */
+    let aborted = false;
+
+    // **登记必须发生在第一次 await 之前。** 放在 `await runTurn(...)` 之后等于
+    // 永远登记不上:WS 的每一条消息是各自 fire-and-forget 处理的,中断消息会在
+    // 这个回合还卡在 await 里的时候就被处理掉。这正是「死接线」得以藏身的缝隙。
+    inflight.set(projectId, () => {
+      aborted = true;
+      // `AgentSession.abort()` 是 async 且会等到 agent 真正 idle。这里**不 await**:
+      // WS 的消息处理器不该被一次取消阻塞住。但失败要留现场(7-N),不许静默。
+      void session.abort().catch((err: unknown) => {
+        log.error(
+          `platform: 中断${channelLabel(projectId)}的回合失败:` +
+            `${err instanceof Error ? err.message : String(err)}`,
+        );
+      });
+    });
+
     try {
       const turn = await runTurn({
         session,
@@ -269,6 +319,11 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
       }
       hub.emitMessageEnd(projectId, messageId);
       hub.emitAgentEnd(projectId);
+      if (aborted) {
+        // 用户主动中断,但 SDK 的 prompt() 正常返回了(abort 让回合收敛)。
+        // 已经拿到的正文照样落库 —— 中断不是丢弃,是「到此为止」。
+        log.muted(`platform: ${channelLabel(projectId)}的回合被用户中断(已产出 ${text.length} 字符)`);
+      }
       if (turn.timedOut) {
         hub.broadcast({
           type: "error", projectId,
@@ -276,11 +331,22 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
         });
       }
     } catch (e) {
-      hub.broadcast({
-        type: "error", projectId,
-        error: { code: "turn_failed", message: e instanceof Error ? e.message : String(e) },
-      });
-      hub.emitAgentEnd(projectId);
+      // **中断不是故障。** 把一次「停止」报成 `turn_failed` 会让用户以为出了错,
+      // 而他要的只是停下来。两条路径呈现不同,但都要收尾(前端还挂着流式气泡)。
+      if (aborted) {
+        log.muted(
+          `platform: ${channelLabel(projectId)}的回合被用户中断:` +
+            `${e instanceof Error ? e.message : String(e)}`,
+        );
+        hub.emitMessageEnd(projectId, messageId);
+        hub.emitAgentEnd(projectId);
+      } else {
+        hub.broadcast({
+          type: "error", projectId,
+          error: { code: "turn_failed", message: e instanceof Error ? e.message : String(e) },
+        });
+        hub.emitAgentEnd(projectId);
+      }
     } finally {
       hub.setBusy(projectId, false);
       inflight.delete(projectId);

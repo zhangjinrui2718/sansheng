@@ -181,8 +181,25 @@ export function HarnessPage() {
           提示词单元可以在这里直接改:改前自动备份(留最近 10 份),保存后显示的是
           后端回读到的正文;「恢复出厂」写回出厂字节(不是删文件)。 也可以绕开本页直接编辑文件:
           {view ? view.promptDir : "harness/system_prompts/"}。
+          <br />
+          工具集合文件目前只能直接编辑(本页不提供写面):
+          {view ? view.toolsDir : "harness/tools/"}
+          {" —— "}
+          文件名必须是 <code>{"{role}"}.json</code>(即 business_manager / project_manager /
+          worker / quality_reviewer),写错了不会被读取;改完不需要重启服务,
+          每个新会话现读一次。上面每张卡里的「集合文件」一行就是它是否生效的实地。
         </span>
       </Flag>
+
+      {/* 落在空处的意图:文件名写错(如 workers.json)会被安静忽略 —— 必须报出来。 */}
+      {view !== null && view.strayToolSetFiles.length > 0 && (
+        <Flag tone="cinnabar">
+          <span className="ss-body" style={{ color: "var(--cinnabar)" }}>
+            工具目录里有 {view.strayToolSetFiles.length} 个文件名不属于任何角色的 .json,
+            它们不会被读取:{view.strayToolSetFiles.join(" · ")}
+          </span>
+        </Flag>
+      )}
 
       {error !== null ? (
         <div className="sansheng-card p-3 text-xs" style={{ color: "var(--cinnabar)" }}>
@@ -237,16 +254,60 @@ export function HarnessPage() {
                     />
                     <KV
                       label="实得工具"
-                      value={r.tools.length > 0 ? r.tools.join(" · ") : "无(集合未接线)"}
-                      title="已过三重门控:集合文件 ∧ ROLE_CEILING ∧ 执行点。本页不提供工具集合的编辑。"
+                      value={
+                        r.tools.length > 0
+                          ? r.tools.join(" · ")
+                          : "无(集合文件把工具面收空了,或还没有种子角色)"
+                      }
+                      title="已过三重门控:ROLE_SPECS[].ceiling(代码内常量)∧ 集合文件 harness/tools/{role}.json ∧ 执行点。"
+                    />
+                    <KV
+                      label="集合文件"
+                      value={
+                        r.toolSet.state === "ok"
+                          ? `生效中 · 收掉 ${r.toolSet.removedByToolSet.length} 个工具`
+                          : r.toolSet.state === "absent"
+                            ? "没有这个文件 · 按 ceiling 全集(出厂行为)"
+                            : "文件无效 · 已退化成 ceiling 全集"
+                      }
+                      title={
+                        `${r.toolSet.path}\n\nstate = ${r.toolSet.state}` +
+                        "\n只有 ok 会真的收窄工具面;absent / invalid 都按 ceiling 全集求解。"
+                      }
                     />
                   </div>
+
+                  {/* 集合文件坏了必须响亮:此时权限**回落到 ceiling 全集**(方向上是放宽)。
+                      「坏了」与「生效了」在界面上长得一样,是最危险的形态。 */}
+                  {r.toolSet.state === "invalid" && (
+                    <Flag tone="cinnabar">
+                      <span className="ss-meta">集合文件无效,当前没有生效(权限按 ceiling 全集):</span>
+                      <span className="ss-body">{r.toolSet.problem}</span>
+                      <span className="ss-meta font-mono">{r.toolSet.path}</span>
+                    </Flag>
+                  )}
+
+                  {/* 集合文件**生效的证据**:ceiling 本来会给、文件没要的那些工具。 */}
+                  {r.toolSet.removedByToolSet.length > 0 && (
+                    <Flag tone="mute">
+                      <span className="ss-meta">被集合文件收掉(ceiling 给了、文件没要):</span>
+                      <span className="ss-body">{r.toolSet.removedByToolSet.join(" · ")}</span>
+                    </Flag>
+                  )}
 
                   {/* 越权条目必须对用户可见 —— 架构裁决不能被静默吞掉。 */}
                   {r.blockedByCeiling.length > 0 && (
                     <Flag tone="cinnabar">
                       <span className="ss-meta">超出架构上界(集合文件写了但被 ceiling 拒绝):</span>
                       <span className="ss-body">{r.blockedByCeiling.join(" · ")}</span>
+                    </Flag>
+                  )}
+
+                  {/* 拼错工具名不静默生效(见 solveToolset 的 unknownTools)。 */}
+                  {r.unknownTools.length > 0 && (
+                    <Flag tone="cinnabar">
+                      <span className="ss-meta">集合文件里有不存在的工具名(已丢弃):</span>
+                      <span className="ss-body">{r.unknownTools.join(" · ")}</span>
                     </Flag>
                   )}
 

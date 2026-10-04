@@ -4,8 +4,10 @@ import path from "node:path";
 
 // Sansheng Web · Vite config
 // - React + TS
-// - Dev server on 5173 with proxy /api & /ws to :4321 (Hono)
-// - Build output → ../dist/web (served by Hono in production)
+// - Dev server on 5173, proxying /api & /ws to the platform host on 127.0.0.1:2719
+//   (`npm run dev` 的另一半 `dev:server` = `tsx watch src/cli/index.ts platform-serve`,
+//    它的默认端口就是 2719 —— 这里写错了 proxy 就会指向一个没人听的端口)
+// - Build output → dist/web (由平台宿主托管:`platform-serve` 注册 serveStatic)
 export default defineConfig(({ mode }) => ({
   root: path.resolve(__dirname, "web"),
   publicDir: path.resolve(__dirname, "web/public"),
@@ -21,11 +23,11 @@ export default defineConfig(({ mode }) => ({
     strictPort: false,
     proxy: {
       "/api": {
-        target: "http://127.0.0.1:2718",
+        target: "http://127.0.0.1:2719",
         changeOrigin: false,
       },
       "/ws": {
-        target: "ws://127.0.0.1:2718",
+        target: "ws://127.0.0.1:2719",
         ws: true,
         changeOrigin: false,
       },

@@ -3,11 +3,14 @@
  *
  * ── 这份实现的两条约束 ──────────────────────────────────────────
  *
- * **① 只读 harness。** 2026-10-04 经 jev 校准(p=0.990):本次只提供只读视图,
- * 写面(编辑提示词 / 改工具集合 / 备份 / 恢复出厂)留到单独一批。
- * 理由是它要重新实现旧系统 7-O 的四条规矩(闭合注册表防路径穿越、备份是写的
- * 前置、报成功=真生效、恢复出厂≠删文件)—— 那不是「顺手做」的量。
- * 用户可以**直接编辑** `~/.sansheng/harness/system_prompts/*.md`,不是能力缺失。
+ * **① harness 只读视图 + 提示词单元写面。**
+ * `GET /api/harness` 是只读视图(能力面 / 提示词装载情况 / **L2 集合文件状态**)。
+ * 写面目前只有**提示词单元**(`PUT /api/harness/units/:id` 等三条,规矩见
+ * `harness/write.ts` 文件头:闭合注册表防路径穿越、备份是写的前置、报成功=真生效、
+ * 恢复出厂≠删文件)。
+ * **工具集合文件(`harness/tools/{role}.json`)本批不提供写面** —— 用户直接编辑
+ * 那个文件即可,它现在是**有读者的**(见 `harness/toolSet.ts`);视图会如实报出
+ * 它的状态与它收掉了什么。给它加写面要重新实现同四条规矩,不是顺手做的量。
  *
  * **② 项目为中心。** 没有 `/api/conversations*`。对话就是项目的。
  * 这是设计 1 §0.1 问题三(「一切以对话为界,项目活不过一轮对话」)的接口面落点。
@@ -31,6 +34,7 @@ import { resolveClientQuestion } from "../tools/client.js";
 import { ORG, ensureOrg, orgReady } from "../runtime/org.js";
 import { loadPromptUnits, unitPath } from "../runtime/promptAssembly.js";
 import { solveToolset } from "../harness/authorize.js";
+import { resolveToolSet, strayToolSetFiles, toolSetDir } from "../harness/toolSet.js";
 import { loadProjectForAuthz } from "../storage/repo/projects.js";
 import { ROLE_SPECS, PROJECT_ROLES, type ProjectRole } from "../identity/role.js";
 import { getAgent, listAgents } from "../storage/repo/agents.js";
@@ -417,12 +421,15 @@ export function createPlatformApp(deps: HttpDeps): Hono {
 /**
  * 拼出四个角色的 harness 视图。
  *
- * 两件事必须如实呈现,它们是这个项目反复栽过的地方:
+ * 三件事必须如实呈现,它们是这个项目反复栽过的地方:
  *
  *  - `loaded: false` 的提示词单元 = **这条职责从没告诉过 agent**。
  *    它会照常工作,只是不知道那条规矩 —— 用户必须看得见(7-B 那一课的守卫)。
  *  - `ceiling` 是**代码内常量**,不是可编辑文件。前端要标注这一点,
  *    否则用户会以为改界面就能放开权限(7-E 的架构裁决:集合文件突破不了上界)。
+ *  - `toolSet` 是 **L2 集合文件的真实状态**,`removedByToolSet` 是它生效的**证据**。
+ *    在此之前这个视图只显示 ceiling,于是「用户改了 `harness/tools/*.json` 却看不到
+ *    任何变化」在界面上无法与「已经生效」区分 —— 又一个「声称有、实际没有」。
  */
 export function buildHarnessView(db: Database.Database, dataDir: string): HarnessView {
   const roles: RoleHarnessView[] = [];
@@ -440,7 +447,9 @@ export function buildHarnessView(db: Database.Database, dataDir: string): Harnes
       return { id: unitId, loaded: isLoaded, chars: content.length, content, path };
     });
 
-    // 工具面:有项目就取第一个项目求解(展示 ceiling 在项目内的效果);
+    // ── 有效工具面 = L1 上界 ∩ scope ∩ L2 集合文件 ────────────────
+    //
+    // 有项目就取第一个项目求解(展示 ceiling 在项目内的效果);
     // **一个项目都没有时按接待模式求解**(project = null),而不是报一个空工具面 ——
     // 那时候业务经理确实拿得到 `project_open` 与记忆工具(见
     // harness/authorize.ts 的 INTAKE_CAPABILITIES),报 0 个工具会让用户以为
@@ -448,16 +457,28 @@ export function buildHarnessView(db: Database.Database, dataDir: string): Harnes
     const anyProject = listProjects(db)[0];
     const project = anyProject !== undefined ? loadProjectForAuthz(db, anyProject.id) : null;
     const agent = listAgents(db).find((a) => a.role === role);
-    const solved =
+    const authzAgent =
       agent !== undefined
-        ? solveToolset(
-            {
-              id: agent.id, role, displayName: agent.displayName,
-              ...(agent.specialization !== null ? { specialization: agent.specialization } : {}),
-            },
-            project,
-          )
+        ? {
+            id: agent.id,
+            role,
+            displayName: agent.displayName,
+            ...(agent.specialization !== null ? { specialization: agent.specialization } : {}),
+          }
         : null;
+
+    const toolSet = resolveToolSet(dataDir, role);
+
+    // 两个解:**出厂面**(不过集合文件)与**有效面**(过集合文件)。
+    // 两者之差就是「这份 JSON 收掉了什么」—— 用户看得见自己改动的效果。
+    const factorySolved = authzAgent !== null ? solveToolset(authzAgent, project) : null;
+    const solved = authzAgent !== null ? solveToolset(authzAgent, project, toolSet.file) : null;
+
+    const effective = new Set(solved?.tools ?? []);
+    const removedByToolSet =
+      factorySolved !== null
+        ? factorySolved.tools.filter((t) => !effective.has(t))
+        : [];
 
     roles.push({
       role,
@@ -469,10 +490,25 @@ export function buildHarnessView(db: Database.Database, dataDir: string): Harnes
       promptUnits,
       tools: solved !== null ? [...solved.tools] : [],
       blockedByCeiling: solved !== null ? solved.blockedByCeiling.map((d) => d.subject) : [],
+      unknownTools: solved !== null ? solved.unknownTools.map((d) => d.subject) : [],
+      toolSet: {
+        path: toolSet.path,
+        state: toolSet.state,
+        allow: toolSet.file !== undefined ? [...toolSet.file.allow] : [],
+        deny: toolSet.file !== undefined ? [...toolSet.file.deny] : [],
+        removedByToolSet: [...removedByToolSet].sort(),
+        ...(toolSet.problem !== undefined ? { problem: toolSet.problem.detail } : {}),
+      },
     });
   }
 
-  return { roles, promptDir: join(dataDir, "harness", "system_prompts"), writable: true };
+  return {
+    roles,
+    promptDir: join(dataDir, "harness", "system_prompts"),
+    toolsDir: toolSetDir(dataDir),
+    strayToolSetFiles: [...strayToolSetFiles(dataDir)],
+    writable: true,
+  };
 }
 
 /**

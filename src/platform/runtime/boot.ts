@@ -25,6 +25,8 @@ import { resolveModel, syncActiveProviderApiKeyEnv } from "../infra/providers.js
 import { openPlatformDb } from "../storage/db.js";
 import { SqliteMemory } from "../memory/sqliteMemory.js";
 import { createLoggingClientChannel } from "../client/port.js";
+import { resolveAllToolSets, strayToolSetFiles, toolSetForDataDir } from "../harness/toolSet.js";
+import { log } from "../../shared/log.js";
 import type { PlatformModel } from "./session.js";
 import type { RuntimeDeps } from "./assembly.js";
 
@@ -108,12 +110,47 @@ export function bootPlatform(opts: BootOptions): BootedPlatform {
 
   const clientLog = opts.clientLog ?? ((line: string) => console.log(line));
 
+  /**
+   * 用户工具集合文件(L2)的接线。
+   *
+   * ⚠️ 在批次 19 之前这里**没有这一行** —— `solveToolset` 的 `userToolSet` 参数
+   * 逻辑完整却没有任何生产调用方传它,于是 `<dataDir>/harness/tools/*.json`
+   * 是一份零读者的 JSON:用户改了它,权限一点没变,而界面上只显示 ceiling。
+   * 那不是「保守」,是「声称有、实际没有」。
+   *
+   * 读盘是懒的(每次建会话现读),所以用户改完文件不必重启服务。
+   */
+  const toolSetFor = toolSetForDataDir(opts.dataDir);
+
+  // 开机时把 L2 的**真实状态**说出来。三种状态里只有 `ok` 会真的收窄工具面;
+  // `invalid` 会退化成 ceiling 全集(方向上是**放宽**)—— 那一条必须以 warn
+  // 出现,否则「文件坏了」和「文件生效了」在日志里长得一模一样。
+  for (const r of resolveAllToolSets(opts.dataDir)) {
+    if (r.state === "ok") {
+      log.muted(
+        `harness: 工具集合生效 ${r.role} ← ${r.path} ` +
+          `(allow ${r.file?.allow.length ?? 0} 条 · deny ${r.file?.deny.length ?? 0} 条)`,
+      );
+    } else if (r.state === "invalid") {
+      log.warn(`harness: 工具集合无效 ${r.role} ← ${r.path}\n        ${r.problem?.detail ?? ""}`);
+    }
+  }
+  // 落在空处的意图:文件名写错(如 workers.json)会被安静忽略
+  const stray = strayToolSetFiles(opts.dataDir);
+  if (stray.length > 0) {
+    log.warn(
+      `harness: 工具目录里有不认识的 ${stray.length} 个文件(${stray.join(", ")})—— ` +
+        `集合文件名必须是 ${"<role>.json"},不是角色名的文件不会被读取`,
+    );
+  }
+
   const deps: RuntimeDeps = {
     db,
     ...(memory !== undefined ? { memory } : {}),
     client: createLoggingClientChannel(clientLog),
     now: opts.now ?? (() => Date.now()),
     newId: opts.newId ?? defaultNewId,
+    toolSetFor,
   };
 
   return {

@@ -243,7 +243,7 @@ export interface ChangeView {
   createdAt: number;
 }
 
-// ── harness(本次**只读**)────────────────────────────────────────
+// ── harness(只读视图 + 提示词单元写面)────────────────────────────
 
 /**
  * 一个提示词单元在前端的呈现。
@@ -261,6 +261,34 @@ export interface PromptUnitView {
   path: string;
 }
 
+/**
+ * 用户工具集合文件(L2,`<dataDir>/harness/tools/{role}.json`)在某个角色上的**真实状态**。
+ *
+ * 为什么要单独一块:在批次 19 之前这个文件**零读者**,而界面上只显示 ceiling ——
+ * 用户改了 JSON 却看不到任何变化,只能怀疑自己改错了地方。这一块把
+ * 「L1 给了什么 / L2 收掉了什么 / L2 有没有生效」三件事摆在同一张卡上。
+ */
+export interface ToolSetFileView {
+  /** 文件路径(让用户知道去哪编辑) */
+  path: string;
+  /**
+   * `absent`  没有这个文件 → 出厂行为(按 ceiling 全集)
+   * `ok`      生效中 —— **只有这一种状态会真的收窄工具面**
+   * `invalid` 文件在但坏 → 退化成出厂行为(方向上是**放宽**),`problem` 说明原因
+   */
+  state: "absent" | "ok" | "invalid";
+  /** state==="ok" 时:文件原样声明的名单(便于用户对照自己写了什么) */
+  allow: string[];
+  deny: string[];
+  /**
+   * 相对 L1 上界被集合文件**收掉**的工具 —— ceiling + scope 本来会给,文件没要。
+   * 这就是「集合文件真的生效了」的可视证据。
+   */
+  removedByToolSet: string[];
+  /** state==="invalid" 时:为什么没生效(必须可见 —— 此时权限回落到 ceiling 全集) */
+  problem?: string;
+}
+
 export interface RoleHarnessView {
   role: ProjectRole;
   displayName: string;
@@ -270,20 +298,32 @@ export interface RoleHarnessView {
   writeKinds: string[];
   boundaryDeny: string[];
   promptUnits: PromptUnitView[];
-  /** 该角色实际拿到的工具名(已过三重门控) */
+  /** 该角色实际拿到的工具名(已过三重门控,**含 L2 集合文件**) */
   tools: string[];
   blockedByCeiling: string[];
+  /** 集合文件里**不存在**的工具名(拼写错误不静默生效) */
+  unknownTools: string[];
+  /** L2 集合文件的真实状态(见 ToolSetFileView) */
+  toolSet: ToolSetFileView;
 }
 
 export interface HarnessView {
   roles: RoleHarnessView[];
   /** 提示词单元所在目录(让用户知道去哪编辑) */
   promptDir: string;
+  /** 工具集合文件所在目录(让用户知道去哪编辑) */
+  toolsDir: string;
+  /**
+   * 工具目录里存在、但文件名不属于任何角色的 `.json`(例如写成了 `workers.json`)
+   * —— 它们不会被读取。必须报出来,否则用户会以为已经生效。
+   */
+  strayToolSetFiles: string[];
   /**
    * 写面已就位。四条规矩见 `src/platform/harness/write.ts` 文件头:
    * 闭合注册表防路径穿越、备份是写的前置、报成功=真生效、恢复出厂≠删文件。
    *
-   * 可以改的是**提示词单元**(`harness/system_prompts/*.md`)。
+   * 可以改的是**提示词单元**(`harness/system_prompts/*.md`)与**工具集合文件**
+   * (`harness/tools/*.json` —— 直接编辑文件,本批未提供集合文件的写面,见报告)。
    * 不可以改的是 `ceiling` / `writeKinds` —— 它们是 `ROLE_SPECS` 里的**代码内
    * 常量**,改它们要走代码评审(7-E 的架构裁决:集合文件突破不了上界)。
    */

@@ -18,18 +18,17 @@
     "node": ">=22"
   },
   "scripts": {
-    "dev:server": "tsx watch src/server/index.ts",
+    "dev:server": "tsx watch src/cli/index.ts platform-serve",
     "dev:web": "vite",
     "dev": "npm-run-all -p dev:server dev:web",
     "build:server": "tsc -p tsconfig.server.json && node scripts/copy-harness.mjs",
     "build:web": "vite build",
     "build": "npm-run-all build:server build:web",
-    "start": "node dist/src/cli/index.js start",
+    "start": "node dist/src/cli/index.js platform-serve",
     "typecheck": "tsc -p tsconfig.server.json --noEmit && tsc -p tsconfig.web.json --noEmit",
     "check:design": "node docs/check-design-consistency.mjs",
     "test": "vitest --run",
     "test:watch": "vitest",
-    "diagnose": "node scripts/diagnose.mjs",
     "prepublishOnly": "npm run build"
   },
   "dependencies": {
