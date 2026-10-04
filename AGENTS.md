@@ -108,7 +108,9 @@ shared/types/            跨端协议类型(platform.ts / settings.ts)
 > 没有任何地方告诉项目经理要建树」—— 那个 grep **作用域漏了运行期任务提示词**,而后者正是本文件
 > 自己认定为最强的那条通道(user message,recency 比 system prompt 强)。
 > **「grep 不到」不等于「不存在」;先问「还有哪条通道我没想到」。**
-> 而且这个错**改变了该修什么**:「没人告诉」→ 再加一句提示词;「告诉了没做到」→ **合规校验/机制**。所以 `collectTodos` 生成 `report_downstream` 时再加两个条件之一:**攒够 N 条**(`--report-batch-size`,默认 **3**)或**最老的那条等了 T**(`--report-max-delay-ms`,默认 **5 分钟**,它是延迟上界)。⚠️ `work_failed` 与 severity ≥ high 的 `blocker_opened` **绕过窗口立刻叫醒**(它们影响时间表,甲方要能据此重新决策)。判定侧收窄的是**时机**,不是**资格** —— 它不按 kind / 位置丢掉任何一行;而「没到阈值的行根本没被消费 ⇒ `consumed_at` 不因合并而撒谎」这条推理写在 `runtime/dispatcher.ts` 与设计 1 §9.4。
+> 而且这个错**改变了该修什么**:「没人告诉」→ 再加一句提示词;「告诉了没做到」→ **合规校验/机制**。
+
+所以 `collectTodos` 生成 `report_downstream` 时再加两个条件之一:**攒够 N 条**(`--report-batch-size`,默认 **3**)或**最老的那条等了 T**(`--report-max-delay-ms`,默认 **5 分钟**,它是延迟上界)。⚠️ `work_failed` 与 severity ≥ high 的 `blocker_opened` **绕过窗口立刻叫醒**(它们影响时间表,甲方要能据此重新决策)。判定侧收窄的是**时机**,不是**资格** —— 它不按 kind / 位置丢掉任何一行;而「没到阈值的行根本没被消费 ⇒ `consumed_at` 不因合并而撒谎」这条推理写在 `runtime/dispatcher.ts` 与设计 1 §9.4。
 
 > 预算**不是**判据,是**限流**,而且与批次 20 的 `stallStore` 有两处本质区别:它在库里(重启后还算数);它**不需要状态指纹**(没有「指纹漏一类状态 → 把真实进展读成无进展 → 掐死整条链」这条失败路径,真机踩过)。宿主**不持有任何跨排空状态** —— `CascadeState` / `stallStore` / `projectSignature` / 「最后一格预算给汇报」全部已删除。
 
