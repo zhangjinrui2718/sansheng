@@ -302,6 +302,12 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
       },
       providers: () => listProviders(),
     },
+    harnessDirs: {
+      dataDir: opts.dataDir,
+      // 出厂副本:`dist/src/platform/host/` 上三级是 `dist/`,再进 `harness/system_prompts/`
+      // (构建时由 package.json 的 build:server 从仓库 harness/ 拷过去)
+      factoryDir: resolve(HERE, "../../../harness/system_prompts"),
+    },
     reset: () => {
       // 常驻会话必须丢掉:它们绑着已被删掉的项目,继续用会往空项目里写消息
       for (const [pid, sess] of sessions) {

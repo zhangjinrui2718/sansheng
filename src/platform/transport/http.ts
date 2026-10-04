@@ -43,6 +43,9 @@ import {
 } from "./views.js";
 import type { HarnessView, PromptUnitView, RoleHarnessView } from "@shared/types/platform.js";
 import type { ResetReport } from "../host/reset.js";
+import {
+  listBackups, promptUnitIds, resetPromptUnit, writePromptUnit, type FactoryDirs,
+} from "../harness/write.js";
 
 export interface HttpDeps {
   readonly db: Database.Database;
@@ -59,6 +62,8 @@ export interface HttpDeps {
   readonly newId: (prefix: string) => string;
   /** 清空平台数据(宿主注入 —— 它还要顺带丢掉常驻会话) */
   readonly reset: () => ResetReport;
+  /** harness 写面的两个目录(数据目录 + 出厂副本目录) */
+  readonly harnessDirs: FactoryDirs;
   /** 设置读写(复用旧 store —— 它是基础设施,不是旧系统的领域逻辑) */
   readonly settings: {
     read: () => unknown;
@@ -271,6 +276,99 @@ export function createPlatformApp(deps: HttpDeps): Hono {
     return c.json({ ok: true, cleared: report.cleared, totalRows: report.totalRows });
   });
 
+  // ── harness 写面(7-O 的四条规矩见 harness/write.ts 文件头)──────
+
+  app.put("/api/harness/units/:unitId", async (c) => {
+    const unitId = c.req.param("unitId");
+    const body = (await c.req.json().catch(() => null)) as { content?: unknown } | null;
+    if (body === null || typeof body.content !== "string") {
+      return c.json(err("invalid_args", "请求体需要 { content: string }").body, 400);
+    }
+    const r = writePromptUnit(deps.harnessDirs, unitId, body.content, deps.now());
+    if (!r.ok) {
+      const code = r.reason === "unknown_unit" ? "unknown_unit" : "write_failed";
+      const status = r.reason === "unknown_unit" ? 404 : 500;
+      return c.json(
+        {
+          error: {
+            code,
+            message: r.detail ?? "写入失败",
+            // 让调用方知道合法 id 有哪些(而不是去猜)
+            ...(r.reason === "unknown_unit" ? { validIds: promptUnitIds() } : {}),
+          },
+        },
+        status,
+      );
+    }
+    // 规矩③:返回的是**回读**到的正文
+    return c.json({
+      ok: true,
+      content: r.content,
+      ...(r.backupPath !== undefined ? { backupPath: r.backupPath } : {}),
+    });
+  });
+
+  app.post("/api/harness/units/:unitId/reset", async (c) => {
+    const unitId = c.req.param("unitId");
+    const body = (await c.req.json().catch(() => null)) as { confirm?: unknown } | null;
+    if (body?.confirm !== "reset") {
+      return c.json(err("confirmation_required", '需要确认:{"confirm":"reset"}').body, 400);
+    }
+    const r = resetPromptUnit(deps.harnessDirs, unitId, deps.now());
+    if (!r.ok) {
+      return c.json(
+        { error: { code: r.reason ?? "reset_failed", message: r.detail ?? "恢复出厂失败" } },
+        r.reason === "unknown_unit" ? 404 : 500,
+      );
+    }
+    return c.json({ ok: true, content: r.content });
+  });
+
+  app.get("/api/harness/units/:unitId/backups", (c) =>
+    c.json({ backups: listBackups(deps.dataDir, c.req.param("unitId")) }),
+  );
+
+  // ── 记忆画像(结构化摘要,与片段互补)──────────────────────────
+  //
+  // 旧系统有 `/api/profile`(读)与 `/api/profile/:key`(写)。新架构里画像与
+  // 片段是**两层**:片段是流水式记录(「用户说过 X」),画像是当前的结构化摘要
+  // (「用户是谁」)。两者都在 BC7,都经 MemoryPort 的存储层。
+  app.get("/api/profile", (c) => {
+    const rows = db
+      .prepare(`SELECT id, payload_json, updated_at FROM memory_profile ORDER BY id`)
+      .all() as Array<{ id: string; payload_json: string; updated_at: number }>;
+    const entries: Record<string, unknown> = {};
+    for (const r of rows) {
+      try {
+        entries[r.id] = JSON.parse(r.payload_json);
+      } catch {
+        // 坏掉的画像项不该让整个接口 500 —— 如实回一个标记
+        entries[r.id] = { __unparsable: true };
+      }
+    }
+    return c.json({ entries });
+  });
+
+  app.put("/api/profile/:key", async (c) => {
+    const key = c.req.param("key");
+    if (key.trim() === "" || key.includes("/")) {
+      return c.json(err("invalid_args", "key 不合法").body, 400);
+    }
+    const body = (await c.req.json().catch(() => null)) as { value?: unknown } | null;
+    if (body === null || body.value === undefined) {
+      return c.json(err("invalid_args", "请求体需要 { value }").body, 400);
+    }
+    const at = deps.now();
+    db.prepare(
+      `INSERT INTO memory_profile (id, payload_json, updated_at) VALUES (?, ?, ?)
+       ON CONFLICT(id) DO UPDATE SET payload_json = excluded.payload_json, updated_at = excluded.updated_at`,
+    ).run(key, JSON.stringify(body.value), at);
+    // 回读 —— 「报成功 = 真生效」这条在写面上处处适用
+    const row = db.prepare(`SELECT payload_json, updated_at FROM memory_profile WHERE id = ?`)
+      .get(key) as { payload_json: string; updated_at: number };
+    return c.json({ ok: true, key, value: JSON.parse(row.payload_json), updatedAt: row.updated_at });
+  });
+
   // ── 记忆 ──────────────────────────────────────────────────────
 
   app.get("/api/memory/fragments", (c) => {
@@ -352,7 +450,7 @@ export function buildHarnessView(db: Database.Database, dataDir: string): Harnes
     });
   }
 
-  return { roles, promptDir: join(dataDir, "harness", "system_prompts"), writable: false };
+  return { roles, promptDir: join(dataDir, "harness", "system_prompts"), writable: true };
 }
 
 /**

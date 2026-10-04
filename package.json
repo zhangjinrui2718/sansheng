@@ -21,7 +21,7 @@
     "dev:server": "tsx watch src/server/index.ts",
     "dev:web": "vite",
     "dev": "npm-run-all -p dev:server dev:web",
-    "build:server": "tsc -p tsconfig.server.json",
+    "build:server": "tsc -p tsconfig.server.json && node scripts/copy-harness.mjs",
     "build:web": "vite build",
     "build": "npm-run-all build:server build:web",
     "start": "node dist/src/cli/index.js start",

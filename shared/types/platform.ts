@@ -272,13 +272,14 @@ export interface HarnessView {
   /** 提示词单元所在目录(让用户知道去哪编辑) */
   promptDir: string;
   /**
-   * 本次只提供只读视图。
+   * 写面已就位。四条规矩见 `src/platform/harness/write.ts` 文件头:
+   * 闭合注册表防路径穿越、备份是写的前置、报成功=真生效、恢复出厂≠删文件。
    *
-   * 写面(编辑提示词 / 改工具集合 / 备份 / 恢复出厂)是单独一批的工作 ——
-   * 它要重新实现旧系统 7-O 的四条规矩(闭合注册表防路径穿越、备份是写的前置、
-   * 报成功=真生效、恢复出厂≠删文件),不顺手做。
+   * 可以改的是**提示词单元**(`harness/system_prompts/*.md`)。
+   * 不可以改的是 `ceiling` / `writeKinds` —— 它们是 `ROLE_SPECS` 里的**代码内
+   * 常量**,改它们要走代码评审(7-E 的架构裁决:集合文件突破不了上界)。
    */
-  writable: false;
+  writable: true;
 }
 
 // ── HTTP 响应 ────────────────────────────────────────────────────
@@ -410,8 +411,14 @@ export function eventProjectId(ev: ServerEvent): string | null {
 //   ── 待甲方答的问题(跨项目;左栏徽标用它)──
 //   GET    /api/client-questions              → { questions: ClientQuestionView[] }
 //   POST   /api/client-questions/:id/answer   → { ok, decisionArtifactId }
-//   ── harness(只读)──
+//   ── harness ──
 //   GET    /api/harness                       → HarnessView
+//   PUT    /api/harness/units/:unitId         { content }        → { ok, content, backupPath? }
+//   POST   /api/harness/units/:unitId/reset   { confirm:"reset" } → { ok, content }
+//   GET    /api/harness/units/:unitId/backups → { backups: [{file,path}] }
+//   ── 记忆画像(结构化摘要;与 fragments 互补)──
+//   GET    /api/profile                       → { entries: Record<string, unknown> }
+//   PUT    /api/profile/:key                  { value }           → { ok, key, value, updatedAt }
 //   ── 记忆 ──
 //   GET    /api/memory/fragments              → { fragments: MemoryFragmentView[] }
 //

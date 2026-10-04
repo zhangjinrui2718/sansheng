@@ -95,12 +95,13 @@ export function HarnessPage() {
         }
       />
 
-      {/* 只读这件事必须在屏幕上说清楚,而不是让用户点进一个没有保存按钮的编辑器。 */}
+      {/* 写面已就位(批次 16)。这一条替换掉原来那句「本页只读」—— */}
+      {/* 写面缺位时如实说明是好的,写面有了还说只读就是在骗用户。 */}
       <Flag tone="mute">
         <span className="ss-body" style={{ color: "var(--bone-dim)" }}>
-          本页只读。要改提示词,直接编辑下面每个单元给出的文件路径
-          {view ? `(目录:${view.promptDir})` : ""}。
-          {view?.writable === false ? " 写入接口(writable=false)尚未提供。" : ""}
+          提示词单元可以在本页直接编辑(改前自动备份,可恢复出厂)。
+          也可以直接编辑文件:{view ? view.promptDir : "harness/system_prompts/"}。
+          {" "}ceiling 与 writeKinds 改不了 —— 它们是代码内常量,要改得走代码评审。
         </span>
       </Flag>
 
