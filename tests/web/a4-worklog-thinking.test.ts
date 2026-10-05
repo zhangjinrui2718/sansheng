@@ -30,7 +30,9 @@ import type { ConversationPartition } from "@/lib/data";
 import type { Turn } from "@/stores/chat";
 
 function turn(id: string, role: Turn["role"], agentId: string | null, blocks: Turn["blocks"]): Turn {
-  return { id, role, agentId, blocks, startedAt: 0 };
+  // `projectId` 是 `Turn` 的必填字段(`tests/` 不在两条 tsconfig 的 include 里,
+  // 漏填 tsc 不会报 —— 见 `tests/web/channel-filter.test.ts` 的同一处说明)。
+  return { id, projectId: "p-test", role, agentId, blocks, startedAt: 0 };
 }
 
 function assistant(text: string): Turn {

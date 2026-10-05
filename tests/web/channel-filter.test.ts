@@ -31,13 +31,21 @@ import {
 import { ConversationStream, contentSignalOf } from "@/components/chat/MessageList";
 import type { Turn } from "@/stores/chat";
 
+/**
+ * 手搓的轮:`Turn` 的必填字段一个都不能少。
+ *
+ * ⚠️ `tests/` **不在** `tsconfig.web.json` / `tsconfig.server.json` 的 `include`
+ * 里,所以漏填不会被 tsc 抓住 —— 这条注释是替补的守卫:`projectId` 漏成
+ * `undefined` 时,这一轮在任何 `agent_end` 下都收不了口(`undefined !== null`,
+ * 而 `delta` 只认 `messageId`)。所以这里如实给一个项目 id。
+ */
 function turn(
   id: string,
   role: Turn["role"],
   agentId: string | null,
   text: string,
 ): Turn {
-  return { id, role, agentId, blocks: [{ kind: "text", text }], startedAt: 0 };
+  return { id, projectId: "p-test", role, agentId, blocks: [{ kind: "text", text }], startedAt: 0 };
 }
 
 /** 真机库的四个 agent(见 `runtime/org.ts` 的 ORG)。 */

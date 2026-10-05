@@ -15,7 +15,7 @@
  *
  * ── 一条纪律:事件只是「有变更」的信号,真值回查后端 ────────────────
  *
- * WS 推来的 `work_changed` / `artifact_created` / `client_question` 只带增量
+ * WS 推来的 `work_changed` / `client_question` 只带增量
  * (一句 status / 一个 id),不带完整视图。store 因此**不自己拼数据**,只递增
  * `projectRevision` / `projectsRevision`,让页面按需回查 `GET /api/...` 拿权威数据。
  * 这样前后端不会有两份会漂移的真相。
@@ -47,6 +47,16 @@ export type Block =
 export interface Turn {
   /** = 后端那条消息的 `messageId`(轮表的键,见 `ChatState.inFlight`)。 */
   id: string;
+  /**
+   * 这一轮属于哪个**上下文**。取值域与 `message_start` / `tool_start` 信封上的
+   * `projectId` 逐字同义:**`null` = 接待会话**(不是「没有项目」)。
+   *
+   * 为什么轮必须自己记着它(而不是从 store 的 `projectId` 推):一条 WS 连接上
+   * 跑着**所有**项目的事件(`hub.broadcast()` 向所有连接扇出,不按项目过滤),
+   * 而 `agent_end` 要 flush 的只能是**它自己那个上下文**的轮 —— 见下面
+   * `ChatState.inFlight` 里记的那条跨项目截断。
+   */
+  projectId: string | null;
   role: Role;
   blocks: Block[];
   startedAt: number;
@@ -58,8 +68,10 @@ export interface Turn {
    * `tool_start.agentId` / `SessionMessageView.agentId` /
    * `session_messages.agent_id` 四处**逐字同义**,不新造取值域。
    *
-   * A2 只负责**存**(两个能建轮的事件 + REST 回填那条路径);**过滤与标注是 A3 的活**
-   * —— 今天它在渲染层没有读者(见本文件末 `inFlightTurns` 的注释)。
+   * A2 只负责**存**(两个能建轮的事件 + REST 回填那条路径);过滤与标注是 A3 的活,
+   * 而 **A3 已经落地**:`web/src/lib/data.ts` 的 `channelOf` 用它做两跳判定
+   * (`agentId → 成员 role → clientFacing`),`MessageList` 据此把轮分到
+   * 甲方通道 / 内部通道并显示被滤掉的条数。
    */
   agentId: string | null;
 }
@@ -115,7 +127,31 @@ export interface ChatState {
    * - `message_end` 只**收口**自己那一轮(`isStreaming: false` + usage),
    *   **不移出轮表** —— 同一回合后面还可能有它的迟到 delta(§2.10.3 的探针里
    *   `delta(msgA,"BBB")` 就在 `message_end(msgB)` **之后**)。
-   * - `agent_end` 才把整张表按开始顺序一起 flush 进 `turns`。
+   * - `agent_end` 才把**它自己那个上下文**的轮按开始顺序一起 flush 进 `turns`
+   *   (判据是 `turn.projectId === e.projectId` 的**恒等比较** —— 见下面那条
+   *   跨项目截断;`null` = 接待会话,是一个真上下文,不是「通配」)。
+   *
+   * ── 为什么每轮都要记 `projectId`(bug②,实测)────────────────────────
+   *
+   * `appSocket.ts` 把这条连接上的**全部**事件无条件灌进 store,而
+   * `hub.broadcast()` 是向所有连接扇出、**不按项目过滤**的。于是「用户坐在项目 A
+   * 看它流」与「排空器在项目 B 跑 pm/qa」共用同一条事件流,修前的 `agent_end`
+   * **把整张表一起 flush**(不看到底是谁的回合):
+   *
+   *     A message_start(a1) → A delta(a1,"前半")
+   *     B message_start(b1) → B delta(b1,"B 的产出")
+   *     B agent_end        ⇒ a1 被 flush 出表 + inFlight 清空
+   *     A delta(a1,"后半") ⇒ 表里没有 a1 ⇒ **整段丢字(A 被截断)**
+   *
+   * 丢字发生在**数据层**(`delta` 按 `messageId` 认领、找不到就丢 —— §2.10.3
+   * 「不猜角色」的同一条纪律),**渲染层救不了**:从没进过 `inFlight` 的 delta
+   * 没有任何地方能补回来。
+   *
+   * ⚠️ **它不是 A2 引入的**:单槽时代 `delta` 的守卫是
+   * `const cur = get().currentTurn; if (!cur) return;`(`git show b5dac9b^:`
+   * 第 363-364 行),B 的 `agent_end` 把 `currentTurn` 置 null 之后,A 的迟到
+   * delta 同样被丢。A2 改变的是「一次 `agent_end` 能 flush 几轮」—— 那个 N
+   * 现在**可以跨项目**。
    */
   inFlight: Record<string, Turn>;
   /**
@@ -130,11 +166,15 @@ export interface ChatState {
    * **兼容指针**:最近一次被写入的进行中轮(`message_start` / `tool_start` /
    * 任一 delta / `message_end` 都会同步它)。
    *
-   * 它**不是**存储 —— 存储是上面的 `inFlight`;这里留着只是因为渲染层今天
-   * 只读这一个字段(`components/chat/MessageList.tsx`:`{current && <TurnView …/>}`),
-   * 而 A2 **不碰渲染层**(那是 A3)。⚠️ 于是 A2 落地的这一刻,**屏幕上仍然只显示
-   * 一轮** —— 数据层已经不丢字(两轮都在 `inFlight` 里、`agent_end` 后都进 `turns`),
-   * 但「流式期间同时看到两轮」要等 A3 把渲染改成消费 `inFlightTurns()`。
+   * 它**不是**存储 —— 存储是上面的 `inFlight`。
+   *
+   * ⚠️ **今天它在 `web/src/` 里没有读者**(A2 写下这段时说「渲染层只读这一个
+   * 字段」,而 A3 已经落地:`components/chat/MessageList.tsx` 现在消费
+   * `inFlightTurns()` 并把结果过一遍 `partitionTurns`,不再看这个指针)。
+   * 保留并继续维护它有两个理由:
+   *   1. `web/src/stores/chat.ts` 之外仍有测试在读它;
+   *   2. 一个**指向已收口那一轮**的指针是比 `null` 更难查的错 —— 所以 `agent_end`
+   *      只在它指向的轮真的被收口时交接(见那个分支)。
    */
   currentTurn: Turn | null;
   /**
@@ -210,8 +250,14 @@ export interface ChatState {
   applyEvent(e: ServerEvent): void;
 }
 
-const newTurn = (id: string, role: Role, agentId: string | null): Turn => ({
+const newTurn = (
+  id: string,
+  role: Role,
+  agentId: string | null,
+  projectId: string | null,
+): Turn => ({
   id,
+  projectId,
   role,
   blocks: [],
   startedAt: Date.now(),
@@ -241,14 +287,16 @@ function withTurn(
 /**
  * 进行中的轮,按**开始顺序**(渲染层在 `turns` 之后接着渲染这一段)。
  *
- * ⚠️ **这是 A2 交给 A3 的接口。** A3 要做的两件事都在渲染侧:
- *   1. `MessageList` 把 `{current && <TurnView turn={current} streaming />}`
- *      换成 `inFlightTurns(s).map(...)` —— 否则流式期间仍然只看得到**最近写入**的那一轮
- *      (§2.10.3:数据层已经不丢字,但屏幕上少那半段的观感还在);
- *   2. 用 `turn.agentId` 做过滤 / 标注(`agentId === null` = 甲方;
- *      `agentId !== null` 时去 `/api/harness` 的角色表里查 `clientFacing`)。
+ * A2 交出去的那两件事**A3 已经落地**,今天的读者是
+ * `components/chat/MessageList.tsx`:
+ *   1. 它把 `inFlightTurns(...)` 的结果接在 `turns` 之后渲染(不再是单槽
+ *      `currentTurn`)—— §2.10.3「流式期间同时看到两轮」在屏幕上成立;
+ *   2. 它把那一段也过一遍 `partitionTurns(turns/live, ctx)`,`ctx` 由
+ *      `agentId → 成员 role → /api/harness 的 clientFacing` 两跳算出
+ *      (`web/src/lib/data.ts` 的 `channelOf`),被滤掉的条数如实显示。
  *
- * A2 **不做**这两件事,也不替 A3 决定「非甲方轮在甲方视图里留不留」(§2.10.4)。
+ * ⚠️ 它**只按开始顺序返回** —— 不替调用方决定「非甲方轮在甲方视图里留不留」
+ * (§2.10.4 那条决定在渲染层,由 `partitionTurns` 承担)。
  */
 export function inFlightTurns(
   s: Pick<ChatState, "inFlight" | "inFlightOrder">,
@@ -267,8 +315,12 @@ export function inFlightTurns(
  *
  * `agentId` 照抄(`SessionMessageView.agentId`,null = 甲方)—— §2.10.1 记的
  * 「拿到又丢掉」在这里收口;**用它做什么是 A3**。
+ *
+ * `projectId` 由调用方给:回填那条路径自己知道拉的是谁的对话
+ * (`selectProject(id)` 给 `id`,`loadIntakeMessages()` 给 `null`)——
+ * **不从 `Turn` 之外的地方猜**。
  */
-function messageToTurn(m: SessionMessageView): Turn {
+function messageToTurn(m: SessionMessageView, projectId: string | null): Turn {
   const blocks: Block[] = [];
   switch (m.kind) {
     case "thinking":
@@ -284,6 +336,7 @@ function messageToTurn(m: SessionMessageView): Turn {
     m.kind === "user" ? "user" : m.kind === "system" ? "system" : "assistant";
   return {
     id: m.id,
+    projectId,
     role,
     blocks,
     startedAt: m.createdAt,
@@ -346,7 +399,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       // 拉取期间用户可能已经切走 —— 迟到的响应不许覆盖当前项目。
       if (get().projectId !== id) return;
       set({
-        turns: (res.messages ?? []).map(messageToTurn),
+        turns: (res.messages ?? []).map((m) => messageToTurn(m, id)),
         inFlight: {},
         inFlightOrder: [],
         currentTurn: null,
@@ -387,7 +440,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       // 拉取期间用户可能已经切到某个项目 —— 迟到的响应不许覆盖当前上下文。
       if (!get().intakeActive) return;
       set({
-        turns: (res.messages ?? []).map(messageToTurn),
+        turns: (res.messages ?? []).map((m) => messageToTurn(m, null)),
         inFlight: {},
         inFlightOrder: [],
         currentTurn: null,
@@ -404,7 +457,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
     if (!socket) return;
     // 既没选项目、也不在接待会话 —— 没有可发送的上下文(而不是发进 void)
     if (projectId === null && !intakeActive) return;
-    const t = newTurn(`u_${Date.now().toString(36)}`, "user", null);
+    // 这一轮属于**当前上下文**(接待会话 = null)—— 乐观上屏这一轮不进
+    // `inFlight`,所以 `projectId` 在这里只做「这条轮属于哪段对话」的如实标注。
+    const t = newTurn(
+      `u_${Date.now().toString(36)}`,
+      "user",
+      null,
+      intakeActive ? null : projectId,
+    );
     set((s) => ({ turns: [...s.turns, { ...t, blocks: [{ kind: "text", text }] }] }));
     // 接待会话发送 `projectId: null` —— 契约里这就是「第一个项目之前」那条会话
     socket.sendToProject(intakeActive ? null : projectId, text);
@@ -471,8 +531,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
         }
         // 建轮的唯一入口之一(另一个是 tool_start)。`agentId` 在这里落进轮里,
         // 之后就由 `messageId` 认领 —— `delta` 系列事件不带 agentId(§2.10.2)。
+        // `projectId` 同样只在这里落一次:认领靠 `messageId`,而**收口要靠它**。
         set((s) => ({
-          ...withTurn(s, { ...newTurn(e.messageId, "assistant", e.agentId), isStreaming: true }),
+          ...withTurn(s, {
+            ...newTurn(e.messageId, "assistant", e.agentId, e.projectId),
+            isStreaming: true,
+          }),
           status: "streaming",
           error: null,
         }));
@@ -520,7 +584,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
         // `tool_start` **自己也能建轮**(设计 1 §2.10.2 表格第 2 行)—— 它是
         // `agentId` 的另一个构造点。已有该 messageId 的轮时**不覆盖身份**:
         // 身份在建轮那一刻就定了,`tool_start` 不该改写消息的作者。
-        const t = get().inFlight[e.messageId] ?? newTurn(e.messageId, "assistant", e.agentId);
+        // **上下文同理**(`projectId` 跟着已有轮走)—— 否则一个只由 tool_start
+        // 建出来的轮会在 `agent_end` 时被当成「别人家的」而漏收口。
+        const t =
+          get().inFlight[e.messageId] ??
+          newTurn(e.messageId, "assistant", e.agentId, e.projectId);
         set((s) => ({
           ...withTurn(s, { ...t, blocks: [...t.blocks, { kind: "tool", tool: e.tool }] }),
         }));
@@ -555,21 +623,41 @@ export const useChatStore = create<ChatState>((set, get) => ({
         return;
       }
       case "agent_end": {
-        // 整张轮表按**开始顺序**flush —— 一个回合里可以有多条消息(§2.10.3 的
-        // 现场就是两条),单槽时代这里只能 append 一条。
+        // 整张轮表按**开始顺序**flush,但**只 flush `e.projectId` 那个上下文的轮**
+        // —— 一条 WS 连接上跑着所有项目的事件(见 `ChatState.inFlight` 里记的
+        // bug② 现场)。判据是恒等比较:`null`(接待会话)是一个真上下文,
+        // **不是通配**;所以别的项目的 `agent_end` 既清不动本项目正在流的轮,
+        // 也不会被本项目的 `agent_end` 顺手清掉。
         set((s) => {
-          const finished = inFlightTurns(s).map((t) => ({
+          const mine = inFlightTurns(s).filter((t) => t.projectId === e.projectId);
+          const finished = mine.map((t) => ({
             ...t,
             endedAt: Date.now(),
             isStreaming: false,
           }));
+          const flushed = new Set(mine.map((t) => t.id));
+          const kept = {
+            inFlight: Object.fromEntries(
+              Object.entries(s.inFlight).filter(([id]) => !flushed.has(id)),
+            ),
+            inFlightOrder: s.inFlightOrder.filter((id) => !flushed.has(id)),
+          };
+          const stillLive = inFlightTurns(kept);
           return {
             turns: finished.length > 0 ? [...s.turns, ...finished] : s.turns,
-            inFlight: {},
-            inFlightOrder: [],
-            currentTurn: null,
-            status: "idle",
+            ...kept,
+            // 兼容指针只在**它指向的轮真的被收口**时交接:`withTurn` 的语义是
+            // 「最近一次被写入的进行中轮」,所以交接给还活着的那一轮(没有才 null)。
+            // 直接置 null 会让别的项目收口把本项目的指针打空 —— 与「清空轮表」
+            // 是同一个错的两种叫法。
+            currentTurn: stillLive.length > 0 ? (stillLive[stillLive.length - 1] ?? null) : null,
+            // **还有回合在流时不许回到 idle**:`ChatSurface.tsx:112` 的发送键正是
+            // `status === "streaming"` 才禁用,别的项目一收口就解锁发送,等于允许
+            // 用户在本项目还在推演时再发一句;顶部「推演中」(同文件 :90)也吃这个值。
+            status: stillLive.length > 0 ? "streaming" : "idle",
             // 一轮结束 = 工作项 / 工件大概率被改过 —— 让页面回查。
+            // (两个 revision 仍然无条件推:排空器改的可能是**别的**项目,
+            //  左栏徽标与项目详情都该有机会回查。)
             projectRevision: s.projectRevision + 1,
             projectsRevision: s.projectsRevision + 1,
           };
@@ -592,11 +680,15 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
       case "client_question":
       case "client_question_answered":
-      case "artifact_created":
       case "work_changed":
       case "blocker_changed": {
         // 事件只是「有变更」的信号,真值回查后端(见文件头)。两个戳分开是有意的:
         // 别的项目来了一个问题 → 左栏徽标该动,但当前项目的详情不该重拉。
+        //
+        // ⚠️ `artifact_created` **曾经**在这个 case 组里 —— 它被删掉是因为
+        // `hub.emitArtifactCreated` **零调用方**(B3 实测):这条分支从来不会到达,
+        // 而它做的事与 `agent_end` 逐字相同(两个 revision 都 +1)⇒ 接上它也不会
+        // 产生任何可观察差异。删「照不到的分支」,不删契约里的类型(见报告)。
         const pid = eventProjectId(e);
         const active = get().projectId;
         set((s) => ({
