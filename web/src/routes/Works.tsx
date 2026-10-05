@@ -40,7 +40,13 @@ export function WorksPage() {
       <PageHeader
         title="工作项"
         hint={projectName}
-        hintTitle="数据来源:GET /api/projects/:id/works。契约没有跨项目的 /api/works —— 工作项总是属于某个项目。状态取值来自契约 WorkStatus。"
+        hintTitle={
+          "数据来源:GET /api/projects/:id/works。契约没有跨项目的 /api/works —— 工作项总是属于某个项目。" +
+          "状态取值来自契约 WorkStatus。" +
+          "⚠️ 同一批工作项也画在「工件」页的**推进图**上(横轴 = 时间,一条工作项一道," +
+          "条 = 创建 → 收口,条上的刻度 = 它产出的工件,未终态的条右端开口到「此刻」)——" +
+          "这一页答的是「它是什么、派给谁、等谁」,那一页答的是「什么时候发生的」。"
+        }
         aside={
           <div className="flex items-center gap-2 flex-wrap">
             <select

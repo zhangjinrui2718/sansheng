@@ -26,6 +26,24 @@ export interface OrgMember {
  * (`engineering|algorithm|data`)而不是自由文本 —— 经校准的裁决:枚举是
  * 代码内常量,自由文本是数据;前者要改得走代码评审,后者谁都能改。
  * 想加「前端」时改的是代码,那是**特性不是缺陷**。
+ *
+ * ── ⚠️ 这四个 `name` 是**界面里角色中文名的唯一来源**(2026-10-06)────────
+ *
+ * 在此之前同一个角色在界面上有**三个名字**:harness 页读 `transport/http.ts`
+ * 一张私有表(写成 `Worker(执行者)` —— 一个名字里塞进一句解释),成员页读
+ * `agents.display_name`(播种值 = 本表),而前端 `lib/vocab.ts` 的兜底表又写成
+ * `执行者` / `质检审查员`。用户的原话是「harness 页面和成员页面四个角色的命名
+ * 统一一下,就不要有解释了」。
+ *
+ * 现在:
+ *   - 播种(`ensureOrg` / `ensureProjectOrg`)用本表;
+ *   - `RoleHarnessView.displayName` 走 `roleDisplayName()`,**也**读本表;
+ *   - 前端 `ROLE_LABEL` 的兜底值与本表逐项相同,并由
+ *     `tests/web/role-names.test.ts` 做**跨边界对照**(两边不许再漂)。
+ *
+ * ⚠️ 设计文档(`docs/DESIGN-AGENTS.md`)的角色表用的是**代号读法**(`Worker` /
+ * `质检审查员`)—— 那是文档对**角色**的称呼,不是运行期显示名;本表才是运行期的
+ * 那一份。改这里不必改文档,反之亦然,但**两处都不许再长出第三份**。
  */
 export const ORG: readonly OrgMember[] = [
   { id: "bm", role: "business_manager", spec: null, name: "业务经理" },
@@ -33,6 +51,17 @@ export const ORG: readonly OrgMember[] = [
   { id: "wk", role: "worker", spec: "engineering", name: "工程师" },
   { id: "qa", role: "quality_reviewer", spec: null, name: "质检" },
 ];
+
+/**
+ * 角色的**界面显示名**(中文)—— `ORG` 是唯一来源。
+ *
+ * 查不到时兜底返回 `role`(英文代号)而不是空串:界面上出现 `worker` 是
+ * **看得出来的**「这个名字没配」,而空串在屏幕上只是一片空白(与 `vocab.ts`
+ * 「未知取值原样透出,不猜」同一条纪律)。
+ */
+export function roleDisplayName(role: ProjectRole): string {
+  return ORG.find((m) => m.role === role)?.name ?? role;
+}
 
 /**
  * 按需播种组织。**幂等**,但返回本次新建了哪些 —— 幂等不等于静默:

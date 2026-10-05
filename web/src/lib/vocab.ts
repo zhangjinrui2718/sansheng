@@ -193,14 +193,20 @@ export const CHANGE_STATUS_TONE: Record<ChangeStatus, Tone> = {
 // ── 角色 ────────────────────────────────────────────────────────
 
 /**
- * 四角色中文名。**兜底表** —— 后端在 MemberView / RoleHarnessView 里都给了
+ * 四角色中文名。**兜底表** —— 后端在 `MemberView` / `RoleHarnessView` 里都给了
  * `displayName`,页面优先用那个;这里只在字段缺失时用。
+ *
+ * ⚠️ **这四个词必须与 `src/platform/runtime/org.ts` 的 `ORG` 逐项相同**(2026-10-06)。
+ * 在此之前这里写的是「执行者 / 质检审查员」,而 harness 页写的是
+ * 「Worker(执行者)」、成员页读库里的「工程师 / 质检」—— 同一个角色三个名字,
+ * 而且其中一个名字里塞着解释。`tests/web/role-names.test.ts` 是一条**跨边界对照**:
+ * 这两张表之间再加一层漂移就会红。
  */
 export const ROLE_LABEL: Record<ProjectRole, string> = {
   business_manager: "业务经理",
   project_manager: "项目经理",
-  worker: "执行者",
-  quality_reviewer: "质检审查员",
+  worker: "工程师",
+  quality_reviewer: "质检",
 };
 
 // ── 读取器(未知值原样透出,绝不猜)────────────────────────────

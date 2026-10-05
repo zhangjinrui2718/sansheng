@@ -258,7 +258,7 @@ describe("① 一次只渲染一个成员(这一版要修的正是「四个人�
     expect(text, "出现了业务经理独有的发言").not.toContain(BM_MSG_EXCERPT);
 
     // 正样本:工程师自己的三样都在(证明上面的负样本不是「整页啥都没渲染」)
-    expect(text).toContain("执行者");
+    expect(text, "角色名(与 harness 页同一个词)").toContain("工程师");
     expect(text).toContain(WK_TODO_LABEL);
     expect(text).toContain(WK_ARTIFACT_TITLE);
     expect(text).toContain(WK_MSG_EXCERPT);
@@ -300,8 +300,11 @@ describe("① 一次只渲染一个成员(这一版要修的正是「四个人�
     const text = visible(html);
     expect(text).toContain("业务经理");
     expect(text).toContain("工程师");
-    // 页签上把角色中文也写出来(主体是**人**,不是角色)
-    expect(text).toContain("执行者");
+    // ⚠️ 页签上**只有角色名**(2026-10-06):以前页签是「人 + 角色 Pill」两段,
+    // 而在「一人一角色」的组织里那两个词一模一样 ⇒ 屏幕上成了「工程师 执行者」。
+    // 现在主体就是角色名(与 harness 页逐字相同),人的名字进 tooltip。
+    expect(text, "角色名只出现一次语义,不再有第二个说法").not.toContain("执行者");
+    expect(text).not.toContain("质检审查员");
   });
 
   it("面板里的折叠块默认都不展开(否则一屏又被消息与常量刷满)", () => {

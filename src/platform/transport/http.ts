@@ -31,7 +31,7 @@ import {
 import { getWork } from "../storage/repo/works.js";
 import { getArtifact } from "../storage/repo/artifacts.js";
 import { resolveClientQuestion } from "../tools/client.js";
-import { ensureOrg, ensureProjectOrg, orgReady } from "../runtime/org.js";
+import { ensureOrg, ensureProjectOrg, orgReady, roleDisplayName } from "../runtime/org.js";
 import { loadPromptUnits, unitPath } from "../runtime/promptAssembly.js";
 import { solveToolset } from "../harness/authorize.js";
 import { resolveToolSet, strayToolSetFiles, toolSetDir } from "../harness/toolSet.js";
@@ -660,15 +660,16 @@ function unitContent(dataDir: string, unitId: string): string {
   }
 }
 
-const DISPLAY: Readonly<Record<ProjectRole, string>> = {
-  business_manager: "业务经理",
-  project_manager: "项目经理",
-  worker: "Worker(执行者)",
-  quality_reviewer: "质检审查员",
-};
-
+/**
+ * ⚠️ 这里**不再**有自己的名字表(2026-10-06)。它原来写着
+ * `worker: "Worker(执行者)"` —— 同一个角色在 harness 页与成员页各有一个名字,
+ * 而且其中一个还带括号解释。用户的原话:「四个角色的命名统一一下,就不要有解释了」。
+ *
+ * 现在只有一处:`runtime/org.ts` 的 `ORG`(`roleDisplayName`),与组织播种共用
+ * 同一张表 —— 界面显示名与 `agents.display_name` 从而**结构上**不会漂。
+ */
 function displayNameOf(role: ProjectRole): string {
-  return DISPLAY[role];
+  return roleDisplayName(role);
 }
 
 // ── 成员页的「他产生了什么对话」清单 ──────────────────────────────

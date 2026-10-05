@@ -2,7 +2,113 @@
 
 ---
 
-# ⚡ 最新一轮 · W4(2026-10-06)· **先读这一节**
+# ⚡ 最新一轮 · W5(2026-10-06)· **先读这一节**
+
+> 上一轮(W4:产出图 DAG + 成员页分栏 + `live` 读面)的那一节在下面,**仍然有效**;
+> 这一节的第 2、3 条**取代**了 W4 的「工件页主视图 = 分层 DAG」。
+
+用户逐字提的三条:
+
+> 1. harness 页面 和 成员页面 的 四个角色的命名统一一下,就不要有解释了
+> 2. 工件这个 dag 看看有没有开源组件可以用的,现在都缠在一起了,另外我觉得好一点的展示是:
+>    横轴是时间,纵轴是工件的类型,即使没在 dag 上的工件也可以放在这个图表里面了
+> 3. 可以想办法把工作项的完成和工件的产出也标在这个图表里面,或者有方法将工作项和工件合并成一个页面
+
+## 状态
+
+```
+W5  `本次提交` feat(web): 角色命名统一 + 工件页主视图换成时间轴泳道
+1363 passed / 65 files · 两条 typecheck 0 · npm run build 绿 · check:design E1–E14 绿 · as any 0
+新增:`web/src/lib/timeline.ts`(布局纯函数)· `.probe/w5-{artifacts,members}-preview.html`
+```
+
+## ① 命名统一:三个名字 → 一个来源
+
+查下来的事实(每一条都能 grep 到):
+
+| 界面 | 当时显示 | 来源 |
+|---|---|---|
+| harness 页 | `Worker(执行者)` / `质检审查员` | `transport/http.ts` 的私有表 `DISPLAY` |
+| 成员页 | `工程师` / `质检` | `agents.display_name`(播种自 `runtime/org.ts` 的 `ORG`) |
+| 前端兜底 | `执行者` / `质检审查员` | `web/src/lib/vocab.ts` 的 `ROLE_LABEL` |
+
+**现在**:唯一来源 = `runtime/org.ts` 的 `ORG`(播种 + `roleDisplayName()` 给 harness 视图,**同一张表**);
+前端 `ROLE_LABEL` 逐项对齐(业务经理 / 项目经理 / 工程师 / 质检);
+`tests/web/role-names.test.ts` 做**跨边界对照**(前端不能 import 服务端模块,所以这件事只能由测试钉),
+负样本是「名字里出现括号 / 斜杠 / 空格 / 长度 > 6」—— 「不要有解释」的机器表达(`Worker(执行者)` 正是被它挡下的那种写法)。
+
+页面侧:两个页面的页签**都只写角色名**;成员面板标题改成角色名(以前是 `人 + 角色 Pill`,一人一角色的组织里那两个词一模一样 ⇒ 屏幕上「工程师 [工程师]」);harness 页签上那个「甲方」pill 拿掉了(事实留在面板里写全「甲方接口」)。
+
+## ② 工件页主视图:分层 DAG → 时间轴泳道
+
+**「缠在一起」的根因(真机渲染图证实,不是猜测)**:把真库副本渲染出来看,五条工作项全叠在一列、
+边互相穿。原因是数据里**真的有环** ——
+
+```
+wk_muv0khuui (根)  --parent-->  wk_muv0kv04i (整合)
+wk_muv0khuui (根)  --depends_on--> wk_muv0kv04i        ← 同一条边反向,环
+```
+
+⇒ Kahn 分层把 5 个节点**全部**收进「排不出先后」那一列。**分层 DAG 对这份数据在结构上给不出可读的图**;
+而时间轴上 x 是时间的函数,**位置不需要解**,所以不存在交叉。
+
+| 维度 | 落点 |
+|---|---|
+| x | 时间(`timelineTicks`:自适应步长、整步长对齐、相邻标签间距 ≥ 60px) |
+| y | 上区**一条工作项一道**(条 = 创建 → 收口),下区**一种工件 kind 一道**(点 = 一件工件) |
+| 工件 | **每一件都画**,含 `workId === null` 的决策 / 会议 / 变更 / 甲方问答(这正是用户要的「没在 dag 上的也放进图表」) |
+| 完成的标记 | 条尾端点:终态实心(**收口**)、未终态开口 + 右端 = 此刻。⚠️ 文案只写「**最后一次变更**」—— `works.updated_at` 会被 `markWorkReviewed` 碰一次,它不是精确完成时刻(要精确得加列,本轮**没有**加,理由是「不回填 ⇒ 对现有行没有值 ⇒ 今天看不到差别」) |
+| 产出的标记 | 条上的**里程碑刻度**(每个工件一个小刻度)⇒ 完成与产出在同一行,且**不画任何边** |
+| 分层 DAG | 保留**全部组件**,收进默认折叠的「依赖关系图」;`artifact-dag.test.ts`(22 条)**一字未改**仍绿(折叠的 `<details>` 在 SSR 里照样渲染内部 markup) |
+
+## ③ 开源组件:调研结论(**没有采用**,理由是可验的)
+
+| 候选 | 实测量级 | 为什么不用 |
+|---|---|---|
+| `recharts` | 566KB min / **151.5KB gzip**、11 个依赖 | 现有前端 bundle 339.76KB(gzip 108KB);它是通用图表,**这张图仍要自己拼**(散点 + 自定义 mark),换了只是把 45% 的体积换来一套用不上的通用机制 |
+| `echarts` | 通用图表 + canvas | 同样不直接给「泳道 × 时间 + 跨度条 + 里程碑刻度」;canvas 还丢掉 SSR 可断言性(本项目的判据全靠 `renderToStaticMarkup`) |
+| `d3-scale` | 47KB min / 16KB gzip、5 个依赖 | **真正需要的那一点点**(线性刻度 + 时间刻度)是 ~40 行纯函数,已经写了并带 25 条测试 |
+| Gantt 类组件([uay-react-tailwind-gantt](https://github.com/uay/uay-react-tailwind-gantt)、[wx-react-gantt](https://www.npmjs.com/package/wx-react-gantt)) / 时间线库([tempis](https://github.com/tempis-dev/tempis)) | —— | 它们的数据模型是「任务 = 有起止 + 依赖」,而这里要画的是**瞬时点(工件)+ 另一种分类轴(kind)**,套进去要跟它的模型打架 |
+
+**结论**:这张图没有现成组件;位置由时间决定之后实现成本本来就低,所以**零新依赖**——
+`web/src/lib/timeline.ts` 是纯函数(25 条测试),渲染是 SVG,判据是 SSR 断言。
+(如果以后要缩放 / 平移 / 复杂交互,最小的接法是 `@visx/scale`(只补刻度),不是整套图表库。)
+
+## 真机验证方式(这一轮新增的能力)
+
+**QuickLook 能把影子页面渲染成 PNG,所以这次是「看图改的」**,不是只看 markup:
+
+```
+cp -R ~/.sansheng /tmp/ss-v5
+node dist/src/cli/index.js platform-serve --data /tmp/ss-v5 --port 2733 \
+     --dispatch-interval 3600000 --scheduler-interval 3600000 &
+PORT=2733 TSX_TSCONFIG_PATH=tsconfig.web.json npx tsx .probe/w5-preview.tsx
+mkdir -p /tmp/ql && qlmanage -t -s 1500 -o /tmp/ql .probe/w5-artifacts-preview.html   # → PNG,可直接看
+```
+
+看图改出来的三处(**只看 markup 是发现不了的**):
+
+1. **泳道名溢出被裁**:右对齐的长标题溢出到 `x < 0`,屏幕上剩半截「础打断模块方案设计」——
+   ⇒ 栏宽 148 → **176**,新增 `clipLabel()`(汉字 11px / ASCII 6.5px 估算)截断 + 全文进 tooltip;
+2. **时间域被硬撑成 1 小时**:真数据跨度 31 分钟,最小跨度常量是 60 分钟 ⇒ 图上左右各空四分之一。
+   ⇒ `TL_MIN_SPAN_MS` 60min → **2min**(只有「几乎同一秒」才需要撑开);
+3. **最右刻度标签被视口裁成「17:」** ⇒ 贴边刻度改 `text-anchor: end`。
+
+`.probe/tl-probe.mts` 是配套的只读诊断(打印真数据上的 domain / ticks / 泳道名宽度)。
+
+## 验收链(本次实跑)
+
+```
+npx tsc -p tsconfig.server.json --noEmit   # 0 error
+npx tsc -p tsconfig.web.json --noEmit      # 0 error
+npm test                                   # 1363 passed / 65 files
+npm run check:design                       # ✓ E1–E14
+grep -rn 'as any' src/ web/src/            # 0
+```
+
+---
+
+# ⚡ 上一轮 · W4(2026-10-06)
 
 > 上一轮(W3:刷新缺口的闭合 + 文档欠账 + 端到端)的那一节在下面,**仍然有效**。
 > 这一节是一次**前端可读性迭代**,起源于用户逐字提的三条:

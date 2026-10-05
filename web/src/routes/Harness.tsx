@@ -171,12 +171,12 @@ export function HarnessRoleTabs({
               borderColor: isActive ? "var(--ink-4)" : "transparent",
             }}
           >
+            {/* ⚠️ 页签上**只有名字**(2026-10-06):以前这里还有一个「甲方」pill,
+                而名字本身写成 `Worker(执行者)` —— 用户的原话是「四个角色的命名
+                统一一下,就不要有解释了」。名字一律来自 `RoleHarnessView.displayName`
+                (= `runtime/org.ts` 的 ORG,与成员页同一张表);「它面向甲方」这条事实
+                留在**面板**里(那一块有位置写全「甲方接口」)。 */}
             <span style={{ fontSize: 12 }}>{r.displayName}</span>
-            {r.clientFacing && (
-              <Pill tone="jade" title="只有它直接对甲方说话(clientFacing)">
-                甲方
-              </Pill>
-            )}
             {issues > 0 && (
               <Pill
                 tone="cinnabar"
@@ -420,7 +420,7 @@ export function HarnessPage() {
    * 编辑中的正文,**按 unit id 存**。
    *
    * 为什么放在父层而不是每个 textarea 各存一份:同一个单元会被多个角色声明 ——
-   * `collaboration.ask` 同时属于项目经理 / 执行者 / 质检审查员。若各存各的,
+   * `collaboration.ask` 同时属于项目经理 / 工程师 / 质检。若各存各的,
    * 在 A 角色改完保存,B 角色那张卡还会显示旧正文,用户会以为「没生效」。
    * 一份草稿 + 一份盘上正文(`unit.content`)就避免了这种自相矛盾。
    */

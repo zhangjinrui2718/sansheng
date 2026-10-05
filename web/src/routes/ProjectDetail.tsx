@@ -13,7 +13,7 @@
  *
  * 两者都叫「提问」,但**收件人完全不同**:
  *
- *   - `AskView`(本页「内部协作」区)= 角色问角色,例如执行者问项目经理。
+ *   - `AskView`(本页「内部协作」区)= 角色问角色,例如工程师问项目经理。
  *     甲方不是对话的一方,看了也插不上手 → 区块标成「内部协作」,理由是
  *     「不用你处理」;
  *   - `ClientQuestionView`(本页「待你回答」区 + 待办页)= 等甲方拍板,
@@ -118,7 +118,7 @@ export function ProjectDetailPage() {
 
           <Section title="成员" count={detail.members.length}>
             {detail.members.length === 0 ? (
-              <EmptyState>还没有成员。四个角色:业务经理 / 项目经理 / 执行者 / 质检审查员。</EmptyState>
+              <EmptyState>还没有成员。四个角色:业务经理 / 项目经理 / 工程师 / 质检。</EmptyState>
             ) : (
               <div className="sansheng-card px-3 py-1.5">
                 {detail.members.map((m) => (

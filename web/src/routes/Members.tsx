@@ -296,8 +296,10 @@ export function MemberRoleTabs({
               borderColor: isActive ? "var(--ink-4)" : "transparent",
             }}
           >
-            <span style={{ fontSize: 12 }}>{m.displayName}</span>
-            <Pill tone="mute">{ROLE_LABEL[m.role]}</Pill>
+            {/* ⚠️ 页签主体 = **角色名**(与 harness 页逐字相同,2026-10-06)。
+                人的名字(`agents.display_name`)进 tooltip:一人一角色的组织里它与
+                角色名一模一样,同时显示两遍就是用户说的「解释」。 */}
+            <span style={{ fontSize: 12 }}>{ROLE_LABEL[m.role]}</span>
             {/* 有回合在跑 = 实时点(会呼吸);读不到 = 灰点且不动 —— 两种状态在
                 视觉上必须分得开,`.ss-live-dot[data-state="unknown"]` 正是为此存在。 */}
             {turn !== null ? (
@@ -428,11 +430,11 @@ export function MemberPane({
 
   return (
     <Section
-      title={member.displayName}
-      // ⚠️ 这里刻意**不再**复述角色中文:摘要行里已经有一个角色 Pill(而且页签上
-      // 还有一个)。同一屏里同一个词出现三次,正是上一版可读性差的那种冗余。
-      // 悬停仍然给全:`agentId` / `role` 都在 hintTitle 里。
-      hintTitle={`agentId = ${member.id} · role = ${member.role}`}
+      // ⚠️ 标题 = **角色名**(与页签、与 harness 页逐字相同,2026-10-06)。
+      // 以前这里是 `member.displayName`,而摘要行里又紧跟一个角色 Pill —— 一人一
+      // 角色的组织里那两个词一模一样,屏幕上就成了「工程师 [工程师]」。
+      title={ROLE_LABEL[member.role]}
+      hintTitle={`agentId = ${member.id} · role = ${member.role} · agents.display_name = ${member.displayName}`}
       aside={
         <span className="ss-meta font-mono" title="role —— 角色是**属性**,身份是 agentId(摘要行里那个等宽小字)">
           {member.role}
@@ -442,12 +444,13 @@ export function MemberPane({
       <article className="sansheng-card p-3 flex flex-col gap-3">
         {/* ── ① 摘要行:这个人是谁 + **此刻**在不在跑 ─────────────── */}
         <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
-          <span className="ss-body" style={{ color: "var(--bone)" }}>
-            {member.displayName}
-          </span>
-          <Pill tone="jade" title={`role = ${member.role}(代码内常量,不可改)`}>
-            {ROLE_LABEL[member.role]}
-          </Pill>
+          {/* 人的名字只在**与角色名不同**时才写出来(它是数据,可以被人改;
+              同名的场合再写一遍就是冗余 —— 角色名已经在标题与页签上了)。 */}
+          {member.displayName !== ROLE_LABEL[member.role] && (
+            <span className="ss-body" style={{ color: "var(--bone)" }}>
+              {member.displayName}
+            </span>
+          )}
           {member.specialization !== null && (
             <span className="ss-meta" title={`specialization = ${member.specialization}`}>
               专长 {member.specialization}
@@ -993,7 +996,7 @@ export function MembersPage() {
       <Section
         title="本项目成员一览"
         count={members.data.length}
-        hint="四个固定职能:业务经理 / 项目经理 / 执行者 / 质检审查员"
+        hint="四个固定职能:业务经理 / 项目经理 / 工程师 / 质检"
         hintTitle="这一行是**组织**的答案(谁在这个项目里);上面那行页签是**运行**的答案(他们此刻在干什么)。"
       >
         {members.data.length === 0 ? (

@@ -21,7 +21,7 @@
  * ⚠️ 排空定时器与调度器都要调大:宿主跑在**真数据的副本**上,不该顺手跑起一个回合
  * (`--data` 指向副本,所以真库一个字节都不会被改)。
  *
- * 产物:`.probe/w4-artifacts-preview.html` / `.probe/w4-members-preview.html`
+ * 产物:`.probe/w5-artifacts-preview.html` / `.probe/w5-members-preview.html`
  * (内联 dist/web 的构建 CSS,双击即可看;纯静态,没有任何脚本)。
  */
 import { writeFileSync, readdirSync, readFileSync } from "node:fs";
@@ -32,7 +32,7 @@ import type {
   ArtifactView, HarnessView, MemberActivityView, MemberConversationView,
   MemberView, ProjectLiveView, ProjectSummary, WorkView,
 } from "@shared/types/platform";
-import { ArtifactsBody } from "@/routes/Artifacts";
+import { ArtifactsScreen } from "@/routes/Artifacts";
 import { MemberPane, MemberRoleTabs } from "@/routes/Members";
 
 const PORT = process.env.PORT ?? "2732";
@@ -86,10 +86,11 @@ const richest =
     .sort((x, y) => y.n - x.n)[0]?.w.id ?? null;
 
 const artifactsBody = renderToStaticMarkup(
-  createElement(ArtifactsBody, {
+  createElement(ArtifactsScreen, {
     works,
     artifacts,
     live: { runtime: live.runtime, agents: live.agents },
+    now: Date.now(),
     picked: richest,
     onPick: () => {},
     openId: null,
@@ -98,9 +99,9 @@ const artifactsBody = renderToStaticMarkup(
 );
 
 writeFileSync(
-  join(process.cwd(), ".probe/w4-artifacts-preview.html"),
+  join(process.cwd(), ".probe/w5-artifacts-preview.html"),
   page(
-    "W4 预览 · 工件页",
+    "W5 预览 · 工件页(推进图)",
     `静态影子(无脚本)· 数据来自 <code>${BASE}</code> 上的真数据副本 · 项目「${project.name}」· ` +
       `${works.length} 个环节 / ${artifacts.length} 件工件(其中 ` +
       `${artifacts.filter((a) => a.workId !== null).length} 件挂在环节上)· ` +
@@ -151,7 +152,7 @@ const panes = members
   .join("\n");
 
 writeFileSync(
-  join(process.cwd(), ".probe/w4-members-preview.html"),
+  join(process.cwd(), ".probe/w5-members-preview.html"),
   page(
     "W4 预览 · 成员页",
     `静态影子(无脚本)· 数据来自 <code>${BASE}</code> 上的真数据副本 · 项目「${project.name}」· ` +
@@ -165,5 +166,5 @@ writeFileSync(
 );
 
 console.log("写好了:");
-console.log("  .probe/w4-artifacts-preview.html");
-console.log("  .probe/w4-members-preview.html");
+console.log("  .probe/w5-artifacts-preview.html");
+console.log("  .probe/w5-members-preview.html");
