@@ -17,8 +17,7 @@
 ## 状态
 
 ```
-W9  🔖 提交号见紧随其后的 docs(handoff) 提交
-    feat(web): 平台通知落到项目页「组织运行态」+ 对话页只留一行摘要
+W9  16747a0 feat(web): 平台通知落到项目页「组织运行态」+ 对话页只留一行摘要
 1405 passed / 66 files · 两条 typecheck 0 · npm run build 绿 · check:design E1–E14 绿 · as any 0
 ```
 
