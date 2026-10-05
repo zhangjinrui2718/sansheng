@@ -47,6 +47,7 @@ import type {
   MemoryFragmentView,
   MessagesResponse,
   ProjectDetail,
+  ProjectLiveView,
   ProjectStatus,
   ProjectSummary,
   ProjectUsageResponse,
@@ -337,6 +338,20 @@ export function getArtifact(id: string): Promise<{ artifact: ArtifactView }> {
 /** 本项目成员(四个固定职能)。`ProjectDetail` 里也带 members,这一条给成员页单独用。 */
 export function listMembers(projectId: string): Promise<{ members: MemberView[] }> {
   return request<{ members: MemberView[] }>(`/projects/${encodeURIComponent(projectId)}/members`);
+}
+
+/**
+ * 本项目**此刻**的运行态(成员页「正在做什么」区 + 工件页 DAG 的在跑标记)。
+ *
+ * 与 `/members` 分成两条端点,理由见契约:那个是**身份**(稳定、可缓存),
+ * 这个是**运行态**(每次都在变,而且读宿主内存 ⇒ 天然不可缓存)。
+ *
+ * ⚠️ 响应里的 `runtime: "unavailable"` 表示**这个进程没接上运行期快照**
+ * (`turn` 一律为 `null`)。调用方**不许**把它显示成「空闲」—— 「读不到」与
+ * 「没在跑」是两件事,而这个页面的读者正是被这类假象坑过的人。
+ */
+export function getProjectLive(projectId: string): Promise<{ live: ProjectLiveView }> {
+  return request<{ live: ProjectLiveView }>(`/projects/${encodeURIComponent(projectId)}/live`);
 }
 
 // ── 待甲方答的问题 ──────────────────────────────────────────────

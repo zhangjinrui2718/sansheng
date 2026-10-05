@@ -243,6 +243,76 @@
   .ss-pill[data-tone="ochre"] { background: rgba(199, 107, 74, 0.16); color: var(--ochre); }
   .ss-pill[data-tone="bone"] { background: var(--ink-3); color: var(--bone-dim); }
 
+  /* ── 运行态:工件页 DAG 与成员页「正在做什么」共用的一组构件 ──────────
+   *
+   * 这三个类只做**一件事**:让「此刻在动」在屏幕上有一个**会动**的形态。
+   * 用户的原话是「我担心系统已经挂了,而实际还在运行」—— 一个静态的「进行中」
+   * 标签与一个已经停了的状态在静止的画面上长得一样,而**动**是骗不了人的。
+   *
+   * 克制是刻意的:只用一个 1.6s 的呼吸点,不做流动边、不做发光卡片 —— 页面上
+   * 同时最多四个角色在跑,动效多了反而看不出哪一格在动。 */
+  .ss-live-dot {
+    display: inline-block;
+    width: 6px;
+    height: 6px;
+    border-radius: 999px;
+    background: var(--jade);
+    animation: ss-breathe 1.6s ease-in-out infinite;
+  }
+  /* 「读不到运行态」不是「空闲」—— 它是**灰的、不动的**,并且必须带文字说明
+     (颜色单独承担不了这个区别:色盲用户与截图里都分不出来)。 */
+  .ss-live-dot[data-state="unknown"] {
+    background: var(--bone-mute);
+    animation: none;
+  }
+  @keyframes ss-breathe {
+    0%, 100% { opacity: 1; box-shadow: 0 0 0 0 rgba(123, 168, 118, 0.5); }
+    50% { opacity: 0.55; box-shadow: 0 0 0 4px rgba(123, 168, 118, 0); }
+  }
+  /* 动效敏感的用户:关掉呼吸,只保留那个点(信息不丢,只是不闪)。 */
+  @media (prefers-reduced-motion: reduce) {
+    .ss-live-dot { animation: none; }
+  }
+
+  /* 产出图(DAG)的画布:节点是绝对定位的卡片,边是它下面的一层 SVG。 */
+  .ss-dag {
+    position: relative;
+    overflow: auto;
+    background: var(--ink-1);
+    border: 1px solid var(--ink-3);
+    border-radius: 6px;
+  }
+  .ss-dag-edges {
+    position: absolute;
+    top: 0;
+    left: 0;
+    pointer-events: none;
+  }
+  /* 一条环节卡片。`[data-running]` 只加**边框**,不加底色 —— 卡片自己已经用
+     Pill 表达了状态色,再染一层会让「在跑」与「已完成」看起来一样重。 */
+  .ss-dag-node {
+    position: absolute;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding: 6px 8px;
+    border: 1px solid var(--ink-3);
+    border-radius: 6px;
+    background: var(--ink-2);
+    text-align: left;
+    cursor: pointer;
+    overflow: hidden;
+  }
+  .ss-dag-node[data-running="true"] { border-color: var(--jade); }
+  .ss-dag-node[data-selected="true"] {
+    border-color: var(--bone);
+    background: var(--ink-3);
+  }
+  /* 已经不挂在任何环节上的工件区块:安静一点,不与主图争注意力。 */
+  .ss-dag-orphan {
+    opacity: 0.85;
+  }
+
   /* 多行截断 —— 配合 <Disclosure> 的「展开」,首屏不再被长正文推走 */
   .ss-clamp-2,
   .ss-clamp-3,

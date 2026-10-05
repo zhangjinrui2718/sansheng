@@ -42,9 +42,11 @@ import {
   listAllClientQuestions,
   listProjectArtifacts, listProjectAsks, listProjectBlockers,
   listProjectChanges, toProjectDetail, listProjectMembers,
-  listProjectMessages, listProjectSummaries, toArtifactView, toProjectSummary,
+  listProjectMessages, listProjectSummaries, toArtifactView, toProjectLiveView,
+  toProjectSummary,
   toMessageView, toProjectUsageView,
   toWorkView,
+  type LiveCollectOptions, type LiveRuntimeSnapshot,
 } from "./views.js";
 import {
   aggregateProjectUsage, normalizeUsageDayLimit, normalizeUsageDays,
@@ -75,6 +77,28 @@ export interface HttpDeps {
   /** 注入时钟 / id(测试可控) */
   readonly now: () => number;
   readonly newId: (prefix: string) => string;
+  /**
+   * **宿主运行期快照**(忙闩 + 兜底定时器心跳 + 正在排空的项目)—— 只读。
+   *
+   * 它回答的是**「现在」**,而这件事只有宿主的内存知道:`works` 里没有「正在跑」
+   * 这一列,`turn_usage` 是回合**结束**时才落的行。所以这条依赖是**可选**的 ——
+   * 只挂 HTTP 的装配(测试、诊断)拿不到它,那时 `GET /api/projects/:id/live`
+   * 会如实返回 `runtime: "unavailable"`,而**不是**把「读不到」显示成「没在跑」。
+   */
+  readonly live?: {
+    /** 此刻占着忙闩的回合 */
+    readonly turns: () => LiveRuntimeSnapshot["turns"];
+    /** 兜底定时器的心跳 */
+    readonly dispatch: () => LiveRuntimeSnapshot["dispatch"];
+    /** 此刻正在排空的项目 id */
+    readonly drainingProjects: () => readonly string[];
+    /**
+     * `collectTodos` 的旋钮 —— **与宿主排空时用的是同一份**(见
+     * `views.ts` 的 `LiveCollectOptions`)。少了这一项,命令行改了合并窗口之后
+     * 页面会继续按缺省值说「现在就该跑」。
+     */
+    readonly collect: LiveCollectOptions;
+  };
   /** 清空平台数据(宿主注入 —— 它还要顺带丢掉常驻会话) */
   readonly reset: () => ResetReport;
   /** harness 写面的两个目录(数据目录 + 出厂副本目录) */
@@ -302,6 +326,39 @@ export function createPlatformApp(deps: HttpDeps): Hono {
     const id = c.req.param("id");
     if (getProjectRow(db, id) === null) return c.json(err("not_found", "项目不存在", 404).body, 404);
     return c.json({ members: listProjectMembers(db, id) });
+  });
+
+  /**
+   * 「**此刻**在做什么」—— 成员页的「正在做什么」区 + 工件页 DAG 的在跑标记。
+   *
+   * ── 为什么它是新的一条端点,而不是并进 `/members` ──────────────────
+   *
+   * 两个读者、两种代价:`/members` 是**身份**(四个角色,几乎不变,缓存友好),
+   * 这一条是**运行态**(每次都在变,而且它读宿主内存 ⇒ 天然不可缓存)。并在一起
+   * 会让「谁是这个项目的成员」这个稳定问题的答案每次都被重新算一遍。
+   *
+   * ── 三个来源,以及「读不到」为什么不等于「没在跑」────────────────
+   *
+   * 库(工作项 / 最近消息 / 待办)+ 宿主内存(忙闩 / 定时器心跳)。`deps.live`
+   * 缺失时(只挂 HTTP 的装配)读面返回 `runtime: "unavailable"`,`turn` 与
+   * `dispatch.lastRunAgeMs` 为 `null` —— **它不是「空闲」**,前端必须分开显示。
+   *
+   * ⚠️ 它**不参与任何判定**:没有一条流水线规则读这个视图。判定只有一处
+   * (`runtime/dispatcher.ts` 的 `collectTodos`),这里只是把它的结果端出来。
+   */
+  app.get("/api/projects/:id/live", (c) => {
+    const row = getProjectRow(db, c.req.param("id"));
+    if (row === null) return c.json(err("not_found", "项目不存在", 404).body, 404);
+    const runtime: LiveRuntimeSnapshot | null =
+      deps.live === undefined
+        ? null
+        : {
+            turns: deps.live.turns(),
+            dispatch: deps.live.dispatch(),
+            drainingProjects: deps.live.drainingProjects(),
+          };
+    const collect: LiveCollectOptions = deps.live?.collect ?? {};
+    return c.json({ live: toProjectLiveView(db, row, deps.now(), runtime, collect) });
   });
 
   // ── 工件 ──────────────────────────────────────────────────────

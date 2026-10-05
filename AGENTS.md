@@ -8,7 +8,12 @@
 - **Sansheng(三生)** = 单用户本机常驻 Node 服务:Pi SDK 驱动**四个角色的 agent 组织**,SQLite 持久化,HTTP + WS + 托管前端。
 - **组织架构是一等数据**:`agents` / `projects` / `project_assignments` 在库里,**角色属性在代码里**(`ROLE_SPECS`)。制品是工件(`artifacts` 表),不是聊天记录。
 - 默认 `127.0.0.1:2719`;数据目录默认 `~/.sansheng/`,可用 `--data` 或 `SANSHENG_DATA` 覆盖。
-- 基线:**1211 passed / 57 test files** · 两条 typecheck 0 error · `check:design` E1–E14 全绿。
+- **「此刻」的读面只有一处**:`GET /api/projects/:id/live`(`ProjectLiveView`)—— 成员页的
+  「正在做什么」与工件页产出图的「在跑」标记共用它。三个来源刻意分开:宿主内存的忙闩
+  (`hub.runningTurns()`,重启即清零)/ 库里的工作项与 `collectTodos` 的待办 / 落库痕迹。
+  `runtime: "unavailable"` 是**读不到**,不是「空闲」—— 前端不许把它渲染成后者。
+  工件页的产出图靠 `ArtifactView.workId`(migration 014 的产出边)把工件挂回环节。
+- 基线:**1305 passed / 62 test files** · 两条 typecheck 0 error · `check:design` E1–E14 全绿。
 - 日志只走 stdout:`~/.sansheng/logs/sansheng.log` 恒为 0 字节,别去 tail 它。
 
 ## 源码地图(`find src -name '*.ts' | wc -l` = 56)
@@ -167,7 +172,7 @@ help
 ```
 npx tsc -p tsconfig.server.json --noEmit
 npx tsc -p tsconfig.web.json --noEmit
-npm test                  # 1211 passed / 57 files
+npm test                  # 1305 passed / 62 files
 npm run build
 npm run check:design      # 设计一致性 E1–E14
 ```

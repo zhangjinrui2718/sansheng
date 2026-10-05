@@ -36,6 +36,7 @@ import type {
   MemberConversationView,
   MemberView,
   ProjectDetail,
+  ProjectLiveView,
   ProjectRole,
   ProjectUsageResponse,
   ProjectUsageView,
@@ -136,6 +137,102 @@ export function useProjectMembers(projectId: string | null): Loaded<MemberView[]
   );
   return { data: r.data?.members ?? [], loading: r.loading, error: r.error };
 }
+
+/**
+ * 本项目**此刻**的运行态(成员页「正在做什么」区 + 工件页 DAG 的在跑标记)。
+ *
+ * ── 为什么这个 hook **破例轮询**(全项目唯一一处)──────────────────
+ *
+ * 文件头那条纪律是「页面不轮询,刷新靠 revision」,理由是「前端不留第二份会漂的
+ * 真相」。这一条不违反它,但必须说清差别:**它问的问题本身就是「现在」**。
+ *
+ *   - WS 驱动的 revision 只覆盖**状态迁移**(建轮 / 起工具 / 收口)。一个跑了
+ *     16 分钟的 worker 回合,在两次工具调用之间可能安静好几分钟 —— 那段时间里
+ *     没有事件、界面停在最后一帧,而用户看到的正是他最怕的那件事:
+ *     「它是不是挂了」。**心跳只能由定时器给。**
+ *   - 更要紧的一条:**WS 断了 REST 还在**。轮询这条路是「系统还活着」的独立证据,
+ *     把 liveness 判据只挂在 WS 上,等于把「浏览器没收到消息」显示成「后台死了」。
+ *
+ * 所以:revision(WS 敲门)+ 2.5s 轮询(心跳)合起来用。`pollMs` 可关(测试与
+ * 「只想知道一次」的读者传 0),默认开。
+ *
+ * ⚠️ **`data === null` 表示「还没有拿到过」,不是「没有运行态」** —— 与
+ * `useProjectUsage` 同一条理由:一个凭空造的空白运行态会被读成「一切正常且空闲」。
+ * 调用方只在 `error === null && data !== null` 时把里面的字段当事实。
+ *
+ * ⚠️ **`loading` 在每一次轮询里都会短暂为 `true`** —— 它是「这一刻在查」,不是
+ * 「还没有数据」。调用方显示加载态时必须用 `loading && data === null`,
+ * 否则整块面板每 2.5 秒闪一次。
+ */
+export function useProjectLive(
+  projectId: string | null,
+  options?: { pollMs?: number },
+): Loaded<ProjectLiveView | null> & { fetchedAt: number | null } {
+  const revision = useChatStore((s) => s.activityRevision);
+  const pollMs = options?.pollMs ?? LIVE_POLL_MS;
+  const [fetchedAt, setFetchedAt] = useState<number | null>(null);
+
+  const load = useCallback(async () => {
+    if (projectId === null) return null;
+    const r = await api.getProjectLive(projectId);
+    setFetchedAt(Date.now());
+    return r.live;
+  }, [projectId, revision]);
+
+  const r = useLoad<ProjectLiveView | null>(
+    () => (projectId === null ? Promise.resolve(null) : load()),
+    [load],
+    pollMs,
+  );
+  // 切项目时把上一份的接收时刻清掉 —— 留着它会让新项目的「距今」从旧快照算起。
+  useEffect(() => {
+    if (projectId === null) setFetchedAt(null);
+  }, [projectId]);
+  return {
+    // ⚠️ **取数失败时不许把上一份快照当成「此刻」用** —— 见 `liveForDisplay`。
+    data: liveForDisplay(r.data, r.error),
+    loading: r.loading,
+    error: r.error,
+    fetchedAt,
+  };
+}
+
+/**
+ * 「这一份运行态**还能不能当此刻用**」—— 取数失败时把运行期那几位降级成「读不到」。
+ *
+ * ── 为什么必须做这一步(它是用户那句担心的镜像)────────────────────
+ *
+ * 用户担心的是「系统已经挂了,而实际还在运行」。它的镜像同样致命:**系统真的挂了,
+ * 而界面还在显示「正在跑」** —— `/live` 一旦失败(宿主被杀、端口断了、HTTP 500),
+ * `useLoad` 保留上一份 `data`(这是对的,不能把界面清空成「什么都没有」),
+ * 但那份快照里的 `turn` / `dispatch` 是**内存事实**,它们只在**取到的那一刻**成立。
+ * 继续显示 ⇒ 屏幕上有一个呼吸的绿点,而它证明的是几秒前的事。
+ *
+ * 所以:失败时
+ *   - `runtime` 降级为 `"unavailable"`(页面据此显示灰点 + 「运行态读不到」);
+ *   - 每个 agent 的 `turn` 归零、`dispatch` 的心跳归零;
+ *   - **库派生的那几位原样保留**(`currentWorks` / `todos` / `lastMessage` /
+ *     项目计数)—— 它们不是「此刻」,失败不会让它们变假。
+ *
+ * 纯函数、导出给测试:这条降级是**判据**,不该只活在一个 hook 的闭包里。
+ */
+export function liveForDisplay(
+  live: ProjectLiveView | null,
+  error: string | null,
+): ProjectLiveView | null {
+  if (live === null) return null;
+  if (error === null) return live;
+  return {
+    ...live,
+    runtime: "unavailable",
+    dispatch: { ...live.dispatch, lastRunAgeMs: null, draining: false },
+    runningTurns: 0,
+    agents: live.agents.map((a) => ({ ...a, turn: null })),
+  };
+}
+
+/** 运行态的轮询周期。2.5s:足够让「已跑 12s」看起来在走,又不至于打满本机 HTTP。 */
+export const LIVE_POLL_MS = 2500;
 
 /**
  * 项目详情 + 阻塞(「哪件事被卡住了」)。`projectId` 为空时不发请求。

@@ -2,7 +2,111 @@
 
 ---
 
-# ⚡ 最新一轮 · W3(2026-10-05 晚)· **先读这一节**
+# ⚡ 最新一轮 · W4(2026-10-06)· **先读这一节**
+
+> 上一轮(W3:刷新缺口的闭合 + 文档欠账 + 端到端)的那一节在下面,**仍然有效**。
+> 这一节是一次**前端可读性迭代**,起源于用户逐字提的三条:
+>
+> > 1. 工件的可读性太差了……是不是可以在工件的这个页面把产出工件的环节做成一个 DAG,
+> >    然后某个节点上的具体信息可以放现在的 summary 和详情
+> > 2. 成员的可读性也很差,改成和 harness 类似的可以根据角色做切换
+> > 3. 成员中我感觉在做什么事情,这个信息没有实时的同步到成员的这个页面来,现在只有
+> >    做了些什么,没有正在做什么……我担心系统已经挂了,而实际还在运行
+
+## 状态
+
+```
+W4  本次提交:`feat(web): 工件页产出图 DAG + 成员页按角色分栏 + 「此刻在做什么」读面`
+1305 passed / 62 files · 两条 typecheck 0 · npm run build 绿 · check:design E1–E14 绿 · as any 0
+新增:`GET /api/projects/:id/live`(ProjectLiveView)· `ArtifactView.workId`(契约)
+真机验证:在 `~/.sansheng/` 的**副本**上起宿主(真 provider / 真库),三个端点逐条 curl;
+影子页面 `.probe/w4-{artifacts,members}-preview.html`(真数据 + 页面自己的组件)
+```
+
+## 三条各自落成了什么
+
+| 用户要的 | 落点 | 判据(可执行) |
+|---|---|---|
+| ① 产出工件的**环节做成 DAG**,节点里放 summary / 详情 | `web/src/lib/workGraph.ts`(布局纯函数)+ `web/src/routes/Artifacts.tsx`(四块:产出流程 / 选中的环节 / 不挂在任何环节上的工件 / 环节读不到的工件)。节点 = 工作项,边 = `parentWorkId`(拆解,实线)∪ `dependsOn`(前置,虚线);工件靠**新进契约的** `ArtifactView.workId`(migration 014 的产出边)挂回产出它的环节 | `tests/web/work-graph.test.ts`(17)· `tests/web/artifact-dag.test.ts`(22,工件的归属 / 计数 / 在跑 / 读不到 / 环) |
+| ② 成员页**按角色切换**(照 harness) | `web/src/routes/Members.tsx` 重写:一行成员页签(`role="tablist"` + 欠活角标 + 实时点)+ **一次只渲染一个** `MemberPane`(先现在 → 再欠什么 → 最后过去) | `tests/web/members-activity.test.ts`(39,含「一次只渲染一个」的正负样本) |
+| ③ **「正在做什么」实时同步** | 新读面 `GET /api/projects/:id/live`;前端 `useProjectLive`(2.5s 轮询,**全项目唯一一处**)+ `stores/chat.ts` 的 `activityRevision`(WS 敲门砖);工件页 DAG 的「在跑」标记共用同一份 | `tests/platform/project-live.test.ts`(11) |
+
+## 这一轮新增/改动的关键结构
+
+| 层 | 落点 | 为什么 |
+|---|---|---|
+| 契约 | `ProjectLiveView` / `MemberActivityView`;`ArtifactView.workId`;**端点表**加 `/live` | 「现在」这一维此前读面里不存在 |
+| 内存登记 | `PlatformHub.busy`:`Set<string>` → `Map<string, BusyTurn>`,`{ projectId, agentId, startedAt, trigger }` + `runningTurns()`;`setBusy(..., true)` 的重载**强制**传 `trigger` | 「已经跑了多久 / 为什么开始」只有闩自己知道;交班时**换一份登记**(沿用上一轮会把两段时长加在一起) |
+| 心跳 | `FixedDelayLoop.lastRunAt()`,记在**开始**跑的那一刻 | 记在结束会让一次 16 分钟的排空期间显示「上一次 0 秒前」 |
+| 读面 | `transport/views.ts` 的 `toProjectLiveView(db, row, now, runtime, collect)`;`HttpDeps.live?` 是宿主注入的**只读**端口(惰性闭包) | 判定仍然只有一处(`collectTodos`);读面不重算,连合并窗口的旋钮都由宿主**原样交付**(`LiveCollectOptions`) |
+| 前端 | `lib/data.ts` 的 `useProjectLive` + `liveForDisplay`;`lib/workGraph.ts`;`styles/globals.css` 的 `.ss-live-dot` / `.ss-dag-*` | —— |
+
+## 真机证据(不是推断)
+
+```
+$ node dist/src/cli/index.js platform-serve --data <~/.sansheng 的副本> --port 2731 \
+      --dispatch-interval 3600000 --scheduler-interval 3600000     # 定时器调大:不碰真数据、不花 token
+$ curl /api/projects/<id>/live
+{"projectId":"pj_muv0ige6jgvbdtco","at":1791193851067,"runtime":"host",
+ "dispatch":{"intervalMs":3600000,"lastRunAgeMs":null,"draining":false},
+ "runningTurns":0,"openWorks":0,"pendingQuestions":0,
+ "agents":[{"agentId":"bm","turn":null,"currentWorks":[],"readyWorks":0,"waitingWorks":0,
+            "todos":[],"exhaustedTodos":0,
+            "lastMessage":{"kind":"assistant","excerpt":"[工作记录] 平台叫醒我…","ageMs":1348172}}, …]}
+$ curl /api/projects/<id>/artifacts   # 20 件:14 件有 workId(evidence 6 / review_finding 7 / deliverable 1)、decision 6 件为 null
+$ curl /api/projects/<id>/works       # 5 条 = 1 根 + 4 子;work_deps 5 条边(含一条重复行)
+```
+
+**两个只有真机才暴露的东西(都改了)**:
+
+1. **`lastTool` 是没有写入方的字段。** 它按 `session_messages.kind='tool'` 查最近一次工具调用,
+   而真机库 `SELECT kind, COUNT(*) … GROUP BY kind` 只有 `user` / `assistant` / `system`
+   —— **`tool` 从不落库**(工具调用只走 WS 广播)。那个字段在真机上恒为 `null`,恒 null 的字段
+   比没有字段更坏(读成「这个角色从没动过手」)。**已从契约与读面删掉**;
+   「现在正在调什么工具」的唯一来源是前端 WS 在飞轮(`stores/chat.ts` 的 `inFlight`)。
+   负样本钉在 `tests/platform/project-live.test.ts`(响应里不许再出现这一位)。
+2. **环的归因错过一次。** 工件页布局第一版用松弛迭代近似「谁在环上」,subagent 复核出
+   `A↔B` 成环时 **`C`(B 的子项,不在环上)也被说成「依赖成环」**。
+   现在改成 **Kahn 未出队集合**(语义恰好是「环上 ∪ 环下游」),文案相应只说
+   「在依赖环上**或环的下游**」,并留了一条测试专门钉这个假归因
+   (`artifact-dag.test.ts` 的「环下游的节点也进这一列 —— 但归因文案不许说它『依赖成环』」)。
+
+**第三处是 subagent 主动报的**:`/live` 轮询失败时,`useLoad` 会留着上一份快照
+⇒ 屏幕上继续显示「正在跑」的绿点,而它证明的是几秒前、甚至一个已经死掉的进程。
+这是用户那句担心的**镜像**,同样致命。已加 `lib/data.ts` 的 `liveForDisplay(纯函数)`:
+失败时运行期那几位(`turn` / `dispatch` / `runningTurns` / `runtime`)一律降级为「读不到」,
+**库派生的那几位原样保留**;`tests/web/live-degradation.test.ts` 钉住两个方向。
+
+## 验收链(本次实跑)
+
+```
+npx tsc -p tsconfig.server.json --noEmit   # 0 error
+npx tsc -p tsconfig.web.json --noEmit      # 0 error
+npm test                                   # 1305 passed / 62 files
+npm run build                              # dist/web 149 modules · index-*.js 339.76 kB
+npm run check:design                       # ✓ E1–E14
+grep -rn 'as any' src/ web/src/            # 0
+```
+
+一条**mutation 实测**(证明新加的检查有牙齿):把 `lastRunAt` 改成在 `await deps.run()`
+**之后**记录 ⇒ `tests/platform/scheduler.test.ts` 的心跳用例变红并报出精确位置;改回 ⇒ 绿。
+
+## 复现影子页面
+
+```
+cp -R ~/.sansheng /tmp/ss-verify
+node dist/src/cli/index.js platform-serve --data /tmp/ss-verify --port 2732 \
+     --dispatch-interval 3600000 --scheduler-interval 3600000 &
+TSX_TSCONFIG_PATH=tsconfig.web.json npx tsx .probe/w4-preview.tsx
+# → .probe/w4-artifacts-preview.html / .probe/w4-members-preview.html(内联构建 CSS,纯静态)
+```
+
+⚠️ `TSX_TSCONFIG_PATH=tsconfig.web.json` 是必须的:根 `tsconfig.json` 没有 `jsx`,tsx 会走
+classic runtime 并报 `React is not defined`(与 `vitest.config.ts` 里记着的那条陷阱同源)。
+
+---
+
+# ⚡ 上一轮 · W3(2026-10-05 晚)
 
 > 上一轮(W2:按触发源判通道 + 播报正交 + 块级过滤)的那一节在下面,**仍然有效**;
 > 这一节记的是 W3 三件 + 一次真机端到端**推翻/修正**的东西。

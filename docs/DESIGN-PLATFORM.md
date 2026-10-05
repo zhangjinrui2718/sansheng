@@ -1077,6 +1077,46 @@ ensureSession(...)           const existing = listSessions(...); if (existing.le
 
 ---
 
+### 2.13 运行态读面:「此刻在做什么」(2026-10-06 新增)
+
+**问题(用户的原话)**:「现在只有做了些什么,没有正在做什么……我担心系统已经挂了,而实际还在运行」。这不是「再加一个页面」,而是**读面缺了一维**:此前所有读面都是**过去时**(`session_messages` 落库的行、`works` 的状态、`turn_usage` 的行),而「现在」**结构上**不在其中 —— 一个正在跑 16 分钟回合的 worker 与一个已经停了三小时的 worker,在「他产生了什么对话」里长得**一模一样**。
+
+**三条判据(决定了这一维的划法)**
+
+1. **「现在」只能来自宿主内存,而内存事实必须与库事实分开呈现。** 忙闩(`transport/hub.ts` 的 `busy`)与排空兜底定时器的心跳(`host/scheduler.ts` 的 `lastRunAt()`)是**进程内**的,重启即清零;`works.status='in_progress'` 与 `collectTodos` 的待办是**库里**的,重启后照样成立。混成一个字段之后,「重启后还没跑过任何回合」与「一切正常但没有在跑的回合」在界面上会长得一样。
+2. **判定只有一处,读面不许重算。** `ProjectLiveView.agents[].todos` 直接来自 `collectTodos`(排空器的判据),连合并唤醒的两个旋钮(`reportBatchSize` / `reportMaxDelayMs`)都由宿主**原样交付**(`LiveCollectOptions`)—— 各写一份默认值的后果是:命令行改了阈值,而页面继续**自信地说一个排空器不会做的动作**。
+3. **「读不到」不是「空闲」。** 只挂 HTTP 的装配拿不到内存快照,那时契约返回 `runtime: "unavailable"`、`turn` 一律 `null`、`lastRunAgeMs` 为 `null`,并且在界面上**必须**与「此刻没有回合在跑」分开显示。这是本次新增里最容易退化成假话的一格(两者在屏幕上长得一样)。
+
+**落地**
+
+| 层 | 落点 |
+|---|---|
+| 内存登记 | `PlatformHub.busy` 从 `Set<string>` 改为 `Map<string, BusyTurn>`:`{ projectId, agentId, startedAt, trigger }`;新增 `runningTurns()`。`setBusy` 的 `true` 重载**强制**传 `trigger`(漏填编译不过)。交班(排队者接闩)时**换一份登记** —— 沿用上一轮的 `startedAt` 会把「已跑多久」算成两段之和 |
+| 心跳 | `FixedDelayLoop.lastRunAt()`,记在**开始**跑的那一刻(不是跑完:一次排空可以跑十几分钟,记在结束会让页面在整个长回合期间显示「上一次 0 秒前」) |
+| 读面 | `transport/views.ts` 的 `toProjectLiveView(db, row, now, runtime, collect)`;`LiveRuntimeSnapshot` 是宿主注入的**只读**端口(`HttpDeps.live?`),三项都是惰性闭包 |
+| 端点 | `GET /api/projects/:id/live` → `{ live: ProjectLiveView }`(**不参与任何判定**,纯投影) |
+| 前端 | `lib/data.ts` 的 `useProjectLive`(全项目唯一一处轮询,2.5s)+ `stores/chat.ts` 的 `activityRevision`(WS 敲门砖)。成员页按角色分栏显示「正在做什么」,工件页的产出图用它点亮正在跑的环节 |
+
+**「工件是流程的关键节点」的另一半:产出边有了读面。** `ArtifactView.workId`(migration 014 的 `artifacts.work_id`)此前只在运行时判据里有读者(`execution.ts`),前端拿不到 ⇒ 工件页只能按 kind 平铺。现在它进契约:工件页按 `works` 的 `parentWorkId` ∪ `dependsOn` 画一张**产出图**(环节 = 工作项、边 = 拆解 / 前置、工件挂在产出它的环节上);`workId IS NULL` 的决策 / 会议 / 变更 / 甲方问答**另立一处**列出 —— 它们不是「还没归位」,而是本来就不由某条工作项产出。
+
+**删掉的一个字段(值得记下)**:`MemberActivityView` 曾经有 `lastTool`(按 `session_messages.kind='tool'` 查最近一次工具调用)。真机库实测 `SELECT kind, COUNT(*) … GROUP BY kind` 只有 `user` / `assistant` / `system` —— **`tool` 从不落库**(工具调用只走 WS 广播)。那个字段因此恒为 `null`:一个**没有写入方**的字段比没有读者更坏,它让人以为「这个角色从没动过手」。已删;「现在正在调什么工具」由前端从 WS 在飞轮(`stores/chat.ts` 的 `inFlight` 里 `kind: "tool"` 的块)读 —— 那是唯一有这个信息的地方。
+
+**验收判据(可执行)**
+
+| 判据 | 落点 |
+|---|---|
+| 缺失 `deps.live` ⇒ `runtime:"unavailable"` 且 `turn` 全 `null`;**接上** ⇒ `"host"`(负样本,防这条判据空转) | `tests/platform/project-live.test.ts` |
+| 只认本项目的闩;`elapsedMs` / `trigger` 来自登记;跨项目的回合**不许**落到这个角色上 | 同上 |
+| `currentWorks` 只收 `in_progress`/`blocked` 且按负责人分开;`readyWorks`/`waitingWorks` 来自 `collectPendingWork` | 同上 |
+| 待办来自 `collectTodos`:`attempts/maxAttempts` 来自库里的账本,预算用满后**不再叫醒但 `exhaustedTodos` 看得见** | 同上 |
+| `ArtifactView.workId`:证据 / 评审发现带边、`decision` 为 `null`;列表与详情**同形** | 同上 |
+| 心跳记在**开始**(mutation 实测:改成记在结束 ⇒ 测试变红) | `tests/platform/scheduler.test.ts` |
+| 交班后登记换成新回合那一份(`trigger` 与 `startedAt` 都不是上一轮的) | `tests/platform/busy-latch-granularity.test.ts` |
+| 分层是**最长路径**;重复边去重、自环不画、环上节点一个不丢且如实标出 | `tests/web/work-graph.test.ts` |
+| 工件分三堆(挂着的 / 本来没环节的 / 挂到读不到环节上的),分堆是**划分**不是筛选 | 同上 |
+
+---
+
 ## 3. 能力模型(Capability)
 
 ### 3.1 闭合联合

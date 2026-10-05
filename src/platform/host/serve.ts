@@ -51,7 +51,7 @@ import {
 } from "../storage/repo/sessions.js";
 import { ROLE_SPECS } from "../identity/role.js";
 import { resolveClientQuestion } from "../tools/client.js";
-import { listProjectSummaries } from "../transport/views.js";
+import { listProjectSummaries, type LiveCollectOptions } from "../transport/views.js";
 import { getProjectRow, listProjects } from "../storage/repo/projects.js";
 import { getWork } from "../storage/repo/works.js";
 import { getAgent } from "../storage/repo/agents.js";
@@ -571,7 +571,7 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
     // ⚠️ 这一次占用**必须同步**发生(在第一次 `await` 之前):hub 的 `send` 判据
     // 与它落在同一个 tick 里,否则两条挨着到的消息会双双通过判据(WS 的每条消息
     // 各自 fire-and-forget),那就是「同一个角色两条流打进同一条会话」的入口。
-    hub.setBusy(projectId, bm.id, true);
+    hub.setBusy(projectId, bm.id, true, { kind: "user" });
     try {
       // ⚠️ `{ kind: "user" }` 是这一句的**唯一**合法值 —— 这一轮存在的原因就是
       // 甲方自己开了口(见 `runAgentTurn` 的 `trigger` 形参)。
@@ -1127,6 +1127,29 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
   //    (`drainProject` 一条一条 await),所以「一个项目里同时跑的排空回合数」
   //    永远是 0 或 1。
 
+  /**
+   * 合并唤醒的两个旋钮 —— **同一份**给排空(下面的 `drainProject`)与读面
+   * (`GET /api/projects/:id/live`)用。
+   *
+   * 为什么必须共用:读面要如实回答「排空器**现在**会不会叫醒它」,而那个答案
+   * 依赖这两个阈值。各写一份的后果是具体的 —— 用户用 `--report-batch-size 10`
+   * 起了服务,页面却按缺省的 3 条显示「它现在就该跑」,于是界面开始**自信地
+   * 说一个排空器不会做的动作**。
+   *
+   * 仍然**不给默认值**:缺省在 `collectTodos` 里(`DEFAULT_REPORT_BATCH_SIZE` /
+   * `DEFAULT_REPORT_MAX_DELAY_MS`),两处各写一份迟早会漂。
+   */
+  const collectOptions: LiveCollectOptions = {
+    ...(opts.reportBatchSize !== undefined ? { reportBatchSize: opts.reportBatchSize } : {}),
+    ...(opts.reportMaxDelayMs !== undefined ? { reportMaxDelayMs: opts.reportMaxDelayMs } : {}),
+  };
+
+  /**
+   * 排空兜底周期。**算一次,两处用**(建定时器 + 读面报它的 `intervalMs`)——
+   * 各写一遍的话,改了命令行参数之后页面显示的还是缺省的 10s。
+   */
+  const dispatchIntervalMs = opts.dispatchIntervalMs ?? DEFAULT_DISPATCH_INTERVAL_MS;
+
   /** 每个项目一个排空闩:**同一个项目**的排空永不重叠(不同项目互不阻塞)。 */
   const drainingProjects = new Set<string>();
   /** 每个项目一个打点:排空期间有人敲过门 → 那一趟跑完再查一遍。 */
@@ -1282,22 +1305,18 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
       now,
       log: (l) => log.muted(l),
       ...(opts.maxCascadeRounds !== undefined ? { maxRounds: opts.maxCascadeRounds } : {}),
-      // 合并唤醒的两个旋钮。同样**不给默认值** —— 缺省在 `collectTodos` 里
-      // (`DEFAULT_REPORT_BATCH_SIZE` / `DEFAULT_REPORT_MAX_DELAY_MS`),
-      // 两个地方各写一份迟早会漂,而漂的表现是「CLI 说 5 分钟、实际不是」。
-      ...(opts.reportBatchSize !== undefined
-        ? { reportBatchSize: opts.reportBatchSize }
-        : {}),
-      ...(opts.reportMaxDelayMs !== undefined
-        ? { reportMaxDelayMs: opts.reportMaxDelayMs }
-        : {}),
+      // 合并唤醒的两个旋钮。**与读面共用同一份 `collectOptions` 对象** ——
+      // 各写一份的后果见那里的注释(界面会按缺省阈值说一个排空器不会做的动作)。
+      // 也仍然**不给默认值**:缺省在 `collectTodos` 里
+      // (`DEFAULT_REPORT_BATCH_SIZE` / `DEFAULT_REPORT_MAX_DELAY_MS`)。
+      ...collectOptions,
       isCancelled: () => cancelled,
       // `todoKind` 是 `drainProject` 传下来的**真值**(`todo.kind`)。宿主在这里
       // 把它翻成契约的 `trigger` —— 这是「runtime 的待办种类」跨到「回合为什么
       // 存在」的**唯一**一处接缝:`runAgentTurn` 不可能自己知道,因为它拿到的
       // 只是 `(agentId, task)`。
       runAgentTurn: async (agentId, task, todoKind): Promise<DrainTurnReport> => {
-        return withTurnLatch(projectId, agentId, async () => {
+        return withTurnLatch(projectId, agentId, { kind: "todo", todoKind }, async () => {
           const r = await runAgentTurn(projectId, agentId, task, { kind: "todo", todoKind });
           if (r.aborted) cancelled = true;
           return {
@@ -1307,7 +1326,7 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
         });
       },
       runWork: async (agentId, workId, todoKind): Promise<DrainWorkReport> => {
-        return withTurnLatch(projectId, agentId, async () => {
+        return withTurnLatch(projectId, agentId, { kind: "todo", todoKind }, async () => {
           const r = await runWorkInSession(projectId, agentId, workId, { kind: "todo", todoKind });
           if (r.aborted) cancelled = true;
           return r;
@@ -1336,13 +1355,19 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
    *
    * ⚠️ 排队**不影响全局上界**:`projectSlots` 是外层信号量,这里等的是**同一个
    * 项目内部**那把闩,不会多占许可(它本来就在这个许可里)。
+   *
+   * `trigger` 是**这一轮为什么存在**(`{kind:"todo", todoKind}`)。它随闩一起
+   * 登记进枢纽(`hub.acquireTurn`)—— 成员页的「正在做什么」要显示「被哪条待办
+   * 叫醒」,而那个值只有调用点知道(`todoKind` 是 `drainProject` 传下来的真值,
+   * 不是这里猜的)。
    */
   function withTurnLatch<T>(
     projectId: string,
     agentId: string,
+    trigger: TurnTrigger,
     fn: () => Promise<T>,
   ): Promise<T> {
-    return hub.acquireTurn(projectId, agentId).then(async (release) => {
+    return hub.acquireTurn(projectId, agentId, trigger).then(async (release) => {
       try {
         return await fn();
       } finally {
@@ -1478,6 +1503,23 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
     hasAnyProvider: booted.provider !== null,
     now,
     newId,
+    /**
+     * 运行期快照(只读)—— 三个**内存**读点,外加排空的旋钮。
+     *
+     * `dispatchTimer` 在本函数里**声明在后面**:这里的三个 `() => …` 都是
+     * 惰性闭包(HTTP 处理器调用时才求值),而那时定时器早已建好。写成直接求值
+     * (`dispatch: () => ({ lastRunAt: dispatchTimer.lastRunAt() })` 之外的任何
+     * 提前取值)会在启动时撞上 TDZ —— 这正是把它写成函数的原因。
+     */
+    live: {
+      turns: () => hub.runningTurns(),
+      dispatch: () => ({
+        intervalMs: dispatchIntervalMs,
+        lastRunAt: dispatchTimer.lastRunAt(),
+      }),
+      drainingProjects: () => [...drainingProjects],
+      collect: collectOptions,
+    },
     settings: {
       // 每次都重新 load —— store 内部有缓存,但语义上要表达「读的是当前值」
       read: () => toPublicSettings(booted.settingsStore.load()),
@@ -1548,7 +1590,7 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
   });
 
   const dispatchTimer: FixedDelayLoop = startFixedDelay({
-    intervalMs: opts.dispatchIntervalMs ?? DEFAULT_DISPATCH_INTERVAL_MS,
+    intervalMs: dispatchIntervalMs,
     run: () => drainAll("timer"),
     log: (l) => log.error(l),
   });

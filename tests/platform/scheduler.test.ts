@@ -202,3 +202,51 @@ describe("startScheduler · 只推变化,不刷屏", () => {
     expect(s.stats().ticks).toBe(before);
   });
 });
+
+// ── fixed-delay 兜底定时器的**心跳**(2026-10-06)────────────────────
+//
+// `lastRunAt()` 是这次为「此刻在做什么」补的一位(`GET /api/projects/:id/live`
+// 的 `dispatch.lastRunAgeMs` 读它)。它看起来像个无聊的 getter,但两条失效方向
+// 都会让页面说假话:
+//
+//   ① 记在**跑完**而不是**开始** ⇒ 一次 16 分钟的排空期间,页面显示「上一次 0 秒前」,
+//      而它其实正在跑(心跳该说「正在转」);
+//   ② 一直返回 `null` ⇒ 页面永远显示「本进程还没跑过兜底检查」,而它其实每 10s 跑一次。
+//
+// `FixedDelayLoop` 的语义(「上一轮跑完再等 interval」)由既有实现保证,这里只钉
+// 心跳这一个新增读点。
+describe("startFixedDelay · 心跳(lastRunAt)", () => {
+  it("没跑过时是 null,跑过之后记的是**开始**那一刻(不是结束那一刻)", async () => {
+    const { startFixedDelay } = await import("../../src/platform/host/scheduler.js");
+    const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+    let resolveRun: (() => void) | null = null;
+    const loop = startFixedDelay({
+      intervalMs: 60_000,
+      run: () =>
+        new Promise<void>((resolve) => {
+          resolveRun = resolve;
+        }),
+    });
+    // 正样本自检:先确认「没跑过 ⇒ null」不是因为这一位永远返回 null
+    expect(loop.lastRunAt(), "还没跑过").toBeNull();
+
+    const before = Date.now();
+    const running = loop.runNow();
+    // 这一轮**卡在 run 里**(模拟一次 16 分钟的排空)
+    expect(typeof resolveRun).toBe("function");
+    const justAfterStart = Date.now();
+    await sleep(30);
+    resolveRun?.();
+    await running;
+
+    const stamp = loop.lastRunAt();
+    expect(stamp, "跑过之后必须有值").not.toBeNull();
+    expect(stamp ?? 0).toBeGreaterThanOrEqual(before);
+    // ⚠️ 这条就是「开始 vs 结束」的判别:实现若记在 `await deps.run()` **之后**,
+    // 这里拿到的戳会晚于 `justAfterStart` + 30ms;而页面会在整个长回合期间
+    // 显示「上一次 0 秒前」,把「正在跑」说成「刚跑完」。
+    expect(stamp ?? 0, "心跳记的是开始时刻").toBeLessThanOrEqual(justAfterStart);
+    expect(loop.runs()).toBe(1);
+    loop.stop();
+  });
+});

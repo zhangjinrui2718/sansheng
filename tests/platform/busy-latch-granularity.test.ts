@@ -445,22 +445,29 @@ describe("A · 忙闩按 `(上下文, agent)` 记", () => {
     await startHost();
     const hub = host!.hub;
 
-    hub.setBusy("pA", "wk", true);
+    hub.setBusy("pA", "wk", true, { kind: "user" });
     expect(hub.isBusy("pA", "wk"), "占了的那个角色要读到忙").toBe(true);
     expect(hub.isBusy("pA", "bm"), "**另一个角色不许被连坐** —— 这条就是整个任务").toBe(false);
     expect(hub.isBusy("pA"), "不给 agent 是「这个上下文里还有活」的保守判据").toBe(true);
     expect(hub.isBusy("pB", "wk"), "别的项目不受影响").toBe(false);
+    // 登记里带着「这一轮跑了多久 / 为什么存在」—— 成员页的「正在做什么」读它。
+    const busy = hub.runningTurns();
+    expect(busy.length, "占着的回合要被 `runningTurns()` 数到").toBe(1);
+    expect(busy[0]?.agentId).toBe("wk");
+    expect(busy[0]?.trigger).toEqual({ kind: "user" });
     hub.setBusy("pA", "wk", false);
     expect(hub.isBusy("pA")).toBe(false);
+    expect(hub.runningTurns().length, "释放之后不许留下幽灵回合").toBe(0);
   });
 
   itT("`acquireTurn` 在闩被占时**等**(闩不放空),释放时**交班**给队首", async () => {
     await startHost();
     const hub = host!.hub;
-    hub.setBusy("pA", "bm", true);
+    const todo = { kind: "todo", todoKind: "execute_work" } as const;
+    hub.setBusy("pA", "bm", true, { kind: "user" });
 
     let acquired = false;
-    const pending = hub.acquireTurn("pA", "bm").then((release) => {
+    const pending = hub.acquireTurn("pA", "bm", todo).then((release) => {
       acquired = true;
       return release;
     });
@@ -472,6 +479,11 @@ describe("A · 忙闩按 `(上下文, agent)` 记", () => {
     const release = await pending;
     expect(acquired).toBe(true);
     expect(hub.isBusy("pA", "bm"), "交班之后队首仍然持有它").toBe(true);
+    // 交班时登记要换成**新回合自己那一份**:沿用上一个回合的 `startedAt` 会把
+    // 「已跑多久」算成两段之和,而 `trigger` 会显示成上一轮的原因(两句都是假话)。
+    const handed = hub.runningTurns();
+    expect(handed.length).toBe(1);
+    expect(handed[0]?.trigger).toEqual(todo);
     release();
     expect(hub.isBusy("pA", "bm")).toBe(false);
   });

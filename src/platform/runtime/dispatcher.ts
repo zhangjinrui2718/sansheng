@@ -327,7 +327,14 @@ export interface CollectTodosOptions {
   readonly reportMaxDelayMs?: number;
 }
 
-const DEFAULT_MAX_ATTEMPTS = 3;
+/**
+ * 单条待办的尝试预算上限:缺省 **3**。
+ *
+ * 导出是给**读面**用的(`transport/views.ts` 的 `toProjectLiveView` 要显示
+ * 「已叫醒 2/3 次」)。把一个 `3` 抄到读面那一侧,等于把「预算到底几次」变成
+ * 两份定义 —— 而这个项目的裁判口径只有一处(`collectTodos`)。
+ */
+export const DEFAULT_MAX_ATTEMPTS = 3;
 
 /**
  * 合并唤醒的**条数**阈值:缺省 3。

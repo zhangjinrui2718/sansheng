@@ -69,6 +69,30 @@ export interface HubDeps {
   readonly newId: (prefix: string) => string;
 }
 
+/**
+ * 一条**占着忙闩**的回合。
+ *
+ * `startedAt` 与 `trigger` 是这次新加的两位 —— 在此之前闩只是一个
+ * `Set<string>`(「有没有人在跑」)。成员页要回答的是「**它在做什么、已经做了多久、
+ * 为什么开始**」,而那三问的答案只有闩自己知道:
+ *
+ *   - `startedAt` —— 闩的占用时刻。**不能**改用别的近似(例如最近一条消息的
+ *     时间戳):一个正在跑的长回合在两次工具调用之间可以安静好几分钟,而那段安静
+ *     与「卡住了」在时间戳上完全一样,在闩上不一样。
+ *   - `trigger` —— 这一轮为什么存在(`TurnTrigger`,与 `message_start.trigger`
+ *     同源):用户亲口发起,还是排空器按某条待办叫醒的。
+ *
+ * ⚠️ **它是内存事实,进程重启即清零。** 读面(`views.ts` 的
+ * `toProjectLiveView`)因此必须把「闩上没有它」与「库里也没有它的活动」
+ * 分开呈现 —— 前者是「此刻没在跑」,后者才是「一直没动过」。
+ */
+export interface BusyTurn {
+  readonly projectId: string | null;
+  readonly agentId: string;
+  readonly startedAt: number;
+  readonly trigger: TurnTrigger;
+}
+
 export interface HubHandlers {
   /**
    * 用户在一个项目(或**接待会话**,`null`)里说了句话 —— host 负责建会话 / 跑回合。
@@ -100,7 +124,7 @@ export class PlatformHub {
    * 对外 API 仍然收 `string | null`,不引入哨兵值(理由见旧注释:哨兵要么前后端
    * 各写一份字面量,要么得从 `@shared` 值导入 —— server 侧禁止)。
    */
-  private readonly busy = new Set<string>();
+  private readonly busy = new Map<string, BusyTurn>();
   /**
    * 等着占用某个 `(上下文, agent)` 的排队者(FIFO)。
    *
@@ -112,7 +136,7 @@ export class PlatformHub {
    * 甲方那条路**不排队**:它由 `send` 的判据直接拒掉(`code=busy`)—— 那正是
    * 验收里的负样本(「业务经理正在回你时再发一条 → 仍然被拒」)。
    */
-  private readonly waiters = new Map<string, Array<() => void>>();
+  private readonly waiters = new Map<string, Array<{ trigger: TurnTrigger; resolve: () => void }>>();
 
   constructor(
     private readonly deps: HubDeps,
@@ -140,8 +164,11 @@ export class PlatformHub {
    */
   isBusy(projectId: string | null, agentId?: string): boolean {
     if (agentId !== undefined) return this.busy.has(this.key(projectId, agentId));
+    // ⚠️ `busy` 从 `Set<string>` 改成了 `Map<string, BusyTurn>`(登记
+    // `startedAt` / `trigger`,给成员页的「正在做什么」)—— 遍历时**键在第一位**,
+    // 别把 `k` 当成字符串用(这里是 `[key, turn]`)。
     const prefix = PlatformHub.contextPrefix(projectId);
-    for (const k of this.busy) if (k.startsWith(prefix)) return true;
+    for (const key of this.busy.keys()) if (key.startsWith(prefix)) return true;
     return false;
   }
 
@@ -157,21 +184,51 @@ export class PlatformHub {
    * 抢:后者会出现一个「闩空着」的窗口,甲方的消息可以插到一个已经排队的排空
    * 回合前面 —— 排空于是永远轮不到(饿死),而现场看起来只是「它一直没动」。
    */
-  setBusy(projectId: string | null, agentId: string, v: boolean): void {
+  setBusy(projectId: string | null, agentId: string, v: true, trigger: TurnTrigger): void;
+  setBusy(projectId: string | null, agentId: string, v: false): void;
+  setBusy(
+    projectId: string | null,
+    agentId: string,
+    v: boolean,
+    // ⚠️ 缺省值是给**绕过类型**的调用方(JS 测试、诊断脚本)兜的底,不是给 TS 调用
+    // 方的:上面那个 `v: true` 的重载要求 `trigger` **必填**(漏填编译不过)。
+    // 读面会把它显示成「你亲口发起」,所以这一位在真实路径上**必须**由调用点声明。
+    trigger: TurnTrigger = { kind: "user" },
+  ): void {
     const key = this.key(projectId, agentId);
     if (v) {
-      this.busy.add(key);
+      // 占用必须同步(见上)。`startedAt` 取 `deps.now()` —— 与平台其它时间戳
+      // 同一个时钟(测试注入假时钟时它跟着走,否则「已跑多久」在测试里不可控)。
+      this.busy.set(key, { projectId, agentId, startedAt: this.deps.now(), trigger });
       return;
     }
     const q = this.waiters.get(key);
     const next = q?.shift();
-    // 交班:队首接着持有这把闩(**它仍然是「忙」**)—— 见上面「不放空」的理由
     if (q !== undefined && q.length === 0) this.waiters.delete(key);
+    // 交班:闩**不放空**(它一直是「忙」),但登记换成**新回合自己那一份** ——
+    // 沿用上一个回合的 `startedAt` 会把「已跑多久」算成两段之和。
     if (next !== undefined) {
-      next();
+      this.busy.set(key, {
+        projectId,
+        agentId,
+        startedAt: this.deps.now(),
+        trigger: next.trigger,
+      });
+      next.resolve();
       return;
     }
     this.busy.delete(key);
+  }
+
+  /**
+   * 此刻**占着闩**的全部回合(读面用:`GET /api/projects/:id/live`)。
+   *
+   * 返回的是**登记时刻的拷贝** —— 调用方拿到之后闩可能已经被释放,所以它必须
+   * 被读成「快照」而不是「订阅」。这里也正是 `BusyTurn` 那两位(`startedAt` /
+   * `trigger`)唯一的读点。
+   */
+  runningTurns(): readonly BusyTurn[] {
+    return [...this.busy.values()];
   }
 
   /**
@@ -179,17 +236,17 @@ export class PlatformHub {
    *
    * 返回值是释放函数 —— 语义与 `setBusy(..., false)` 完全一样(它就是这个)。
    */
-  acquireTurn(projectId: string | null, agentId: string): Promise<() => void> {
+  acquireTurn(projectId: string | null, agentId: string, trigger: TurnTrigger): Promise<() => void> {
     const key = this.key(projectId, agentId);
     const release = (): void => this.setBusy(projectId, agentId, false);
     // 队里已经有人时也照排 —— 否则「后到者插队」会把先到的排空饿死
     if (!this.busy.has(key) && !this.waiters.has(key)) {
-      this.busy.add(key);
+      this.busy.set(key, { projectId, agentId, startedAt: this.deps.now(), trigger });
       return Promise.resolve(release);
     }
     return new Promise<() => void>((resolve) => {
       const q = this.waiters.get(key) ?? [];
-      q.push(() => resolve(release));
+      q.push({ trigger, resolve: () => resolve(release) });
       this.waiters.set(key, q);
     });
   }

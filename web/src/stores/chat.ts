@@ -158,6 +158,19 @@ export interface ChatState {
   contextDecided: boolean;
   /** 当前项目的工作项 / 工件 / 提问发生变更 —— 详情页据此回查。 */
   projectRevision: number;
+  /**
+   * **运行态**的 revision —— 成员页「正在做什么」区与工件页 DAG 的在跑标记据此回查。
+   *
+   * 为什么与 `projectRevision` 分开:那一位是一个**粗**信号(任何项目里一个回合
+   * 结束都推它),而它带的读者会重拉整个项目的工件 / 对话 / 工作项。运行态要的
+   * 是**立刻**跟着 `message_start` / `tool_start` / `agent_end` 动 —— 把它挂在
+   * projectRevision 上等于让每一个工具调用触发一次全项目重拉。
+   *
+   * ⚠️ 它**不是**「现在有没有人在跑」的真相,**只是一个『去查一下』的敲门砖**:
+   * 真相永远来自 `GET /api/projects/:id/live`(见 `lib/data.ts` 的
+   * `useProjectLive`)。WS 会断,库与宿主不会。
+   */
+  activityRevision: number;
   /** 项目列表本身的变更(新建 / 状态变化 / 待答问题数变化)。 */
   projectsRevision: number;
 
@@ -496,6 +509,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   contextDecided: false,
   projectRevision: 0,
   projectsRevision: 0,
+  activityRevision: 0,
 
   turns: [],
   inFlight: {},
@@ -647,6 +661,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
       currentUsage: { input: 0, output: 0 },
       error: null,
       status: "idle",
+      // 运行态的 revision 一起归零:重置之后屏幕上那份「正在做什么」没有意义了。
+      activityRevision: 0,
     });
   },
 
@@ -692,6 +708,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
           }),
           status: "streaming",
           error: null,
+          // 「有人在跑」这件事要**立刻**反映到成员页 / 工件页的运行态上:
+          // 建轮这一刻正是它从「空闲」变「在跑」的时刻。跨项目的轮不在这里刷
+          // (恒等比较,与 `inFlight` 的收口判据同粒度)。
+          activityRevision:
+            e.projectId === s.projectId ? s.activityRevision + 1 : s.activityRevision,
         }));
         return;
       }
@@ -751,6 +772,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
           newTurn(e.messageId, "assistant", e.agentId, e.projectId, { source: "unknown" });
         set((s) => ({
           ...withTurn(s, { ...t, blocks: [...t.blocks, { kind: "tool", tool: e.tool }] }),
+          // 「他最后一次动手是什么工具」在运行态里是一个要显示的事实 —— 工具一开始
+          // 就要刷(而不是等回合结束),否则一个 16 分钟的长回合里那一格永远是旧的。
+          activityRevision:
+            e.projectId === s.projectId ? s.activityRevision + 1 : s.activityRevision,
         }));
         return;
       }
@@ -820,6 +845,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
             //  左栏徽标与项目详情都该有机会回查。)
             projectRevision: s.projectRevision + 1,
             projectsRevision: s.projectsRevision + 1,
+            // 一个回合收口 ⟹ 谁在跑 / 最后活动 / 待办都变了(排空器可能立刻接上
+            // 下一个角色)。跨项目的收口不刷这一屏。
+            activityRevision:
+              e.projectId === s.projectId ? s.activityRevision + 1 : s.activityRevision,
           };
         });
         return;
@@ -859,6 +888,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
         set((s) => ({
           projectsRevision: s.projectsRevision + 1,
           projectRevision: s.projectRevision + (pid === null || pid === active ? 1 : 0),
+          // `work_changed` 会改变「他手上正在做的事」,所以运行态也要刷
+          // (`artifact_created` / `client_question` 那几个不影响它,但仍然无害 ——
+          //  这几位都在同一个 case 组里,判据是「当前上下文」)。
+          activityRevision:
+            pid === null || pid === active ? s.activityRevision + 1 : s.activityRevision,
         }));
         return;
       }
@@ -880,6 +914,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
         set((s) => ({
           projectsRevision: s.projectsRevision + 1,
           projectRevision: s.projectRevision + (pid === null || pid === active ? 1 : 0),
+          // 排空器**停下了** —— 这正是运行态最需要立刻显示的一件事(它从「有回合
+          // 在跑」变成「没人再被叫醒」),所以这一位也要推。
+          activityRevision:
+            pid === null || pid === active ? s.activityRevision + 1 : s.activityRevision,
         }));
         return;
       }

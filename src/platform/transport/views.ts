@@ -29,7 +29,8 @@ import {
 } from "../storage/repo/blockers.js";
 import { listChanges, type ChangeRequestRow } from "../storage/repo/changes.js";
 import {
-  listSessions, listSessionMessages, normalizeMessageLimit, type SessionMessageRow,
+  listSessions, listSessionMessages, normalizeMessageLimit, isSessionMessageKind,
+  type SessionMessageRow,
 } from "../storage/repo/sessions.js";
 import { getAgent } from "../storage/repo/agents.js";
 import {
@@ -37,10 +38,16 @@ import {
 } from "../storage/repo/projects.js";
 import { isProjectRole, type ProjectRole } from "../identity/role.js";
 import type { ProjectUsageAggregate, TurnUsageRow } from "../storage/repo/usage.js";
+import { collectPendingWork } from "../runtime/pendingWork.js";
+import {
+  collectTodos, DEFAULT_MAX_ATTEMPTS, type DriverTodo,
+} from "../runtime/dispatcher.js";
 import type {
   AskView, ArtifactView, BlockerView, ChangeView, ClientQuestionView,
-  MemberView, MessageOrigin, ProjectDetail, ProjectSummary, ProjectUsageView,
-  SessionMessageView, TurnUsageView, UsageByAgentView, WorkView,
+  MemberActivityView, MemberView, MessageOrigin, ProjectDetail, ProjectLiveView,
+  ProjectSummary, ProjectUsageView,
+  SessionMessageView, TurnTrigger, TurnUsageView,
+  UsageByAgentView, WorkView,
 } from "@shared/types/platform.js";
 
 // ── 小工具 ──────────────────────────────────────────────────────
@@ -122,6 +129,10 @@ export function toArtifactView(
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
     links: listLinkEdges(db, row.id),
+    // migration 014 的产出边。**`null` 原样透出** —— 「不挂在任何环节上」是
+    // 合法状态(决策 / 会议 / 变更 / 甲方问答),前端据此把它列在「无环节」区,
+    // 这里不许拿 authorAgentId 之类去猜一个环节出来(那是编造 provenance)。
+    workId: row.workId,
   };
 }
 
@@ -528,3 +539,210 @@ export function listProjectArtifacts(
   const name = agentNameCache(db);
   return listArtifacts(db, projectId, filter).map((a) => toArtifactView(db, a, name));
 }
+
+// ── 运行态(「此刻在做什么」)───────────────────────────────────────
+//
+// 这一节的读者只有一个:**成员页的「正在做什么」区 + 工件页 DAG 的在跑标记**。
+// 它**不参与任何判定** —— 判定仍然只有一处(`runtime/dispatcher.ts` 的
+// `collectTodos`),这里只是把它的结果连同两个**内存事实**端出来。
+//
+// 为什么把它放在 views 层而不是 http 层:与其它视图同一条理由 —— 行 / 内存
+// 片段 → 给人看的形状。放在路由里,「哪几个来源拼成了这个视图」就散在路由函数体
+// 里,而它正是这一节最需要看得清的东西(三个来源语义完全不同,见下)。
+
+/**
+ * 宿主运行期快照 —— **只读,而且只用于如实报告**。
+ *
+ * 三项都是**内存**事实(`host/serve.ts` 持有),因此有一个结构性的性质:
+ * **进程一重启就清零**。这正是它必须与库里的真状态(工作项 / 待办)**分开**
+ * 呈现的原因 —— 混成一个字段之后,「重启后还没跑过任何回合」与「一切正常但没有
+ * 在跑的回合」在界面上会长得一样。
+ *
+ * `null`(没接上)时读面如实返回 `runtime: "unavailable"`,而不是把
+ * `turn: null` 冒充成「空闲」。
+ */
+export interface LiveRuntimeSnapshot {
+  /** 此刻占着忙闩的回合(`transport/hub.ts` 的 `busy`)。`trigger` 是这一轮为什么存在 */
+  readonly turns: ReadonlyArray<{
+    readonly projectId: string | null;
+    readonly agentId: string;
+    readonly startedAt: number;
+    readonly trigger: TurnTrigger;
+  }>;
+  /** 排空器兜底定时器(`host/scheduler.ts` 的 fixed-delay)的心跳 */
+  readonly dispatch: { readonly intervalMs: number; readonly lastRunAt: number | null };
+  /** 此刻正在排空的项目 id */
+  readonly drainingProjects: readonly string[];
+}
+
+/**
+ * `collectTodos` 的那几个旋钮 —— **必须与宿主排空时用的是同一份**。
+ *
+ * 不这么接的后果很具体:用户用 `--report-batch-size 10` 起了服务,排空器要攒够
+ * 10 条才叫醒业务经理,而页面按缺省的 3 条显示「它现在就该跑」—— 界面开始
+ * **自信地说一个排空器不会做的动作**。这类谎与「显示 0 个工具」是同一类,
+ * 所以这几个旋钮由宿主原样交给读面,不由读面自己填默认值。
+ */
+export interface LiveCollectOptions {
+  readonly maxAttemptsPerTodo?: number;
+  readonly reportBatchSize?: number;
+  readonly reportMaxDelayMs?: number;
+}
+
+/** 一条待办在人读层面的最小形状 —— 字段与 `DriverTodo` 一一对应(**不重算**)。 */
+function todoView(t: DriverTodo, max: number): MemberActivityView["todos"][number] {
+  return {
+    kind: t.kind,
+    label: t.label,
+    attempts: t.attempts,
+    maxAttempts: max,
+    target: t.target,
+  };
+}
+
+/**
+ * 装配一个项目的运行态视图。
+ *
+ * ── 三个来源,逐条对应契约里的字段 ─────────────────────────────
+ *
+ *   ① **内存**:`turn`(忙闩 + 这一轮为什么存在)、`dispatch`(兜底心跳)、
+ *      `draining`。`runtime === null` ⇒ 三项一律退化成「读不到」并标
+ *      `runtime: "unavailable"`。
+ *   ② **库**:`currentWorks`(`in_progress` / `blocked` 的工作项)、
+ *      `readyWorks` / `waitingWorks`(`collectPendingWork` —— 与注入面
+ *      **同一个**判据)、`lastMessage` / `lastTool`(落库痕迹)。
+ *   ③ **`collectTodos`**:`todos` / `exhaustedTodos`。它是排空器自己的判据 ——
+ *      这里**绝不**重写一遍「谁该跑」,否则页面与排空器会有两个说法,
+ *      而它们漂了之后不会有任何东西红。
+ *
+ * `ageMs` 全部由 `now - 时间戳` 在**服务端**算:同一台机器上时钟无偏移,
+ * 但把减法收在一处之后,前端就不必自己决定「以谁的时钟为准」。
+ */
+export function toProjectLiveView(
+  db: Database.Database,
+  row: ProjectRow,
+  now: number,
+  runtime: LiveRuntimeSnapshot | null,
+  collect: LiveCollectOptions = {},
+): ProjectLiveView {
+  const members = listProjectMembers(db, row.id);
+  const maxAttempts = collect.maxAttemptsPerTodo ?? DEFAULT_MAX_ATTEMPTS;
+
+  // ③ 待办 —— **排空器的判据**,按 agent 分组。缺省旋钮与宿主一致(见
+  //    `LiveCollectOptions`);`collectTodos` 本身是纯查询(不写库)。
+  const board = collectTodos({
+    db,
+    projectId: row.id,
+    now,
+    ...collect,
+  });
+  const todosByAgent = new Map<string, DriverTodo[]>();
+  for (const t of board.runnable) {
+    const cur = todosByAgent.get(t.agentId);
+    if (cur === undefined) todosByAgent.set(t.agentId, [t]);
+    else cur.push(t);
+  }
+  const exhaustedByAgent = new Map<string, number>();
+  for (const t of board.exhausted) {
+    exhaustedByAgent.set(t.agentId, (exhaustedByAgent.get(t.agentId) ?? 0) + 1);
+  }
+
+  // ① 内存:这个项目里在跑的回合,按 agentId 索引。
+  const turns = new Map<string, { startedAt: number; trigger: TurnTrigger }>();
+  if (runtime !== null) {
+    for (const t of runtime.turns) {
+      if (t.projectId !== row.id) continue;
+      turns.set(t.agentId, { startedAt: t.startedAt, trigger: t.trigger });
+    }
+  }
+
+  // ② 库:最近一条落库消息(每个角色一次查询)。
+  //
+  // ⚠️ **只有一条查询,没有「最近一次工具调用」** —— 真机库实测 `session_messages`
+  // 里 `kind='tool'` 的行数是 **0**(工具调用只走 WS 广播,不落库)。曾经这里也
+  // 查了 `kind='tool'`,于是那个字段在真机上**恒为 null**:一个没有写入方的字段
+  // 比没有读者更坏,它会让人以为「这个角色从没动过手」。已在契约里删掉;
+  // 「现在正在调什么工具」由前端从 WS 的在飞轮读(那是唯一有的地方)。
+  const lastMsgStmt = db.prepare(
+    `SELECT m.kind AS kind, m.content AS content, m.created_at AS createdAt
+       FROM session_messages m
+       JOIN project_sessions s ON s.id = m.session_id
+      WHERE s.project_id = ? AND m.agent_id = ?
+      ORDER BY m.created_at DESC, m.id DESC
+      LIMIT 1`,
+  );
+
+  const works = listWorks(db, row.id);
+  const agents: MemberActivityView[] = members.map((m) => {
+    const turn = turns.get(m.id) ?? null;
+    const currentWorks = works
+      .filter((w) => w.assigneeAgentId === m.id && (w.status === "in_progress" || w.status === "blocked"))
+      .sort((a, b) => b.updatedAt - a.updatedAt)
+      .map((w) => ({
+        id: w.id,
+        title: w.title,
+        status: w.status,
+        ageMs: Math.max(0, now - w.updatedAt),
+      }));
+
+    const pending = collectPendingWork(db, m.id, row.id, now);
+
+    const lastRow = lastMsgStmt.get(row.id, m.id) as
+      | { kind: string; content: string; createdAt: number }
+      | undefined;
+    // 表里出现未定义 kind 是**数据错误**,不是「这条没有消息」—— 与
+    // `http.ts` 的 `memberConversations` 同一条纪律:不认识的 kind 不静默跳过,
+    // 而是让 `isSessionMessageKind` 判假 ⇒ 这里如实显示 `null`(「读不到最近活动」),
+    // 而**不是**编一个 kind 出来。判据与 `repo/sessions.ts` 的 CHECK 闭集同源。
+    const lastKind: string | undefined = lastRow?.kind;
+    const lastMessage: MemberActivityView["lastMessage"] =
+      lastRow !== undefined && isSessionMessageKind(lastKind)
+        ? {
+            kind: lastKind,
+            excerpt: excerpt(lastRow.content, 90),
+            ageMs: Math.max(0, now - lastRow.createdAt),
+          }
+        : null;
+
+    return {
+      agentId: m.id,
+      turn:
+        turn === null
+          ? null
+          : { elapsedMs: Math.max(0, now - turn.startedAt), trigger: turn.trigger },
+      currentWorks,
+      readyWorks: pending.myOpenWorks.length,
+      waitingWorks: pending.myWaitingWorks.length,
+      todos: (todosByAgent.get(m.id) ?? []).map((t) => todoView(t, maxAttempts)),
+      exhaustedTodos: exhaustedByAgent.get(m.id) ?? 0,
+      lastMessage,
+    };
+  });
+
+  const openWorks = works.filter(
+    (w) => w.status === "open" || w.status === "in_progress" || w.status === "blocked",
+  ).length;
+
+  return {
+    projectId: row.id,
+    at: now,
+    runtime: runtime === null ? "unavailable" : "host",
+    dispatch: {
+      intervalMs: runtime?.dispatch.intervalMs ?? 0,
+      lastRunAgeMs:
+        runtime?.dispatch.lastRunAt == null ? null : Math.max(0, now - runtime.dispatch.lastRunAt),
+      draining: runtime !== null && runtime.drainingProjects.includes(row.id),
+    },
+    runningTurns: turns.size,
+    openWorks,
+    pendingQuestions: listArtifacts(db, row.id, { kind: "client_question", status: "open" }).length,
+    agents,
+  };
+}
+
+/** 单行截断(与前端 `lib/vocab.ts` 的 `excerpt` 同语义:折行 + 省略号)。 */
+function excerpt(text: string, n: number): string {
+  const flat = text.replace(/\s+/g, " ").trim();
+  return flat.length > n ? `${flat.slice(0, n)}…` : flat;
+}
+

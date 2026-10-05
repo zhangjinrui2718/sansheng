@@ -164,6 +164,18 @@ export interface FixedDelayLoop {
   runNow(): Promise<void>;
   /** 已经跑过几轮 */
   runs(): number;
+  /**
+   * 最近一次**开始**跑的时刻(时钟来自 `Date.now()`);没跑过时为 `null`。
+   *
+   * 它是排空器的**心跳**:读面(`GET /api/projects/:id/live`)靠它显示
+   * 「上一次兜底触发距今多久」。没有这一位的话,「排空器还在转」就只存在于日志
+   * 里的一行行文字 —— 而用户要的是屏幕上看得见(「我担心系统已经挂了,而实际
+   * 还在运行」)。
+   *
+   * ⚠️ **内存事实**:进程重启即 `null`,而 `null` 的语义是「本进程还没跑过」,
+   * 不是「很久以前跑过」。读面必须把这两种状态分开显示。
+   */
+  lastRunAt(): number | null;
 }
 
 /**
@@ -180,9 +192,14 @@ export function startFixedDelay(deps: FixedDelayDeps): FixedDelayLoop {
   let stopped = false;
   let timer: NodeJS.Timeout | null = null;
   let runs = 0;
+  let lastRunAt: number | null = null;
 
   const fire = async (): Promise<void> => {
     runs++;
+    // 心跳记在**真正开始**跑的那一刻(不是跑完之后):一次排空可以跑十几分钟,
+    // 记在结束时刻会让界面上显示「上一次 0 秒前」而它其实刚跑完 —— 两种读法
+    // 都在回答「它还在转吗」,但只有「开始」能同时回答「转过几轮、多久前开始的」。
+    lastRunAt = Date.now();
     try {
       await deps.run();
     } catch (err) {
@@ -209,5 +226,6 @@ export function startFixedDelay(deps: FixedDelayDeps): FixedDelayLoop {
     },
     runNow: fire,
     runs: () => runs,
+    lastRunAt: () => lastRunAt,
   };
 }

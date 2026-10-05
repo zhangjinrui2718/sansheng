@@ -164,6 +164,22 @@ export interface ArtifactView {
   updatedAt: number;
   /** 出边:本工件 → 别的工件 */
   links: Array<{ rel: "parent" | "depends_on" | "answers"; targetId: string }>;
+  /**
+   * **产出这条工件的工作项**(provenance,migration 014 的 `artifacts.work_id`)。
+   *
+   * 工件页的 DAG 靠这条边把「工件」挂回「产出它的那个环节」——没有它,页面只能
+   * 按 kind 平铺,读者看不出这些工件其实是同一条流水线上不同步骤的产物。
+   *
+   * ⚠️ **`null` 是合法状态,不是缺参数**:立项书 / 会议纪要 / 变更记录 /
+   * 甲方问答(**决策工件**)不是任何工作项的执行产出。它们**不挂在任何环节上**,
+   * 页面必须把它们**另立一处列出**,而不是丢进某个节点假装是自己产的。
+   *
+   * ⚠️ 这条边**一条边两个语义**(生产 ∩ 关于):worker 写 `evidence` 是产出,
+   * 质检把 `review_finding` 挂到被审的那条上表达的是「审的是哪一条」。两者都该
+   * 显示在同一个节点上 —— 节点的语义是「这一步上留下了什么」,不是「谁生产的」。
+   * 判据与取舍见 `docs/DESIGN-PLATFORM.md` 与 `runtime/execution.ts`。
+   */
+  workId: string | null;
 }
 
 /**
@@ -291,6 +307,137 @@ export interface MemberConversationView {
   messages: SessionMessageView[];
   /** `total > messages.length` —— 截断了就如实说,不许拿返回条数冒充总数 */
   truncated: boolean;
+}
+
+/**
+ * 一个角色**此刻**在做什么 —— 成员页「正在做什么」这一区的数据源。
+ *
+ * ── 为什么需要它(这不是「再加一个页面」,是补一条读面)──────────────
+ *
+ * 在此之前成员页只有「他产生了什么对话」(过去时)。用户的原话是
+ * 「现在只有做了些什么,没有正在做什么……我担心系统已经挂了,而实际还在运行」。
+ * 过去的记录**结构上**回答不了「现在」:一个正在跑 16 分钟回合的 worker 与一个
+ * 已经停了三小时的 worker,在「他产生了什么对话」里长得一模一样。
+ *
+ * ── 三个来源,刻意分开(它们**不是**同一件事)────────────────────────
+ *
+ *   ① `turn`      —— 宿主内存的忙闩(`transport/hub.ts` 的 `busy`)。它答的是
+ *      「**此刻**有一个回合在它身上跑」。这是唯一能回答「现在」的来源,代价是
+ *      **进程重启即清零** —— 所以它单独一个字段,绝不与②混在一起。
+ *   ② `currentWorks` / `todos` —— **库里的真状态**:`works.status='in_progress'`
+ *      与 `collectTodos` 的待办。重启后照样成立,而且**与排空器看到的是同一个判据**
+ *      (不在这里重写一份「谁该跑」)。
+ *   ③ `lastMessage` / `lastTool` —— 最近一次的**落库**痕迹,用来回答「它最后一次
+ *      动是什么时候」。`ageMs` 由**服务端**算(同一台机器也在同一时钟上,
+ *      但由服务端算就不必让前端去担心时钟偏移)。
+ *
+ * ⚠️ **`turn === null` 不等于「空闲」**:它只说「宿主此刻没有登记这条闩」。
+ * 真正该被读成「空闲」的判据是三者合起来(没有回合、没有进行中的工作项、
+ * 没有待办)。前端**不许**把 `turn === null` 单独渲染成「空闲」——
+ * 那正好是「系统挂了而看起来正常」的镜像形态。
+ */
+export interface MemberActivityView {
+  agentId: string;
+  /**
+   * 此刻在这个角色身上跑的回合。`null` = 宿主没有登记闩。
+   *
+   * `elapsedMs` 是**服务端**算的(快照时刻 − 闩的占用时刻);前端要让它继续走,
+   * 就把「本地收到这份快照之后经过的时间」加上去(同一台机器,这个加法成立)。
+   * `trigger` 是**这一轮为什么存在** —— 用户触发 / 排空器按某条待办叫醒
+   * (`TurnTrigger`,与 `message_start.trigger` 同源同形)。
+   */
+  turn: { elapsedMs: number; trigger: TurnTrigger } | null;
+  /** 库里派给它的活:`in_progress` / `blocked`(重启后仍成立的真状态) */
+  currentWorks: Array<{ id: string; title: string; status: WorkStatus; ageMs: number }>;
+  /**
+   * 派给它、前置已满足、还没终态的活 —— `collectPendingWork().myOpenWorks` 的条数
+   * (判据是 `open` ∪ `in_progress`,且**容器不算**:有子项的那种工作项由子项推动)
+   * 。
+   *
+   * 与 `todos` 的区别:待办是**排空器现在还愿不愿意叫它**(受尝试预算约束),
+   * 这个是**它手上真实欠着多少活**。两个都对,问的是不同的问题。
+   */
+  readyWorks: number;
+  /** 派给它、但前置还没满足的工作项数 —— 「它为什么还没动」的答案 */
+  waitingWorks: number;
+  /**
+   * 平台判定「现在该它跑」的待办 —— 直接来自 `collectTodos` 的 `runnable`,
+   * 按 `agentId` 分组。这里是**排空器自己的判据**,不是前端重算的一份。
+   *
+   * `attempts` 是尝试预算已经用掉的次数(默认上界 3):用满的条目不在
+   * `runnable` 里,而在 `exhaustedTodos` 的计数里 —— 「排空器不再叫它了」
+   * 必须看得见,否则与「它马上就会跑」长得一样。
+   */
+  todos: Array<{
+    kind: TriggerTodoKind;
+    label: string;
+    attempts: number;
+    maxAttempts: number;
+    target: string | null;
+  }>;
+  /** 预算用尽、**不再被叫醒**的待办数(静默放弃是禁止的,所以它必须显示) */
+  exhaustedTodos: number;
+  /**
+   * 最近一条**落库**的会话消息(任何 kind)。
+   *
+   * ⚠️ 库里实际会出现的 kind 只有 `user` / `assistant` / `system`(**`tool` 从不
+   * 落库** —— 工具调用只走 WS 广播,见 `host/serve.ts` 的 `bridge`)。所以这一格
+   * 答的是「它最后一次**留下痕迹**是什么时候」,不是「它最后一次调了什么工具」。
+   * 正在调什么工具由**前端**从 WS 的在飞轮里读(`stores/chat.ts` 的 `inFlight`
+   * 里那些 `kind: "tool"` 的块)—— 那是唯一有这个信息的地方。
+   *
+   * 曾经这里有一个 `lastTool` 字段,在真机库上**恒为 `null`**(没有写入方),
+   * 属于「有声明没读者」的反面形态:有声明没**写**方。已删。
+   */
+  lastMessage: { kind: SessionMessageKind; excerpt: string; ageMs: number } | null;
+}
+
+/**
+ * 一个项目**此刻**的运行态快照(`GET /api/projects/:id/live`)。
+ *
+ * ── 它为什么存在,以及它**不是**什么 ──────────────────────────────
+ *
+ * 它存在的理由只有一个:**回答「现在」**。工件页的 DAG 靠它给正在跑的节点点亮,
+ * 成员页靠它显示「正在做什么」,页首靠它显示排空器的心跳 —— 用户要能看出
+ * 「系统还活着」而不是「界面停在最后一帧上」。
+ *
+ * 它**不参与任何判定**:没有一条流水线规则读这个视图,它是纯粹的读面投影。
+ * 判定仍然是 `collectTodos` 那一份(见 `runtime/dispatcher.ts`),这里只是把它的
+ * 结果**连同**运行期两个内存事实(忙闩、定时器心跳)一起端出来。
+ *
+ * ⚠️ **它是一次性的快照,不带 revision 语义** —— 调用方按自己的节奏重取
+ * (成员页轮询 + WS 事件触发),权威值永远以**这次响应**为准。
+ */
+export interface ProjectLiveView {
+  projectId: string;
+  /** 这份快照算出来的时刻(服务端时钟)。所有 `ageMs` 都是相对它算的 */
+  at: number;
+  /**
+   * 运行期数据的来源:
+   *   - `host`        —— 宿主把内存快照接上了(`turn` / `dispatch` 都是真值);
+   *   - `unavailable` —— **这个进程没接上运行期快照**(例如只挂 HTTP 的测试装配)。
+   *     此时 `turn` 一律为 `null` 且 `dispatch.lastRunAgeMs` 为 `null` ——
+   *     它**不是**「没在跑」,是「读不到」。两种状态在界面上**必须**分开显示,
+   *     否则「读不到」会被读成「空闲」,那正是这次要修的那类谎。
+   */
+  runtime: "host" | "unavailable";
+  /** 排空器兜底定时器的心跳 */
+  dispatch: {
+    /** 兜底周期(默认 10s) */
+    intervalMs: number;
+    /** 上一次兜底触发距今多久;`null` = 本进程还没触发过 */
+    lastRunAgeMs: number | null;
+    /** 此刻正在排空这个项目 */
+    draining: boolean;
+  };
+  /** 此刻在**这个项目**里跑着的回合数(四个角色加起来) */
+  runningTurns: number;
+  /** 未终态的工作项数(`open` / `in_progress` / `blocked`) */
+  openWorks: number;
+  /** 等甲方答的问题数(它们是流水线停下来的原因) */
+  pendingQuestions: number;
+  /** 本项目四个角色,一人一条(`MemberView` 的顺序) */
+  agents: MemberActivityView[];
 }
 
 /** 项目内的提问(角色之间,或对角色的)。**甲方看不到横向沟通**,只看发给自己那部分。 */
@@ -1037,6 +1184,16 @@ export function eventProjectId(ev: ServerEvent): string | null {
 //   GET    /api/projects/:id/blockers         → { blockers: BlockerView[] }
 //   GET    /api/projects/:id/changes          → { changes: ChangeView[] }
 //   GET    /api/projects/:id/members          → { members: MemberView[] }
+//   GET    /api/projects/:id/live             → { live: ProjectLiveView }
+//                                                「**此刻**在做什么」——成员页的
+//                                                「正在做什么」区与工件页 DAG 的
+//                                                「在跑」标记共用这一条。
+//                                                它**不参与判定**:判定仍是
+//                                                `collectTodos`(`?` 无查询参数)。
+//                                                运行期两项(忙闩 / 定时器心跳)来自
+//                                                宿主内存,接不上时 `runtime:
+//                                                "unavailable"` —— 那时 `turn`
+//                                                一律 null 且**不是**「没在跑」。
 //   ── 接待会话(第一个项目之前)──
 //   GET    /api/intake/messages               → IntakeMessagesResponse
 //                                                无需先建项目就能拉到与业务经理的
