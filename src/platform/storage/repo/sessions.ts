@@ -23,6 +23,27 @@ export function isSessionMessageKind(v: unknown): v is SessionMessageKind {
   return typeof v === "string" && (MESSAGE_KINDS as readonly string[]).includes(v);
 }
 
+/**
+ * 会话的**通道**(`project_sessions.channel`,migration 017)。
+ *
+ *   - `internal` = 项目的内部会话:角色回合 / 系统通知 / 工作项执行都写这里
+ *   - `client`   = **交付对话**:平台在 `handover` 回合**成功结束后**开的那条
+ *     (`runtime/dispatcher.ts` 的消费块第三支),它同时带
+ *     `deliverable_artifact_id`
+ *
+ * ⚠️ **它与前端 `TurnChannel`(`web/src/lib/data.ts`)不是同一个东西**,只是
+ * 名字撞了:那个是**渲染通道**(按 `agentId → role → clientFacing` 算出来的),
+ * 这个是**会话的归属**。两者独立,所以「甲方视图里看得见」由前端那条判据保证,
+ * 不需要读这一列(设计 1 §2.10 / §2.12 的 A3)。
+ */
+export type SessionChannel = "internal" | "client";
+
+export const SESSION_CHANNELS: readonly SessionChannel[] = ["internal", "client"];
+
+export function isSessionChannel(v: unknown): v is SessionChannel {
+  return typeof v === "string" && (SESSION_CHANNELS as readonly string[]).includes(v);
+}
+
 export interface SessionRow {
   id: string;
   /**
@@ -31,6 +52,15 @@ export interface SessionRow {
    */
   projectId: string | null;
   createdAt: number;
+  /** 见 {@link SessionChannel}。接待会话是 `internal`(它不是交付开出来的)。 */
+  channel: SessionChannel;
+  /**
+   * 这条对话是**哪条交付物**开出来的(`null` = 不是交付开出来的)。
+   *
+   * 它同时是 `handover` 规则的**终止判据** —— 读面在
+   * `runtime/dispatcher.ts` 的 `deliveredArtifactIds`。
+   */
+  deliverableArtifactId: string | null;
 }
 
 export interface SessionMessageRow {
@@ -47,6 +77,8 @@ interface RawConversation {
   id: string;
   project_id: string | null;
   created_at: number;
+  channel: string;
+  deliverable_artifact_id: string | null;
 }
 
 interface RawMessage {
@@ -58,22 +90,56 @@ interface RawMessage {
   created_at: number;
 }
 
+/**
+ * 往 `project_sessions` 插一行。
+ *
+ * `channel` 缺省 `internal`(与 schema 的 `DEFAULT` 一致):**存量调用方**
+ * (测试、接待会话、以及项目主会话)写的就是内部会话。交付会话**不**走缺省 ——
+ * 它由 {@link openDeliverableSession} 显式带 `channel: "client"` 写。
+ */
 export function insertSession(
   db: Database.Database,
-  row: { id: string; projectId: string | null; createdAt: number },
+  row: {
+    id: string;
+    projectId: string | null;
+    createdAt: number;
+    channel?: SessionChannel;
+    deliverableArtifactId?: string | null;
+  },
 ): void {
   db.prepare(
-    `INSERT INTO project_sessions (id, project_id, created_at) VALUES (?, ?, ?)`,
-  ).run(row.id, row.projectId, row.createdAt);
+    `INSERT INTO project_sessions (id, project_id, created_at, channel, deliverable_artifact_id)
+     VALUES (?, ?, ?, ?, ?)`,
+  ).run(
+    row.id,
+    row.projectId,
+    row.createdAt,
+    row.channel ?? "internal",
+    row.deliverableArtifactId ?? null,
+  );
+}
+
+function toSessionRow(raw: RawConversation): SessionRow {
+  if (!isSessionChannel(raw.channel)) {
+    throw new Error(
+      `project_sessions 表里出现未定义 channel「${raw.channel}」(id=${raw.id})—— ` +
+        `闭集是 ${SESSION_CHANNELS.join(" | ")},schema 的 CHECK 本该拦住它`,
+    );
+  }
+  return {
+    id: raw.id,
+    projectId: raw.project_id,
+    createdAt: raw.created_at,
+    channel: raw.channel,
+    deliverableArtifactId: raw.deliverable_artifact_id,
+  };
 }
 
 export function getSession(db: Database.Database, id: string): SessionRow | null {
   const raw = db.prepare(`SELECT * FROM project_sessions WHERE id = ?`).get(id) as
     | RawConversation
     | undefined;
-  return raw
-    ? { id: raw.id, projectId: raw.project_id, createdAt: raw.created_at }
-    : null;
+  return raw ? toSessionRow(raw) : null;
 }
 
 /**
@@ -93,7 +159,91 @@ export function listSessions(db: Database.Database, projectId: string | null): S
           .prepare(`SELECT * FROM project_sessions WHERE project_id = ? ORDER BY created_at DESC`)
           .all(projectId)
   ) as RawConversation[];
-  return rows.map((r) => ({ id: r.id, projectId: r.project_id, createdAt: r.created_at }));
+  return rows.map(toSessionRow);
+}
+
+/**
+ * **某个通道**的那条会话(设计 1 §2.11.6)。
+ *
+ * ⚠️ **这是 C4 拆地雷的落点:按 `(project_id, channel)` 取,不再挑「项目里最新
+ * 那条会话」。** 旧写法(`listSessions(...)[0]`)的失败形态是静默的 —— 交付会话
+ * 一建出来,六处调用点会把**所有角色**的消息都写进它(消息都在,只是分错了会话)。
+ *
+ * 多条同通道会话时取**最新**的那条,`id` 作次序的第二个键 —— 让选择是**全序**的,
+ * 同一个 `created_at` 也不会漂。这条次序对 `internal` 无意义(每个项目至多一条,
+ * 它只由 {@link ensureSession} 惰性建出),对 `client` 才是语义:每次交付开一条
+ * 新对话,甲方接下来的话该落在**最新的那场**上。
+ */
+export function findSessionByChannel(
+  db: Database.Database,
+  projectId: string,
+  channel: SessionChannel,
+): SessionRow | null {
+  const raw = db
+    .prepare(
+      `SELECT * FROM project_sessions
+       WHERE project_id = ? AND channel = ?
+       ORDER BY created_at DESC, id DESC LIMIT 1`,
+    )
+    .get(projectId, channel) as RawConversation | undefined;
+  return raw ? toSessionRow(raw) : null;
+}
+
+/**
+ * **交付会话的 id** —— 由交付物 id 派生(`s_deliv_<artifact>`),不是随机生成。
+ *
+ * 三个理由,都不是口味:
+ *   1. 它就是「一条交付物**至多**一条交付会话」这条不变量的**可读形态** ——
+ *      `SELECT id FROM project_sessions` 里一眼看得出哪条对话属于哪条交付物;
+ *   2. 它让**并发**的第二次写入撞主键(响亮失败),而不是安静地开出第二条对话
+ *      —— 幂等的第一道仍然是 {@link openDeliverableSession} 的 SELECT,但坏掉的
+ *      检查不该变成「静默多一条」;
+ *   3. 它不需要把 `newId` 塞进 `runtime/dispatcher.ts` 的 `DrainDeps`(那个接口
+ *      被 26 处测试的依赖字面量实现着,加一个只为建会话服务的必填字段,是把
+ *      「谁生成 id」这个与排空无关的事塞进排空的契约里)。
+ */
+export function deliverableSessionId(deliverableArtifactId: string): string {
+  return `s_deliv_${deliverableArtifactId}`;
+}
+
+/**
+ * 平台在 `handover` 回合**成功结束后**开一条交付对话(设计 1 §2.11.6)。
+ *
+ * **幂等 / at-least-once**:同一个交付物**只建一条**会话 —— 判据是
+ * `deliverable_artifact_id` 那列(读**库**,不是读本次调用的入参)。第二次调用
+ * 返回 `{ created: false }`,调用方据此决定要不要广播。
+ *
+ * ⚠️ 它**只建会话行**,不写任何消息:这场交付的正文由业务经理在随后的回合里
+ * 用 `tell_client` 说 —— 平台替它说话就又成了「平台写一份自己的叙事」。
+ *
+ * ⚠️ 它**不校验**交付物存在:那条外键(`REFERENCES artifacts(id)`,NO ACTION)
+ * 会替我们拒掉悬空引用,而且是**响亮**的。在这里再查一遍只会多一处会漂的真相。
+ */
+export function openDeliverableSession(
+  db: Database.Database,
+  input: {
+    projectId: string;
+    deliverableArtifactId: string;
+    channel: "client";
+    createdAt: number;
+  },
+): { created: boolean; sessionId: string } {
+  const existing = db
+    .prepare(
+      `SELECT id FROM project_sessions WHERE deliverable_artifact_id = ? LIMIT 1`,
+    )
+    .get(input.deliverableArtifactId) as { id: string } | undefined;
+  if (existing !== undefined) return { created: false, sessionId: existing.id };
+
+  const sessionId = deliverableSessionId(input.deliverableArtifactId);
+  insertSession(db, {
+    id: sessionId,
+    projectId: input.projectId,
+    createdAt: input.createdAt,
+    channel: input.channel,
+    deliverableArtifactId: input.deliverableArtifactId,
+  });
+  return { created: true, sessionId };
 }
 
 export function appendSessionMessage(

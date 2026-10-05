@@ -255,6 +255,35 @@
   .ss-clamp-3 { -webkit-line-clamp: 3; }
   .ss-clamp-4 { -webkit-line-clamp: 4; }
 
+  /* 工作记录块:业务经理「决定不播」时留在正文里的那行 `[未播报] …`
+     (设计 1 §2.10.4,A4)。它与播报**同出于一个人、同落一条消息**,所以必须靠
+     形状分开:甲方气泡是 ink-1 底 + 整圈描边 + 14px 正文;这块是**左侧 jade
+     色条** + ink-2 底 + 10px 等宽标签 + 12px 小字,且**不折叠**(它甲方要看得到)。 */
+  .ss-worklog {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    max-width: 85%;
+    padding: 6px 10px 7px;
+    border-radius: 6px;
+    background: var(--ink-2);
+    border-left: 2px solid var(--jade);
+  }
+  .ss-worklog-label {
+    font-family: theme('fontFamily.mono');
+    font-size: 10px;
+    line-height: 16px;
+    letter-spacing: 0.08em;
+    color: var(--bone-mute);
+  }
+  .ss-worklog-text {
+    font-size: 12px;
+    line-height: 1.6;
+    color: var(--bone-dim);
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+
   /* 原生 <details>:比自建 useState 少一份状态,展开/收起行为浏览器原生保证 */
   .ss-disclosure > summary {
     cursor: pointer;

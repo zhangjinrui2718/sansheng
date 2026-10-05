@@ -31,6 +31,7 @@ import { existsSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Server } from "node:http";
+import type Database from "better-sqlite3";
 import type { AgentSession, AgentSessionEvent } from "@earendil-works/pi-coding-agent";
 import { bootPlatform, type BootedPlatform } from "../runtime/boot.js";
 import { createPlatformSession, type CreateSessionFn } from "../runtime/session.js";
@@ -45,7 +46,10 @@ import { createPlatformApp } from "../transport/http.js";
 import { attachHub, ensureSession, PlatformHub } from "../transport/hub.js";
 import { startFixedDelay, startScheduler, type FixedDelayLoop, type Scheduler } from "./scheduler.js";
 import { resetPlatformData } from "./reset.js";
-import { appendSessionMessage } from "../storage/repo/sessions.js";
+import {
+  appendSessionMessage, type SessionChannel,
+} from "../storage/repo/sessions.js";
+import { ROLE_SPECS } from "../identity/role.js";
 import { resolveClientQuestion } from "../tools/client.js";
 import { listProjectSummaries } from "../transport/views.js";
 import { getProjectRow, listProjects } from "../storage/repo/projects.js";
@@ -324,7 +328,11 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
 
     ensureOrg(db, now());
     const at = now();
-    const sessionId = ensureSession(db, projectId, at, newId);
+    // **通道 = `client`(调用点显式声明)**:这是**甲方说的话**,它属于甲方通道。
+    // 交付对话开出来之后它落在那场交付的对话里;开出来之前明确回退到项目内部会话
+    // (交付之前不存在第二条对话)。接待会话(`projectId === null`)的通道由
+    // `ensureSession` 内部按 `project_id IS NULL` 处置,与这个实参无关。
+    const sessionId = ensureSession(db, projectId, at, newId, "client");
 
     // 1. 用户消息先落库 —— 落库和广播的顺序反了会出现「用户看见自己说了话,
     //    刷新后它没了」
@@ -421,7 +429,10 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
    * 而 `DROP TABLE` 那条路更糟(见 migrations/012 文件头:foreign_key_check 一声不响)。
    */
   function adoptIntakeMessages(intakeSessionId: string, newProjectId: string): void {
-    const target = ensureSession(db, newProjectId, now(), newId);
+    // **通道 = `internal`**:接待迁移把历史搬进**项目主会话**。这一刻项目是刚
+    // 立起来的,交付对话不可能存在(交付物都还没有),所以它**不会**误搬进
+    // 交付对话;而接待那段历史是「立项背景」,属于项目内部会话的起点。
+    const target = ensureSession(db, newProjectId, now(), newId, "internal");
     const moved = db
       .prepare(`UPDATE session_messages SET session_id = ? WHERE session_id = ?`)
       .run(target, intakeSessionId).changes;
@@ -532,7 +543,18 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
       };
     }
     const session = got.session;
-    const sessionId = ensureSession(db, projectId, now(), newId);
+    // **通道:按「这个角色是不是甲方接口」定**(调用点显式声明的那一条)。
+    //
+    // `runAgentTurn` 是本文件里**唯一**服务多个角色的调用点:业务经理
+    // (`handleUserMessage`)与排空器叫醒的项目经理 / 质检 / 整合都走它。判据只有
+    // 一条、而且是代码内常量:`ROLE_SPECS[role].clientFacing`(只有业务经理为
+    // true)。甲方通道 = 甲方说的话 ∪ 面向甲方的角色的回合 —— 两边合起来才是
+    // 「甲方看得见的那条对话」。
+    //
+    // 查不到这个 agent 时**取 `internal`(fail-closed)**:宁可让一条发言留在
+    // 内部会话里,也不把可能是内部角色的发言塞进甲方通道 —— 与前端
+    // `channelOf`(web/src/lib/data.ts)同一条纪律,连失效方向都一样。
+    const sessionId = ensureSession(db, projectId, now(), newId, channelForAgent(db, agentId));
     const messageId = newId("msg");
     // 建轮那一刻就把说话人钉住 —— 这一条是**跑这个回合的那个 agent**(参数,不是常量):
     // `handleUserMessage` 传业务经理,排空器传项目经理 / 质检(见 `drainOne` 的回调)。
@@ -656,7 +678,10 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
       };
     }
     const session = got.session;
-    const sessionId = ensureSession(db, projectId, now(), newId);
+    // **通道 = `internal`(调用点显式声明)**:工作项执行是**内部**流水线,不是
+    // 甲方对话。这一条正是 C4 的回归判据 —— 交付对话建出来之后,worker 的产出
+    // **不得**落进那场交付的对话里(设计 1 §2.11.6)。
+    const sessionId = ensureSession(db, projectId, now(), newId, "internal");
     const messageId = newId("msg");
     // 执行那条路的说话人是 `agentId`(worker,或派活的角色)—— 不是写死的 bm:
     // 它由 `drainOne` 的 `runWork` 回调按待办把 agent 传进来。
@@ -924,7 +949,10 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
       reason,
       detail: r.stopDetail,
     });
-    const sessionId = ensureSession(db, projectId, now(), newId);
+    // **通道 = `internal`(调用点显式声明)**:平台通知不是任何一个角色对甲方
+    // 说的话 —— 它是机器的记录。前端把它渲染成 `system` 带(`agentId === null`
+    // 且 `kind === 'system'`),不落进任何人的气泡。
+    const sessionId = ensureSession(db, projectId, now(), newId, "internal");
     appendSessionMessage(db, {
       id: newId("m"),
       sessionId,
@@ -1049,6 +1077,23 @@ const DEFAULT_DISPATCH_INTERVAL_MS = 10_000;
 /** 日志里怎么称呼一个上下文通道。`null` = 接待会话(见 migrations/012)。 */
 function channelLabel(projectId: string | null): string {
   return projectId === null ? "接待会话" : `项目 ${projectId}`;
+}
+
+/**
+ * 这个 agent 的回合该写进哪条会话通道(C4,设计 1 §2.11.6)。
+ *
+ * 判据只有一条、而且是**代码内常量**:`ROLE_SPECS[role].clientFacing`
+ * (只有业务经理为 true)。它表达的是「甲方通道 = 甲方说的话 ∪ 面向甲方的角色的
+ * 回合」—— 两边合起来才是甲方看得见的那条对话。
+ *
+ * **查不到这个 agent 时取 `internal`(fail-closed)**:宁可让一条发言留在内部
+ * 会话里,也不把可能是内部角色的发言塞进甲方通道。这与前端
+ * `channelOf`(web/src/lib/data.ts)是同一条纪律 —— 连失效方向都一样
+ * (「晚一拍」而不是「通道分离失效」)。
+ */
+function channelForAgent(db: Database.Database, agentId: string): SessionChannel {
+  const agent = getAgent(db, agentId);
+  return agent !== null && ROLE_SPECS[agent.role].clientFacing ? "client" : "internal";
 }
 
 function bridge(

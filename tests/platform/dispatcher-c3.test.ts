@@ -35,6 +35,7 @@ import {
   insertWork, markWorkReviewed, type WorkStatus,
 } from "../../src/platform/storage/repo/works.js";
 import { insertArtifact } from "../../src/platform/storage/repo/artifacts.js";
+import { openDeliverableSession } from "../../src/platform/storage/repo/sessions.js";
 import {
   collectTodos, drainProject, renderTask, RULES,
   type DrainTurnReport,
@@ -283,35 +284,68 @@ describe("C3 · `handover`:把已验收的交付物交到业务经理手上", ()
     expect(handoverTodo()?.refs).toEqual(["d_open"]);
   });
 
-  it("**终止判据(C4 的契约)**:交付会话一建出来,规则就不再触发", () => {
+  it("**终止判据(C4 已落地)**:交付会话一建出来,规则就不再触发", () => {
     mkReviewedDone({ id: "R" });
     mkArtifact({ id: "d1", kind: "deliverable", status: "accepted", workId: "R" });
     expect(handoverTodo()).toBeDefined();
 
-    // ── 这里**手工**跑一遍 C4 的 migration 017 要做的两件事,证明判据是活的 ──
-    //    ① 给 project_sessions 加那一列(§2.11.6 的「纯加法」)
-    //    ② 建一条挂在这条交付物上的会话(平台在 handover 回合成功后做)
-    db.exec(`ALTER TABLE project_sessions ADD COLUMN deliverable_artifact_id TEXT REFERENCES artifacts(id)`);
-    // 负样本:列有了、但没有会话 → 判据照旧成立(不是「加了列就永不再触发」)
-    expect(handoverTodo()).toBeDefined();
-    db.prepare(
-      `INSERT INTO project_sessions (id, project_id, created_at, deliverable_artifact_id)
-       VALUES ('s_deliv', 'p1', ?, 'd1')`,
-    ).run(T0 + 1000);
-    expect(handoverTodo(), "已经有交付会话 ⇒ 这一环做过了").toBeUndefined();
-  });
-
-  it("列**还不存在**时不假装已交付:待办照样产出来(C3 的交付面在这里止步)", () => {
-    // 这就是仓库今天的形状(017 还没落地)。判据如实读 schema(`PRAGMA table_info`),
-    // 列不在 ⇒ 没有任何交付会话 ⇒ 该交付的还是要交付。
+    // ── 017 之后:`project_sessions` 真的有两个新列,这里**直接用真 schema** ──
+    //    (C3 那版是手工 `ALTER TABLE ADD COLUMN` —— 017 一落地它就撞
+    //     `duplicate column name`,所以那些手工 DDL 全部删掉,改成断言 017 的产物)
     const cols = (db.pragma("table_info(project_sessions)") as Array<{ name: string }>)
       .map((c) => c.name);
-    expect(cols, "自检:这一列今天不该存在(存在了说明 017 已落地,这个用例该改)").not.toContain(
+    expect(cols, "017 的握手协议列:名字不一样,`handover` 永远不会终止")
+      .toContain("deliverable_artifact_id");
+    expect(cols, "017 的通道列").toContain("channel");
+
+    // 负样本:列在、但**还没有会话** → 判据照旧成立(不是「加了列就永不再触发」)
+    expect(handoverTodo()).toBeDefined();
+    // 平台在 `handover` 回合成功后做的正是这一句(`drainProject` 的消费块第三支)
+    const opened = openDeliverableSession(db, {
+      projectId: "p1", deliverableArtifactId: "d1", channel: "client", createdAt: T0 + 1000,
+    });
+    expect(opened.created).toBe(true);
+    expect(handoverTodo(), "已经有交付会话 ⇒ 这一环做过了").toBeUndefined();
+    // **幂等**:同一个交付物只建一条会话(at-least-once 的重放是安全的)
+    const again = openDeliverableSession(db, {
+      projectId: "p1", deliverableArtifactId: "d1", channel: "client", createdAt: T0 + 2000,
+    });
+    expect(again).toEqual({ created: false, sessionId: opened.sessionId });
+    expect(
+      db.prepare(`SELECT COUNT(*) AS n FROM project_sessions WHERE project_id = 'p1'`).get(),
+    ).toEqual({ n: 1 });
+  });
+
+  it("列**不在**时不假装已交付:待办照样产出来(读面先问 schema,不靠异常)", () => {
+    // 017 之后这一列在生产路径上永远在(迁移每次 boot 都跑)。所以这条用例**自己
+    // 造一个「列不在」的库**:DROP COLUMN 之后判据必须如实退化成「还没有交付会话」。
+    // 没有这条负样本,`deliveredArtifactIds` 里那段 `PRAGMA table_info` 就是一段
+    // 谁也没走过、也测不到的死代码(AGENTS.md:「有声明没读者」要定期复核)。
+    const cols = (db.pragma("table_info(project_sessions)") as Array<{ name: string }>)
+      .map((c) => c.name);
+    expect(cols, "自检:017 落地之后这一列必须在(不在说明迁移没跑上)").toContain(
       "deliverable_artifact_id",
     );
     mkReviewedDone({ id: "R" });
     mkArtifact({ id: "d1", kind: "deliverable", status: "accepted", workId: "R" });
+    // 正样本:列在、没有会话 ⇒ 该交付
     expect(handoverTodo()).toBeDefined();
+    // 平台已经交付过一次(真的落了一条会话)—— 此刻规则**不该**再触发
+    openDeliverableSession(db, {
+      projectId: "p1", deliverableArtifactId: "d1", channel: "client", createdAt: T0 + 1000,
+    });
+    expect(handoverTodo()).toBeUndefined();
+
+    db.exec(`ALTER TABLE project_sessions DROP COLUMN deliverable_artifact_id`);
+    // 列没了 ⇒ 读面**如实**返回空集(「还没有任何交付会话」),不假装已交付
+    expect(handoverTodo(), "列不在 ⇒ 判据如实退化,而不是抛错 / 假装成立").toBeDefined();
+    // 恢复:把列加回来。⚠️ SQLite 的 `DROP COLUMN` 是**重写行**,那条边的值跟着没了
+    // (会话行还在,但 `deliverable_artifact_id` 变成 NULL)—— 所以恢复要两步:
+    // 先加列,再回填那条边。这是 SQLite 的语义,不是本模块的取舍。
+    db.exec(`ALTER TABLE project_sessions ADD COLUMN deliverable_artifact_id TEXT REFERENCES artifacts(id)`);
+    expect(handoverTodo(), "列回来但值没回填 ⇒ 判据仍然不成立(如实)").toBeDefined();
+    db.prepare(`UPDATE project_sessions SET deliverable_artifact_id = 'd1' WHERE id = 's_deliv_d1'`).run();
+    expect(handoverTodo(), "边回填之后,终止判据照旧成立").toBeUndefined();
   });
 });
 
@@ -381,8 +415,8 @@ describe("C3 · 排空:整合 → 交付", () => {
 
     const r = await drainProject({
       db, projectId: "p1", now: () => T0, log: () => {}, reportBatchSize: 1,
-      // C4 还没落地(没有交付会话)⇒ `handover` 的终止判据暂时不成立,
-      // 这条用例只钉「两环接起来了」,重复叫醒由下面那条单独测。
+      // `maxAttemptsPerTodo: 1` 在这里**不参与判定**:交付会话由消费块第三支
+      // (C4)在业务经理那个回合成功后建出来,所以 `handover` 只可能跑一次。
       maxAttemptsPerTodo: 1,
       runAgentTurn: async (agentId, task) => { pmWritesDeliverable(agentId, task); return okTurn; },
       runWork: async () => { throw new Error("这一串里没有工作项要执行"); },
@@ -427,7 +461,7 @@ describe("C3 · 排空:整合 → 交付", () => {
     expect(r.stopDetail).toContain("尝试预算");
   });
 
-  it("C4 之前,交付那一环**没有终点**:会话不建,`handover` 会再次出现(诚实的现状)", async () => {
+  it("C4 之后,交付那一环**有**终点了:`handover` 只被叫醒一次", async () => {
     mkReviewedDone({ id: "R" });
     mkArtifact({ id: "d1", kind: "deliverable", status: "accepted", workId: "R" });
     const r = await drainProject({
@@ -436,9 +470,22 @@ describe("C3 · 排空:整合 → 交付", () => {
       runAgentTurn: async () => okTurn,
       runWork: async () => { throw new Error("不该被调用"); },
     });
-    // 这条断言钉的是**C4 的缺口**,不是期望行为:建交付会话落地之后,它必须改成
-    // 「只叫醒一次」。改动的那一天正是这条测试该更新的那一天。
+    // C3 时这条断言是 `toBe(2)`,钉的是**缺口**(没有交付会话 ⇒ 判据不成立 ⇒
+    // 按预算重复)。017 + 消费块第三支落地之后,它必须变成 1 —— 终止判据真的成立。
     const handed = r.visited.filter((v) => v.kind === "handover").length;
-    expect(handed, "没有交付会话 ⇒ 终止判据不成立 ⇒ 按预算重复(限流兜住)").toBe(2);
+    expect(handed, "交付会话建出来了 ⇒ 终止判据成立 ⇒ 不再重复叫醒").toBe(1);
+    // 而且那条会话真的落在库里(不是「规则不叫了」而已)
+    expect(
+      db.prepare(`SELECT id, channel, deliverable_artifact_id FROM project_sessions`)
+        .all(),
+    ).toEqual([{ id: "s_deliv_d1", channel: "client", deliverable_artifact_id: "d1" }]);
+    // 第二次排空:整条交付链都没有待办了(这才是「有终点」的完整形态)
+    const second = await drainProject({
+      db, projectId: "p1", now: () => T0, log: () => {}, maxAttemptsPerTodo: 2,
+      reportBatchSize: 1,
+      runAgentTurn: async () => okTurn,
+      runWork: async () => { throw new Error("不该被调用"); },
+    });
+    expect(second.visited, "第二次 tick 谁都不该被叫醒").toEqual([]);
   });
 });

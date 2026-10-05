@@ -18,6 +18,23 @@
  *    ⚠️ `agentId === null` **不等于**甲方 —— 它有两个作者(kind `user` / kind
  *    `system`),所以系统通知走一条**独立的提示带**,不冒充任何人的气泡。
  *
+ * ── 本批次(设计 1 §2.12 的 A4):`[未播报]` 行首分流 ────────────────
+ *
+ * 业务经理**决定不播**时,正文里必须留一行工作记录 `[未播报] …`
+ * (`harness/system_prompts/business_manager.protocol.md:65`,硬要求;格式示例在
+ * `business_manager.core.md:131`)。它随正文落成**同一条** `assistant` 消息
+ * (`host/serve.ts` 的落库),而业务经理是 `clientFacing` ⇒ 通道分离之后它会
+ * **整段进甲方气泡** —— 一行给下一个读会话的人(和事后追问「当时为什么没告诉我」
+ * 的甲方)看的工作记录,被当成播报渲染了出来。
+ *
+ * 所以把它**按行首**切出来,渲染成独立的「工作记录」块:
+ *   - **不滤掉**:§2.10.4 的原话是「这行甲方也看得到」,删了它「判断过」与
+ *     「漏了」在记录里就长得一模一样(§2.9 末的同一条纪律);
+ *   - **不与播报混在一个气泡里**:独立一块 + 左侧色条 + 小字(`.ss-worklog`)。
+ *
+ * 判据是 `splitWorkLog`(纯函数,导出给测试):**行首** `[未播报]`,不是包含 ——
+ * 正文中段引述 `"[未播报]"` 不得分流(设计 ④ 明确要这条负样本)。
+ *
  * ── 旧版留下的两件事(未改)────────────────────────────────────
  *
  * 1. **正文按 markdown 渲染**(此前是裸 `{text}`,业务经理的 `**加粗**` / 表格 /
@@ -32,7 +49,7 @@
  *      · 用户上滚 → 关闭跟随 + 显示「回到底部」;自己滚回底部 → 恢复跟随
  *      · 滚到顶加载历史 → **未做**(后端无分页/游标,见 lib/scroll.ts 文件头)
  */
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { inFlightTurns, useChatStore, type Turn } from "@/stores/chat";
 import {
   channelContextOf,
@@ -74,6 +91,81 @@ export function contentSignalOf(turns: readonly Turn[], streaming: readonly Turn
     for (const b of t.blocks) textLength += b.kind === "tool" ? 1 : b.text.length;
   }
   return `${turns.length}:${streaming.length}:${textLength}`;
+}
+
+/**
+ * 正文切出来的两段:「对甲方说的话」与「工作记录」。
+ *
+ * 与 `lib/data.ts` 的 `TurnChannel` 分开:**通道**判的是「这一轮是谁说的」
+ * (甲方 / 面向甲方的角色 / 平台通知),**这个**判的是「这一块正文里哪几行不是
+ * 给甲方的话」—— 两者作用在不同粒度上,合并成一个类型会让「一轮里既有播报又有
+ * 工作记录」这件事没法表达。
+ */
+export interface TextSegment {
+  readonly kind: "speech" | "work_log";
+  readonly text: string;
+}
+
+/**
+ * 工作记录的**行首**判据。
+ *
+ *   - `^` 是行首,不是包含:正文中段引述 `"[未播报]"`(例如「甲方问:为什么有
+ *     `[未播报]` 这行?」)不分流 —— 那是**对甲方说的话**。
+ *   - `[ \t]*` 允许行首的水平空白:提示词示例写在代码块里,缩进仍属行首;
+ *     破折号开头的列表项(`- [未播报] …`)因此**不**匹配 —— 那已经是一条列表
+ *     正文,不是提示词要求的那一行。
+ *   - 不用 `m` 标志:输入是先 split 出来的**单行**,`^` 天然就是这一行的行首。
+ */
+const WORK_LOG_LINE = /^[ \t]*\[未播报\]/;
+
+/**
+ * 把一段正文按「工作记录」切开(纯函数,导出给测试)。
+ *
+ * ── 一行还是一段 ────────────────────────────────────────────────
+ *
+ * 提示词要求工作记录「**一行,最多两句**」,但它自己给的示例是**硬折行的三行**
+ * (`business_manager.core.md:131` —— 第一行结尾是「钱」,没有句末标点)。所以这里
+ * 以**空行为界**:匹配行 + 其后的连续非空行属于同一条工作记录;空行之后回到播报。
+ *
+ * **为什么敢把续行也折进去**(而不是只折匹配的那一行):折错的方向只是「把一句
+ * 播报挪进工作记录块」,而那块**照样在屏幕上**(不是折叠、不丢字符)⇒ 代价是
+ * 分组,不是证据消失。反过来「只折一行 + 工作记录被硬折行」会让半句工作记录
+ * 留在甲方气泡里 —— 那才是这一批要消灭的混合。
+ *
+ * 只用空白行组成的段**不产出**气泡(它们只是分隔符)。
+ */
+export function splitWorkLog(text: string): TextSegment[] {
+  const segments: TextSegment[] = [];
+  let kind: TextSegment["kind"] = "speech";
+  let buf: string[] = [];
+  const flush = () => {
+    if (buf.length === 0) return;
+    // 段的**两头不留空行**:空行是分隔符,不是内容。留在段里只会在气泡开头
+    // 多一个空行(markdown 忽略它,但字面量渲染看得到),也会让 `splitWorkLog`
+    // 的输出对同一个输入有两种形状。
+    const joined = buf.join("\n").replace(/^\n+/, "").replace(/\n+$/, "");
+    buf = [];
+    if (joined.trim() === "") return; // 纯空白段不成块
+    segments.push({ kind, text: joined });
+  };
+  for (const line of text.split("\n")) {
+    if (kind === "speech" && WORK_LOG_LINE.test(line)) {
+      flush();
+      kind = "work_log";
+      buf.push(line);
+      continue;
+    }
+    if (kind === "work_log" && line.trim() === "") {
+      // 空行 = 这条工作记录结束。**不把空行带进下一段**:它只是分隔符,
+      // 带进去会在播报气泡的开头留一个空行。
+      flush();
+      kind = "speech";
+      continue;
+    }
+    buf.push(line);
+  }
+  flush();
+  return segments;
 }
 
 export function MessageList() {
@@ -434,19 +526,32 @@ export const TurnView = memo(function TurnView({
           />
         )}
         {turn.blocks.map((b, i) => {
+          const isLastBlock = i === turn.blocks.length - 1;
           if (b.kind === "thinking") {
             // 思维链是内部推理,不是给用户看的正式输出 —— **不渲染 markdown**,
             // 保持纯文本(等宽字体 + pre-wrap,见 ThinkingBlock)。
-            return <ThinkingBlock key={i} text={b.text} streaming={streaming && i === turn.blocks.length - 1} />;
+            return <ThinkingBlock key={i} text={b.text} streaming={streaming && isLastBlock} />;
           }
           if (b.kind === "text") {
+            // **只有助手的正文**参与工作记录分流:甲方自己打的字按字面渲染
+            // (`Bubble` 的 user 分支),把人打的字重新分类是替他改写输入;
+            // 平台通知走 `SystemNotice`,根本不到这里。
+            const segments: readonly TextSegment[] = isUser
+              ? [{ kind: "speech", text: b.text }]
+              : splitWorkLog(b.text);
             return (
-              <Bubble
-                key={i}
-                user={isUser}
-                text={b.text}
-                streaming={streaming && i === turn.blocks.length - 1}
-              />
+              // Fragment 不产生 DOM 节点 ⇒ 这些块仍是那一列 flex 的直接子元素,
+              // 气泡间距(`gap-1`)与分流前一致。
+              <Fragment key={i}>
+                {segments.map((seg, j) => {
+                  const isLastSegment = streaming && isLastBlock && j === segments.length - 1;
+                  return seg.kind === "work_log" ? (
+                    <WorkLogBlock key={j} text={seg.text} streaming={isLastSegment} />
+                  ) : (
+                    <Bubble key={j} user={isUser} text={seg.text} streaming={isLastSegment} />
+                  );
+                })}
+              </Fragment>
             );
           }
           if (b.kind === "tool") {
@@ -458,6 +563,41 @@ export const TurnView = memo(function TurnView({
     </div>
   );
 });
+
+/**
+ * 「工作记录」块 —— 业务经理**决定不播**时留在正文里的那行 `[未播报] …`。
+ *
+ * ── 为什么它必须留在屏幕上(而不是滤掉)──────────────────────────
+ *
+ * 它是「判断过,决定不打扰你」这件事**在会话记录里唯一的现场**
+ * (`business_manager.protocol.md:65` 说得很直白:少了它,「判断过」与「漏了」
+ * 在记录里长得一模一样)。所以 §2.10.4 的裁决是**留,但与播报视觉分开** ——
+ * 看不到就等于平台替甲方删了证据,那与「平台偷偷替他决定」是一回事。
+ *
+ * 呈现上刻意与甲方气泡不同:气泡是 `--ink-1` 底 + 整圈描边 + 14px 正文,这块是
+ * 左侧 jade 色条 + `--ink-2` 底 + 10px 等宽标签 + 12px 小字(样式在 globals.css
+ * 的 `.ss-worklog`)。**不折进 ThinkingBlock 那种可折叠壳**:它是给甲方看的,
+ * 默认就该在屏幕上。
+ */
+function WorkLogBlock({ text, streaming }: { text: string; streaming?: boolean }) {
+  return (
+    <div
+      className="ss-worklog"
+      data-channel="work-log"
+      title="工作记录:业务经理判断「这次不值得打扰你」时留下的现场(设计 1 §2.10.4)"
+    >
+      <span className="ss-worklog-label">工作记录 · 未播报</span>
+      <span className="ss-worklog-text">
+        {text}
+        {streaming && (
+          <span className="animate-caret" style={{ color: "var(--jade)" }}>
+            ▍
+          </span>
+        )}
+      </span>
+    </div>
+  );
+}
 
 function Bubble({ user, text, streaming }: { user: boolean; text: string; streaming?: boolean }) {
   return (

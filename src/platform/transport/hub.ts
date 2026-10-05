@@ -31,7 +31,10 @@ import type { Duplex } from "node:stream";
 import type Database from "better-sqlite3";
 import type { ClientChannel, ClientQuestion } from "../client/port.js";
 import { getArtifact, type ArtifactRow } from "../storage/repo/artifacts.js";
-import { listSessions, insertSession, appendSessionMessage } from "../storage/repo/sessions.js";
+import {
+  listSessions, insertSession, appendSessionMessage, findSessionByChannel,
+  type SessionChannel,
+} from "../storage/repo/sessions.js";
 import { getProjectRow } from "../storage/repo/projects.js";
 import { toArtifactView, toClientQuestionView, toWorkView } from "./views.js";
 import { getAgent } from "../storage/repo/agents.js";
@@ -276,7 +279,13 @@ export class PlatformHub {
         // **作者是调用方给的真实 agent id** —— 从前这里写死成业务经理的 id,
         // 今天恰好对(只有它会播报),但组织表换 id 的那一刻就**静默归错人**。
         const at = this.deps.now();
-        const sessionId = ensureSession(this.deps.db, projectId, at, this.deps.newId);
+        // **通道 = `client`(调用点显式声明)**:`tell_client` 就是「业务经理对
+        // 甲方说话」,它属于**甲方通道**。交付对话开出来之后(C4),播报落在
+        // 那场交付的对话里;开出来之前,`ensureSession` 明确回退到项目内部会话
+        // (那条会话此刻就是甲方看得到的对话)—— 见 `ensureSession` 的注释。
+        const sessionId = ensureSession(
+          this.deps.db, projectId, at, this.deps.newId, "client",
+        );
         appendSessionMessage(this.deps.db, {
           id: this.deps.newId("m"),
           sessionId,
@@ -302,12 +311,31 @@ function nameOf(db: Database.Database, agentId: string): string {
 }
 
 /**
- * 拿那个上下文的第一条会话,没有就建一条。**每个项目一条连续对话**(经校准的裁决)。
+ * 拿**这个通道**的那条会话,没有就建一条。**每个项目一条连续对话**(经校准的裁决)。
  *
  * `projectId === null` = **接待会话**:全局只有那一条(`project_id IS NULL`)。
  * 这里不额外做「只能有一条」的判定 —— 那条不变量在 **schema 层**由
  * `idx_session_single_intake` 机械保证(见 `migrations/012_intake_session.sql`),
  * 应用层再判一次只会多一处会漂的真相。
+ *
+ * ── ⚠️ `channel` 是**必填实参**,这就是 C4 拆的那条地雷 ─────────────
+ *
+ * 旧写法没有通道参数,于是只能 `listSessions(db, projectId)[0]` —— **挑项目里最新
+ * 那条会话**。它今天恰好对(每项目一条),但交付会话(C4)一建出来,六处调用点就会
+ * 把**所有角色**的消息都写进那条交付对话:消息一条不少,只是**分错了会话**,而
+ * 表现是静默的(设计 1 §2.11.6)。现在每处调用点各自声明自己写的是内部通道还是
+ * 甲方通道,库里的判据是 `(project_id, channel)`。
+ *
+ * **`client` 有一条明确回退(不是「挑最新的」)**:这条项目**还没有**交付对话时,
+ * 落回项目内部会话。理由是可查的 —— 交付之前**不存在第二条对话**,那条内部会话
+ * 就是甲方此刻能看到的对话。回退目标是唯一的(每个项目至多一条 `internal`),
+ * 与旧写法那种「谁最新是谁」的含糊有本质区别。没有这条回退,任何一个 `client`
+ * 调用点都会给项目**凭空造出**一条会话,于是「拆地雷不改行为」当场为假。
+ *
+ * ⚠️ 惰性建出来的会话**一律是 `internal`**:`client` 通道的会话只由平台在
+ * `handover` 回合成功后开(`repo/sessions.ts` 的 `openDeliverableSession`)。
+ * 让「甲方通道」可以由一次用户消息凭空产生,等于把「哪条对话是哪场交付开的」
+ * 这个问题重新变成猜的。
  *
  * ⚠️ 接待会话**不校验项目存在**(没有项目可校验);项目会话必须校验 —— 往不存在的
  * 项目里写消息会让那条对话永远读不出来。
@@ -317,14 +345,26 @@ export function ensureSession(
   projectId: string | null,
   at: number,
   newId: (p: string) => string,
+  channel: SessionChannel,
 ): string {
-  if (projectId !== null && getProjectRow(db, projectId) === null) {
+  // 接待会话:通道对它没有意义(它既不是项目主会话,也不是交付对话)。
+  // schema 的 `DEFAULT 'internal'` 就是它的通道。
+  if (projectId === null) {
+    const intake = listSessions(db, null);
+    if (intake.length > 0) return intake[0]!.id;
+    const id = newId("s");
+    insertSession(db, { id, projectId: null, createdAt: at, channel: "internal" });
+    return id;
+  }
+  if (getProjectRow(db, projectId) === null) {
     throw new Error(`项目 ${projectId} 不存在 —— 不能往不存在的项目里写消息`);
   }
-  const existing = listSessions(db, projectId);
-  if (existing.length > 0) return existing[0]!.id;
+  const picked =
+    findSessionByChannel(db, projectId, channel) ??
+    (channel === "client" ? findSessionByChannel(db, projectId, "internal") : null);
+  if (picked !== null) return picked.id;
   const id = newId("s");
-  insertSession(db, { id, projectId, createdAt: at });
+  insertSession(db, { id, projectId, createdAt: at, channel: "internal" });
   return id;
 }
 

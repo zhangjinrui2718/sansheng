@@ -114,6 +114,7 @@ import {
   type DispatchEventRow,
 } from "../storage/repo/dispatch.js";
 import { ROLE_SPECS, isProjectRole, type ProjectRole } from "../identity/role.js";
+import { openDeliverableSession } from "../storage/repo/sessions.js";
 import type { Capability } from "../harness/capability.js";
 import type { ToolCallRecord } from "./turn.js";
 
@@ -1383,10 +1384,16 @@ const DEFAULT_MAX_ROUNDS = 8;
 /**
  * 把这个项目里此刻所有的待办**排空**,直到没有待办、或撞上界、或用户中断。
  *
- * 它**不建会话、不发 WS 事件、不写会话消息** —— 那三件事由宿主提供的回调负责。
- * 这样这个循环可以在没有任何 provider / 网络的情况下被穷举测试
- * (见 `tests/platform/dispatcher.test.ts`),而「会不会失控」这条最要紧的性质
- * 也因此是**可测的**而不是「看起来应该会停」。
+ * 它**不发 WS 事件、不写会话消息** —— 那两件事由宿主提供的回调负责(谁来跑回合、
+ * 事件怎么桥到前端)。这样这个循环可以在没有任何 provider / 网络的情况下被穷举
+ * 测试(见 `tests/platform/dispatcher.test.ts`),而「会不会失控」这条最要紧的
+ * 性质也因此是**可测的**而不是「看起来应该会停」。
+ *
+ * ⚠️ **C4 之后它确实会建一条会话行**(`handover` 成功后的第三支,见下面消费块),
+ * 所以旧句「它不建会话」已经为假 —— 留着它就是一句会腐烂的注释。建会话与
+ * 「跑一个 agent 回合」「把消息落库」是两类动作:前者是**平台记账**(与
+ * `markWorkReviewed` / `consumePendingDispatchEvents` 同一类,都是「这件事办过了」
+ * 的落库),后者才是宿主的事。判据因此仍然可以在这一个函数里被穷举测试。
  *
  * ── 三件事保证它一定停 ──────────────────────────────────────────
  *
@@ -1519,6 +1526,40 @@ export async function drainProject(deps: DrainDeps): Promise<DrainResult> {
       if (todo.kind === "report_downstream") {
         consumePendingDispatchEvents(deps.db, deps.projectId, todo.agentId, deps.now());
         reportedToClient = true;
+      }
+      // ── 第三支(C4):交付那一环的**终点** ────────────────────────
+      //
+      // 「业务经理主动开一条对话」这句话的机械形态:平台在 `handover` 回合
+      // **成功结束后**开一条交付对话(`channel='client'` +
+      // `deliverable_artifact_id`)—— 与上面两支同形:回合成功才记账,
+      // 失败 / 被中断就下次重来。
+      //
+      // **为什么这条边必须在库里**:它同时是 `handover_deliverable` 规则的
+      // **终止判据**(`deliveredArtifactIds` 读的就是这一列)。没有它,那条规则
+      // 每个 tick 都成立,只能靠尝试预算兜住 —— 而预算按 AGENTS.md 的定性是
+      // **限流不是判据**,拿它兜一条每次都成立的规则等于让流水线静默停在一个
+      // 「看起来跑过很多次」的地方(§2.11.4 末)。
+      //
+      // **幂等**:`openDeliverableSession` 先读库(同一条交付物已有会话就返回
+      // `created:false`),所以重复消费不会开出第二条对话 —— at-least-once 的
+      // 重放是安全的。
+      //
+      // ⚠️ `todo.target` 就是那条交付物的 id(`handover:${a.id}` 的 target)。
+      // 为 `null` 时**什么都不做**:那是装配错误(这条待办一定带 target),
+      // 此刻悄悄开一条不挂边的会话,只会让下一次排空再产出同一条待办 —— 那才是
+      // 「静默」的正确形态:规则如实地说「还没交付」,由预算兜住。
+      if (todo.kind === "handover" && todo.target !== null) {
+        const r = openDeliverableSession(deps.db, {
+          projectId: deps.projectId,
+          deliverableArtifactId: todo.target,
+          channel: "client",
+          createdAt: deps.now(),
+        });
+        if (r.created) {
+          deps.log(
+            `dispatcher: 交付物 ${todo.target} 的对话已开出来(${r.sessionId},通道 client)`,
+          );
+        }
       }
     }
 
