@@ -212,6 +212,18 @@ describe("⑤ 工具面「求解不了」不许显示成「0 个」", () => {
     ).toBe(false);
   });
 
+  it("字段缺失(前端比后端新)⇒ 退化回旧行为显示计数,**不许**误报成「求解不了」", () => {
+    // 旧后端(没有 toolsSolved 这个字段)与只增字段的契约:absent ⇒ 按旧行为走。
+    const legacy = role("project_manager", "项目经理", {
+      tools: ["c1", "c2"],
+      promptUnits: [unit("project_manager.core")],
+    });
+    delete (legacy as { toolsSolved?: boolean }).toolsSolved;
+    const html = renderPane(legacy);
+    expect(html, "字段缺失被误报成「组织未播种」").not.toContain("求解不了");
+    expect(showsSolvedCount(html, 2)).toBe(true);
+  });
+
   it("正样本:toolsSolved=true 且 tools 真的为空 ⇒ **这才是**「0 个」(接待阶段的合法形状)", () => {
     const solvedEmpty = role("project_manager", "项目经理", {
       toolsSolved: true,

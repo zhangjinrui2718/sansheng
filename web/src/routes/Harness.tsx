@@ -158,7 +158,7 @@ export function HarnessRoleTabs({
             title={
               `role = ${r.role}\n` +
               `提示词单元 ${r.promptUnits.filter((u) => u.loaded).length}/${r.promptUnits.length} 已加载 · ` +
-              (r.toolsSolved ? `能力 ${r.ceiling.length} 项 · 实得工具 ${r.tools.length} 个` : `能力 ${r.ceiling.length} 项 · 工具面求解不了(组织未播种)`) +
+              (r.toolsSolved !== false ? `能力 ${r.ceiling.length} 项 · 实得工具 ${r.tools.length} 个` : `能力 ${r.ceiling.length} 项 · 工具面求解不了(组织未播种)`) +
               ` · ` +
               `集合文件 ${r.toolSet.state}` +
               (issues > 0 ? `\n⚠️ ${issues} 处需要注意(页签上的数字)` : "")
@@ -259,7 +259,11 @@ export function HarnessRolePane({
             title="能力 = ceiling 的条目数(代码内常量);实得工具 = 工具名个数 —— 一条能力可展开成多个工具,所以工具数常大于能力数,两者不是分数关系"
           >
             能力 <span style={{ color: "var(--bone-dim)" }}>{role.ceiling.length}</span> 项 ·{" "}
-            {role.toolsSolved ? (
+            {/* ⚠️ 判据是 **`=== false`**,不是 `!toolsSolved` —— 字段缺失(前端比后端新,
+                例如只刷新了页面而没重启进程)时必须**退化回旧行为**(照常显示计数),
+                否则会把「旧后端没这个字段」误报成「组织未播种」。契约只增字段,
+                前端就要能容忍这个字段不存在。 */}
+            {role.toolsSolved !== false ? (
               <>
                 实得工具 <span style={{ color: "var(--bone)" }}>{role.tools.length}</span> 个
               </>

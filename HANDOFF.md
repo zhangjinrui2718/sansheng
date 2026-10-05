@@ -12,7 +12,7 @@
 ```
 W3-① `516ae93` fix(origin): 闭合刷新缺口 —— 封套落库(migration 019)+ 前端判据同形
 W3-②③ 本次提交:文档欠账 + 端到端(证据在 .probe/w3-e2e-*)
-1210 passed / 57 files · 两条 typecheck 0 · npm run build 绿 · check:design E1–E14 绿 · as any 0
+1211 passed / 57 files · 两条 typecheck 0 · npm run build 绿 · check:design E1–E14 绿 · as any 0
 全部已推送到 origin/master(上一轮那 15 个提交也已推送 —— GitHub 443 当时不通,后来通了)
 ```
 
@@ -212,8 +212,15 @@ SqliteError: FOREIGN KEY constraint failed  at resetPlatformData (reset.js:62)
 改成按真实形状断言后才有效(判据⑤两条:unsolved 不显示计数 + solved 且 0 **才**显示 0;
 注入「忽略 toolsSolved」的突变 ⇒ 红)。
 
-**你这边的动作**:刷新一下页面即可(服务器返回的本来就是对的)。
-`1206 → 1210 passed / 57 files`,其余验证链全绿。
+⚠️ **顺手堵掉一个版本混搭风险**:前端判据是 **`toolsSolved === false`**,不是
+`!toolsSolved`。因为 `serveStatic` 是**按请求读盘**的 —— 前端可能比后端新
+(只刷新页面、没重启进程),那时后端**没有这个字段**,`!undefined` 会把它误报成
+「组织未播种」,又是一条新的假话。契约只增字段,前端就得容忍字段缺失
+(缺失 = 退化回旧行为)。判据⑤里有一条专门钉这个形状。
+
+**你这边的动作**:**重启 server**(拿到新的后端字段)+ 刷新页面。
+只刷新也能用(会优雅退化),但要看到「求解不了」那条诚实提示必须重启。
+`1206 → 1211 passed / 57 files`,其余验证链全绿。
 
 ## ⚠️ 还没做的(如实标注,不是遗漏)
 

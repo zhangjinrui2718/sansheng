@@ -211,7 +211,9 @@ export function MembersPage() {
                       不是「一个工具都没有」。两种状态在界面上长得一样是这个项目
                       反复栽过的形态(2026-10-05 真机现场:这里显示了「实得工具 0 个」,
                       而真相是那一刻组织还没播种)。 */}
-                  {r.toolsSolved ? (
+                  {/* ⚠️ `=== false`,不是 `!r.toolsSolved`:字段缺失(前端比后端新)要退化回
+                      旧行为,别把「旧后端没这个字段」误报成「组织未播种」。 */}
+                  {r.toolsSolved !== false ? (
                     `实得工具 ${r.tools.length} 个`
                   ) : (
                     <span
