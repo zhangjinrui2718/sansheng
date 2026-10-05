@@ -17,7 +17,7 @@
 ## 状态
 
 ```
-W5  `本次提交` feat(web): 角色命名统一 + 工件页主视图换成时间轴泳道
+W5  `ac0fc5d` feat(web): 角色命名统一 + 工件页主视图换成时间轴泳道
 1363 passed / 65 files · 两条 typecheck 0 · npm run build 绿 · check:design E1–E14 绿 · as any 0
 新增:`web/src/lib/timeline.ts`(布局纯函数)· `.probe/w5-{artifacts,members}-preview.html`
 ```
