@@ -39,8 +39,11 @@
  */
 import { PageHeader, Pill, Section, StatStrip, EmptyState, KV, Flag } from "@/components/ui/primitives";
 import { ClientQuestionCard } from "@/components/client/ClientQuestionCard";
-import { useProjectAsks, useProjectChanges, useProjectDetail, useProjectMessages } from "@/lib/data";
-import { collectPlatformNotices, platformNoticeLabel, type PlatformNoticeKind } from "@/lib/platformNotices";
+import {
+  useProjectAsks, useProjectChanges, useProjectDetail, useProjectLive, useProjectMessages,
+} from "@/lib/data";
+import { platformNoticeLabel, type PlatformNoticeKind } from "@/lib/platformNotices";
+import { liveHeadline, orgRuntime } from "@/lib/orgState";
 import { useChatStore } from "@/stores/chat";
 import {
   ROLE_LABEL,
@@ -81,9 +84,13 @@ export function ProjectDetailPage() {
     loading: noticesLoading,
     error: noticesError,
   } = useProjectMessages(projectId);
-  // 平台通知的全文落点。判据(哪一行算通知、属于哪一类)在
-  // `lib/platformNotices.ts` 的纯函数里 —— 页面只渲染结果,不自己认字符串。
-  const notices = collectPlatformNotices(messages);
+  // 「此刻」的唯一读面。`pollMs: 0` = **不轮询**:这一页此前没有任何定时器,状态行要的是
+  // 「打开/事件后刷新」而不是每 2.5 秒重画一次(WS 事件会推 `activityRevision`,见
+  // `useProjectLive`)。
+  const live = useProjectLive(projectId, { pollMs: 0 });
+  // 两类平台记录的**分类**(platformNotices.ts)与**状态派生**(orgState.ts)都是纯函数 ——
+  // 页面只渲染结果,不自己认字符串、也不自己编状态。
+  const runtime = orgRuntime({ messages, live: live.data });
 
   if (!projectId) {
     return (
@@ -163,47 +170,148 @@ export function ProjectDetailPage() {
           </Section>
 
           {/*
-            平台通知的**全文落点**(本批:从对话页的系统带搬过来)。
+            平台记录的**全文落点**,按主体分两段(2026-10-05)。
 
-            ⚠️ 这些记录的主体是**项目**,不是那场对话:一条说「排空在 8 回合处停下,
-            还有待办没跑完」(组织不动了),一条说「某个回合没留工作记录」
-            (合规)。它们原先只出现在对话页的系统带里 —— 而那页是「甲方与业务经理
-            的对话」,一段机器记录横在里面既不像发言、也找不到该谁看。今天:
-            全文在这里;对话页只留一行摘要 + 指向本页。
+            ⚠️ 两段的**状态语义完全不同**,这是这次分家的全部理由:
+              - 「停止推进」是运行态**快照** —— 会自己过去(兜底定时器每 10 秒重查);
+                所以它带一个**派生出来的状态**(已接回 / 会被接回 / 在等你 / 不会自愈……),
+                判据在 `lib/orgState.ts`,事实来自 `GET /live` 与 `GET /messages`。
+              - 「合规告警」是既成事实的**记录** —— 它**没有**「已解决」这个状态,
+                也不该有(平台不替模型补那行 `[未播报]`)。所以它只报事实与计数,
+                并明写「这不是待办」。
           */}
           <Section
-            title="组织运行态"
-            count={notices.total}
-            hint="平台留下的机器记录 · 停止推进 / 合规告警"
-            hintTitle="来源:GET /api/projects/:id/messages 里 kind = 'system' 的行,按时间倒序。①「停止推进」= serve.ts 的 announceDrain(排空撞上单次回合上限或待办预算用尽 —— 到界不静默);②「合规告警」= reportUnannouncedTurn(平台叫醒的回合既没调 tell_client、正文也没有行首 [未播报])。正文原样显示,不做字段解析 —— 解析失手会静默丢内容。"
+            title="组织推进"
+            count={runtime.stops.length}
+            hint="平台叫醒的排空在这里异常停下过 · 每条带此刻的状态"
+            hintTitle="来源:GET /api/projects/:id/messages 里 kind = 'system' 且正文以「⚠️ 组织停止推进」开头的行(serve.ts 的 announceDrain 落库)。状态由 lib/orgState.ts 从「此刻」读面(GET /api/projects/:id/live:在跑的回合 / 可执行待办 / 预算用尽的待办 / 等甲方答的问题 / 兜底定时器心跳)与「这条之后又落了几个回合」派生 —— 不是编的。读不到运行态时显示「读不到」,不显示「空闲」。"
           >
+            <div className="ss-note mb-1.5" title="来源:GET /api/projects/:id/live —— 「此刻」的唯一读面">
+              {liveHeadline(live.data)}
+              {runtime.attention > 0 && (
+                <span style={{ color: "var(--amber)" }}>
+                  {" · "}
+                  有 {runtime.attention} 条停下来的原因**不是自己会过去**的
+                </span>
+              )}
+            </div>
             {noticesError !== null ? (
               <div className="sansheng-card p-3 text-xs" style={{ color: "var(--cinnabar)" }}>
                 加载失败:{noticesError}
               </div>
-            ) : noticesLoading && notices.total === 0 ? (
+            ) : noticesLoading && runtime.stops.length === 0 ? (
               <EmptyState>加载中…</EmptyState>
-            ) : notices.total === 0 ? (
-              <EmptyState>没有平台通知 —— 排空没有异常停下,也没有回合漏留工作记录。</EmptyState>
+            ) : runtime.stops.length === 0 ? (
+              <EmptyState>没有异常停下过 —— 排空每次都跑到了没有待办为止。</EmptyState>
             ) : (
               <div className="grid gap-1.5">
-                {notices.all.map((n) => (
+                {runtime.stops.map(({ notice, state }) => (
+                  <article
+                    key={notice.id}
+                    className="sansheng-card p-2.5"
+                    data-notice-kind="stop"
+                    data-stop-state={state.key}
+                    title={notice.id}
+                  >
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <Pill tone="amber" title={NOTICE_TITLE.stop}>
+                        {platformNoticeLabel("stop")}
+                      </Pill>
+                      {/* 状态是这一批的重点:同一个类名下的两条,状态可能完全不同 */}
+                      <Pill
+                        tone={
+                          state.key === "stalled"
+                            ? "cinnabar"
+                            : state.key === "waiting_client"
+                              ? "amber"
+                              : state.key === "unreadable"
+                                ? "mute"
+                                : "bone"
+                        }
+                        title={state.why}
+                      >
+                        {state.label}
+                      </Pill>
+                      <span className="ss-meta ml-auto">{fmtTime(notice.createdAt)}</span>
+                    </div>
+                    <div className="ss-note mt-0.5" title="判据(为什么是左边那个状态)">
+                      {state.why}
+                    </div>
+                    <div className="ss-meta">该怎么办:{state.action}</div>
+                    {/* 正文原样:换行保留(库里那几段本来就是分行写的) */}
+                    <div
+                      className="ss-body mt-1"
+                      style={{ color: "var(--bone)", whiteSpace: "pre-wrap" }}
+                    >
+                      {notice.content}
+                    </div>
+                  </article>
+                ))}
+              </div>
+            )}
+          </Section>
+
+          <Section
+            title="合规记录"
+            count={runtime.compliance.length}
+            hint="平台叫醒的回合没留工作记录 · 记录,不是待办"
+            hintTitle="来源:GET /api/projects/:id/messages 里 kind = 'system' 且正文以「⚠️ 平台检测」开头的行(serve.ts 的 reportUnannouncedTurn 落库:平台叫醒的回合既没调 tell_client、正文也没有行首 [未播报])。⚠️ 它**没有状态**:那一个回合确实没留痕,平台也不替模型补那行记录 —— 任何「已解决」都是编造现场。能降频的只有机制(提示词 / 检测)。"
+          >
+            {runtime.compliance.length === 0 ? (
+              <EmptyState>没有合规告警 —— 平台叫醒的每个回合都留了工作记录。</EmptyState>
+            ) : (
+              <div className="grid gap-1.5">
+                {runtime.compliance.map((n) => (
                   <article
                     key={n.id}
                     className="sansheng-card p-2.5"
-                    data-notice-kind={n.kind}
+                    data-notice-kind="compliance"
                     title={n.id}
                   >
                     <div className="flex items-center gap-2 flex-wrap">
-                      <Pill
-                        tone={n.kind === "stop" ? "amber" : n.kind === "compliance" ? "cyan" : "bone"}
-                        title={NOTICE_TITLE[n.kind]}
-                      >
-                        {platformNoticeLabel(n.kind)}
+                      <Pill tone="cyan" title={NOTICE_TITLE.compliance}>
+                        {platformNoticeLabel("compliance")}
+                      </Pill>
+                      <Pill tone="mute" title="这一类没有「已解决」—— 它是记录,不是待办">
+                        记录 · 不需要你动作
                       </Pill>
                       <span className="ss-meta ml-auto">{fmtTime(n.createdAt)}</span>
                     </div>
-                    {/* 正文原样:换行保留(库里那两段本来就是分行写的) */}
+                    <div className="ss-body mt-1" style={{ color: "var(--bone)", whiteSpace: "pre-wrap" }}>
+                      {n.content}
+                    </div>
+                  </article>
+                ))}
+              </div>
+            )}
+          </Section>
+
+          {/*
+            只在**真的有**认不出类别的平台记录时才渲染这一段(与成员页那段 `strangers`
+            同一形态:一条证据可以被折叠,但不许被删掉)。今天它是空的 —— 两个写入方
+            (`announceDrain` / `reportUnannouncedTurn`)的正文前缀都被分类器认得。
+          */}
+          {runtime.others.length > 0 && (
+            <Section
+              title="其他平台记录"
+              count={runtime.others.length}
+              hint="认不出类别的平台通知 · 原样保留"
+              hintTitle="分类器认的是正文首行前缀(「⚠️ 组织停止推进」/「⚠️ 平台检测」)。认不出的**不当丢**:它在这里原样显示 —— 分类失手只会退化成「其他」,不会静默消失(见 lib/platformNotices.ts)。"
+            >
+              <div className="grid gap-1.5">
+                {runtime.others.map((n) => (
+                  <article
+                    key={n.id}
+                    className="sansheng-card p-2.5"
+                    data-notice-kind="other"
+                    title={n.id}
+                  >
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <Pill tone="bone" title={NOTICE_TITLE.other}>
+                        {platformNoticeLabel("other")}
+                      </Pill>
+                      <span className="ss-meta ml-auto">{fmtTime(n.createdAt)}</span>
+                    </div>
                     <div
                       className="ss-body mt-1"
                       style={{ color: "var(--bone)", whiteSpace: "pre-wrap" }}
@@ -213,8 +321,8 @@ export function ProjectDetailPage() {
                   </article>
                 ))}
               </div>
-            )}
-          </Section>
+            </Section>
+          )}
 
           <Section
             title="工作项"

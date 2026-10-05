@@ -31,6 +31,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import type { MemberView, ProjectRole, TriggerTodoKind } from "@shared/types/platform";
 import {
   channelContextOf,
+  channelNoteText,
   partitionTurns,
   type ChannelContext,
 } from "@/lib/data";
@@ -150,9 +151,11 @@ describe("A3 · 对话页的通道判据", () => {
 
     // 正样本:同样是 agentId=null,甲方那条进甲方面
     expect(partitionTurns([user], ctx()).timeline[0]?.channel).toBe("client");
-    // 负样本:系统通知**不进**甲方通道,而是走独立的系统带
+    // 负样本:系统通知**不进**甲方通道(2026-10-05 起也不进这条时间线 —— 全文与状态
+    // 在「项目」页的「组织运行态」,这里只留条数;见 `notices` 与 `channelNoteText`)
     const sysOnly = partitionTurns([sys], ctx());
-    expect(sysOnly.timeline[0]?.channel).toBe("system");
+    expect(sysOnly.timeline, "平台通知不冒充甲方,也不在这页出现").toEqual([]);
+    expect(sysOnly.notices).toBe(1);
     expect(sysOnly.hidden, "系统通知不该被当成内部角色而计入 hidden").toBe(0);
   });
 
@@ -216,18 +219,54 @@ describe("A3 · 渲染:只有甲方与业务经理,系统通知走独立带", ()
     expect(html).toContain("另有 2 条发言不在这条通道里");
   });
 
-  it("系统通知渲染在 data-channel=system 的带里(不在任何气泡内)", () => {
+  it("**平台通知不进对话页**(2026-10-05):正文与它那条带都不在 DOM 里,条数在", () => {
     const all = [turn("u1", "user", null, "你好"), turn("s1", "system", null, "排空停在 max_rounds")];
     const part = partitionTurns(all, ctx());
+    const note = channelNoteText({
+      hidden: part.hidden,
+      notices: part.notices,
+      ready: true,
+      harnessError: null,
+    });
     const html = renderToStaticMarkup(
-      createElement(ConversationStream, { history: part.timeline, streaming: [], hiddenNote: null }),
+      createElement(ConversationStream, { history: part.timeline, streaming: [], hiddenNote: note }),
     );
-    const at = html.indexOf('data-channel="system"');
-    expect(at, "系统带必须在 DOM 里").toBeGreaterThan(-1);
-    // 正文出现在系统带**之后** ⇒ 它在那条带里,而不是被塞进了某个气泡
-    expect(html.indexOf("排空停在 max_rounds")).toBeGreaterThan(at);
-    // 负样本:它没有走助手气泡的那套样式
-    expect(html).not.toContain("三生 · 推演中");
+    // 正样本:甲方那句话照旧上屏
+    expect(html).toContain("你好");
+    // 负样本:平台通知**一个字都不在这页**(既不是气泡,也不再是一条「系统带」)
+    expect(html).not.toContain("排空停在 max_rounds");
+    expect(html).not.toContain('data-channel="system"');
+    // 但它**不是静默丢**:条数与去向必须写在屏幕上
+    expect(html).toContain("1 条平台通知");
+    expect(html).toContain("「项目」页「组织运行态」");
+  });
+
+  // ── 那一行提示的**文案**是纯函数产出的:判据在这里,不靠肉眼 ────────
+  describe("channelNoteText · 「不在这条通道里的东西」怎么报出来", () => {
+    it("负样本:什么都没滤掉 ⇒ null(不摆 0 占位)", () => {
+      expect(channelNoteText({ hidden: 0, notices: 0, ready: true, harnessError: null })).toBeNull();
+    });
+
+    it("两类并存时**两段都在**,各自给落点", () => {
+      const t = channelNoteText({ hidden: 2, notices: 1, ready: true, harnessError: null })!;
+      expect(t).toContain("2 条回合不在这条通道里");
+      expect(t).toContain("「成员」页");
+      expect(t).toContain("1 条平台通知");
+      expect(t).toContain("「项目」页「组织运行态」");
+    });
+
+    it("只有平台通知时也报出来(它不是静默丢弃,只是搬到项目页)", () => {
+      const t = channelNoteText({ hidden: 0, notices: 3, ready: true, harnessError: null })!;
+      expect(t).toContain("3 条平台通知");
+      expect(t).not.toContain("「成员」页");
+    });
+
+    it("⚠️ 能力面还没读到 ⇒ 内部回合那一半**不许**按「不是由你触发」解释(读不到 ≠ 空闲)", () => {
+      const t = channelNoteText({ hidden: 4, notices: 0, ready: false, harnessError: "boom" })!;
+      expect(t).toContain("暂时无法归类");
+      expect(t).toContain("boom");
+      expect(t).not.toContain("不是由你触发");
+    });
   });
 
   it("流式期间**两轮同时上屏**(A2 的接口被渲染层真的用上了)", () => {

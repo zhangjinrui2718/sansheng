@@ -9,29 +9,26 @@
  *      正文中段引用了这几个字样的记录不该被改判(下面有负样本)。
  *   2. **收集**:只有 `kind === "system"` 算平台通知。同一条正文出现在助手消息里,
  *      那是某个角色在**谈论**这件事,不是平台在报这件事(负样本)。
- *   3. **落点**:全文落在项目页的「组织运行态」卡;对话页的系统带只剩一行摘要,
- *      正文**仍在 DOM 里、默认折叠** —— 7-N:「一份证据被折叠可以,被删掉不行」。
+ *   3. **落点**(2026-10-05 定稿):**全文与状态都在「项目」页的「组织运行态」**;
+ *      对话页**一个字都不留**(既不是气泡,也不再是一条「系统带」),只留条数 ——
+ *      「既然已经放到项目页了,就不要留半截」。条数那半边的判据在
+ *      `tests/web/channel-filter.test.ts` 的 `channelNoteText`;状态那半边在
+ *      `tests/web/org-state.test.ts`。本文件只管**分类与收集**。
  *
  * ⚠️ 两条正样本是**真机库原文**(`~/.sansheng/sansheng.db` 的 `session_messages`),
  * 逐字抄来不做改写:判据就是照着它们写的,改成「像真的」的句子等于把测试变成自证。
  *
- * ── 为什么这样测 ────────────────────────────────────────────────
- *
- * 与 `tests/web/channel-filter.test.ts` 同一形态:判据抽在纯函数里直测,渲染抽在
- * `ConversationStream`(纯 props)上用 `renderToStaticMarkup` —— `MessageList`
- * 从 zustand 取数,而 SSR 下 store 读的是 server snapshot,驱动不了。
+ * ⚠️ 真机原文①是**旧文案**(「8 个回合」)。它作为历史现场保留:分类靠**首行前缀**,
+ * 所以那次改口径(改成「N 次派发 · 其中 M 个真回合」)不该影响分类 —— 下面另有一条
+ * 新文案的样本。(这本身是一条判据:改文案不许改分类。)
  */
 import { describe, expect, it } from "vitest";
-import { createElement } from "react";
-import { renderToStaticMarkup } from "react-dom/server";
 import type { SessionMessageView } from "@shared/types/platform";
-import { ConversationStream } from "@/components/chat/MessageList";
 import {
   classifyPlatformNotice,
   collectPlatformNotices,
   platformNoticeLabel,
 } from "@/lib/platformNotices";
-import type { Turn } from "@/stores/chat";
 
 /** 真机原文①:排空撞上单次回合上限(项目 pj_muv0ige6jgvbdtco)。 */
 const REAL_STOP =
@@ -122,52 +119,5 @@ describe("平台通知 · 收集", () => {
     const n = collectPlatformNotices([]);
     expect(n.total).toBe(0);
     expect(n.all).toEqual([]);
-  });
-});
-
-describe("对话页 · 系统带只剩一行摘要", () => {
-  /** 平台通知那一轮的形态(role=system ⇒ `channelOf` 第 1 步就摘进系统带)。 */
-  function sysTurn(id: string, text: string): Turn {
-    return {
-      id,
-      projectId: "p-test",
-      role: "system",
-      agentId: null,
-      blocks: [{ kind: "text", text }],
-      startedAt: 0,
-      origin: { source: "unknown" },
-    };
-  }
-
-  it("摘要行给出类名与去向;正文默认折叠但**仍在 DOM 里**", () => {
-    const html = renderToStaticMarkup(
-      createElement(ConversationStream, {
-        history: [{ turn: sysTurn("s1", REAL_STOP), channel: "system" }],
-        streaming: [],
-        hiddenNote: null,
-      }),
-    );
-    // 带子还在(既有判据:平台通知不冒充任何人的气泡)
-    expect(html).toContain('data-channel="system"');
-    // 摘要:类名 + 去向
-    expect(html).toContain("停止推进");
-    expect(html).toContain("全文在「项目」页");
-    // 折叠:是 `<details>`,而且**没有 open**
-    expect(html).toContain("<details");
-    expect(html).not.toContain("<details open");
-    // 7-N:折叠不是删除 —— 正文一个字都没少(含路径那一行)
-    expect(html).toContain("本轮路径:pm → wk → wk → pm → wk → wk → pm → qa");
-  });
-
-  it("合规告警走同一形态,类名不同", () => {
-    const html = renderToStaticMarkup(
-      createElement(ConversationStream, {
-        history: [{ turn: sysTurn("s2", REAL_COMPLIANCE), channel: "system" }],
-        streaming: [],
-        hiddenNote: null,
-      }),
-    );
-    expect(html).toContain("合规告警");
-    expect(html).toContain("msg_muv1q716bl1xp8ve");
   });
 });

@@ -16,7 +16,9 @@
  *    被滤掉并**如实报出条数**(看不见 ≠ 不存在,见 §2.10.4)。判据是
  *    `lib/data.ts` 的 `channelOf` / `partitionTurns`(纯函数,有单测)。
  *    ⚠️ `agentId === null` **不等于**甲方 —— 它有两个作者(kind `user` / kind
- *    `system`),所以系统通知走一条**独立的提示带**,不冒充任何人的气泡。
+ *    `system`)。平台通知(kind `system`)既不冒充甲方气泡,**也不在这页出现**:
+ *    条数由 `channelNoteText` 报出,全文与状态在「项目」页的「组织运行态」卡
+ *    (2026-10-05,用户:「这类信息既然已经放到项目页了,就不要留半截」)。
  *
  * ── W2-④(2026-10-06):判据换成「为什么有这一轮」+ **块级过滤** ─────
  *
@@ -65,12 +67,12 @@ import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState } fro
 import { inFlightTurns, useChatStore, type Block, type Turn } from "@/stores/chat";
 import {
   channelContextOf,
+  channelNoteText,
   partitionTurns,
   useHarnessRoles,
   useProjectMembers,
   type ConversationPartition,
 } from "@/lib/data";
-import { classifyPlatformNotice, platformNoticeLabel } from "@/lib/platformNotices";
 import {
   INITIAL_FOLLOW,
   observeFollow,
@@ -388,13 +390,15 @@ export function MessageList() {
   const history = useMemo(() => partitionTurns(turns, ctx), [turns, ctx]);
   const live = useMemo(() => partitionTurns(streaming, ctx), [streaming, ctx]);
   const hidden = history.hidden + live.hidden;
-  const hiddenNote =
-    hidden === 0
-      ? null
-      : !harness.ready
-        ? `另有 ${hidden} 条消息暂时无法归类 —— 角色能力面(GET /api/harness)还没读到` +
-          (harness.error !== null ? `:${harness.error}` : "")
-        : `另有 ${hidden} 条回合不在这条通道里(不是由你触发、也不是播报)—— 到「成员」页逐人查看`;
+  const notices = history.notices + live.notices;
+  // 文案是**纯函数**产出的(`lib/data.ts` 的 `channelNoteText`):这一层在 SSR 下驱动不了,
+  // 而「屏幕上那句话说什么」必须能单独验 —— 它同时承担两条纪律:折叠不静默、读不到 ≠ 空闲。
+  const hiddenNote = channelNoteText({
+    hidden,
+    notices,
+    ready: harness.ready,
+    harnessError: harness.error,
+  });
 
   const ref = useRef<HTMLDivElement>(null);
   /** 跟随状态用 ref 持有 —— onScroll 每帧都在读它,不该为它触发一次渲染。 */
@@ -550,25 +554,21 @@ export function ConversationStream({
 }: {
   history: ConversationPartition["timeline"];
   streaming: ConversationPartition["timeline"];
-  /** 被滤掉的条数说明;`null` = 一条都没被滤掉 */
+  /** 「不在这一屏里的东西」那一行(内部回合 + 平台通知的条数);`null` = 一条都没有 */
   hiddenNote: string | null;
 }) {
+  // ⚠️ 2026-10-05:**类型上只可能有 `client`**。平台通知与内部回合都被
+  // `partitionTurns` 挡在外面了(前者只留条数,全文与状态在项目页的「组织运行态」)——
+  // 所以这里没有「如果是 system 就渲染另一条带」那一支了。别再把它加回来:
+  // 那条路的存在本身就是「对话页里出现机器记录」的原因。
   return (
     <>
-      {history.map(({ turn, channel }) =>
-        channel === "system" ? (
-          <SystemNotice key={turn.id} turn={turn} />
-        ) : (
-          <TurnView key={turn.id} turn={turn} />
-        ),
-      )}
-      {streaming.map(({ turn, channel }) =>
-        channel === "system" ? (
-          <SystemNotice key={turn.id} turn={turn} />
-        ) : (
-          <TurnView key={turn.id} turn={turn} streaming />
-        ),
-      )}
+      {history.map(({ turn }) => (
+        <TurnView key={turn.id} turn={turn} />
+      ))}
+      {streaming.map(({ turn }) => (
+        <TurnView key={turn.id} turn={turn} streaming />
+      ))}
       {hiddenNote !== null && <HiddenNotice note={hiddenNote} />}
     </>
   );
@@ -603,66 +603,6 @@ function Empty() {
           先到「设置」配一个 Provider 的 API Key,回来发条消息试试。
         </p>
       </div>
-    </div>
-  );
-}
-
-/**
- * **平台通知**的独立提示带(设计 1 §2.10)。
- *
- * 为什么要单独一条带,而不是当成一条普通轮渲染:
- *   - 它的 `agent_id` 也是 `NULL`,与甲方的消息**同一个分组键** —— 若按
- *     `agentId` 判,它会**冒充甲方说的话**(A1 在真机上实测到的那个坑);
- *   - 它也不是任何角色的发言(作者是平台:排空器异常停下时的
- *     `announceDrain`、回合漏留工作记录时的 `reportUnannouncedTurn`,`serve.ts`)。
- * 所以它既不进甲方气泡,也不进业务经理气泡,而是一条居中、等宽、虚线框的提示。
- *
- * ── 本批改动:这页只留一行摘要,全文默认折叠 ──────────────────────
- *
- * 这两段机器记录原先**整段**铺在对话记录里(用户的原话:它们在这一页出现得莫名其妙)。
- * 但按 7-N「一份证据被折叠可以,被删掉不行」——所以**不删**,改成:
- *
- *   - 摘要行:类名(`platformNotices.ts` 的 `platformNoticeLabel`)+ 「全文在项目页」;
- *   - 正文仍然在 DOM 里,点开可读(搜索、拷走、离线看都还在);
- *   - **全文的落点是「项目」页的「组织运行态」卡** —— 这些记录的主体是项目,
- *     不是这一场对话,而对话页是「甲方与业务经理的对话」。
- *
- * 分类判据是 `classifyPlatformNotice`(纯函数,有测试):这里不认字符串,只消费结果。
- */
-function SystemNotice({ turn }: { turn: Turn }) {
-  const text = turn.blocks
-    .map((b) => (b.kind === "tool" ? "" : b.text))
-    .join("\n")
-    .trim();
-  const kind = classifyPlatformNotice(text);
-  return (
-    <div className="flex justify-center" data-channel="system">
-      <details
-        className="rounded-md px-3 py-1.5 ss-note"
-        style={{ border: "1px dashed var(--ink-3)", maxWidth: "85%" }}
-        data-notice-kind={kind}
-      >
-        <summary
-          style={{ cursor: "pointer", textAlign: "center" }}
-          title="平台通知:不是甲方说的,也不是任何角色的发言。全文也在「项目」页的「组织运行态」卡里。"
-        >
-          <span className="font-mono" style={{ fontSize: 10, letterSpacing: ".08em" }}>
-            系统
-          </span>
-          <span className="ss-note" style={{ fontSize: 11 }}>
-            {" · "}
-            {platformNoticeLabel(kind)}
-            {" · 全文在「项目」页"}
-          </span>
-        </summary>
-        {text !== "" && (
-          <div
-            style={{ whiteSpace: "pre-wrap", color: "var(--bone)", fontSize: 12, textAlign: "left" }}
-          >
-            {text}
-          </div>
-        )}
-      </details>
     </div>
   );
 }
@@ -710,7 +650,7 @@ export const TurnView = memo(function TurnView({
    * 这一层**不判通道** —— 它判的是「一轮里哪几块是给甲方看的话」。判通道是
    * `lib/data.ts` 的 `channelOf`,而它作用在**轮**上:能走到 `TurnView` 的轮
    * 只有 `client` / `system` 两种(`internal` 的轮被 `partitionTurns` 滤掉,
-   * `system` 走 `SystemNotice` 不经过这里)⇒ 这里折的就是**甲方通道那一轮**的
+   * `system` 根本不在这页出现)⇒ 这里折的就是**甲方通道那一轮**的
    * 内部过程。**内部轮根本不必折 —— 它们压根不上屏。**
    */
   const layers = useMemo(() => layerBlocks(turn.blocks), [turn.blocks]);
@@ -765,7 +705,7 @@ export const TurnView = memo(function TurnView({
           // 这一层只剩正文(思考 / 工具卡已全部折进 `layers.internal`)——
           // **只有助手的正文**参与工作记录分流:甲方自己打的字按字面渲染
           // (`Bubble` 的 user 分支),把人打的字重新分类是替他改写输入;
-          // 平台通知走 `SystemNotice`,根本不到这里。
+          // 平台通知根本不在这页(见 `partitionTurns` 的 `notices`)。
           const segments: readonly TextSegment[] = isUser
             ? [{ kind: "speech", text: item.text }]
             : splitWorkLog(item.text);

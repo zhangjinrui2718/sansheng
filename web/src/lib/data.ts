@@ -575,10 +575,11 @@ export function channelContextOf(input: {
  *
  * ── 判据(顺序不能换)────────────────────────────────────────────
  *
- * 1. **平台通知**(`role === "system"`)走**独立的系统带**。
+ * 1. **平台通知**(`role === "system"`)⇒ `system`:**既不进甲方通道,也不进对话页**。
  *    `agentId === null` **不等于「甲方」** —— 它有**两个**作者:`kind='user'`
- *    (甲方)与 `kind='system'`(平台通知,`host/serve.ts` 的 `announceDrain`)。
- *    所以先按 `Turn.role`(kind 的投影)把 system 摘出去。
+ *    (甲方)与 `kind='system'`(平台通知,`host/serve.ts` 的 `announceDrain` /
+ *    `reportUnannouncedTurn`)。所以先按 `Turn.role`(kind 的投影)把 system 摘出去;
+ *    落点是「项目」页的「组织运行态」,对话页只留条数(`partitionTurns().notices`)。
  * 2. **甲方自己说的话**(`agentId === null`)⇒ `client`。
  * 3. **播报封套**(`origin.source === "broadcast"`,只有 `tell_client` 发它)⇒
  *    `client`,**无条件** —— 它是一条独立落库的消息,不属于任何回合,所以
@@ -631,8 +632,14 @@ function fallbackChannelOf(turn: Turn, ctx: ChannelContext): TurnChannel {
 
 /** 一屏里要看的两类轮 + 被滤掉的条数。 */
 export interface ConversationPartition {
-  /** 按时间正序,只含 `client` 与 `system`(不进甲方通道的轮不在里面) */
-  timeline: Array<{ turn: Turn; channel: Exclude<TurnChannel, "internal"> }>;
+  /**
+   * 按时间正序,**只含甲方通道**的轮。
+   *
+   * ⚠️ 2026-10-05 起**平台通知不再放进这条时间线**(用户:「这类信息既然已经放到项目页了,
+   * 就不要留半截」)。它既不是人说的话,也不是内部推进 —— 它是机器的记录,全文与状态都在
+   * 项目页的「组织运行态」卡;对话页只留**条数**(见 `channelNoteText`),所以不是静默丢弃。
+   */
+  timeline: Array<{ turn: Turn; channel: "client" }>;
   /**
    * 被滤掉的轮**条数**(`channel === "internal"`)。
    *
@@ -644,6 +651,12 @@ export interface ConversationPartition {
    * 所以调用方的措辞不能写死成「其他角色的回合」。
    */
   hidden: number;
+  /**
+   * 被摘出来的**平台通知**条数(`role === "system"` 的那一类)。它们同样不进时间线,
+   * 但**计数必须在**(理由与 `hidden` 逐字相同),并由调用方指向它们真正的落点:
+   * 项目页的「组织运行态」卡。
+   */
+  notices: number;
 }
 
 /** 把一屏轮按通道分开。纯函数 —— 判据在这里,渲染层只消费结果。 */
@@ -653,15 +666,53 @@ export function partitionTurns(
 ): ConversationPartition {
   const timeline: ConversationPartition["timeline"] = [];
   let hidden = 0;
+  let notices = 0;
   for (const turn of turns) {
     const channel = channelOf(turn, ctx);
+    if (channel === "system") {
+      notices += 1;
+      continue;
+    }
     if (channel === "internal") {
       hidden += 1;
       continue;
     }
     timeline.push({ turn, channel });
   }
-  return { timeline, hidden };
+  return { timeline, hidden, notices };
+}
+
+/**
+ * 对话页那条提示的**文案**(纯函数,有单测:`MessageList` 在 SSR 下驱动不了,
+ * 所以「屏幕上那句话说什么」必须能单独验)。
+ *
+ * 两条纪律写在文案里:
+ *   - **折叠不静默**:被滤掉的内部回合与平台通知都要报出**条数**,并各自给出落点
+ *     (内部回合在「成员」页逐人清单;平台通知在「项目」页的「组织运行态」)。
+ *   - **读不到 ≠ 空闲**:角色能力面还没读到时,内部回合那一半**不许**按「不是由你触发」
+ *     的口径解释 —— 那时判据本身还没就位,如实说「暂时无法归类」。
+ */
+export function channelNoteText(input: {
+  readonly hidden: number;
+  readonly notices: number;
+  readonly ready: boolean;
+  readonly harnessError: string | null;
+}): string | null {
+  const parts: string[] = [];
+  if (input.hidden > 0) {
+    parts.push(
+      input.ready
+        ? `另有 ${input.hidden} 条回合不在这条通道里(不是由你触发、也不是播报)—— 到「成员」页逐人查看`
+        : `另有 ${input.hidden} 条消息暂时无法归类 —— 角色能力面(GET /api/harness)还没读到` +
+            (input.harnessError !== null ? `:${input.harnessError}` : ""),
+    );
+  }
+  if (input.notices > 0) {
+    parts.push(
+      `另有 ${input.notices} 条平台通知(组织停止推进 / 合规告警)—— 到「项目」页「组织运行态」查看`,
+    );
+  }
+  return parts.length === 0 ? null : parts.join(" · ");
 }
 
 // ── 运行态也按通道派生:输入框的禁用判据(bug A,2026-10-05)──────────────

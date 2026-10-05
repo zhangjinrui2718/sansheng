@@ -23,19 +23,24 @@
   「正在做什么」(`GET /api/projects/:id/live`)与他产出的工件;面板**之下另起一张独立的
   「角色 harness」卡片**(`Section` + 常显的状态摘要行 + 默认折叠的配置)—— 提示词单元的
   编辑 / 恢复出厂 / 备份数都在那里,写面四条规矩与后端一致。**未来角色 harness 的配置就放这张卡**。
-- **平台通知的落点 = 项目页的「组织运行态」卡**(`web/src/routes/ProjectDetail.tsx`;
-  判据是纯函数 `web/src/lib/platformNotices.ts` 的 `collectPlatformNotices` /
-  `classifyPlatformNotice`)。`session_messages` 里 `kind='system'` 的行**只有两个生产者**,
-  都在 `src/platform/host/serve.ts`:`announceDrain`(停止推进,项目级)与
-  `reportUnannouncedTurn`(合规告警,回合级)—— 两者都落项目的**内部会话**,`agent_id` 为
-  NULL。对话页的系统带**只剩一行摘要**(全文默认折叠,仍在 DOM 里),别再把它当成唯一读面
-  又删一次(2026-10-05 之前它就是唯一读面:成员页 W7 删掉「平台通知」卡之后,
-  `agentId === null` 那一组没有任何页面渲染)。
+- **平台记录的落点 = 项目页两段,按主体分家**(`web/src/routes/ProjectDetail.tsx`)。
+  **「组织推进」**= 停止推进,带**派生状态**(已接回 / 会被接回 / 在等你 / 不会自愈 / 已收口 /
+  读不到 ⇒ 判据在 `web/src/lib/orgState.ts`,事实来自 `GET /live` 与 `GET /messages`);
+  **「合规记录」**= 不派生状态 —— 那一个回合确实没留工作记录,平台也不替模型补,
+  **任何「已解决」都是编造现场**,它只能说「记录 · 不需要你动作」+ 计数。
+  `session_messages` 里 `kind='system'` 的行**只有两个生产者**,都在
+  `src/platform/host/serve.ts`:`announceDrain`(停止推进,项目级)与
+  `reportUnannouncedTurn`(合规告警,回合级),都落项目的**内部会话**,`agent_id` 为 NULL;
+  分类只认**正文首行前缀**(`web/src/lib/platformNotices.ts`)。
+  **对话页一个字都不留**(既不是气泡,也不再是一条「系统带」):`partitionTurns` 把它们摘成
+  `notices` 计数,屏幕上只剩 `channelNoteText` 那一行「另有 N 条平台通知 —— 到「项目」页
+  「组织运行态」查看」。别再把它渲染回对话页(**别再引回 `data-channel="system"`**),
+  也别把「读不到」渲染成「空闲」。
 - **依赖图的边方向 = 先后**(前置 → 本条;**子项 → 父项**,容器由子项推动)。这个方向是
   判据的一部分:同一对节点上两类边**方向一致**时不是环(真机那份数据就是这样),方向相反
   才是环(`mutualPairs` 会点名是哪两条边)。写反会让「交付」跑到最左、并且把一个不存在的
   环报出来(`web/src/lib/workGraph.ts` 的 `collectEdges`)。
-- 基线:**1411 passed / 66 test files** · 两条 typecheck 0 error · `check:design` E1–E14 全绿。
+- 基线:**1429 passed / 67 test files** · 两条 typecheck 0 error · `check:design` E1–E14 全绿。
 - **角色中文名只有一处**:`src/platform/runtime/org.ts` 的 `ORG`(播种 + `RoleHarnessView.displayName`
   共用);前端兜底表 `web/src/lib/vocab.ts` 的 `ROLE_LABEL` 必须逐项相同,由
   `tests/web/role-names.test.ts` 跨边界对照。**不许在某个页面里再写一张名字表**
@@ -208,7 +213,7 @@ help
 ```
 npx tsc -p tsconfig.server.json --noEmit
 npx tsc -p tsconfig.web.json --noEmit
-npm test                  # 1411 passed / 66 files
+npm test                  # 1429 passed / 67 files
 npm run build
 npm run check:design      # 设计一致性 E1–E14
 ```
