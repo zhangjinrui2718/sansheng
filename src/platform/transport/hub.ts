@@ -37,7 +37,8 @@ import {
 } from "../storage/repo/sessions.js";
 import { getProjectRow } from "../storage/repo/projects.js";
 import { toClientQuestionView, toTurnUsageView, toWorkView } from "./views.js";
-import { getAgent } from "../storage/repo/agents.js";
+import { getAgent, listAgents } from "../storage/repo/agents.js";
+import { ROLE_SPECS } from "../identity/role.js";
 import type { TurnUsageRow } from "../storage/repo/usage.js";
 import type {
   ClientCommand, ClientQuestionView, ServerEvent, WsToolInfo,
@@ -62,13 +63,37 @@ export interface HubHandlers {
 export class PlatformHub {
   private readonly clients = new Set<WebSocket>();
   /**
-   * 每个上下文当前正在跑的回合(用于 interrupt 与「忙」状态)。
+   * **常驻会话的忙闩 —— 键是 `(上下文, agent)`,不是上下文。**
    *
-   * 键是 `string | null` —— `null` 就是**接待会话**。不引入哨兵字符串是有意的:
-   * 哨兵要么在前后端各写一份字面量(迟早漂),要么得从 `@shared` 值导入
-   * (server 侧禁止,见 AGENTS.md)。`null` 本身就是「还没有项目」的诚实表示。
+   * ── 它保护的到底是什么 ──────────────────────────────────────────
+   *
+   * 「**一条常驻会话**不能被两条流同时写」—— `host/serve.ts` 的 `runAgentTurn`
+   * 自己写着「两条流打在同一条常驻会话上就是一次真正的竞态」。而常驻会话的键
+   * 就是 `(上下文, agent)`(四个角色各一条:工具面 / 提示词不同),所以闩的键
+   * 必须与它**同粒度**。按项目记的时候:worker 在跑 ⇒ 整个项目算忙 ⇒ 甲方
+   * **发不出话**,而他要找的是业务经理那条会话 —— 与 worker 那条根本不是同一条。
+   *
+   * ⚠️ **错在「粗」,不在「方向」**:用户消息走业务经理,**排空器也会叫醒业务
+   * 经理**(`report_downstream` 的 targetRole 就是它),所以「用户那条路永远与
+   * 排空不撞车」是假的 —— `(上下文, agent)` 才是对的判据。
+   *
+   * 键的编码只在枢纽内部用(`<上下文>::<agent>`,上下文 `null` = 接待会话);
+   * 对外 API 仍然收 `string | null`,不引入哨兵值(理由见旧注释:哨兵要么前后端
+   * 各写一份字面量,要么得从 `@shared` 值导入 —— server 侧禁止)。
    */
-  private readonly busy = new Set<string | null>();
+  private readonly busy = new Set<string>();
+  /**
+   * 等着占用某个 `(上下文, agent)` 的排队者(FIFO)。
+   *
+   * **只有排空器会排队**(见 `acquireTurn`):它每条回合都要占用那个角色的会话,
+   * 而甲方那条路正在用同一个业务经理时它必须**等**。不能改成「跳过这一回合」——
+   * 排空器按回合记账(`dispatch_attempts`),跳过会被记成「叫醒过一次却没动」,
+   * 三次就把那条待办的预算烧光,然后广播一条**假的** `cascade_stopped`。
+   *
+   * 甲方那条路**不排队**:它由 `send` 的判据直接拒掉(`code=busy`)—— 那正是
+   * 验收里的负样本(「业务经理正在回你时再发一条 → 仍然被拒」)。
+   */
+  private readonly waiters = new Map<string, Array<() => void>>();
 
   constructor(
     private readonly deps: HubDeps,
@@ -79,13 +104,75 @@ export class PlatformHub {
     return this.clients.size;
   }
 
-  isBusy(projectId: string | null): boolean {
-    return this.busy.has(projectId);
+  /** 闩的键(`<上下文>::<agent>`)。上下文 `null` = 接待会话。 */
+  private key(projectId: string | null, agentId: string): string {
+    return `${PlatformHub.contextPrefix(projectId)}${agentId}`;
+  }
+  /** 某个上下文里全部键的前缀。 */
+  private static contextPrefix(projectId: string | null): string {
+    return `${projectId ?? "<intake>"}::`;
   }
 
-  setBusy(projectId: string | null, v: boolean): void {
-    if (v) this.busy.add(projectId);
-    else this.busy.delete(projectId);
+  /**
+   * 这个上下文里**有没有**回合在跑;给了 `agentId` 就只看那一个角色。
+   *
+   * 不给 agent 的那条是**保守判据**(「这个上下文里还有活」)—— 给诊断与
+   * 「整个接待会话在不在跑」的既有读者用;真正保护会话的是带 agent 的那条。
+   */
+  isBusy(projectId: string | null, agentId?: string): boolean {
+    if (agentId !== undefined) return this.busy.has(this.key(projectId, agentId));
+    const prefix = PlatformHub.contextPrefix(projectId);
+    for (const k of this.busy) if (k.startsWith(prefix)) return true;
+    return false;
+  }
+
+  /**
+   * 占用 / 释放 `(上下文, agent)` 的回合闩。
+   *
+   * ⚠️ **甲方那条路的占用必须是同步的**:`send` 的忙判据与这次占用落在**同一个
+   * tick** 里,否则两条挨着到的 WS 消息会双双通过判据(`handleRaw` 对每条消息
+   * 各自 fire-and-forget)。`await` 一下这个缝就重新出现 —— 那正是「同一个角色
+   * 两条流打进同一条会话」的入口。
+   *
+   * 释放时**直接把闩交给队首**(队首仍然算「忙」),而不是先清空再让排队者重新
+   * 抢:后者会出现一个「闩空着」的窗口,甲方的消息可以插到一个已经排队的排空
+   * 回合前面 —— 排空于是永远轮不到(饿死),而现场看起来只是「它一直没动」。
+   */
+  setBusy(projectId: string | null, agentId: string, v: boolean): void {
+    const key = this.key(projectId, agentId);
+    if (v) {
+      this.busy.add(key);
+      return;
+    }
+    const q = this.waiters.get(key);
+    const next = q?.shift();
+    // 交班:队首接着持有这把闩(**它仍然是「忙」**)—— 见上面「不放空」的理由
+    if (q !== undefined && q.length === 0) this.waiters.delete(key);
+    if (next !== undefined) {
+      next();
+      return;
+    }
+    this.busy.delete(key);
+  }
+
+  /**
+   * 等到 `(上下文, agent)` 空出来再占用(排空器**每条回合**一次)。
+   *
+   * 返回值是释放函数 —— 语义与 `setBusy(..., false)` 完全一样(它就是这个)。
+   */
+  acquireTurn(projectId: string | null, agentId: string): Promise<() => void> {
+    const key = this.key(projectId, agentId);
+    const release = (): void => this.setBusy(projectId, agentId, false);
+    // 队里已经有人时也照排 —— 否则「后到者插队」会把先到的排空饿死
+    if (!this.busy.has(key) && !this.waiters.has(key)) {
+      this.busy.add(key);
+      return Promise.resolve(release);
+    }
+    return new Promise<() => void>((resolve) => {
+      const q = this.waiters.get(key) ?? [];
+      q.push(() => resolve(release));
+      this.waiters.set(key, q);
+    });
   }
 
   // ── 连接管理 ──────────────────────────────────────────────────
@@ -126,16 +213,33 @@ export class PlatformHub {
         case "ping":
           this.sendTo(ws, { type: "pong", ts: this.deps.now() });
           return;
-        case "send":
-          if (this.busy.has(cmd.projectId)) {
+        case "send": {
+          // ── 忙判据的粒度是 `(项目, 收件人)`,不是项目 ──────────────────
+          //
+          // 这条消息的收件人是**面向甲方的那个角色**(`ROLE_SPECS.clientFacing`,
+          // 今天只有业务经理 —— 见 `clientFacingAgentId`)。原来判
+          // `busy.has(cmd.projectId)` 会把「worker 正在跑」也读成「业务经理忙」
+          // ⇒ 甲方在与 worker 那条会话无关的通道上被拒,而他要找的人(业务经理)
+          // 那条会话根本没被占。
+          //
+          // 反过来**必须仍然拒**:业务经理自己正在回你时(`send` 打在同一条常驻
+          // 会话上)第二条要拿到 `code=busy` —— 这是负样本,证明不是「什么都不拦」。
+          const to = clientFacingAgentId(this.deps.db);
+          const taken =
+            to !== null ? this.isBusy(cmd.projectId, to) : this.isBusy(cmd.projectId);
+          if (taken) {
             this.sendTo(ws, {
               type: "error", projectId: cmd.projectId,
-              error: { code: "busy", message: "这个项目正在跑一个回合,等它结束或先中断" },
+              error: {
+                code: "busy",
+                message: "与你对话的那位正在跑一个回合,等它结束或先中断",
+              },
             });
             return;
           }
           await this.handlers.onUserMessage(cmd.projectId, cmd.content);
           return;
+        }
         case "answer_client_question":
           await this.handlers.onAnswerQuestion(cmd.questionId, cmd.answer);
           return;
@@ -347,6 +451,20 @@ export class PlatformHub {
 function nameOf(db: Database.Database, agentId: string): string {
   const a = getAgent(db, agentId);
   return a !== null ? a.displayName : agentId;
+}
+
+/**
+ * 「甲方说的话落进谁那条常驻会话」—— **面向甲方的那个角色**。
+ *
+ * 判据是代码内常量 `ROLE_SPECS[role].clientFacing`(今天只有业务经理为 true),
+ * **不是写死的 `"bm"`**:`agents` 表里 id 是数据,`client.test.ts` 的夹具就是
+ * `ag_business_manager` —— 写死的实现会静默问错人。
+ *
+ * 查不出来(组织还没播种)返回 `null`:调用方按「这个上下文里**任一角色**忙」
+ * 处置(fail-closed —— 宁可多拒一条消息,不可让两条流打进同一条会话)。
+ */
+export function clientFacingAgentId(db: Database.Database): string | null {
+  return listAgents(db).find((a) => ROLE_SPECS[a.role].clientFacing)?.id ?? null;
 }
 
 /**

@@ -43,7 +43,7 @@ import {
   type DrainResult, type DrainTurnReport, type DrainWorkReport,
 } from "../runtime/dispatcher.js";
 import { createPlatformApp } from "../transport/http.js";
-import { attachHub, ensureSession, PlatformHub } from "../transport/hub.js";
+import { attachHub, clientFacingAgentId, ensureSession, PlatformHub } from "../transport/hub.js";
 import { startFixedDelay, startScheduler, type FixedDelayLoop, type Scheduler } from "./scheduler.js";
 import { resetPlatformData } from "./reset.js";
 import {
@@ -131,8 +131,10 @@ export interface ServeOptions {
    * 没有任何一条是按进程记的 —— 所以项目的并发数就是全局花费的代理指标,
    * 它必须是一个硬上界,而不是「尽力而为」。
    *
-   * 并行**只在项目之间**:同一个项目内部仍由 `hub.isBusy` 串行(理由见
-   * `createPlatformHost` 里排空器那一段的注释)。
+   * 并行**不止在项目之间**:同一个项目内部**甲方那条路 ⊥ 排空那条路**也会并行
+   * (忙闩的键是 `(项目, agent)`,不是项目 —— 见 `PlatformHub.busy` 的注视)。
+   * 项目内那一路的串行分别由上界与忙闩管:排空**内部**逐回合串行(`drainProject`
+   * 一条一条 `await`),而「同一个角色不许两条流打进同一条常驻会话」由忙闩管。
    */
   readonly maxConcurrentProjects?: number;
   /**
@@ -310,8 +312,14 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
    * 修法不是「给 AbortController 加一个 set」:SDK 的取消入口是
    * `AgentSession.abort()`(`AbortController` 根本传不进 `session.prompt`),
    * 所以登记的就是**那个会话自己的 abort**。
+   *
+   * ⚠️ **键是 `(上下文, agent)`(用 `pooledKey`),不是 `projectId`。**
+   * 「同一个项目里两个角色同时在跑」在忙闩按项目记时是**不可达**的,所以按项目
+   * 记的键看起来够用;忙闩一改成按 `(上下文, agent)`,它就从不可达变成**可达**,
+   * 而按项目记会让**后登记的覆盖前一个** ⇒ 用户的中断只到得了最后一个回合
+   * (R1 读出来的雷 (b))。键必须与「一个回合」同粒度。
    */
-  const inflight = new Map<string | null, () => void>();
+  const inflight = new Map<string, () => void>();
 
   const hub = new PlatformHub(
     { db, now, newId },
@@ -344,16 +352,30 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
         }
       },
       onInterrupt: (projectId) => {
-        const abort = inflight.get(projectId);
-        if (abort === undefined) {
+        // ── 一次中断停掉这个上下文里**正在跑的每一个**回合 ─────────────
+        //
+        // 不是「随便一个」、更不是「最后一个」。旧键(`projectId`)下,同一个项目
+        // 里两个角色并发时后登记的那条会**覆盖**前一条,于是用户的中断只到得了
+        // 最后起来的那个回合 —— 那正是 R1 读出来的雷 (b),也正是忙闩改细之后
+        // 会变成可达的那条路。
+        //
+        // ⚠️ **「只停某一个角色」在今天的协议上不可表达**:`ClientCommand.interrupt`
+        // 只带 `projectId`(`shared/types/platform.ts`),角色维度没有上过线。
+        // 所以这里给的是**超集**:能保证的是**不丢任何一个**,而不是「精确到角色」。
+        const prefix = contextPrefix(projectId);
+        const hit = [...inflight.entries()].filter(([k]) => k.startsWith(prefix));
+        if (hit.length === 0) {
           // 幂等:没有正在跑的回合(用户连点两次、或回合刚好结束)不是错误。
           // 但**必须留一行日志** —— 否则「中断按钮没反应」和「真的没有活可停」
           // 在事后完全无法区分(7-N:见不到的现场等于没有现场)。
           log.muted(`platform: 收到中断,但${channelLabel(projectId)}上没有正在跑的回合 —— 忽略`);
           return;
         }
-        log.ok(`platform: 中断${channelLabel(projectId)}正在跑的回合`);
-        abort();
+        log.ok(
+          `platform: 中断${channelLabel(projectId)}正在跑的 ${hit.length} 个回合` +
+            `(${hit.map(([k]) => k.slice(prefix.length)).join(", ")})`,
+        );
+        for (const [, abort] of hit) abort();
       },
     },
   );
@@ -415,7 +437,13 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
     /** 这一回合结束后要不要敲一下门铃(排空哪个项目)。`null` = 不敲。 */
     let nudgeTarget: string | null = null;
 
-    hub.setBusy(projectId, true);
+    // 占用的是 **`(上下文, 业务经理)`** —— 受保护的资源是业务经理那条常驻会话,
+    // 不是整个项目(项目里 worker / 质检在跑不该挡住甲方跟业务经理说话)。
+    //
+    // ⚠️ 这一次占用**必须同步**发生(在第一次 `await` 之前):hub 的 `send` 判据
+    // 与它落在同一个 tick 里,否则两条挨着到的消息会双双通过判据(WS 的每条消息
+    // 各自 fire-and-forget),那就是「同一个角色两条流打进同一条会话」的入口。
+    hub.setBusy(projectId, bm.id, true);
     try {
       const out = await runAgentTurn(projectId, bm.id, content);
       openedProjectIds = out.openedProjectIds;
@@ -469,8 +497,11 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
       // 或定时器下一次 fire 才被捡起来。这两条路都在,不是漏掉。
       if (projectId !== null) nudgeTarget = projectId;
     } finally {
-      hub.setBusy(projectId, false);
-      inflight.delete(projectId);
+      hub.setBusy(projectId, bm.id, false);
+      // ⚠️ 这里**不再** `inflight.delete(projectId)`:那张表按 `(上下文, agent)`
+      // 记,在上下文这一层删会把**别的角色**的登记一起抹掉(用户的中断随即
+      // 找不到那个回合)。每个回合自己删自己那一条 —— 见 `runAgentTurn` /
+      // `runWorkInSession` 的 `finally`。
     }
 
     // 门铃**不 await**:排空是平台自己的循环,用户那条消息的回合到这儿就结束了。
@@ -602,12 +633,13 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
   /**
    * 跑一个 agent 回合:建(或取)会话 → 流式桥事件 → 落库 → 收尾。
    *
-   * **它不碰 `busy`** —— busy 的粒度是「一次交互」(用户消息那一下,或一整次级联),
-   * 由调用方持有。放进这里会让级联的回合之间出现一个「用户消息可以插进来」的窗口,
-   * 而两条流打在同一条常驻会话上就是一次真正的竞态。
+   * **忙闩的占用在调用方**(用户那条路是 `handleUserMessage`,排空那条路是
+   * `withTurnLatch`),但粒度已经是 **`(上下文, agent)`** —— 也就是说它挡的是
+   * 「同一个角色两条流打进同一条常驻会话」,而不是「这个项目里还有别的回合」。
    *
-   * `inflight` 的登记**每回合一次**,这是刻意的:中断要能准确地停住**正在跑的那一个**,
-   * 而不是「这个项目里随便哪个角色」。
+   * `inflight` 的登记**每回合一次、键是 `(上下文, agent)`**,这是刻意的:中断要能
+   * 准确地停住**正在跑的那一个回合**,而不是「这个项目里随便哪个角色」。前者按
+   * 项目记时,同项目两角色并发会让后登记的覆盖前一个(R1 的雷 (b))。
    */
   async function runAgentTurn(
     projectId: string | null,
@@ -650,7 +682,7 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
     // **登记必须发生在第一次 await 之前。** 放在 `await runTurn(...)` 之后等于
     // 永远登记不上:WS 的每一条消息是各自 fire-and-forget 处理的,中断消息会在
     // 这个回合还卡在 await 里的时候就被处理掉。这正是「死接线」得以藏身的缝隙。
-    inflight.set(projectId, () => {
+    inflight.set(pooledKey(projectId, agentId), () => {
       aborted = true;
       // `AgentSession.abort()` 是 async 且会等到 agent 真正 idle。这里**不 await**:
       // WS 的消息处理器不该被一次取消阻塞住。但失败要留现场(7-N),不许静默。
@@ -669,6 +701,18 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
         agentId,
         projectId,
         message: task,
+        // ── 用量那两行接线(见 `RunTurnOptions.sessionId` 的已知缺口)───────
+        //
+        // `sessionId` 就在作用域里(`ensureSession` 刚算出来的那条),`runTurn`
+        // 自己**不知道也不该猜**它(同一个项目里可以有多条会话,按
+        // `(projectId, agentId)` 反推会得到一个「看起来对、换一个场景就错」的值)。
+        //
+        // `onUsageRecorded` 是实时推送的接缝 —— `runTurn` 不持有 WS 枢纽(它连
+        // transport 都不该知道),所以推送必须由宿主接线。**不接的后果不是理论**:
+        // `hub.emitUsageRecorded` 此前零调用方(有声明没读者),前端那条
+        // `usage_recorded` 一个包都收不到。
+        sessionId,
+        onUsageRecorded: (row) => hub.emitUsageRecorded(row),
         // 墙钟上界透传。**不给默认值**:缺省由 `runTurn` 自己那份
         // `DEFAULT_WALL_CLOCK_TIMEOUT_MS` 兜底 —— 两个地方各写一个默认值,
         // 迟早会漂,而漂的表现是「文档说 10 分钟、实际是另一个数」。
@@ -732,7 +776,7 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
         openedProjectIds: [], failed: true,
       };
     } finally {
-      inflight.delete(projectId);
+      inflight.delete(pooledKey(projectId, agentId));
     }
   }
 
@@ -772,7 +816,7 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
     const textBuf: string[] = [];
     const thinkBuf: string[] = [];
     let aborted = false;
-    inflight.set(projectId, () => {
+    inflight.set(pooledKey(projectId, agentId), () => {
       aborted = true;
       void session.abort().catch((err: unknown) => {
         log.error(
@@ -784,6 +828,12 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
     try {
       const execution = await runWorkItem({
         session, db, workId,
+        // 与 `runAgentTurn` 那两行同一条理由、同一批接线:执行这条路上的回合
+        // 同样要落 `turn_usage.session_id` 并把 `usage_recorded` 推给前端。
+        // **两条路都要接** —— 只接聊天那条等于没接(与墙钟上界同一条教训,
+        // 真机现场那个跑了 16 分钟的 worker 回合走的正是这里)。
+        sessionId,
+        onUsageRecorded: (row) => hub.emitUsageRecorded(row),
         ...(opts.turnTimeoutMs !== undefined ? { timeoutMs: opts.turnTimeoutMs } : {}),
         // 同一根线也要接在**执行**这条路上:worker 卡在 curl 文档 16 分钟那次
         // 真机现场走的正是这里,只接 `runAgentTurn` 等于没接。
@@ -847,7 +897,7 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
         aborted, timedOut: false, text: textBuf.join(""), toolCalls: [],
       };
     } finally {
-      inflight.delete(projectId);
+      inflight.delete(pooledKey(projectId, agentId));
     }
   }
 
@@ -865,7 +915,8 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
   //      原来那个闩的唯一理由是防**叠**:「一次排空可能比定时器间隔还长,
   //      不加闩就会叠起来跑(而每一层都在花 token)」。而「叠」这件事的判据是
   //      **(项目, 排空)** 而不是 **(排空)**:同一个项目叠起来才会重复花 token
-  //      (`hub.isBusy` 也挡着那一半),不同项目叠起来恰恰是这次要的效果。
+  //      (`drainOne` 的让路判据 + 忙闩也挡着那一半),不同项目叠起来恰恰是
+  //      这次要的效果。
   //      宿主级闩还有一个它自己看不见的副作用:它把「全局同时只有一个项目在跑」
   //      变成了事实上的第二道上界 —— 拆它的时候必须同时把上界**显式**建出来,
   //      那就是 ②。
@@ -881,20 +932,32 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
   //    代价是「两趟 pass 会重复扫一遍项目列表」—— 那不是 token,是几条 SQL:
   //    没有待办的项目在 `drainProject` 里查一次就退,一个回合都不跑。
   //
-  // ⚠️⚠️ **绝不在项目内部并发**(R1 读出来的两条雷,今天因「同一项目只有一个
-  //    排空者 + `hub.isBusy` 串行」而不可达 —— 一旦项目内并行就会踩上):
+  // ⚠️⚠️ **项目内部现在真的会并发**(用户找业务经理 ⊥ 排空叫醒 worker / 质检 /
+  //    项目经理)—— 忙闩的键从「项目」改成「`(项目, agent)`」之后,这一条从
+  //    「不可达」变成「可达」。R1 读出来过两条雷,两条都已处置:
   //
-  //    (a) `getOrCreateSession` 是 **check-then-act**(见上面 `sessions.get` →
-  //        `await createPlatformSession` → `sessions.set`):同一个
-  //        `(projectId, agentId)` 并发进入,两边都读到 `undefined`,于是建出
-  //        **两条**会话,后一次 `set` 覆盖前一条;而被覆盖的那条**永远不会被
+  //    (a) `getOrCreateSession` 是 **check-then-act**(`sessions.get` →
+  //        `await createPlatformSession` → `sessions.set`)⇒ 同一个
+  //        `(上下文, agent)` 并发进入,两边都读到 `undefined`,于是建出**两条**
+  //        会话,后一次 `set` 覆盖前一条;而被覆盖的那条**永远不会被
   //        `disposeSessionsFor` 回收** —— 泄漏一条带订阅的常驻会话。
-  //    (b) `inflight` 的键是 `projectId | null`,**不是** `(projectId, agentId)`:
+  //        ✅ **由忙闩本身关掉**:`(上下文, agent)` 的闩在**建会话之前**占用、
+  //        在回合收尾之后释放,而两条路(`handleUserMessage` 的同步占用 /
+  //        排空的 `withTurnLatch`)都必须先拿到它 ⇒ 同一个键的两个
+  //        `getOrCreateSession` 在结构上不可能同时在飞。
+  //        **键与池子的键同粒度才是这条性质的来源**(按项目记的闩挡不住
+  //        「同项目两个角色各自建会话」—— 那两条本来就该并发)。
+  //    (b) `inflight` 的键原来是 `projectId | null`,**不是** `(projectId, agentId)`:
   //        同一个项目里两个角色并发时,后者的中断登记覆盖前者 ⇒ 用户的
   //        「中断」只到得了最后一个回合。
+  //        ✅ 已改键(`pooledKey`),`onInterrupt` 也随之改成「停掉这个上下文里
+  //        正在跑的**每一个**」(协议里只有 projectId,见那里的注视)。
   //
-  //    这两条**不需要修**(现在的并行不会让它们可达),但必须留在这里 ——
-  //    下一个顺手把 `Promise.all` 加进项目内部的人要先看见它们。
+  //    下面这三条宿主级结构与它们无关(不要顺手一起改):
+  //    `drainingProjects` / `nudgedProjects` / `projectSlots` 管的是**排空之间**
+  //    的重叠与全局上界,不是「一个回合」。排空**内部**仍然是逐回合串行的
+  //    (`drainProject` 一条一条 await),所以「一个项目里同时跑的排空回合数」
+  //    永远是 0 或 1。
 
   /** 每个项目一个排空闩:**同一个项目**的排空永不重叠(不同项目互不阻塞)。 */
   const drainingProjects = new Set<string>();
@@ -1018,58 +1081,102 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
   }
 
   /**
-   * 排空一个项目。返回它的结果(`null` = 因为正在跑别的回合而让开)。
+   * 排空一个项目。返回它的结果(`null` = 因为甲方正在跟业务经理说话而让开)。
    *
-   * `hub.isBusy` 是**重入闩**的一半:用户消息那条路正在跑同一个项目的回合时,
-   * 排空让开(那条路自己会在回合结束后敲门)。另一半是 `drainingProjects`
-   * (按项目)—— 同一个项目的排空不叠(叠起来每一层都在花 token)。
-   * **跨项目不挡**:那正是这次要的并行,上界由 `projectSlots` 给。
+   * ── 闩的粒度(这次改的就是它)──────────────────────────────────
+   *
+   * 旧写法在**整趟排空**期间占着 `hub.setBusy(projectId)`,于是一次级联
+   * (真机 18 分钟、最多 8 个回合)里甲方**发不出话** —— 而排空跑的常常是
+   * worker / 质检 / 项目经理,与他要找的业务经理**不是同一条会话**。
+   *
+   * 现在:① 这里只做一次**让路判据**(甲方正在跟业务经理说话 ⇒ 这一趟让开,
+   * 他那边回合结束时会自己敲门);② 每个回合由 `withTurnLatch` **单独**占用
+   * 它自己那个角色的会话(排空里不同回合是不同 agent)。
+   * `maxConcurrentProjects` 信号量是**另一层**(全局上界),一点都不动。
    */
   async function drainOne(projectId: string): Promise<DrainResult | null> {
-    if (hub.isBusy(projectId)) {
-      log.muted(`platform: ${channelLabel(projectId)}正在跑一个回合,跳过本次排空`);
+    // **重入闩的一半**:甲方正与业务经理对话时,排空让开(那条路结束时会自己
+    // 敲门)。判据是**那个角色**,不是整个项目 —— 项目里 worker 在跑不该挡住
+    // 甲方找业务经理,反过来也一样。另一半是 `drainingProjects`(按项目)。
+    const talker = clientFacingAgentId(db);
+    if (talker !== null && hub.isBusy(projectId, talker)) {
+      log.muted(`platform: ${channelLabel(projectId)}的业务经理正在跟甲方说话,跳过本次排空`);
       return null;
     }
-    hub.setBusy(projectId, true);
     /** 这一轮排空被用户中断过 —— 传进 dispatcher 让它立刻停 */
     let cancelled = false;
-    try {
-      const result = await drainProject({
-        db,
-        projectId,
-        now,
-        log: (l) => log.muted(l),
-        ...(opts.maxCascadeRounds !== undefined ? { maxRounds: opts.maxCascadeRounds } : {}),
-        // 合并唤醒的两个旋钮。同样**不给默认值** —— 缺省在 `collectTodos` 里
-        // (`DEFAULT_REPORT_BATCH_SIZE` / `DEFAULT_REPORT_MAX_DELAY_MS`),
-        // 两个地方各写一份迟早会漂,而漂的表现是「CLI 说 5 分钟、实际不是」。
-        ...(opts.reportBatchSize !== undefined
-          ? { reportBatchSize: opts.reportBatchSize }
-          : {}),
-        ...(opts.reportMaxDelayMs !== undefined
-          ? { reportMaxDelayMs: opts.reportMaxDelayMs }
-          : {}),
-        isCancelled: () => cancelled,
-        runAgentTurn: async (agentId, task): Promise<DrainTurnReport> => {
+    // ⚠️ 这里**没有** `hub.setBusy(projectId, …)`,也**没有** `inflight.delete(projectId)`:
+    // 整趟排空不再占闩(每个回合的闩由 `withTurnLatch` 自己持/放),而 `inflight`
+    // 按 `(上下文, agent)` 记 —— 在上下文这一层删会抹掉别的角色的登记。
+    const result = await drainProject({
+      db,
+      projectId,
+      now,
+      log: (l) => log.muted(l),
+      ...(opts.maxCascadeRounds !== undefined ? { maxRounds: opts.maxCascadeRounds } : {}),
+      // 合并唤醒的两个旋钮。同样**不给默认值** —— 缺省在 `collectTodos` 里
+      // (`DEFAULT_REPORT_BATCH_SIZE` / `DEFAULT_REPORT_MAX_DELAY_MS`),
+      // 两个地方各写一份迟早会漂,而漂的表现是「CLI 说 5 分钟、实际不是」。
+      ...(opts.reportBatchSize !== undefined
+        ? { reportBatchSize: opts.reportBatchSize }
+        : {}),
+      ...(opts.reportMaxDelayMs !== undefined
+        ? { reportMaxDelayMs: opts.reportMaxDelayMs }
+        : {}),
+      isCancelled: () => cancelled,
+      runAgentTurn: async (agentId, task): Promise<DrainTurnReport> => {
+        return withTurnLatch(projectId, agentId, async () => {
           const r = await runAgentTurn(projectId, agentId, task);
           if (r.aborted) cancelled = true;
           return {
             aborted: r.aborted, timedOut: r.timedOut, text: r.text, toolCalls: r.toolCalls,
             failed: r.failed,
           };
-        },
-        runWork: async (agentId, workId): Promise<DrainWorkReport> => {
+        });
+      },
+      runWork: async (agentId, workId): Promise<DrainWorkReport> => {
+        return withTurnLatch(projectId, agentId, async () => {
           const r = await runWorkInSession(projectId, agentId, workId);
           if (r.aborted) cancelled = true;
           return r;
-        },
-      });
-      announceDrain(projectId, result);
-      return result;
-    } finally {
-      hub.setBusy(projectId, false);
-      inflight.delete(projectId);
-    }
+        });
+      },
+    });
+    announceDrain(projectId, result);
+    return result;
+  }
+
+  /**
+   * **一个回合的闩**:排空器每条回合单独占用它那个角色的常驻会话。
+   *
+   * ── 为什么是「每回合」而不是「整趟排空占着项目」────────────────────
+   *
+   * 排空里不同回合是**不同 agent**(项目经理拆解 → worker 执行 → 质检 → 业务
+   * 经理汇报),而受保护的资源是**每个角色自己那条常驻会话**。整趟占着项目 =
+   * 甲方在整个级联(真机 18 分钟)里发不出话,而他要找的人与正在跑的人不是同一个。
+   *
+   * ── 为什么是「等」而不是「跳过这一回合」───────────────────────────
+   *
+   * 排空器**按回合记账**(`dispatch_attempts`,默认 3 次):跳过一回合会被记成
+   * 「叫醒过一次却没动」,三次就把那条待办的预算烧光,然后广播一条**假的**
+   * `cascade_stopped` + 落一条 system 消息。等它空出来,这一回合就真的跑了 ——
+   * 代价只是这一趟排空多花一点墙钟,而它本来就在等回合。
+   *
+   * ⚠️ 排队**不影响全局上界**:`projectSlots` 是外层信号量,这里等的是**同一个
+   * 项目内部**那把闩,不会多占许可(它本来就在这个许可里)。
+   */
+  function withTurnLatch<T>(
+    projectId: string,
+    agentId: string,
+    fn: () => Promise<T>,
+  ): Promise<T> {
+    return hub.acquireTurn(projectId, agentId).then(async (release) => {
+      try {
+        return await fn();
+      } finally {
+        release();
+      }
+    });
   }
 
   /**
