@@ -12,7 +12,7 @@
 ```
 W3-① `516ae93` fix(origin): 闭合刷新缺口 —— 封套落库(migration 019)+ 前端判据同形
 W3-②③ 本次提交:文档欠账 + 端到端(证据在 .probe/w3-e2e-*)
-1187 passed / 55 files · 两条 typecheck 0 · npm run build 绿 · check:design E1–E14 绿 · as any 0
+1194 passed / 56 files · 两条 typecheck 0 · npm run build 绿 · check:design E1–E14 绿 · as any 0
 全部已推送到 origin/master(上一轮那 15 个提交也已推送 —— GitHub 443 当时不通,后来通了)
 ```
 
@@ -100,6 +100,43 @@ outbox 事件 + 一条未 `accepted` 的 `deliverable` 工件(压住 `integrate`
 —— 按提示词自己的说法那**「等于没写」**。**修法不是再加一句提示词**(§9.4 那条归因的
 教训),机制已经在报(`detectUnannouncedTurn` 落 `system` 告警)—— 这一趟证明的是
 **这条链路的每一环都对,只有模型的合规率是 0/2**。
+
+## W3 追加 · 危险区那个「重置 Sansheng」—— **它本来是坏的**,顺手修了
+
+起因是用户问「这两处文案与实现对不上」。照实写之前先在副本上试了一次,结果:
+
+```
+$ curl -X POST localhost:2731/api/reset -d '{"confirm":"reset"}'
+HTTP/1.1 500 Internal Server Error          ← 裸 500,连一句可读原因都没有
+SqliteError: FOREIGN KEY constraint failed  at resetPlatformData (reset.js:62)
+```
+
+**两个根因,都在注释里看不出来:**
+
+| # | 事实 |
+|---|---|
+| ① | `PLATFORM_DATA_TABLES` **漏了 3 张表**:013 的 `dispatch_events` / `dispatch_attempts`、018 的 `turn_usage`(两个迁移都比 `reset.ts` 晚)。致命的那个是 `turn_usage.agent_id → agents(id)` = **NO ACTION**,而真机 9 行 usage 里有 **7 行 `project_id IS NULL`**(接待会话那几笔钱,删 `projects` 时级联不走它们)⇒ 删到 `agents` 那一步 FK 拒绝 ⇒ **重置是一个事务 ⇒ 整体回滚 ⇒ 一行都没清**。 |
+| ② | `reset.ts` 文件头声称「有一个测试断言清单覆盖所有平台表(见 `tests/platform/reset.test.ts`)」—— `git log --all` 里**从来没有这个文件**。那句「加表时它会红」是假的,所以 013 / 018 加表时没有任何东西红。**这是「有声明没读者」的又一形态:这次缺的是守卫本身。** |
+
+**修法**:清单补 3 张(子先于父)+ 把那个测试**真的补上**(`tests/platform/reset.test.ts`:
+覆盖差集 + 真形状库上的行为回归 + `schema_version` 保留 + 幂等)。
+
+⚠️ **夹具第一版是错的,已实测并修好**:我只放了一条「有 `project_id`」的 usage 行,
+于是删 `projects` 时它被级联清掉,**回归测试在坏掉的实现上照样绿** —— 一个坏掉的检查。
+补上 `project_id IS NULL` 那条(接待会话的形状)之后,突变测试才红得起来。
+**判据:拿掉 `turn_usage` ⇒ 5 条红,报出的正是真机那个 `FOREIGN KEY constraint failed`;
+还原 ⇒ 7/7 绿。**
+
+**真机复跑(副本)**:reset 200 · 21 张表 · 清 9 行;`settings.json` / `.keyring` /
+提示词 12 个 / 备份 / 隔离区 / 数据库文件**一个都没动**;`schema_version` 不回退;
+**不重启也能恢复**(`POST /api/projects` 当场重新播种 4 个角色,服务 PID 没变)。
+
+**文案**(用户点名的那两处,已照实改):旧文案声称删「配置 / API key」,
+按钮 tooltip 更声称删「数据库、密钥环、设置与 Pi 会话目录」—— 两处都**夸大**了破坏范围,
+而危险区里夸大是双向有害的(想清干净的人以为 key 没了;想留 key 的人不敢点)。
+另外「需要重启 server 才能重新初始化」也不对(代码自己的说法是
+「组织未就绪 —— 第一次收到消息或建项目时会自动播种」),一并改掉。
+新文案已进 `dist/web` 的 bundle(构建后 grep 过)。
 
 ## ⚠️ 还没做的(如实标注,不是遗漏)
 

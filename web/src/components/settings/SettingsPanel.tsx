@@ -321,8 +321,19 @@ function ResetSection() {
 
   async function onReset() {
     if (busy) return;
+    // ⚠️ **这两段文案必须与实现对齐**(2026-10-05 改过一次,此前是夸大的)。
+    // 实现只有两步(`src/platform/host/serve.ts` 的 `reset`):
+    //   ① 丢掉进程里的常驻会话;② 一个事务删掉 `PLATFORM_DATA_TABLES` 里那些表的行。
+    // **不碰**任何文件:settings.json、密钥环、提示词单元与备份、日志、数据库文件本身;
+    // `schema_version` 也不清(重置数据 ≠ 回退 schema)。
+    // 旧文案声称会删「配置 / API key」(按钮 tooltip 更声称删「数据库、密钥环、设置与
+    // Pi 会话目录」)—— 两处都与实现对不上,而方向是**让人以为破坏更大**:想清干净的人
+    // 会以为 key 也没了,想保留 key 的人会不敢点。危险区里的文案不许夸大。
     const ok = window.confirm(
-      "确认重置 Sansheng?\n\n将删除:所有项目 / 工作项 / 工件 / 配置 / API key / 记忆片段。\n日志会保留。\n\n需要重启 server 才能重新初始化。",
+      "确认重置 Sansheng?\n\n" +
+        "将清空平台数据表:项目 / 工作项与依赖 / 工件与边 / 阻塞 / 变更 / 提问 / 会议 / 会话与消息 / 记忆 / 组织 / 排空器状态 / 回合用量。\n\n" +
+        "不会删除:设置与 API key(settings.json / 密钥环)、提示词单元与它们的备份、日志、数据库文件本身;schema 版本也不回退。\n\n" +
+        "重置后组织会在你下一条消息(或建项目)时自动重新播种,不需要重启 server。",
     );
     if (!ok) return;
     setDone(null);
@@ -362,7 +373,7 @@ function ResetSection() {
           onClick={onReset}
           disabled={busy}
           className="sansheng-button"
-          title="删除数据库、密钥环、设置与 Pi 会话目录(日志保留)"
+          title="清空平台数据表(项目 / 工作项 / 工件 / 会话消息 / 记忆 / 组织 / 排空器状态 / 回合用量);不删设置、API key、提示词、备份、日志与数据库文件"
           style={{
             padding: "8px 16px",
             color: "var(--cinnabar)",

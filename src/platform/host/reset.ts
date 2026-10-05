@@ -18,11 +18,27 @@
  * 用户 2026-10-23 的指令是「一切以最新的为准,有冲突删掉老的写新的」,
  * 这条正是那个原则的落点。
  *
- * ── 那条守卫为什么必须有 ────────────────────────────────────────
+ * ── 那条守卫为什么必须有(以及它曾经**缺失**的真实代价)──────────
  *
  * 表清单是**硬编码**的。将来加一张表而忘了加进这里,重置就会**静默漏掉它** ——
- * 用户以为清干净了,实际上有一张表还留着旧数据。所以有一个测试断言
- * 「清单覆盖所有平台表」(见 `tests/platform/reset.test.ts`):加表时它会红。
+ * 用户以为清干净了,实际上有一张表还留着旧数据。
+ *
+ * ⚠️ **2026-10-05 实测:这条守卫此前只写在注释里,而那行注释是假的。**
+ * 本文件曾经声称「有一个测试断言清单覆盖所有平台表(见
+ * `tests/platform/reset.test.ts`)」,而 `git log --all -- tests/platform/reset.test.ts`
+ * **一条记录都没有** —— 那个测试从来没有被提交过。代价是在真机上量出来的:
+ *
+ *   - migration 013 的 `dispatch_events` / `dispatch_attempts` 与 018 的
+ *     `turn_usage` **都不在清单里**(013 / 018 都在本文件写完之后才加);
+ *   - `turn_usage.agent_id → agents(id)` 是 **NO ACTION** ⇒ 库里有 usage 行时,
+ *     删到 `agents` 那一步 `FOREIGN KEY constraint failed`;
+ *   - 而重置**在一个事务里**做 ⇒ **整体回滚** ⇒ 一行都没清,接口 500
+ *     ("Internal Server Error",连一句可读的原因都没有)。
+ *
+ * ⇒ 守卫现在是**真的**:`tests/platform/reset.test.ts` 既做覆盖差集(漏一张表就红),
+ *   也做「在真形状的库上真的清干净」的行为回归(含 `turn_usage`,即上面那次事故的形状)。
+ *   **注释里声称存在的测试,必须能被 `ls` 到** —— 与 AGENTS.md「有声明没读者」同源,
+ *   只是这次缺的是**守卫**。
  */
 import type Database from "better-sqlite3";
 
@@ -36,6 +52,14 @@ import type Database from "better-sqlite3";
  *     messages / user_profile)—— 同上
  */
 export const PLATFORM_DATA_TABLES: readonly string[] = [
+  // BC6 排空器状态(migration 013)+ 回合用量(migration 018)
+  //
+  // ⚠️ 这三张是**后补进来的**(2026-10-05):它们此前不在清单里,而 013 / 018
+  // 都比本文件晚 ⇒ 真机上「重置」在有 usage 数据的库上直接 500(见文件头那段)。
+  // 三张都引 `projects`,后两张还引 `works` / `agents` ⇒ 必须排在它们的父表之前。
+  "dispatch_events",
+  "dispatch_attempts",
+  "turn_usage",
   // BC1 项目与工作
   "work_deps",
   "works",
