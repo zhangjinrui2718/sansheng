@@ -52,14 +52,50 @@
  * 登记(`setTimeout` + 它到点时对 `session.abort()` 的调用)必须发生在
  * **第一次 `await` 之前** —— 批次 19 的教训原话:「放在 `await runTurn(...)`
  * 之后等于永远登记不上」。前端中断按钮曾在同一个缝隙里死接线过。
+ *
+ * ── 用量(usage)为什么必须在**事件时刻**读并深拷贝 ──────────────────
+ *
+ * 真机探针(T1)的实测:一次 LLM 调用的 `Usage` 是**一个对象**,它被 `message_start`
+ * / N 条 `message_update` / `message_end` **共享**,并且在流的过程中被**就地改写**:
+ *
+ *   message_start      usage 键在,值全零
+ *   message_update ×N  usage 键在,值全零(每条 partial 都带)
+ *   message_end        ★ 事件时刻即终值
+ *   turn_end           ★ 同一条消息的第二次投递(对象身份相同)
+ *   agent_end.messages ★ 第三次投递(对象身份相同)
+ *
+ * 于是有三种写法都「看起来能跑通」,而只有一种是对的:
+ *
+ *   ① **在 `message_start` / `message_update` 上读** ⇒ 拿到 0(那一刻真的还是 0);
+ *   ② **记住最后一次 partial 的 `message` 引用,回合结束后再读它的 usage**
+ *      ⇒ 拿到**终值** —— 因为那个对象被改写了。它和正确实现**值上完全一样**,
+ *      所以任何只断言「落库的数字对不对」的测试都**抓不到它**。
+ *      T1 的探针 v1 就是这么坏掉的:它把 `{path, value}` 存成引用,打印时回合
+ *      早已结束,于是 `message_start` 那一行显示 `output=61`,看起来「usage 从
+ *      第一个事件起就是完整的」。**那是假的。**
+ *   ③ 在 `message_end` **事件发生的那一刻读、并深拷贝** ⇒ 唯一稳的读法(本文件)。
+ *
+ * ⇒ 累加器里放的是**值的快照**(三个数字),不是对象引用。这条纪律的机器形式在
+ * `tests/platform/turn-usage-write.test.ts`,其中有两条负样本:
+ * 「事件时刻快照 ≠ 回合结束后读引用」(把差别打出来),
+ * 以及「同一个对象在 `message_end` 之后又被改写时,落库的值不许跟着变」。
+ *
+ * ── 为什么是「每个回合一行」而不是「每次 LLM 调用一行」 ──────────────
+ *
+ * 一个回合可能调 N 次工具 ⇒ N+1 次 LLM 调用 ⇒ N+1 条 usage。三条投递路径
+ * (`message_end` / `turn_end` / `agent_end.messages`)逐项相等 ——
+ * **同时累加两条会把同一份用量算两遍**。所以只认 `message_end` 一条,
+ * 在回合结束时**求和写一行**(表是回合级的,见 `migrations/018`)。
  */
 import type { AgentSession, AgentSessionEvent } from "@earendil-works/pi-coding-agent";
+import { randomUUID } from "node:crypto";
 import { log } from "../../shared/log.js";
 import type Database from "better-sqlite3";
 import {
   collectPendingWork, renderPendingWork, summarizePendingWork,
 } from "./pendingWork.js";
 import { renderProjectContext } from "./projectContext.js";
+import { insertTurnUsage, type TurnUsageRow } from "../storage/repo/usage.js";
 
 /** 一次工具调用的现场记录。 */
 export interface ToolCallRecord {
@@ -70,6 +106,42 @@ export interface ToolCallRecord {
   /** 结果的简短摘要(截断) */
   readonly resultSummary: string;
   readonly durationMs: number;
+}
+
+/**
+ * **一次 LLM 调用**在 `message_end` 那一刻的用量快照。
+ *
+ * ⚠️ 它是一个**值的拷贝**,不是 SDK 那个 `Usage` 对象 —— 那个对象在整个流的
+ * 过程中被就地改写(见文件头)。存引用 = 存了一个「以后还会变」的东西,
+ * 而它变化的方向恰好是「从 0 变成终值」,于是错误的实现会**看起来完全正确**。
+ *
+ * 字段名以 `pi-ai/dist/types.d.ts` 的 `Usage` 为准:`input` / `output` /
+ * `cacheRead` / `cacheWrite` / `reasoning` / `totalTokens` / `cost`。
+ * **没有 `inputTokens` / `outputTokens`** —— 读名字之前先 grep 类型定义。
+ *
+ * 只取三个:落库的形状(`turn_usage`)就是 `input_tokens` / `output_tokens` /
+ * `cache_read`;**`cost` 刻意不取**(用户已定:只显示 token 数,不显示金额)。
+ */
+export interface TurnUsageCall {
+  readonly input: number;
+  readonly output: number;
+  readonly cacheRead: number;
+  /** 这条 assistant 消息自称的模型 id;读不到为 `null` */
+  readonly model: string | null;
+}
+
+/** 一个回合的用量合计(`TurnResult.usage` 与落库行同源)。 */
+export interface TurnUsageTotal {
+  readonly input: number;
+  readonly output: number;
+  readonly cacheRead: number;
+  /** 这一回合里有几条 assistant `message_end`(即几次 LLM 调用) */
+  readonly calls: number;
+  /**
+   * 落库那一行的 id。**报告里要能指出「哪一行」** —— 没有它,一次
+   * 「账目对不上」只能靠时间戳去库里猜。
+   */
+  readonly rowId: string;
 }
 
 export interface TurnResult {
@@ -128,6 +200,16 @@ export interface TurnResult {
    * 墙钟上界打断的。
    */
   readonly timeout?: TurnTimeoutScene;
+  /**
+   * **这一回合花了多少 token**(已落库的那一份,与 `turn_usage` 那一行同源)。
+   *
+   * **可选**:`calls === 0` 时**没有它** —— 一个没买到任何 LLM 输出的回合
+   * (拒绝执行、prompt 立刻炸)不写账,也不假装记了一笔 0。
+   *
+   * 存在的理由与 `timeout` 同一条(7-N):「它写的账对不对」要能在**回合的产物里**
+   * 看出来,而不用去库里按时间戳猜哪一行是刚才那次跑的。
+   */
+  readonly usage?: TurnUsageTotal;
 }
 
 /**
@@ -211,6 +293,42 @@ export interface RunTurnOptions {
   readonly abortGraceMs?: number;
   /** 逐事件观察(调试/日志)。抛错会被吞掉,不影响回合 */
   readonly onEvent?: (ev: AgentSessionEvent) => void;
+  /**
+   * **这条回合跑在哪条会话里**(`project_sessions.id`),写进 `turn_usage.session_id`。
+   *
+   * ⚠️ **`runTurn` 自己不知道它,也不去猜**:同一个项目里可以有多条会话
+   * (`internal` + 每场交付一条 `client`),按 `(projectId, agentId)` 反推是哪一条
+   * 会得到**一个看起来对、换一个场景就错**的答案 —— 而错的那个 `session_id`
+   * 在事后无法与正确的区分。所以只能由**调用方**传(它手里就是 `ensureSession`
+   * 的返回值)。
+   *
+   * 缺省不传 ⇒ 落 `NULL`。⚠️ `NULL` 在 018 里的含义是「接待会话,或那条会话已被
+   * 删」;「调用方没传」是第三种含义,会与它撞在一起 —— 这是个**已知的诚实缺口**,
+   * 不是设计。宿主两处调用点(`runAgentTurn` / `runWorkInSession`)各补一个实参即可
+   * 消掉它(见批次报告)。
+   */
+  readonly sessionId?: string;
+  /**
+   * 这一回合在干哪个工作项,写进 `turn_usage.work_id`。
+   * 缺省 `null`(= 聊天 / 汇报 / 评审的回合不挂工作项)。
+   */
+  readonly workId?: string;
+  /**
+   * id 生成(注入是为了可测:测试要能钉住落库行的 id)。
+   * 缺省 `tu_<uuid>` —— 与全库的 `prefix_xxx` 同形。
+   */
+  readonly newId?: (prefix: string) => string;
+  /**
+   * **用量落库之后的回调**(实时推送的接缝)。
+   *
+   * `runTurn` 不持有 WS 枢纽(它连 `transport` 都不该知道),所以推送必须由
+   * 宿主接线:`onUsageRecorded: (row) => hub.emitUsageRecorded(row.projectId, row)`。
+   *
+   * ⚠️ **它抛错不影响回合**(与 `onEvent` 同一条规矩)—— 但**不会**被静默:
+   * 失败会记一条 ERROR 日志。这一点与「写账失败」同等处置:账已经落了,
+   * 推送失败是传输问题,不是账目问题。
+   */
+  readonly onUsageRecorded?: (row: TurnUsageRow) => void;
 }
 
 /**
@@ -280,6 +398,107 @@ function isToolEnd(
   ev: AgentSessionEvent,
 ): ev is Extract<AgentSessionEvent, { type: "tool_execution_end" }> {
   return ev.type === "tool_execution_end";
+}
+/**
+ * 收窄到 `message_end`。
+ *
+ * ⚠️ **读点只有这一个,不许挪到 `message_start` / `message_update`**:
+ * 那两处事件上的 usage 键**在、值全零**(T1 探针实测)。挪过去的表现不是
+ * 「报错」,而是「每一行都是 0」—— `tests/platform/turn-usage-write.test.ts`
+ * 里有一条变异验证钉着它(把读点改过去,那条测试必须红)。
+ */
+function isMessageEnd(
+  ev: AgentSessionEvent,
+): ev is Extract<AgentSessionEvent, { type: "message_end" }> {
+  return ev.type === "message_end";
+}
+
+/**
+ * usage 里的一个 token 数。
+ *
+ * 非有限值(`NaN` / `Infinity` / 类型不对)按 0 记 —— 与 018 的
+ * 「`DEFAULT 0` 让『provider 没报这一项』与『真的是 0』在写入侧是同一种写法」
+ * 一致。负数也按 0:SDK 的契约是非负整数,出现负数说明读错了字段,
+ * 而「读错了字段」**要能被看见**(见下面的 `warnIfAllZero`),不是静默夹住。
+ */
+function tokenCount(v: unknown): number {
+  return typeof v === "number" && Number.isFinite(v) ? Math.max(0, Math.trunc(v)) : 0;
+}
+
+/**
+ * 从 `message_end` 的 `message` 上读一次 LLM 调用的用量 —— **读的那一刻就拷成值**。
+ *
+ * 返回 `null` = 这条消息不是 assistant,或它压根没有 usage 对象。
+ * 形状不认识时**不抛**:一个读不出来的事件不该让整轮对话崩掉
+ * (与 `openedProjectIdOf` 同一条规矩)。
+ *
+ * 写这个函数时**不 import `@earendil-works/pi-ai` 的 `Usage` 类型**是有意的:
+ * 那会把「SDK 的实际字段名」变成编译期断言,而 SDK 改名时我们希望**运行期**
+ * 仍然读得到一个可解释的结果(全零 + WARN),而不是整个平台编译不过。
+ */
+function usageSnapshotOf(message: unknown): TurnUsageCall | null {
+  if (message === null || typeof message !== "object") return null;
+  const m = message as { role?: unknown; usage?: unknown; model?: unknown };
+  if (m.role !== "assistant") return null;
+  const u = m.usage;
+  if (u === null || typeof u !== "object") return null;
+  const rec = u as { input?: unknown; output?: unknown; cacheRead?: unknown };
+  return {
+    input: tokenCount(rec.input),
+    output: tokenCount(rec.output),
+    cacheRead: tokenCount(rec.cacheRead),
+    model: typeof m.model === "string" && m.model !== "" ? m.model : null,
+  };
+}
+
+/** 缺省的 id 生成:与全库 `prefix_xxx` 同形,不引第三方依赖。 */
+const defaultUsageId = (prefix: string): string => `${prefix}_${randomUUID()}`;
+
+/**
+ * 一整回合的 token 全为 0 时的告警。
+ *
+ * **为什么必须有这一条**:T1 的教训是「字段名给错过一次」
+ * (`inputTokens` / `outputTokens` 根本不存在,真实的是 `input` / `output`)。
+ * 若 SDK 哪天再改一次名,这里的读取会**全部读成 0** —— 那是一条**看起来完全
+ * 正常**的账(每回合都花了 0 token),而「provider 没报用量」也会是同一个形状。
+ * 两种原因在库里分不开,但**至少要留下现场**:一行 WARN 带上是几次调用。
+ */
+function warnIfAllZero(
+  agentId: string,
+  total: { input: number; output: number; cacheRead: number },
+  calls: number,
+): void {
+  if (total.input + total.output + total.cacheRead > 0) return;
+  log.warn(
+    `turn: ${agentId} 的回合落了 ${calls} 次 LLM 调用的 usage,但 token 全为 0 —— ` +
+      `要么 provider 没报用量(合法),要么 SDK 的字段名变了(读的是 ` +
+      `input/output/cacheRead,见 pi-ai 的 Usage 类型)。两者在库里长得一样,` +
+      `所以这条日志是唯一的现场。`,
+  );
+}
+
+/** 把一回合里各次调用的 usage 求和。`calls` 为 0 时返回 `null`(不写账)。 */
+function sumUsage(
+  calls: readonly TurnUsageCall[],
+): { input: number; output: number; cacheRead: number; model: string | null } | null {
+  if (calls.length === 0) return null;
+  let input = 0;
+  let output = 0;
+  let cacheRead = 0;
+  const models = new Set<string>();
+  for (const c of calls) {
+    input += c.input;
+    output += c.output;
+    cacheRead += c.cacheRead;
+    if (c.model !== null) models.add(c.model);
+  }
+  return {
+    input,
+    output,
+    cacheRead,
+    // 恰好一个模型才写它;混用多个写 null(一列装不下两个,写其中一个 = 假归属)
+    model: models.size === 1 ? [...models][0]! : null,
+  };
 }
 
 function truncate(s: string, n: number): string {
@@ -395,6 +614,13 @@ export async function runTurn(opts: RunTurnOptions): Promise<TurnResult> {
     string,
     { name: string; startedAt: number; argsSummary: string }
   >();
+  /**
+   * 本回合各次 LLM 调用的用量**快照**(不是引用 —— 见文件头那段)。
+   *
+   * 顺序 = 事件到达顺序,对求和没有影响(加法可交换),所以不额外排序:
+   * 引入一个会漂的次序只会让「同一份数据两次跑出不同结果」多一个来源。
+   */
+  const usageCalls: TurnUsageCall[] = [];
   let settled = false;
 
   // ── 待办注入 ──
@@ -435,6 +661,20 @@ export async function runTurn(opts: RunTurnOptions): Promise<TurnResult> {
       // "thinking")。这里**显式分开**,两者永不混流。
       if (u.type === "text_delta" && typeof u.delta === "string") text.push(u.delta);
       else if (u.type === "thinking_delta" && typeof u.delta === "string") thinking.push(u.delta);
+      return;
+    }
+
+    // ── ★ 用量读点:只有这里 ──────────────────────────────────────
+    // `message_start` / `message_update` 上的 usage **键在、值全零**;
+    // `message_end` 是唯一「事件时刻即终值」的投递。而 `turn_end` /
+    // `agent_end.messages` 是**同一条消息的第二次 / 第三次投递** ——
+    // 三条路逐项相等,累加两条就是对同一份用量收两遍钱。
+    //
+    // 这里读出来的是**值的快照**(`usageSnapshotOf` 只取三个数字),
+    // 所以「事件时刻」这个前提是机器保证的,不依赖任何后来才读的引用。
+    if (isMessageEnd(ev)) {
+      const snap = usageSnapshotOf(ev.message);
+      if (snap !== null) usageCalls.push(snap);
       return;
     }
 
@@ -497,6 +737,9 @@ export async function runTurn(opts: RunTurnOptions): Promise<TurnResult> {
     releaseWallClock = resolve;
   });
 
+  /** 落库那一行的现场(见 `TurnResult.usage`);没写账时为 `undefined`。 */
+  let recordedUsage: TurnUsageTotal | undefined;
+
   // ⚠️ **登记必须发生在第一次 `await` 之前。** 放在 `await opts.session.prompt()`
   // 之后等于永远登记不上:到点时回合早就结束了(或者早就该被打断了)——
   // 批次 19 修前端中断时,死接线正是藏在这个缝隙里(一个从来没人 `set` 的
@@ -555,6 +798,82 @@ export async function runTurn(opts: RunTurnOptions): Promise<TurnResult> {
     settled = true;
   }, timeoutMs);
 
+  /**
+   * 把这一回合的用量落成**一行**(`turn_usage` 是回合级的,见 `migrations/018`)。
+   *
+   * ── 为什么它写在 `finally`(而调用点只有一个)──────────────────
+   *
+   * `runTurn` 有**两条出口**:正常返回,以及 `prompt()` 自己失败时
+   * `throw promptErrorValue`。后者同样可能已经买到了 LLM 输出(前几次调用成功、
+   * 后面某次失败),把它漏掉就是**静默少账** —— 钱花了、账上没有。
+   * `finally` 对两条出口各跑一次,所以它既满足「单点写入」,又不漏掉失败路径。
+   *
+   * **幂等策略 = 单点写入 + 不重试**(任务书已定),不是「按某个键去重」:
+   * 表里没有能识别「同一个回合」的天然键,而为此加一列会把幂等变成需要
+   * 跨进程协商的事实 —— 这里没有那个需要。调用方重跑一个回合 = 新的一回合
+   * = 新的一行,那也确实是**新花掉的钱**。
+   *
+   * 写账失败**不毁回合**(账目是账目,回合是回合),但绝不静默:ERROR 日志里带
+   * 上这一次的量与项目,事后看得出「这笔钱没记上」。失败时返回 `undefined` ——
+   * **没落进去就不能说落了**,`TurnResult.usage` 因此缺席。
+   *
+   * ── 已知的边界(如实写)──────────────────────────────────────
+   *
+   * 墙钟上界打断时 `settled` 被置真,收尾循环会退出;此后若 SDK 再投递一条
+   * `message_end`,它在 `unsub()` 之后到达,于是**不计入本行**。这是有界的:
+   * 打断之后 SDK 要么已经投递完,要么在 `abortGraceMs` 宽限内不收尾 ——
+   * 那一条用量会落在下一次(重跑)的账上,而不是消失两遍。
+   */
+  const recordTurnUsage = (): TurnUsageTotal | undefined => {
+    const total = sumUsage(usageCalls);
+    // 没买到任何 LLM 输出(拒绝执行 / prompt 立刻炸)⇒ **不写账**。
+    // 写一行 0 会把它变成「这个回合花了 0」的假事实。
+    if (total === null) return undefined;
+
+    const rowId = (opts.newId ?? defaultUsageId)("tu");
+    warnIfAllZero(opts.agentId, total, usageCalls.length);
+
+    const row: TurnUsageRow = {
+      id: rowId,
+      projectId: pid,
+      sessionId: opts.sessionId ?? null,
+      agentId: opts.agentId,
+      workId: opts.workId ?? null,
+      model: total.model,
+      inputTokens: total.input,
+      outputTokens: total.output,
+      cacheRead: total.cacheRead,
+      createdAt: Date.now(),
+    };
+
+    try {
+      insertTurnUsage(opts.db, row);
+    } catch (err: unknown) {
+      log.error(
+        `turn: 用量落库失败(${opts.agentId} · 项目 ${pid ?? "(接待会话)"} · ` +
+          `input=${total.input} output=${total.output} cacheRead=${total.cacheRead} ` +
+          `来自 ${usageCalls.length} 次 LLM 调用)—— 这笔钱记不上了:` +
+          (err instanceof Error ? err.message : String(err)),
+      );
+      return undefined;
+    }
+
+    // 实时推送的接缝:账**已经落了**才回调。抛错不影响回合(与 onEvent 同一条
+    // 规矩),但要留现场 —— 传输失败是传输问题,不是账目问题。
+    if (opts.onUsageRecorded !== undefined) {
+      try {
+        opts.onUsageRecorded(row);
+      } catch (err: unknown) {
+        log.error(
+          `turn: 用量 ${rowId} 已落库,但 onUsageRecorded 抛错(推送可能没发出去):` +
+            (err instanceof Error ? err.message : String(err)),
+        );
+      }
+    }
+
+    return { input: total.input, output: total.output, cacheRead: total.cacheRead, calls: usageCalls.length, rowId };
+  };
+
   try {
     // `prompt()` 的结局显式接住(而不是直接 `await`),因为两条路都可能有错:
     // 普通失败要照旧抛给调用方;而**墙钟打断时它抛错是预期结果**,不是回合故障
@@ -600,7 +919,11 @@ export async function runTurn(opts: RunTurnOptions): Promise<TurnResult> {
   } finally {
     clearTimeout(wallClockTimer);
     clearTimeout(timer);
+    // 先退订再写账:晚到的 `message_end` 不该落进**上一个**回合的账
+    // (`message_end` → 求和 → 落库 是一个同步块,中间不会插进新事件)。
     unsub();
+    // ★ 单点写入 —— `finally` 对「正常返回」与「prompt() 抛错」两条出口各跑一次
+    recordedUsage = recordTurnUsage();
   }
 
   const timeout: TurnTimeoutScene | undefined = wallClockExceeded
@@ -626,6 +949,7 @@ export async function runTurn(opts: RunTurnOptions): Promise<TurnResult> {
     settled: !timedOut,
     timedOut,
     ...(timeout !== undefined ? { timeout } : {}),
+    ...(recordedUsage !== undefined ? { usage: recordedUsage } : {}),
   };
 }
 
@@ -684,6 +1008,13 @@ export function renderTurnReport(r: TurnResult): string {
   }
   if (r.openedProjectIds.length > 0) {
     lines.push(`本回合立项: ${r.openedProjectIds.join(", ")}`);
+  }
+  if (r.usage !== undefined) {
+    // 只报 token,**不报金额** —— `cost` 刻意既不落库也不展示(用户已定)
+    lines.push(
+      `本回合用量: input ${r.usage.input} · output ${r.usage.output} · ` +
+        `cacheRead ${r.usage.cacheRead}(来自 ${r.usage.calls} 次 LLM 调用 · 已落库 ${r.usage.rowId})`,
+    );
   }
   if (r.thinking !== "") lines.push(`(另有 ${r.thinking.length} 字符内部推理,未混入正文)`);
   if (r.timeout !== undefined) lines.push(...renderTimeoutScene(r.timeout));

@@ -36,8 +36,9 @@ import {
   type SessionChannel,
 } from "../storage/repo/sessions.js";
 import { getProjectRow } from "../storage/repo/projects.js";
-import { toClientQuestionView, toWorkView } from "./views.js";
+import { toClientQuestionView, toTurnUsageView, toWorkView } from "./views.js";
 import { getAgent } from "../storage/repo/agents.js";
+import type { TurnUsageRow } from "../storage/repo/usage.js";
 import type {
   ClientCommand, ClientQuestionView, ServerEvent, WsToolInfo,
 } from "@shared/types/platform.js";
@@ -206,8 +207,47 @@ export class PlatformHub {
   emitThinking(projectId: string | null, messageId: string, text: string): void {
     this.broadcast({ type: "thinking_delta", projectId, messageId, text });
   }
-  emitMessageEnd(projectId: string | null, messageId: string, usage?: { input: number; output: number }): void {
+  /**
+   * 一条助手消息流完了。
+   *
+   * `usage` 的字段是 `input` / `output` / `cacheRead`(契约 2026-10-05 扩了
+   * `cacheRead`;在此之前前端只累加 input+output ⇒ **缓存命中那部分完全不计**,
+   * 而它恰恰是省钱的那一块)。
+   *
+   * ⚠️ **今天没有任何调用点传 `usage`** —— `grep -rn 'emitMessageEnd' src/` 的
+   * 五个调用点(本文件 :299 与 `host/serve.ts` 的四处)全是两个实参。也就是说
+   * 前端那条「本轮 in/out」的显示**上游是空的**。本批次新增的实时通道是
+   * `emitUsageRecorded`(回合级、带 `projectId`、由 `runTurn` 的
+   * `onUsageRecorded` 驱动);这个 per-message 的字段保留原样,等宿主接线。
+   */
+  emitMessageEnd(
+    projectId: string | null,
+    messageId: string,
+    usage?: { input: number; output: number; cacheRead: number },
+  ): void {
     this.broadcast({ type: "message_end", projectId, messageId, ...(usage !== undefined ? { usage } : {}) });
+  }
+  /**
+   * **一个回合的用量刚落库** —— 实时把这一笔推给前端。
+   *
+   * ── 为什么事件里必须带 `projectId`(而不是让前端按当前上下文猜)──────
+   *
+   * 「按项目分组呈现」是这个界面的基本裁决:多项目并行时,一条不带 `projectId`
+   * 的事件会被前端累积到**当前**那个项目上 —— A 项目烧的 token 记到 B 头上,
+   * 而且两边都是合法数字,事后查不出来(bug② 那一类)。
+   *
+   * `projectId === null` 是**接待会话**(那笔账还没有项目,见 migration 018),
+   * 不是「没有上下文」—— 契约里的 `ServerEvent` 对这个区分有整段说明。
+   *
+   * 载荷是**那一行**而不是新的合计:合计由 `GET /api/projects/:id/usage` 给权威值
+   * (事件会丢,库不会)。与 `work_changed` / `blocker_changed` 同一条纪律。
+   */
+  emitUsageRecorded(row: TurnUsageRow): void {
+    this.broadcast({
+      type: "usage_recorded",
+      projectId: row.projectId,
+      usage: toTurnUsageView(this.deps.db, row),
+    });
   }
   /**
    * 「某个工具开始跑了」。`tool_start` **自己也能建轮**

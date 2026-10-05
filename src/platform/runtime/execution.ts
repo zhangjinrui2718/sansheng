@@ -58,6 +58,7 @@ import {
 import type { ArtifactKind } from "../identity/role.js";
 import { listBlockers } from "../storage/repo/blockers.js";
 import { getAgent } from "../storage/repo/agents.js";
+import type { TurnUsageRow } from "../storage/repo/usage.js";
 import {
   runTurn, renderTimeoutScene, type TurnResult, type TurnTimeoutScene,
 } from "./turn.js";
@@ -169,6 +170,22 @@ export interface RunWorkOptions {
    * 抛错的处理与 `runTurn` 一致:观察者出错不影响回合。
    */
   readonly onEvent?: (ev: AgentSessionEvent) => void;
+  /**
+   * **这条回合跑在哪条会话里**(`project_sessions.id`)—— 透传给
+   * `runTurn.sessionId`,写进 `turn_usage.session_id`。
+   *
+   * 与 `runTurn` 同一条理由:`runWorkItem` 自己也不知道它(会话由调用方建),
+   * 所以只能由宿主传。缺省 ⇒ 落 `NULL`(见 `RunTurnOptions.sessionId` 的说明)。
+   */
+  readonly sessionId?: string;
+  /**
+   * 用量落库之后的回调(实时推送的接缝)—— 透传给 `runTurn.onUsageRecorded`。
+   *
+   * 宿主接线的落点在这一层是**必须**的:`runWorkItem` 是工人那条执行路径的
+   * 唯一入口,只接 `runAgentTurn` 那条(聊天/汇报)等于没接 —— 与
+   * `wallClockTimeoutMs` 的教训同一个形状(见 `host/serve.ts` 的注释)。
+   */
+  readonly onUsageRecorded?: (row: TurnUsageRow) => void;
 }
 
 /**
@@ -285,6 +302,9 @@ export async function runWorkItem(opts: RunWorkOptions): Promise<ExecutionResult
     agentId: before.assigneeAgentId,
     projectId: before.projectId,
     message: composeWorkPrompt(before),
+    // **工作项是知道的** —— `runTurn` 不知道自己在干哪个工作项,而这里手里就是
+    // 它。不传的话「这个回合花的钱是投在哪件活上」在库里永远是 NULL(静默丢字段)。
+    workId: opts.workId,
     ...(opts.timeoutMs !== undefined ? { timeoutMs: opts.timeoutMs } : {}),
     ...(opts.wallClockTimeoutMs !== undefined
       ? { wallClockTimeoutMs: opts.wallClockTimeoutMs }
@@ -293,6 +313,9 @@ export async function runWorkItem(opts: RunWorkOptions): Promise<ExecutionResult
     ...(opts.injectPending !== undefined ? { injectPending: opts.injectPending } : {}),
     // 观察者透传 —— 不传的话 worker 干活的这几分钟在前端是全黑的
     ...(opts.onEvent !== undefined ? { onEvent: opts.onEvent } : {}),
+    // 会话与用量回调同样要透传(两条执行路径都接 = 与墙钟上界同一条教训)
+    ...(opts.sessionId !== undefined ? { sessionId: opts.sessionId } : {}),
+    ...(opts.onUsageRecorded !== undefined ? { onUsageRecorded: opts.onUsageRecorded } : {}),
   });
 
   // ── 墙钟超时:平台必须处置,而不是留一句「未收敛」(见文件头)──

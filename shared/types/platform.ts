@@ -432,6 +432,98 @@ export interface MemberConversationsResponse {
   groups: MemberConversationView[];
 }
 
+// ── 用量(回合烧了多少 token;migration 018 的 `turn_usage`)────────
+//
+// ⚠️ **只报 token 数,不报金额** —— SDK 的 `Usage` 上有 `cost`,但用户已定
+// 「不显示金额」,所以 `cost` **既不落库、也不进这份契约**。将来要破例必须先
+// 解决「单价/汇率会变」这件事:今天存下来的金额不是明天那份钱。
+//
+// 粒度:**一个回合一行**(`turn_usage` 是回合级的)。一次 LLM 调用结一次账,
+// 一个回合可能调 N 次工具 ⇒ N+1 次调用,写入侧求和成一行。
+
+/** 一组用量(合计 / 今日 / 某角色 / 某一天)。 */
+export interface UsageBucketView {
+  input: number;
+  output: number;
+  cacheRead: number;
+  /** 有花费的回合数(没买到任何 LLM 输出的回合不写账,也不计在这里) */
+  turns: number;
+}
+
+export interface UsageByAgentView extends UsageBucketView {
+  agentId: string;
+  /** 显示名 —— 由视图层解析(`agent_id → agents.display_name`) */
+  agentName: string;
+  role: ProjectRole;
+}
+
+export interface UsageByDayView extends UsageBucketView {
+  /** 本地日历日 `YYYY-MM-DD` */
+  day: string;
+}
+
+/**
+ * 项目(**或接待会话**)的用量聚合 ——「合计 / 今日 / 按角色 / 最近 7 天」都由它支撑。
+ *
+ * ── 为什么 `totals` 与 `allTime` 是两件事 ─────────────────────────
+ *
+ * `totals` 是**窗口内**的合计(`window` 那一栏自证窗口在哪),`allTime` 是**全历史**。
+ * 只留窗口合计会让「这个项目总共花了多少」在窗口外**静默变小** —— 而那个数字
+ * 看起来完全正常。
+ *
+ * ── `byDayTruncated` 为什么必须存在 ──────────────────────────────
+ *
+ * `byDay` 可以被 `?limit=` 截短(它只是展示用的日桶),但**截短不许静默**:
+ * 少几天与「那几天没花钱」在数组上长得一样,所以截断时这一位为 `true`。
+ * ⚠️ `?limit=` **只截 `byDay`**,`totals` / `allTime` / `byAgent` 永远是窗口内/全历史的真值。
+ */
+export interface ProjectUsageView {
+  /** `null` = **接待会话**(还没有项目)—— 那笔账也是真的,必须读得到 */
+  projectId: string | null;
+  /** 窗口:含今日共 `days` 个本地日历日,`[since, until]` 闭区间(毫秒) */
+  window: { days: number; since: number; until: number };
+  /** 窗口内合计 */
+  totals: UsageBucketView;
+  /** **全历史**合计(不受窗口影响) */
+  allTime: UsageBucketView;
+  /** 今日(本地日历日) */
+  today: UsageBucketView;
+  /** 按角色,量的降序(同量按 agentId 字典序 —— 次序固定,两次读可比对) */
+  byAgent: UsageByAgentView[];
+  /** 按本地日历日**升序**(旧的在前),最多 `?limit=` 天 */
+  byDay: UsageByDayView[];
+  /** `byDay` 是否因为 `?limit=` 被截断(**不许静默少几天**) */
+  byDayTruncated: boolean;
+  /** 窗口内最近一行的时刻;**窗口内没有任何记录时为 `null`**(不拿「现在」冒充) */
+  updatedAt: number | null;
+}
+
+/** `GET /api/projects/:id/usage` 与 `GET /api/intake/usage` 的响应。 */
+export interface ProjectUsageResponse {
+  usage: ProjectUsageView;
+}
+
+/**
+ * 一个回合的用量行(`turn_usage` 的一行 + 显示名)。
+ *
+ * 它是 WS `usage_recorded` 事件的载荷 —— 让前端在**不轮询**的前提下当天数字能
+ * 立刻动。纪律与 `work_changed` / `blocker_changed` 一致:事件只递增 revision,
+ * 权威值仍以 `GET .../usage` 为准(这里带上行只是让首屏不必等下一次回查)。
+ */
+export interface TurnUsageView {
+  id: string;
+  projectId: string | null;
+  sessionId: string | null;
+  agentId: string;
+  agentName: string;
+  workId: string | null;
+  model: string | null;
+  input: number;
+  output: number;
+  cacheRead: number;
+  createdAt: number;
+}
+
 // ── WS 协议 ─────────────────────────────────────────────────────
 
 /**
@@ -520,7 +612,27 @@ export type ServerEvent =
       type: "message_end";
       projectId: string | null;
       messageId: string;
-      usage?: { input: number; output: number };
+      /**
+       * 这一次 LLM 调用的用量。**可选**:调用点不传时整个字段缺席
+       * (与「传了一个全零的对象」不是一回事)。
+       *
+       * ⚠️ **2026-10-05 契约扩展:`cacheRead` 进来了。** 起因是实测:
+       *
+       *   call#1  input=10063  cacheRead=128
+       *   call#2  input=335    cacheRead=10112     ← cacheRead 是 input 的 30 倍
+       *
+       * 旧契约只有 `{ input, output }`,而前端 `currentUsage` **只累加 input+output**
+       * ⇒ **缓存命中的那部分完全不计** —— 而 `cacheRead` 恰恰是省钱的那一块。
+       * 字段名以 `pi-ai/dist/types.d.ts` 的 `Usage` 为准:**没有** `inputTokens` /
+       * `outputTokens`。
+       *
+       * ⚠️ **前端要跟着改**(`web/src/stores/chat.ts` 的 `currentUsage` 只累加
+       * input+output,`web/src/components/chat/MessageList.tsx` 只显示 in/out)
+       * —— 那两个文件不在本次改动的可碰清单里,所以本契约先行、界面在 T5 跟上。
+       *
+       * `cost` **刻意不在这里**(只显示 token 数,不显示金额,用户已定)。
+       */
+      usage?: { input: number; output: number; cacheRead: number };
     }
   | {
       type: "tool_start";
@@ -559,6 +671,24 @@ export type ServerEvent =
    * 收到它该做的是:前端把该项目的待办标注为超时并置顶。**不自动替用户决定。**
    */
   | { type: "overdue_asks"; projectId: string; askIds: readonly string[]; count: number }
+  /**
+   * **一个回合的用量刚落库**(`turn_usage` 多了一行)。
+   *
+   * ── 为什么 `projectId` 是**必填**(这类坑踩过一次)──────────────────
+   *
+   * 「按项目分组呈现」是这个界面的基本裁决,而一条**不带 `projectId`** 的实时
+   * 事件在多项目并行时会被前端按当前上下文累积 —— 于是 A 项目花的 token 会被
+   * 记到 B 项目头上(bug② 那一类跨项目污染)。所以这里**必须**带 `projectId`,
+   * 而**`null` 是它的一种合法取值**(接待会话:那笔账还没有项目,见 018)。
+   *
+   * 这与 `message_start` / `tool_start` 的 `agentId` 是同一条纪律:
+   * **类型上必填,不是可选** —— 可选 = 漏填也编译得过,而漏填的表现是静默的。
+   *
+   * 收到它该做的是:递增该项目的 revision(或直接把 `usage` 并进首屏数字),
+   * **权威值仍以 `GET /api/projects/:id/usage` 为准** —— 事件会丢(断流),
+   * 而库不会。
+   */
+  | { type: "usage_recorded"; projectId: string | null; usage: TurnUsageView }
   /**
    * **驱动者循环停在了异常的位置** —— 撞上单次级联上限,或检测到「同一个待办
    * 在项目状态没变的情况下被反复唤醒」。
@@ -624,6 +754,14 @@ export function eventProjectId(ev: ServerEvent): string | null {
 //   GET    /api/projects/:id                  → { project: ProjectDetail }
 //   GET    /api/projects/:id/works            → { works: WorkView[] }
 //   GET    /api/projects/:id/artifacts        → { artifacts: ArtifactView[] }
+//   GET    /api/projects/:id/usage            → ProjectUsageResponse
+//                                                「这个项目花了多少 token」——
+//                                                合计 / 今日 / 按角色 / 最近 N 天。
+//                                                **只有 token,没有金额**(见
+//                                                `ProjectUsageView` 那一段)。
+//                                                `?days=`(默认 7,上限 365)定窗口,
+//                                                `?limit=` 只截 `byDay`(截断时
+//                                                `byDayTruncated: true`)。
 //   GET    /api/projects/:id/messages         → MessagesResponse
 //   GET    /api/projects/:id/member-conversations → MemberConversationsResponse
 //                                                「谁产生了什么对话」:按 agent_id
@@ -637,6 +775,13 @@ export function eventProjectId(ev: ServerEvent): string | null {
 //   GET    /api/intake/messages               → IntakeMessagesResponse
 //                                                无需先建项目就能拉到与业务经理的
 //                                                那一段对话历史(刷新不丢上下文)。
+//   GET    /api/intake/usage                  → ProjectUsageResponse
+//                                                **接待会话那笔账**(`project_id`
+//                                                为 NULL,`usage.projectId` 也是
+//                                                `null`)。与上面同一条理由:
+//                                                它是产品里**第一个花钱的回合**,
+//                                                只写不读等于「数据在手边没有读者」。
+//                                                没有接待会话时返回全零,不是 404。
 //   ── 工件 ──
 //   GET    /api/artifacts/:id                 → { artifact: ArtifactView }
 //   ── 待甲方答的问题(跨项目;左栏徽标用它)──
@@ -658,6 +803,9 @@ export function eventProjectId(ev: ServerEvent): string | null {
 //   /api/projects/:id/artifacts?kind=&status=&limit=
 //   /api/projects/:id/member-conversations?limit=   (每组消息条数,默认 200,上限 500)
 //   /api/memory/fragments?limit=
+//   /api/projects/:id/usage?days=&limit=            (days 默认 7、上限 365;
+//                                                    limit 只截 byDay,默认 = days)
+//   /api/intake/usage?days=&limit=                  (同上)
 //
 // **没有** `/api/works` 与 `/api/artifacts`(不带项目)这两个平级列表 ——
 // 工作项与工件**总是属于某个项目**,跨项目的同类列表没有使用场景,而提供

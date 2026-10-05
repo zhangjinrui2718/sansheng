@@ -36,9 +36,11 @@ import {
   getProjectRow, listProjects, listAssignments, type ProjectRow,
 } from "../storage/repo/projects.js";
 import { isProjectRole, type ProjectRole } from "../identity/role.js";
+import type { ProjectUsageAggregate, TurnUsageRow } from "../storage/repo/usage.js";
 import type {
   AskView, ArtifactView, BlockerView, ChangeView, ClientQuestionView,
-  MemberView, ProjectDetail, ProjectSummary, SessionMessageView, WorkView,
+  MemberView, ProjectDetail, ProjectSummary, ProjectUsageView,
+  SessionMessageView, TurnUsageView, UsageByAgentView, WorkView,
 } from "@shared/types/platform.js";
 
 // ── 小工具 ──────────────────────────────────────────────────────
@@ -294,6 +296,97 @@ export function listProjectMessages(
  */
 function compareId(a: string, b: string): number {
   return a < b ? -1 : a > b ? 1 : 0;
+}
+
+// ── 用量(回合烧了多少 token)────────────────────────────────────
+//
+// 仓储(`repo/usage.ts`)交出的是**纯数字 + agent_id**;「谁」与「给人看的名字」
+// 在这一层补 —— 与 `toWorkView` / `toAskView` 同一条分工。这一层**不查二次聚合**:
+// 窗口、按天分桶、截断标记全在仓储里定完,这里只做映射。
+
+/**
+ * 解析用量行上的 agent。
+ *
+ * ── 为什么**抛错而不兜底** ──────────────────────────────────────
+ *
+ * `turn_usage.agent_id` 有外键指向 `agents(id)`,所以正常路径上**一定查得到**。
+ * 查不到只可能是「有人绕过外键写进来的坏数据」,而那种情况按本仓纪律要**响亮**
+ * (`getAgent` 对未知 role 本来也抛,见 `agents.ts` 的 `rowToAgent`)。
+ * 静默回一个像名字的 id 会让「账上出现了一个不存在的人」在页面上看起来完全正常
+ * —— 那正是最难查的一类。
+ */
+function usageAgentOrThrow(db: Database.Database, agentId: string): { displayName: string; role: ProjectRole } {
+  const agent = getAgent(db, agentId);
+  if (agent === null) {
+    throw new Error(
+      `turn_usage 里出现不存在于 agents 表的 agent_id「${agentId}」—— 外键本该拦住它`,
+    );
+  }
+  return { displayName: agent.displayName, role: agent.role };
+}
+
+/**
+ * 一条 `turn_usage` 行 → WS `usage_recorded` 的载荷。
+ *
+ * 只映射一行(不含聚合):实时事件要的是「刚刚多了一笔」,而**权威的合计仍由
+ * `GET .../usage` 给出** —— 事件会丢(断流),库不会。
+ */
+export function toTurnUsageView(db: Database.Database, row: TurnUsageRow): TurnUsageView {
+  const agent = usageAgentOrThrow(db, row.agentId);
+  return {
+    id: row.id,
+    projectId: row.projectId,
+    sessionId: row.sessionId,
+    agentId: row.agentId,
+    agentName: agent.displayName,
+    workId: row.workId,
+    model: row.model,
+    input: row.inputTokens,
+    output: row.outputTokens,
+    cacheRead: row.cacheRead,
+    createdAt: row.createdAt,
+  };
+}
+
+/**
+ * 把用量聚合映射成协议里的 `ProjectUsageView`。
+ *
+ * 空 `byAgent`(项目一分钱没花)是**合法**的,返回空数组,不是错误。
+ */
+export function toProjectUsageView(
+  db: Database.Database,
+  agg: ProjectUsageAggregate,
+): ProjectUsageView {
+  const byAgent: UsageByAgentView[] = agg.byAgent.map((b) => {
+    const agent = usageAgentOrThrow(db, b.agentId);
+    return {
+      agentId: b.agentId,
+      agentName: agent.displayName,
+      role: agent.role,
+      input: b.input,
+      output: b.output,
+      cacheRead: b.cacheRead,
+      turns: b.turns,
+    };
+  });
+
+  return {
+    projectId: agg.projectId,
+    window: agg.window,
+    totals: { ...agg.totals },
+    allTime: { ...agg.allTime },
+    today: { ...agg.today },
+    byAgent,
+    byDay: agg.byDay.map((d) => ({
+      day: d.day,
+      input: d.input,
+      output: d.output,
+      cacheRead: d.cacheRead,
+      turns: d.turns,
+    })),
+    byDayTruncated: agg.byDayTruncated,
+    updatedAt: agg.updatedAt,
+  };
 }
 
 // ── 项目 ────────────────────────────────────────────────────────

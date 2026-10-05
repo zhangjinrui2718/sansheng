@@ -19,6 +19,8 @@ import { insertProject, addMember } from "../../src/platform/storage/repo/projec
 import { insertWork, getWork, updateWorkStatus, type WorkRow } from "../../src/platform/storage/repo/works.js";
 import { insertArtifact, listArtifacts } from "../../src/platform/storage/repo/artifacts.js";
 import { insertBlocker } from "../../src/platform/storage/repo/blockers.js";
+import { insertSession } from "../../src/platform/storage/repo/sessions.js";
+import { listTurnUsage } from "../../src/platform/storage/repo/usage.js";
 import { listPendingDispatchEvents } from "../../src/platform/storage/repo/dispatch.js";
 import { collectPendingWork } from "../../src/platform/runtime/pendingWork.js";
 import {
@@ -538,5 +540,68 @@ describe("任务 1 · 产出采集走 014 的产出边", () => {
     });
     expect(p).toContain("workId");
     expect(p).toContain('"w1"');
+  });
+});
+
+// ── 用量归属(T3 的透传:工作项 / 会话 / 推送回调)──────────────────
+//
+// `turn_usage` 的三格(`work_id` / `session_id`)里,前者的真值**只在
+// `runWorkItem` 手里** —— `runTurn` 不知道自己在干哪个工作项。所以这条透传
+// 必须有机器形式:不传的话那一格永远是 NULL,而「这条活花了多少」在库里
+// 就查不出来了(静默丢字段,不是报错)。
+
+/** 一条带真 usage 的 assistant `message_end`。 */
+const usageEnd = (input: number, output: number, cacheRead: number) =>
+  ({
+    type: "message_end",
+    message: {
+      role: "assistant", model: "claude-sonnet-4-20250514",
+      usage: {
+        input, output, cacheRead, cacheWrite: 0, totalTokens: input + output + cacheRead,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+      },
+    },
+  }) as unknown as AgentSessionEvent;
+
+describe("runWorkItem · 用量落库归属", () => {
+  it("★ `workId` 透传进 `runTurn` ⇒ `turn_usage.work_id` 不是 NULL", async () => {
+    const w = mkWork();
+    const session = fakeSession(({ emit }) => {
+      emit(usageEnd(100, 5, 3));
+    });
+    const r = await runWorkItem({ session, db, workId: w.id, timeoutMs: 1000, injectPending: false });
+
+    const rows = listTurnUsage(db, "p1", { since: 0, until: Number.MAX_SAFE_INTEGER });
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.workId, "「这条活花了多少」必须在库里查得出来").toBe(w.id);
+    expect([rows[0]!.inputTokens, rows[0]!.outputTokens, rows[0]!.cacheRead]).toEqual([100, 5, 3]);
+    expect(r.turn.usage!.input).toBe(100);
+  });
+
+  it("`sessionId` 与 `onUsageRecorded` 也透传(两条执行路径都接)", async () => {
+    insertSession(db, { id: "s_wk", projectId: "p1", createdAt: AT });
+    const w = mkWork();
+    const session = fakeSession(({ emit }) => {
+      emit(usageEnd(7, 2, 1));
+    });
+    const seen: Array<{ id: string; sessionId: string | null }> = [];
+    await runWorkItem({
+      session, db, workId: w.id, timeoutMs: 1000, injectPending: false,
+      sessionId: "s_wk",
+      onUsageRecorded: (row) => seen.push({ id: row.id, sessionId: row.sessionId }),
+    });
+
+    const rows = listTurnUsage(db, "p1", { since: 0, until: Number.MAX_SAFE_INTEGER });
+    expect(rows[0]!.sessionId).toBe("s_wk");
+    expect(seen).toHaveLength(1);
+    expect(seen[0]!.id).toBe(rows[0]!.id);
+    expect(seen[0]!.sessionId).toBe("s_wk");
+  });
+
+  it("refused(不该跑)的回合**不写账** —— 一行都没有", async () => {
+    const w = mkWork({ status: "done" });
+    const r = await run(w.id, saidDone());
+    expect(r.outcome).toBe("refused");
+    expect(listTurnUsage(db, "p1", { since: 0, until: Number.MAX_SAFE_INTEGER })).toEqual([]);
   });
 });

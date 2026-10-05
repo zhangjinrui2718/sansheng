@@ -43,9 +43,12 @@ import {
   listProjectArtifacts, listProjectAsks, listProjectBlockers,
   listProjectChanges, toProjectDetail, listProjectMembers,
   listProjectMessages, listProjectSummaries, toArtifactView, toProjectSummary,
-  toMessageView,
+  toMessageView, toProjectUsageView,
   toWorkView,
 } from "./views.js";
+import {
+  aggregateProjectUsage, normalizeUsageDayLimit, normalizeUsageDays,
+} from "../storage/repo/usage.js";
 import { isSessionMessageKind } from "../storage/repo/sessions.js";
 import type { SessionMessageKind, SessionMessageRow } from "../storage/repo/sessions.js";
 import type {
@@ -90,6 +93,30 @@ const err = (code: string, message: string, status: 400 | 404 | 409 | 500 = 400)
 export function createPlatformApp(deps: HttpDeps): Hono {
   const app = new Hono();
   const { db } = deps;
+
+  /**
+   * 用量视图的装配(两条端点共用)。
+   *
+   * ── `days` / `limit` 的边界(定清楚,不留「看情况」)──────────────
+   *
+   *   `days`  窗口长度,**含今日**共 `days` 个**本地日历日**。
+   *           默认 7、上界 365;**非有限值 / ≤ 0 一律取默认**
+   *           (与 `runTurn.wallClockTimeoutMs` 同一条规矩:坏值取默认,
+   *            而不是「0 = 不设上界」—— 那等于把唯一的上界悄悄拆掉)。
+   *   `limit` **只截 `byDay` 的天数**,默认 = `days`。它**绝不截** `totals` /
+   *           `allTime` / `byAgent` —— 拿行数上限去截合计会让数字**静默变小**
+   *           (历史一长,「今日花了多少」就开始撒谎),而那种数字看起来完全正常。
+   *           截断时响应里 `byDayTruncated: true`,不静默。
+   *
+   * `now` 取 `deps.now()`(注入的时钟)—— 窗口与「今日」都以它为准,所以
+   * 测试能穷举跨零点这类边界,而不必等真实的午夜。
+   */
+  function usageView(projectId: string | null, daysRaw: string | undefined, limitRaw: string | undefined) {
+    const days = normalizeUsageDays(Number(daysRaw));
+    const dayLimit = normalizeUsageDayLimit(Number(limitRaw), days);
+    const agg = aggregateProjectUsage(db, projectId, { now: deps.now(), days, dayLimit });
+    return toProjectUsageView(db, agg);
+  }
 
   // ── 基础 ──────────────────────────────────────────────────────
 
@@ -228,6 +255,27 @@ export function createPlatformApp(deps: HttpDeps): Hono {
   // 而 404 会让前端把首屏显示成一次错误。
   app.get("/api/intake/messages", (c) =>
     c.json({ projectId: null, messages: listProjectMessages(db, null) }),
+  );
+
+  // ── 用量(回合烧了多少 token;migration 018 的 turn_usage)────────
+  //
+  // 两条端点,**同一个读函数**:项目 (`:id`) 与接待会话 (`null`)。
+  // ⚠️ 接待会话那一条不是对称强迫症 —— 它是**产品里第一个花钱的回合**
+  // (新用户第一次与业务经理说话)。只写不读等于「数据在手边却没有读者」,
+  // 而那正是 018 文件头记着的那类缺陷。
+  //
+  // 没有接待会话时返回全零视图而不是 404(与 `/intake/messages` 同一条理由:
+  // 404 会让首屏显示成一次错误,而「还没花过钱」是一个正常的答案)。
+  app.get("/api/projects/:id/usage", (c) => {
+    const id = c.req.param("id");
+    if (getProjectRow(db, id) === null) {
+      return c.json(err("not_found", "项目不存在", 404).body, 404);
+    }
+    return c.json({ usage: usageView(id, c.req.query("days"), c.req.query("limit")) });
+  });
+
+  app.get("/api/intake/usage", (c) =>
+    c.json({ usage: usageView(null, c.req.query("days"), c.req.query("limit")) }),
   );
 
   app.get("/api/projects/:id/asks", (c) => {
