@@ -2,7 +2,96 @@
 
 ---
 
-# ⚡ 最新一轮 · W8(2026-10-07 凌晨)· **先读这一节**
+# ⚡ 最新一轮 · W9(2026-10-05 晚)· 平台通知落到项目页 + 对话页只留一行摘要
+
+> ⚠️ 日期取本机 `date` 与 git 提交时间(2026-10-05 20:3x);**上一节 W8 标题写的 2026-10-07 与
+> git 记录不一致** —— 那一节不改(历史),这一节以 git 为准。
+
+用户一句:
+
+> 另外还有,对话记录里面也出现了:`⚠️ 组织停止推进(8 个回合后)…`。这类消息,放到项目或者
+> 工作项里面是不是会更好?
+
+(判据:jev 闸门 `PROCEED` / pick A,置信 0.99、needsUser 0.27 —— 按 AGENTS.md 的决策自主,直接落地不打断。)
+
+## 状态
+
+```
+W9  🔖 提交号见紧随其后的 docs(handoff) 提交
+    feat(web): 平台通知落到项目页「组织运行态」+ 对话页只留一行摘要
+1405 passed / 66 files · 两条 typecheck 0 · npm run build 绿 · check:design E1–E14 绿 · as any 0
+```
+
+## ① 先钉住现状(两条命令就能验)
+
+```
+# 写面只有两处 —— 都在 src/platform/host/serve.ts
+grep -rn 'kind: "system"' src/             # 1431(reportUnannouncedTurn)· 1483(announceDrain)
+# 读面只有一处 —— 对话页的系统带
+grep -rn 'data-channel="system"' web/src   # MessageList.tsx(SystemNotice)
+```
+
+- `announceDrain` 落的是**项目级**事实(排空撞上单次回合上限 / 预算用尽);
+  `reportUnannouncedTurn` 落的是**回合级**事实(平台叫醒的回合没留工作记录)。
+- 两处都 `ensureSession(…, "internal")` ⇒ 落进项目的**内部会话**,`agent_id` 为 `NULL`。
+- ⚠️ **对话页的系统带此前是它们唯一的读面**:成员页 W7 删掉「平台通知 N 条」卡之后,
+  `agentId === null` 那一组没有任何页面渲染(`Members.tsx` 的 strangers 明写 `agentId !== null`)。
+  所以这次改动的前提是「**先加新读面,再降级旧读面**」—— 反过来就是删掉唯一的现场(7-N)。
+
+## ② 判据落成纯函数:`web/src/lib/platformNotices.ts`(新)
+
+`classifyPlatformNotice`(**只看首行前缀**,不是 `includes`:正文中段引用那几个字样不该被改判)
++ `collectPlatformNotices`(只认 `kind === "system"`,按时间倒序,正文**原样**带着)。
+
+⚠️ **刻意不做字段解析**(不把回合数 / 路径 / 待办类别抽成结构化字段):那条路的失败方式是
+静默的 —— 改一个字,字段变 null,页面出现一张空壳卡而没有任何报错。分类失手最多退化成
+「平台通知」,一个字都不会丢。
+
+## ③ 项目页:「组织运行态」卡 = **全文的落点**
+
+`web/src/routes/ProjectDetail.tsx`,位置在「成员」之后、「工作项」之前
+(目标 → 成员 → **他们现在在动吗 / 为什么停了** → 做到哪)。数据走**现有端点**
+`GET /api/projects/:id/messages`(新增 hook `useProjectMessages`,**无迁移、无新端点** ——
+`SessionMessageView.kind` 本来就是契约字段)。每条:类名 Pill + 时间 + **原样正文**。
+
+## ④ 对话页:系统带只剩一行摘要(**折叠,不是删除**)
+
+`SystemNotice` 改成默认折叠的 `<details>`:摘要行 = `系统 · 停止推进/合规告警 · 全文在「项目」页`,
+正文仍在 DOM 里(搜索、拷贝、离线看都还在),点开可读。
+
+⚠️ 这条是**故意**选「折叠」而不是「移除」的:7-N「一份证据被折叠可以,被删掉不行」。
+两条既有判据因此**一条都没改**而且仍然绿 —— `channel-filter` 的「系统通知渲染在
+data-channel=system 的带里」与 `w3-e2e-real-payload` 的「平台告警落在系统带,不是甲方气泡」。
+
+## ⑤ 没做的事(如实记)
+
+- **回合级告警的「角色归属」**没做:它的 `agent_id` 仍是 `NULL`,所以成员页那一组照样不渲染。
+  要按角色落,得改**写入侧**(`reportUnannouncedTurn` 的 `agentId` + 落进被点名回合所在的那条
+  会话 —— 真机上那条回合在**交付会话**里,而告警落的是内部会话),那是另一批。
+- **工作项页的时间轴标记**(把「停止推进」投到推进图上)没做:它是 B 方案,jev 给的是 A。
+  留在这里,免得被当成「已经处理」。
+- **真机页面**逐屏人工点验没做;本次验到的是「构建产物里的新 bundle 被常驻宿主真的托管」(见验收链)。
+
+## 验收链(本次实跑)
+
+```
+npx tsc -p tsconfig.server.json --noEmit   # 0
+npx tsc -p tsconfig.web.json --noEmit      # 0
+npm test                                   # 1405 passed / 66 files(基线 1396/65 + 新增 9)
+npm run build                              # 绿
+npm run check:design                       # ✓ E1–E14
+grep -rn 'as any' src/ web/src/            # 0
+```
+
+## 新增的判据(9 条,`tests/web/platform-notices.test.ts`)
+
+两类正样本用**真机库原文**(`session_messages` 那两条,逐字不改写),负样本三条:
+同一句话出现在**正文中段**不算「停止推进」;同一条正文出现在**助手消息**里不算平台通知;
+认不出来的 system 文本退化成「平台通知」。渲染面钉「摘要行 + 默认折叠 + 正文没丢」。
+
+---
+
+# ⚡ 上一轮 · W8(2026-10-07 凌晨)
 
 > W7(成员页删两段 + Harness 并入成员 tab)**仍然有效**。这一轮是两处**摆放**的收口。
 

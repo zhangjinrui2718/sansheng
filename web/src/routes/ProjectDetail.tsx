@@ -2,12 +2,21 @@
  * 项目详情屏(新)
  *
  * 一个项目「是什么、谁在做、做到哪、卡在哪、等我答什么」—— 一屏说完。
- * 数据全部来自四个只读端点,由 `lib/data.ts` 的 hooks 统一读取:
+ * 数据全部来自五个只读端点,由 `lib/data.ts` 的 hooks 统一读取:
  *
  *   GET /api/projects/:id          → ProjectDetail(目标 / 成员 / 工作项 / 待答问题)
  *   GET /api/projects/:id/blockers → 阻塞列表(「哪件事被卡住了」)
  *   GET /api/projects/:id/asks     → **角色之间**的提问(内部协作,不是问用户的)
  *   GET /api/projects/:id/changes  → 变更记录(提议 → 评审 → 接受/实施)
+ *   GET /api/projects/:id/messages → 平台通知(`kind = 'system'`)—— 「组织运行态」卡
+ *
+ * ── 「组织运行态」卡为什么在这一页(本批新增)────────────────────
+ *
+ * 两条平台通知(排空异常停下 / 回合漏留工作记录)原先只出现在**对话页**的系统带里。
+ * 但它们的主体是**项目**:一条回答「组织还动不动」,一条回答「这个项目跑得规不规矩」。
+ * 对话页是「甲方与业务经理的对话」,机器记录横在那里既不是发言、也没有该看它的人。
+ * 所以全文落在这一屏(挨着「成员」——目标是谁做、他们现在在动吗、做到哪),
+ * 对话页只留一行摘要并指回这里。判据在 `lib/platformNotices.ts`(纯函数)。
  *
  * ── asks 与 client-questions 在界面上怎么分开(本次刻意做的一件事)────
  *
@@ -30,7 +39,8 @@
  */
 import { PageHeader, Pill, Section, StatStrip, EmptyState, KV, Flag } from "@/components/ui/primitives";
 import { ClientQuestionCard } from "@/components/client/ClientQuestionCard";
-import { useProjectAsks, useProjectChanges, useProjectDetail } from "@/lib/data";
+import { useProjectAsks, useProjectChanges, useProjectDetail, useProjectMessages } from "@/lib/data";
+import { collectPlatformNotices, platformNoticeLabel, type PlatformNoticeKind } from "@/lib/platformNotices";
 import { useChatStore } from "@/stores/chat";
 import {
   ROLE_LABEL,
@@ -50,11 +60,30 @@ import {
   workStatusTone,
 } from "@/lib/vocab";
 
+/**
+ * 悬停时补一句「这一类意味着什么」。类名本身只有一处
+ * (`platformNotices.ts` 的 `platformNoticeLabel`)—— 这里不重复名字,只解释后果。
+ */
+const NOTICE_TITLE: Record<PlatformNoticeKind, string> = {
+  stop: "排空器异常停下(撞上单次回合上限 / 待办预算用尽)—— 平台到界不静默,这条是它的现场",
+  compliance:
+    "平台叫醒的回合没留工作记录(未调 tell_client,正文也没有行首 [未播报])—— 「判断过」与「漏了」的分界",
+  other: "平台自己落的通知:作者不是任何角色,也不是甲方",
+};
+
 export function ProjectDetailPage() {
   const projectId = useChatStore((s) => s.projectId);
   const { detail, blockers, loading, error } = useProjectDetail(projectId);
   const { data: asks, loading: asksLoading, error: asksError } = useProjectAsks(projectId);
   const { data: changes, loading: changesLoading, error: changesError } = useProjectChanges(projectId);
+  const {
+    data: messages,
+    loading: noticesLoading,
+    error: noticesError,
+  } = useProjectMessages(projectId);
+  // 平台通知的全文落点。判据(哪一行算通知、属于哪一类)在
+  // `lib/platformNotices.ts` 的纯函数里 —— 页面只渲染结果,不自己认字符串。
+  const notices = collectPlatformNotices(messages);
 
   if (!projectId) {
     return (
@@ -128,6 +157,60 @@ export function ProjectDetailPage() {
                     value={m.displayName}
                     title={m.specialization !== null ? `专长 ${m.specialization} · ${m.id}` : m.id}
                   />
+                ))}
+              </div>
+            )}
+          </Section>
+
+          {/*
+            平台通知的**全文落点**(本批:从对话页的系统带搬过来)。
+
+            ⚠️ 这些记录的主体是**项目**,不是那场对话:一条说「排空在 8 回合处停下,
+            还有待办没跑完」(组织不动了),一条说「某个回合没留工作记录」
+            (合规)。它们原先只出现在对话页的系统带里 —— 而那页是「甲方与业务经理
+            的对话」,一段机器记录横在里面既不像发言、也找不到该谁看。今天:
+            全文在这里;对话页只留一行摘要 + 指向本页。
+          */}
+          <Section
+            title="组织运行态"
+            count={notices.total}
+            hint="平台留下的机器记录 · 停止推进 / 合规告警"
+            hintTitle="来源:GET /api/projects/:id/messages 里 kind = 'system' 的行,按时间倒序。①「停止推进」= serve.ts 的 announceDrain(排空撞上单次回合上限或待办预算用尽 —— 到界不静默);②「合规告警」= reportUnannouncedTurn(平台叫醒的回合既没调 tell_client、正文也没有行首 [未播报])。正文原样显示,不做字段解析 —— 解析失手会静默丢内容。"
+          >
+            {noticesError !== null ? (
+              <div className="sansheng-card p-3 text-xs" style={{ color: "var(--cinnabar)" }}>
+                加载失败:{noticesError}
+              </div>
+            ) : noticesLoading && notices.total === 0 ? (
+              <EmptyState>加载中…</EmptyState>
+            ) : notices.total === 0 ? (
+              <EmptyState>没有平台通知 —— 排空没有异常停下,也没有回合漏留工作记录。</EmptyState>
+            ) : (
+              <div className="grid gap-1.5">
+                {notices.all.map((n) => (
+                  <article
+                    key={n.id}
+                    className="sansheng-card p-2.5"
+                    data-notice-kind={n.kind}
+                    title={n.id}
+                  >
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <Pill
+                        tone={n.kind === "stop" ? "amber" : n.kind === "compliance" ? "cyan" : "bone"}
+                        title={NOTICE_TITLE[n.kind]}
+                      >
+                        {platformNoticeLabel(n.kind)}
+                      </Pill>
+                      <span className="ss-meta ml-auto">{fmtTime(n.createdAt)}</span>
+                    </div>
+                    {/* 正文原样:换行保留(库里那两段本来就是分行写的) */}
+                    <div
+                      className="ss-body mt-1"
+                      style={{ color: "var(--bone)", whiteSpace: "pre-wrap" }}
+                    >
+                      {n.content}
+                    </div>
+                  </article>
                 ))}
               </div>
             )}

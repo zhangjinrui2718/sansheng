@@ -35,12 +35,14 @@ import type {
   HarnessView,
   MemberConversationView,
   MemberView,
+  MessagesResponse,
   ProjectDetail,
   ProjectLiveView,
   ProjectRole,
   ProjectUsageResponse,
   ProjectUsageView,
   RoleHarnessView,
+  SessionMessageView,
   WorkView,
 } from "@shared/types/platform";
 import * as api from "./api";
@@ -343,6 +345,33 @@ export function useMemberConversations(projectId: string | null): Loaded<MemberC
     [projectId, revision],
   );
   return { data: r.data?.groups ?? [], loading: r.loading, error: r.error };
+}
+
+/**
+ * 本项目**全部会话**的消息(内部会话 + 交付会话),按时间归并。
+ *
+ * ── 它是给谁用的(**不是**对话页)──────────────────────────────────
+ *
+ * 对话页走 store(WS 流式 + 刷新回填),不读这里。这条 hook 的读者是**项目页的
+ * 「组织运行态」卡**:平台通知(`kind === "system"`)的全文落点在那里。
+ *
+ * ── 为什么不必新开端点 ──────────────────────────────────────────
+ *
+ * `GET /api/projects/:id/messages`(`views.ts` 的 `listProjectMessages`)本来就把
+ * 项目下所有会话的消息归并好、并带上契约里的 `kind` —— 平台通知要的字段它全有。
+ * 新开一条只读端点等于把同一份数据抄第二遍,还要多养一个「有没有人读」的问题。
+ *
+ * ⚠️ **与 `useMemberConversations()` 不冲突,但别混用**:那条端点的 `total` 来自
+ * SQL `GROUP BY agent_id`,是条数的真值;这条端点是**每条会话最多 N 条**的分页结果。
+ * 要显示条数只许用前者(理由见上一段注释),这条只用来取正文。
+ */
+export function useProjectMessages(projectId: string | null): Loaded<SessionMessageView[]> {
+  const revision = useChatStore((s) => s.projectRevision);
+  const r = useLoad<MessagesResponse | null>(
+    () => (projectId ? api.getProjectMessages(projectId) : Promise.resolve(null)),
+    [projectId, revision],
+  );
+  return { data: r.data?.messages ?? [], loading: r.loading, error: r.error };
 }
 
 // ── 用量(这个项目花了多少 token)──────────────────────────────────

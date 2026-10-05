@@ -70,6 +70,7 @@ import {
   useProjectMembers,
   type ConversationPartition,
 } from "@/lib/data";
+import { classifyPlatformNotice, platformNoticeLabel } from "@/lib/platformNotices";
 import {
   INITIAL_FOLLOW,
   observeFollow,
@@ -613,30 +614,55 @@ function Empty() {
  *   - 它的 `agent_id` 也是 `NULL`,与甲方的消息**同一个分组键** —— 若按
  *     `agentId` 判,它会**冒充甲方说的话**(A1 在真机上实测到的那个坑);
  *   - 它也不是任何角色的发言(作者是平台:排空器异常停下时的
- *     `announceDrain`,`serve.ts`)。
+ *     `announceDrain`、回合漏留工作记录时的 `reportUnannouncedTurn`,`serve.ts`)。
  * 所以它既不进甲方气泡,也不进业务经理气泡,而是一条居中、等宽、虚线框的提示。
- * **不删它** —— 它是「排空器异常停止」在界面上唯一的现场,删了之后「判断过」
- * 与「漏了」看起来一模一样(§2.9 末的同一条纪律)。
+ *
+ * ── 本批改动:这页只留一行摘要,全文默认折叠 ──────────────────────
+ *
+ * 这两段机器记录原先**整段**铺在对话记录里(用户的原话:它们在这一页出现得莫名其妙)。
+ * 但按 7-N「一份证据被折叠可以,被删掉不行」——所以**不删**,改成:
+ *
+ *   - 摘要行:类名(`platformNotices.ts` 的 `platformNoticeLabel`)+ 「全文在项目页」;
+ *   - 正文仍然在 DOM 里,点开可读(搜索、拷走、离线看都还在);
+ *   - **全文的落点是「项目」页的「组织运行态」卡** —— 这些记录的主体是项目,
+ *     不是这一场对话,而对话页是「甲方与业务经理的对话」。
+ *
+ * 分类判据是 `classifyPlatformNotice`(纯函数,有测试):这里不认字符串,只消费结果。
  */
 function SystemNotice({ turn }: { turn: Turn }) {
   const text = turn.blocks
     .map((b) => (b.kind === "tool" ? "" : b.text))
     .join("\n")
     .trim();
+  const kind = classifyPlatformNotice(text);
   return (
     <div className="flex justify-center" data-channel="system">
-      <div
+      <details
         className="rounded-md px-3 py-1.5 ss-note"
-        style={{ border: "1px dashed var(--ink-3)", maxWidth: "85%", textAlign: "center" }}
-        title="平台通知:不是甲方说的,也不是任何角色的发言"
+        style={{ border: "1px dashed var(--ink-3)", maxWidth: "85%" }}
+        data-notice-kind={kind}
       >
-        <span className="font-mono" style={{ fontSize: 10, letterSpacing: ".08em" }}>
-          系统
-        </span>
+        <summary
+          style={{ cursor: "pointer", textAlign: "center" }}
+          title="平台通知:不是甲方说的,也不是任何角色的发言。全文也在「项目」页的「组织运行态」卡里。"
+        >
+          <span className="font-mono" style={{ fontSize: 10, letterSpacing: ".08em" }}>
+            系统
+          </span>
+          <span className="ss-note" style={{ fontSize: 11 }}>
+            {" · "}
+            {platformNoticeLabel(kind)}
+            {" · 全文在「项目」页"}
+          </span>
+        </summary>
         {text !== "" && (
-          <div style={{ whiteSpace: "pre-wrap", color: "var(--bone)", fontSize: 12 }}>{text}</div>
+          <div
+            style={{ whiteSpace: "pre-wrap", color: "var(--bone)", fontSize: 12, textAlign: "left" }}
+          >
+            {text}
+          </div>
         )}
-      </div>
+      </details>
     </div>
   );
 }
