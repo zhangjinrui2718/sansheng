@@ -1,0 +1,24 @@
+### 变异 2:把 resolve_blocked_work 的判据换成恒假(等价于「这条规则不存在」)
+
+--- 单元测试 ---
+   × 丙③ · `blocked` 必须有驱动者(缺陷 1 的解) > S4 · 一条 `blocked` 的子项 ⇒ **必须有人被叫醒**(修之前这里是零待办) 10ms
+   × 丙③ · `blocked` 必须有驱动者(缺陷 1 的解) > S4b · **裸 `blocked`(一条阻塞都没登记)也照样被叫** —— 那是最该有人看一眼的一种 5ms
+   × 丙③ · `blocked` 必须有驱动者(缺陷 1 的解) > 阻塞**解除**之后不再是待办(判据是库里的状态,不是「刚才发生过什么」) 6ms
+   × 丙③ · `blocked` 必须有驱动者(缺陷 1 的解) > S5 · **因 `ask_client` 而 blocked 的工作项不叫醒 PM**(那在等甲方) 5ms
+   × 丙③ · `blocked` 必须有驱动者(缺陷 1 的解) > S5 边界 · 抑制要**两条同时成立**:裸 `blocked` 不因为项目里有个甲方提问就被压住 5ms
+   × 丙③ · `blocked` 必须有驱动者(缺陷 1 的解) > 渲染:每一条被阻塞的工作项都带上**它的阻塞 id 与 severity**(结构化列,不读正文) 5ms
+   × 丙③ · `blocked` 必须有驱动者(缺陷 1 的解) > 限流是**预算**,不是判据:PM 被叫若干次而目标不动 ⇒ 进 exhausted(可见,不静默) 5ms
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 7 ⎯⎯⎯⎯⎯⎯⎯
+ Test Files  1 failed (1)
+      Tests  7 failed | 11 passed (18)
+
+--- 真机库副本探针 S4 ---
+S4 · 真机库原样(1 根 blocked + 子项 done/done/blocked/open/open)
+──────────────────────────────────────────────────────────────────────────────
+  works: wk_muujz3qc05kz9cew(root)[blocked/none] wk_muujzdetn7hvwej3(child)[done/done] wk_muujzk1kwbzj3r6d(child)[blocked/none] wk_muujzqlbu09utt4s(child)[open/none] wk_muujzwofozqe8ygx(child)[open/none]
+  待办 : (空 —— 没有任何人会被叫醒)
+  ❌ S4 —— 待办条数 = 0(旧判定在这个形状上是 **0**)
+  ❌ S4(谁被叫醒) —— 没有 resolve_blocked_work
+  ✅ S4(对照) —— 把新规则那一行减掉 = [] ⇒ **旧判定在这个形状上确实是零待办**
+══════════════════════════════════════════════════════════════════════════════
+有 3 条判据失败 ❌

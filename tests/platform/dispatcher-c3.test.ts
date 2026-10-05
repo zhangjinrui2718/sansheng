@@ -137,6 +137,12 @@ describe("C3 · `integrate` 的条件侧:根 R 的整棵子树都收口了", () 
     const root = mkWork({ id: "R", title: "交付:选型建议" });
     mkReviewedDone({ id: "c1", parent: root, title: "路线 A" });
     mkReviewedDone({ id: "c2", parent: root, title: "路线 B" });
+    // 「别的 kind 也在表里」这条自检的**证人**必须是一条**叶子**工作项(丙① 之后):
+    // 上面那条 `R` 是**容器**(有子项),它不再产出 `execute_work` —— 那是本次刻意的
+    // 行为变更(容器不由执行者跑,判据是「有子项」而不是「是根」),所以证人换成一条
+    // 真活(`leaf`,没有子项)。**不是**放宽断言:被证伪的能力(看板会不会只列
+    // `integrate`)一模一样。
+    mkWork({ id: "leaf", title: "真活:路线 A 的实测" });
     const t = integrateTodo();
     expect(t, "子树收口之后流水线必须有人推 —— 这一条就是 C3 补的那一环").toBeDefined();
     expect(t).toMatchObject({ agentId: "pm", role: "project_manager", refs: [root] });

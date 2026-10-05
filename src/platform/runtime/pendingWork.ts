@@ -28,7 +28,7 @@ import { getAgent } from "../storage/repo/agents.js";
 import { listBlockers, type BlockerRow } from "../storage/repo/blockers.js";
 import { isChangeTerminal, listChanges, type ChangeRequestRow } from "../storage/repo/changes.js";
 import {
-  listWorks, depsSatisfied, depState, type WorkRow,
+  listWorks, depsSatisfied, depState, workIdsWithChildren, type WorkRow,
 } from "../storage/repo/works.js";
 import { getProjectRow } from "../storage/repo/projects.js";
 import { ROLE_SPECS, isProjectRole, type ProjectRole } from "../identity/role.js";
@@ -60,6 +60,28 @@ export interface PendingWork {
    * 这一条此前是缺的 —— 25 个字段里没有「派给我的活」,于是 worker 的待办在
    * 注入面里**根本不存在**:它只能靠主动 `work_list` 才看得到自己有活。
    * 而「谁手上有可执行的待办就唤醒谁」这条驱动规则正需要它(见 `runtime/driver.ts`)。
+   *
+   * ── 容器**不在**这里(判据是「有子项」,不是「是根」)─────────────
+   *
+   * 「交付整合」这类**容器**根工作项不该被当成活派给执行者。真机现场:worker 拿到
+   * 那条容器,跑了 6 分钟、读了全树,才自己识别出「它是一个『交付整合』容器,
+   * 而我刚拿到的任务就是它」,然后 `work_update(blocked)` + 开一条阻塞 —— 一次
+   * 纯浪费的回合(而它识别对了,**说明判据本来就该在平台这一侧**)。
+   *
+   * 过滤收在**这里**(而不是 `runtime/dispatcher.ts` 的规则 `if` 里),因为本函数
+   * 就是**注入面**:下面 `renderPendingWork` 渲染的「分派给你、可以开工的工作项」
+   * 正是它。两处各收一半会让「模型看得见它」与「平台拒绝跑它」同时成立 ——
+   * 一处判据两个说法,迟早漂(而这个项目为「两份定义会漂」已付过好几次代价)。
+   *
+   * ⚠️ **已知失效方向:抢跑窗口。** PM 若在**第 N 回合**建出根、**第 N+1 回合**
+   * 才建子项,那一瞬间根还是叶子 ⇒ 它**照样**会被派去执行。**同一个回合内**
+   * 建根 + 建子项是安全的:门铃在回合内只记打点(`host/serve.ts` 的
+   * `drainingProjects` / `nudgedProjects`),排空在**这个回合结束之后**才重查库,
+   * 那时子项已经在库里了。⇒ 残余窗口 = 「PM 拆解到一半就停下了」,而那是**异常**
+   * 本身;它的代价是**一个**被浪费的 worker 回合(不是停摆:worker 会把它置
+   * `blocked`,而 `dispatcher.ts` 的 `resolve_blocked_work` 随即把 PM 叫回来)。
+   * 关掉它需要「容器形态」这个**模型的声明**(方案乙,已否决:忘标就静默停摆)
+   * 或一个时间启发式 —— 两者都比这个窗口更坏。
    */
   myOpenWorks: readonly WorkRow[];
   /**
@@ -67,6 +89,9 @@ export interface PendingWork {
    *
    * 为什么单独列出来:`myOpenWorks` 把它们排除掉之后,「这条工作项为什么一直没跑」
    * 在界面上就没有答案了(7-N:见不到的现场等于没有现场)。
+   *
+   * ⚠️ 容器也不在这里 —— 容器**不是「还没轮到跑」,而是「不由执行者跑」**,
+   * 把它摆成「在等前置」是对模型的一次误导(它按它做事的代价见 `myOpenWorks`)。
    */
   myWaitingWorks: readonly WorkRow[];
   /**
@@ -107,8 +132,13 @@ export function collectPendingWork(
   const role = row !== null && isProjectRole(row.role) ? row.role : null;
 
   // 分派给我的工作项,按前置是否满足分两堆。终态的不算待办。
+  //
+  // **容器不进这两堆**(判据 = 有子项,见 `myOpenWorks` 的字段注释与
+  // `workIdsWithChildren`):它由子项推动、由平台在整合成功后收口,不由执行者跑。
+  const containers = workIdsWithChildren(db, projectId);
   const assigned = listWorks(db, projectId, { assigneeAgentId: agentId }).filter(
-    (w) => w.status === "open" || w.status === "in_progress",
+    (w) =>
+      (w.status === "open" || w.status === "in_progress") && !containers.has(w.id),
   );
   const myOpenWorks: WorkRow[] = [];
   const myWaitingWorks: WorkRow[] = [];

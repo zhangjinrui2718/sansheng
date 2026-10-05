@@ -1,0 +1,64 @@
+npm notice run sansheng@0.1.0 npx
+npm notice run 'tsx' .probe/bugb-probe3-blocked-container.mts
+真机库: /Users/fuyao/.sansheng/sansheng.db
+副本目录: /var/folders/rm/kg3j0vq55rzc0pm_097z4gq00000gn/T/sansheng-probe3-uJgg7d
+项目: pj_muujuaia2cx8bpvp
+
+══════════════════════════════════════════════════════════════════════════════
+S1 · 真机库原样:容器根(blocked,4 个子项)不产出 execute_work
+──────────────────────────────────────────────────────────────────────────────
+  works: wk_muujz3qc05kz9cew(root)[blocked/none] wk_muujzdetn7hvwej3(child)[done/done] wk_muujzk1kwbzj3r6d(child)[blocked/none] wk_muujzqlbu09utt4s(child)[open/none] wk_muujzwofozqe8ygx(child)[open/none]
+  待办 : resolve_blocked_work(resolve_blocked_work:wk_muujz3qc05kz9cew+wk_muujzk1kwbzj3r6d)
+  ✅ S1 —— execute_work 的 target = [],不含容器根 wk_muujz3qc05kz9cew
+  ✅ S1(open) —— 根置 open 后 execute_work = []
+  ✅ S1(in_progress) —— 根置 in_progress 后 execute_work = []
+  ✅ S1(注入面) —— myOpenWorks=[] myWaitingWorks=[wk_muujzqlbu09utt4s,wk_muujzwofozqe8ygx]
+
+══════════════════════════════════════════════════════════════════════════════
+S2 · 副本 + 一条**没有子项的根**(真活)
+──────────────────────────────────────────────────────────────────────────────
+  works: wk_probe_leaf(root)[open/none] wk_muujz3qc05kz9cew(root)[blocked/none] wk_muujzdetn7hvwej3(child)[done/done] wk_muujzk1kwbzj3r6d(child)[blocked/none] wk_muujzqlbu09utt4s(child)[open/none] wk_muujzwofozqe8ygx(child)[open/none]
+  待办 : resolve_blocked_work(resolve_blocked_work:wk_muujz3qc05kz9cew+wk_muujzk1kwbzj3r6d) | execute_work(execute_work:wk_probe_leaf)
+  ✅ S2 —— execute_work 的 target = [wk_probe_leaf](含新叶子)
+  ✅ S2(反向) —— 同一次输出里容器根仍不在(所以上面那条不是「看板把什么都列出来了」);库形状:root=1 child=4
+
+══════════════════════════════════════════════════════════════════════════════
+S3 · 子项全 done+审过、**根仍 blocked**
+──────────────────────────────────────────────────────────────────────────────
+  works: wk_muujz3qc05kz9cew(root)[blocked/none] wk_muujzdetn7hvwej3(child)[done/done] wk_muujzk1kwbzj3r6d(child)[done/done] wk_muujzqlbu09utt4s(child)[done/done] wk_muujzwofozqe8ygx(child)[done/done]
+  待办 : resolve_blocked_work(resolve_blocked_work:wk_muujz3qc05kz9cew) | integrate(integrate:wk_muujz3qc05kz9cew)
+  ✅ S3 —— integrate refs = [wk_muujz3qc05kz9cew]
+
+══════════════════════════════════════════════════════════════════════════════
+S4 · 真机库原样(1 根 blocked + 子项 done/done/blocked/open/open)
+──────────────────────────────────────────────────────────────────────────────
+  works: wk_muujz3qc05kz9cew(root)[blocked/none] wk_muujzdetn7hvwej3(child)[done/done] wk_muujzk1kwbzj3r6d(child)[blocked/none] wk_muujzqlbu09utt4s(child)[open/none] wk_muujzwofozqe8ygx(child)[open/none]
+  待办 : resolve_blocked_work(resolve_blocked_work:wk_muujz3qc05kz9cew+wk_muujzk1kwbzj3r6d)
+  ✅ S4 —— 待办条数 = 1(旧判定在这个形状上是 **0**)
+  ✅ S4(谁被叫醒) —— pm ← 处置 2 条被阻塞的工作项;refs = [wk_muujz3qc05kz9cew, wk_muujzk1kwbzj3r6d]
+  ✅ S4(对照) —— 把新规则那一行减掉 = [] ⇒ **旧判定在这个形状上确实是零待办**
+
+══════════════════════════════════════════════════════════════════════════════
+S5 · 真机库副本 + 一条**未答复的 client_question**(球在甲方那边)
+──────────────────────────────────────────────────────────────────────────────
+  works: wk_muujz3qc05kz9cew(root)[blocked/none] wk_muujzdetn7hvwej3(child)[done/done] wk_muujzk1kwbzj3r6d(child)[blocked/none] wk_muujzqlbu09utt4s(child)[open/none] wk_muujzwofozqe8ygx(child)[open/none]
+  待办 : (空 —— 没有任何人会被叫醒)
+  ✅ S5 —— 未答复的 client_question = 1 ⇒ resolve_blocked_work **不出现**(不让 PM 空转一轮)
+  ✅ S5(答复后自愈) —— 处置 2 条被阻塞的工作项;refs=[wk_muujz3qc05kz9cew, wk_muujzk1kwbzj3r6d]
+
+══════════════════════════════════════════════════════════════════════════════
+S6 · 子树收口 + 根上落了 deliverable(根仍 blocked)
+──────────────────────────────────────────────────────────────────────────────
+  works: wk_muujz3qc05kz9cew(root)[blocked/none] wk_muujzdetn7hvwej3(child)[done/done] wk_muujzk1kwbzj3r6d(child)[done/done] wk_muujzqlbu09utt4s(child)[done/done] wk_muujzwofozqe8ygx(child)[done/done]
+  待办 : resolve_blocked_work(resolve_blocked_work:wk_muujz3qc05kz9cew) | handover(handover:art_probe_deliv)
+    [drain] dispatcher: 容器 wk_muujz3qc05kz9cew 已收口 → done(它的交付整合完了);等一下质检会按 review_work 审这条整合产物
+    [drain] dispatcher: 第 1/8 回合 → qa(quality_reviewer) · 审查 1 个已完成的工作项
+    [drain] dispatcher: 第 2/8 回合 → bm(business_manager) · 把交付物「催收语音机器人升级 · 交付整合」交付给甲方
+    [drain] dispatcher: 交付物 art_probe_deliv 的对话已开出来(s_deliv_art_probe_deliv,通道 client)
+    [drain] dispatcher: 排空结束(2 回合 · exhausted)—— 没有可执行的待办了
+  ✅ S6 —— blocked → done/done
+  ✅ S6(经唯一写口) —— review_state = done(写口维护它;绕过 §2.7 直接 UPDATE 的话它不会动)
+  ✅ S6(排空结果) —— rounds=2 stop=exhausted visited=[review_work,handover]
+
+══════════════════════════════════════════════════════════════════════════════
+全部判据通过 ✅

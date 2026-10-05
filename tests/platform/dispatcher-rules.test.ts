@@ -92,13 +92,15 @@ function sync(r: Promise<ToolResult> | ToolResult): ToolResult {
 
 // ── ① 规则表是闭合的 ────────────────────────────────────────────
 
-describe("B1 · 规则表:每个 `TodoKind` 恰好一条规则(C3 之后是 10 条)", () => {
+describe("B1 · 规则表:每个 `TodoKind` 恰好一条规则(C3 之后是 10 条,丙③ 之后 11 条)", () => {
   it("`TodoKind` 的每个取值**恰好**有一条规则产出它 —— 没有分支留在表外", () => {
     const kinds = RULES.map((r) => r.then.kind);
-    // B1 落地时是 8/8;C3 补了流水线缺的两环(`integrate` / `handover`)。
+    // B1 落地时是 8/8;C3 补了流水线缺的两环(`integrate` / `handover`);
+    // 丙③ 补上第 11 条 `resolve_blocked_work`(一条 `blocked` 的工作项此前**没有
+    // 任何驱动者** ⇒ 整个项目零待办的静默停摆)。
     // 这两个数字**同时**改是对的:集合相等那条断言才是闭合性本身。
-    expect(RULES).toHaveLength(10);
-    expect(TODO_KINDS).toHaveLength(10);
+    expect(RULES).toHaveLength(11);
+    expect(TODO_KINDS).toHaveLength(11);
     // 集合相等 ⇒ 「表产出的 kind」与「闭集」是同一个集合
     expect([...kinds].sort()).toEqual([...TODO_KINDS].sort());
     // 且没有两条规则争同一个 kind(否则「谁负责这一条」没有答案)

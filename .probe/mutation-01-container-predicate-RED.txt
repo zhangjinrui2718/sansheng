@@ -1,0 +1,30 @@
+### 变异 1:把 丙① 的「有子项」谓词整个拿掉(容器根又变成可执行项)
+
+--- 单元测试(本批新增的 18 条)---
+   × 丙① · 容器(有子项)不进 `execute_work`;叶子(真活)照旧 > S1 · 有子项的根 **不产出** `execute_work`(任意状态:open / in_progress / blocked) 10ms
+   × 丙① · 容器(有子项)不进 `execute_work`;叶子(真活)照旧 > S2 对照 · 容器**不因为子项都终态就变回叶子** —— 判据是「有子项」,不是「子项还开着」 6ms
+   × 丙① · 容器(有子项)不进 `execute_work`;叶子(真活)照旧 > `hasActionableWork`:只有容器派给 worker 时**不叫醒他**(叫醒也只能空转) 4ms
+   × 丙② · 整合成功后平台把容器置 `done`(唯一写口 `updateWorkStatus`) > S6 · 根 `open` + 子树终态 → PM 整合 → 根被置 `done`(且走了状态机:review_state = pending) 9ms
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 4 ⎯⎯⎯⎯⎯⎯⎯
+ Test Files  1 failed (1)
+      Tests  4 failed | 14 passed (18)
+
+--- 真机库副本探针 S1/S2 ---
+S1 · 真机库原样:容器根(blocked,4 个子项)不产出 execute_work
+──────────────────────────────────────────────────────────────────────────────
+  works: wk_muujz3qc05kz9cew(root)[blocked/none] wk_muujzdetn7hvwej3(child)[done/done] wk_muujzk1kwbzj3r6d(child)[blocked/none] wk_muujzqlbu09utt4s(child)[open/none] wk_muujzwofozqe8ygx(child)[open/none]
+  待办 : resolve_blocked_work(resolve_blocked_work:wk_muujz3qc05kz9cew+wk_muujzk1kwbzj3r6d)
+  ✅ S1 —— execute_work 的 target = [],不含容器根 wk_muujz3qc05kz9cew
+  ❌ S1(open) —— 根置 open 后 execute_work = [wk_muujz3qc05kz9cew]
+  ❌ S1(in_progress) —— 根置 in_progress 后 execute_work = [wk_muujz3qc05kz9cew]
+  ❌ S1(注入面) —— myOpenWorks=[wk_muujz3qc05kz9cew] myWaitingWorks=[wk_muujzqlbu09utt4s,wk_muujzwofozqe8ygx]
+
+══════════════════════════════════════════════════════════════════════════════
+S2 · 副本 + 一条**没有子项的根**(真活)
+──────────────────────────────────────────────────────────────────────────────
+  works: wk_probe_leaf(root)[open/none] wk_muujz3qc05kz9cew(root)[blocked/none] wk_muujzdetn7hvwej3(child)[done/done] wk_muujzk1kwbzj3r6d(child)[blocked/none] wk_muujzqlbu09utt4s(child)[open/none] wk_muujzwofozqe8ygx(child)[open/none]
+  待办 : resolve_blocked_work(resolve_blocked_work:wk_muujz3qc05kz9cew+wk_muujzk1kwbzj3r6d) | execute_work(execute_work:wk_probe_leaf)
+  ✅ S2 —— execute_work 的 target = [wk_probe_leaf](含新叶子)
+  ✅ S2(反向) —— 同一次输出里容器根仍不在(所以上面那条不是「看板把什么都列出来了」);库形状:root=1 child=4
+══════════════════════════════════════════════════════════════════════════════
+有 3 条判据失败 ❌

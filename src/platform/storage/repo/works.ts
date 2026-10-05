@@ -298,6 +298,42 @@ export function listWorks(
   return rows.map(rowToWork);
 }
 
+/**
+ * **容器**工作项的 id —— 这个项目里**有子项**的那些。
+ *
+ * ── 判据是「有子项」,不是「是根」────────────────────────────────
+ *
+ * `parent_work_id IS NULL` 只说明「没有父」,而设计 1 §9.4 记的那次实测里
+ * **每一条真活都是根**(扁平结构 `9 work → 9 root → 0 中间`)—— 于是「是根」
+ * 会把**每一条真活**都判成容器,而那是**静默停摆**的方向:没有任何人会被叫来
+ * 执行它(比误派一次严重得多,见 `runtime/dispatcher.ts` 的 `integrate` 规则里
+ * 「不能反过来只判后代」那段)。「有子项」在扁平结构下恒假 ⇒ 真活照常可执行。
+ *
+ * ⚠️ **2026-10-05 复核(形状变了,判据不变)**:当前 `~/.sansheng/sansheng.db`
+ * 是 **1 根 + 4 子项**(树),不是扁平库 —— 两次实测的形状不同。所以判据要能在
+ * **两种形状下都成立**:按「是根」判会在扁平库上停摆(每一条真活都失去执行者),
+ * 按「有子项」判在两种形状下都对(树的根是容器、扁平库的根是真活)。
+ * 而「真机库是扁平的」这句话是**当时**的测量,别再当成当下的库形状。
+ *
+ * 与 `runtime/dispatcher.ts` 的 `childrenByParent(works)` 是**同一个谓词**:
+ * 那里已经把 `works` 拿在手上(规则要算整棵子树),不必再查一次库;这里则是给
+ * **只拿到一个 agent** 的调用方(`pendingWork.collectPendingWork`)用的。
+ * 两处判据的字面不同、语义同一条,所以都写在这里说明白,免得下次有人以为
+ * 它们可以各自漂。
+ */
+export function workIdsWithChildren(
+  db: Database.Database,
+  projectId: string,
+): ReadonlySet<string> {
+  const rows = db
+    .prepare(
+      `SELECT DISTINCT parent_work_id AS id FROM works
+        WHERE project_id = ? AND parent_work_id IS NOT NULL`,
+    )
+    .all(projectId) as ReadonlyArray<{ id: string }>;
+  return new Set(rows.map((r) => r.id));
+}
+
 // ── 写入侧的「可打扰」判据 ───────────────────────────────────────
 //
 // ── 用户的原话 ────────────────────────────────────────────────────

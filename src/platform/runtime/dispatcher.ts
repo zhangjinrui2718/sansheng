@@ -48,6 +48,12 @@
  * `9 条 work → 9 条 root → 0 条中间`。扁平结构下**每条工作项终态都是「根终态」**,
  * 于是写入侧的「只要根」那条判据全部命中,一条也没被筛掉。
  *
+ * ⚠️ **2026-10-05 复核(形状变了,结论不变)**:当前 `~/.sansheng/sansheng.db` 是
+ * **1 根 + 4 子项**(树),`dispatch_attempts` 是空的 —— 那份 `9/9/0` 的实测属于
+ * **更早的一份库**。结论不变(扁平形状下这一刀确实空转),但**不要把「真机库是扁平的」
+ * 当成当下的库形状**;而「判据不能写成『是根』」这条纪律在**两种形状下都成立**
+ * (见 `repo/works.ts` 的 `workIdsWithChildren`)。
+ *
  * ⚠️ **这条归因错过一次(2026-10-04 按设计 1 §9.4 更正,存此以免重犯)**:原文写的是
  * 「`grep -rn parentWorkId harness/` 是空的 —— 没有任何地方告诉项目经理要建树」。
  * **grep 的结果对,推出来的结论错**:作用域只扫了提示词单元目录,而**运行期的任务
@@ -102,9 +108,10 @@ import {
   getProjectRow, loadProjectRoster,
 } from "../storage/repo/projects.js";
 import {
-  listWorks, getWork, listWorksPendingReview, markWorkReviewed,
+  listWorks, getWork, listWorksPendingReview, markWorkReviewed, updateWorkStatus,
   isTerminalWorkStatus, type WorkRow, type WorkStatus,
 } from "../storage/repo/works.js";
+import { blockersForWork } from "../storage/repo/blockers.js";
 import {
   listArtifacts, getArtifact, type ArtifactRow,
 } from "../storage/repo/artifacts.js";
@@ -137,6 +144,21 @@ export const TODO_KINDS = [
   "review_change",
   /** 有工作项被派给了非 worker(平台不会执行它)—— 派活的人必须改派或关掉 */
   "fix_work_assignment",
+  /**
+   * 有工作项**停在 `blocked`** 而没有任何人在推它 —— 项目经理必须处置。
+   *
+   * ⚠️ 这一条的存在理由是一条**真机实测的缺陷**:`blocked` 的工作项**不在任何
+   * 待办里**(`pendingWork.ts` 的 `myOpenWorks` 只要 `open|in_progress`),而
+   * **没有任何规则读 `works.status='blocked'`**。后果不是「少叫醒一次」,是
+   * **整个项目零待办**:一条 `blocked` 的子项把依赖它的下游全卡在
+   * `myWaitingWorks`(`depsSatisfied=false`),于是排空器每 10 秒空转,
+   * 而「零待办」与「组织已经把活干完了」在日志里长得**一模一样**。
+   *
+   * 真机现场(`collectTodos` 直接跑在真机库的 `VACUUM INTO` 副本上):
+   * `1 根 blocked + 子项 done/done/blocked/open/open` ⇒ 待办**空** ——
+   * 没有任何人会被叫醒。判据见 `RULES` 里 `resolve_blocked_work` 的 `why`。
+   */
+  "resolve_blocked_work",
   /** 项目里一个工作项都没有 —— 拆解 */
   "decompose_project",
   /** 分派给我、前置已满足的工作项 */
@@ -184,17 +206,20 @@ const PRIORITY: Readonly<Record<TodoKind, number>> = {
   answer_ask: 0,
   attend_meeting: 1,
   review_change: 2,
+  // 两条「修」的待办挨着:派活错了与活被卡住都是**项目经理的存量修复**,
+  // 而它们都挡着下面的执行 / 审查 / 整合。
   fix_work_assignment: 3,
-  decompose_project: 4,
-  execute_work: 5,
-  review_work: 6,
+  resolve_blocked_work: 4,
+  decompose_project: 5,
+  execute_work: 6,
+  review_work: 7,
   // 整合与交付接在**审查之后**(C3,§2.11.4):子树收口 → 整合 → 交付。
   // `integrate` 排在 `review_work` 之后是刻意的:容器自己也可能 `done` 而没审,
   // 那种情况下先让质检把 `review_work` 跑掉,再叫项目经理整合(否则会在
   // 「还有一条 done 没审」时提前整合 —— 而 ② 那一条判据正是禁止这个的)。
-  integrate: 7,
-  handover: 8,
-  report_downstream: 9,
+  integrate: 8,
+  handover: 9,
+  report_downstream: 10,
 };
 
 export interface DriverTodo {
@@ -308,8 +333,9 @@ const DEFAULT_MAX_ATTEMPTS = 3;
  * 合并唤醒的**条数**阈值:缺省 3。
  *
  * 依据(都是可算的,不是手感):
- *   - 用户抱怨的是「**一长串**」。真机库是扁平结构(9 work / 9 root / 0 中间),
- *     所以**每条工作项终态都会产生一条事件**。攒 3 条 = 把「3 次唤醒」压成
+ *   - 用户抱怨的是「**一长串**」。那次实测的真机库是扁平结构
+ *     (9 work / 9 root / 0 中间;⚠️ 2026-10-05 复核当前库是 1 根 + 4 子项),
+ *     所以那一次**每条工作项终态都会产生一条事件**。攒 3 条 = 把「3 次唤醒」压成
  *     「1 次」,而这是**用户自己库里反复出现的规模**(9 条工作项 ⇒ 大约 3 次唤醒)。
  *   - 取 2 省得太少(仍有 4~5 次唤醒),取 5 会让只有 2~4 条工作项的小项目
  *     **永远靠 T 兜底** —— 那等于把「攒批」换成「定时」,丢掉了合并的意义。
@@ -466,6 +492,34 @@ export interface RuleFacts {
    * (而预算是**限流,不是判据**)。
    */
   readonly deliverableWorkIds: ReadonlySet<string>;
+  // ── `resolve_blocked_work` 要读的两条结构化事实(见下面那条规则)──────
+  /**
+   * **有人正在等甲方回话** —— 库里唯一一条真正表示「球在甲方那边」的结构化事实。
+   *
+   * `ask_client`(只有业务经理持 `client.ask`)落一条 `client_question`
+   * (`status='open'`),甲方答复时转 `accepted`(`tools/client.ts` 的
+   * `resolveClientQuestion`)。所以「项目里有未答复的 client_question」
+   * = 此刻存在一个**只有外部输入能解**的等待。
+   *
+   * ⚠️ 它是**项目级**的,不是工作项级的:`ask_client` 的参数表里**没有 `workId`**,
+   * 于是 `client_question` 的产出边(`artifacts.work_id`)恒为 `NULL` ——
+   * 库里没有「这条提问对应哪条工作项」这条边(真机库实测:两条 `q_*` 的
+   * `work_id` 都是 `NULL`)。所以这条判据只能粗到项目粒度,见
+   * `resolve_blocked_work` 的 `why`(那里如实写了它的失效方向)。
+   */
+  readonly awaitingClient: boolean;
+  /**
+   * **挂着至少一个未解决阻塞**(`status ∈ {open, acknowledged}`)的工作项 id。
+   *
+   * 这是「这条工作项为什么被卡住」在库里的**唯一结构化答案**:`blockers` 表本身
+   * **没有** `work_id` 列,关联落在 `blocker_blocks`(migration 008),
+   * 而读它的生产入口是 `repo/blockers.ts` 的 `blockersForWork`(逐条查)。
+   * 规则要的是**整个项目的集合**,所以这里按项目查一次。
+   *
+   * 只读 `status` 这一列 —— 连 `severity` 都没读(更不读 `title` / `detail`):
+   * §2.11.3 那条纪律(规则的 `if` 不读正文)**从这里就开始成立**。
+   */
+  readonly blockedByBlockerWorks: ReadonlySet<string>;
   /**
    * `kind='deliverable' AND status='accepted'` 的工件 —— `handover` 的**资格**判据。
    *
@@ -694,6 +748,64 @@ export const RULES: readonly Rule[] = [
       "`work_assign` 的调用期门直接拒收)。",
   },
   {
+    id: "resolve_blocked_work",
+    // `blocked` 是一次**状态迁移**(`work_update` → `work_status_changed`),而
+    // 「阻塞被解除」在闭合触发集里**没有取值**(`blocker.update` 只能敲门铃,
+    // 说不出触发名 —— 与「建会 / 建工作项 / 改派 / 登记阻塞」同一个已知缺口)。
+    on: ["work_status_changed", "tick"],
+    if: (q) => {
+      const pm = q.members.find((m) => m.role === "project_manager");
+      if (pm === undefined) return [];
+      const ids = q.works
+        // `blocked` 是非终态(`isTerminalWorkStatus` 只含 done/failed/cancelled),
+        // 所以这里不需要再判一次终态。
+        .filter((w) => w.status === "blocked")
+        // ── 唯一的抑制条件:**等甲方**,两条同时成立 ──────────────────
+        //
+        //   ① 项目里有未答复的 `client_question`(球在甲方那边),
+        //   ② 这条工作项**挂了至少一个未解决的阻塞**(它的现场已经在库里,
+        //      `blocker_list` 查得到,不是一条无声的 `blocked`)。
+        //
+        // ② 不是装饰:一条**裸 `blocked`**(没人登记过阻塞)无论甲方那边在等什么,
+        // 都必须要有人去看一眼 —— 那是「说不出为什么卡住」,而不是「说清了在等谁」。
+        // 少了 ②,一次无关的甲方提问就能把一条没人解释过的 `blocked` 静默压住,
+        // 而那正是本规则要修的那个形态(零待办 —— 与「组织干完了」长得一样)。
+        //
+        // ⚠️ 抑制是**项目级**的粗判据(库里没有「这条提问对应哪条工作项」的边,
+        // 见 `RuleFacts.awaitingClient`)。失效方向如实记在 `why` 里。
+        .filter((w) => !(q.awaitingClient && q.blockedByBlockerWorks.has(w.id)))
+        .map((w) => w.id)
+        .sort();
+      if (ids.length === 0) return [];
+      return [{
+        agentId: pm.agentId, role: "project_manager", kind: "resolve_blocked_work",
+        // 集合谓词,与 `review_work` / `fix_work_assignment` / `integrate` 同形:
+        // **进度 = key 变了** —— 处置掉一条,集合缩小 ⇒ 自动拿到新预算。
+        key: `resolve_blocked_work:${ids.join("+")}`,
+        target: null, refs: ids, targetState: null,
+        label: `处置 ${ids.length} 条被阻塞的工作项`,
+      }];
+    },
+    then: { kind: "resolve_blocked_work", targetRole: "project_manager" },
+    why:
+      "**真机实测的静默停摆**(这条规则就是为它写的):`blocked` 的工作项**不在任何待办里**" +
+      " —— `pendingWork.ts` 的 `myOpenWorks` 只要 `open|in_progress`,而**没有任何规则读**" +
+      "`works.status='blocked'`(`grep 'blocked' dispatcher.ts` 当时只命中注释;" +
+      "`asks` 表 0 行;`blocker_opened` 只在 severity ∈ {high, critical} 时写 outbox," +
+      "medium 阻塞**连 outbox 都没有**)。后果是整个项目**零待办**:一条 `blocked` 的子项" +
+      "把依赖它的下游全卡在 `myWaitingWorks`(`depsSatisfied=false`),排空器每 10 秒空转。" +
+      "真机库副本上三组对照:①原样(1 根 blocked + 子项 done/done/blocked/open/open)⇒ 待办**空**;" +
+      "②只留那条 blocked 的子项 ⇒ `integrate` **不出现**;③那条子项也 done ⇒ `integrate` 出现 ✓" +
+      "(⇒ 根 blocked 不卡 integrate,卡住的是**那条子项没人推**)。" +
+      "判据的另一半是**不许把「等甲方」也当成「该叫 PM」**:甲方还没回话时(项目里有" +
+      "未答复的 `client_question`)那条 `blocked` 等的就是**外部输入** —— 而向甲方开口只有" +
+      "业务经理做得到(`client.ask` 只在他的 ceiling 里;**worker 连 `ask_client` 都不持**)," +
+      "PM 叫醒也只能空转一轮(抑制条件见规则的 `if`)。" +
+      "⚠️ 它会**多叫醒 PM**(与合并唤醒「少打扰」反向),所以靠 `dispatch_attempts` 限流 —— " +
+      "而限流**不是判据**:判据是上面那条「有工作项停在 blocked 且没有驱动者」,预算只决定" +
+      "「叫几次」,不决定「叫不叫」。",
+  },
+  {
     id: "review_done_works",
     // `review_state` 的唯一写口就是 `works.status` 的唯一写口(`updateWorkStatus`),
     // 所以「刚做完」在这里表现为一次工作项状态迁移。
@@ -726,7 +838,8 @@ export const RULES: readonly Rule[] = [
       // ── 合并唤醒:攒够 N 条、或最老的那条等到 T,才叫醒一次 ──────────
       //
       // 加这两个条件的**唯一**理由是用户的原话:「业务经理干的事情太多了……
-      // 聊天记录里面的一长串,真真甲方不关心这些」。真机库是扁平结构,写入侧的
+      // 聊天记录里面的一长串,真真甲方不关心这些」。那次实测的真机库是扁平结构,
+      // 写入侧的
       // 「只留根」那条判据**全部命中**(每条工作项都是根),所以「每条终态都叫醒
       // 一次」这件事只能在这里收窄。见本文件头注释。
       //
@@ -785,43 +898,18 @@ export const RULES: readonly Rule[] = [
       const ready: WorkRow[] = [];
       for (const root of q.works) {
         if (root.parentWorkId !== null) continue; // 只看根
-        const subtree = subtreeOf(root, children);
-        const kids = subtree.slice(1);
-        // ── ① 子树**全部终态** ──────────────────────────────────────
+        // 判据本身在 `deliveryCollected` / `hasDeliverableOnSubtree` ——
+        // **平台收口容器时读的是同一对函数**(见 `closeIntegratedContainers`)。
+        // 两份定义会漂,而这个项目为它付过代价。
         //
-        // `cancelled` 按 §2.8 算**收口**(`isTerminalWorkStatus` 含它):取消的定义
-        // 是「这块范围不要了,输入少了一块」,它不阻塞也不产出 —— 若按「必须有产出」
-        // 判,一个取消的子项就能把里程碑**永久钉死**(§2.11.2 的第一条反例)。
-        //
-        // ⚠️ 判的是**后代**;没有后代时判 R **自己**(§9.4:「扁平时每个根就是它
-        // 自己,子树判据退化成单条工作项判据」)。不能反过来只判后代:空集上
-        // 「全部终态」**恒真**,刚拆完就会把项目经理叫来整合。
-        const judged = kids.length > 0 ? kids : [root];
-        if (!judged.every((w) => isTerminalWorkStatus(w.status))) continue;
-        // ── ② 产出都审过 ─────────────────────────────────────────────
-        //
-        // 含 R 自己:容器也可能是 `done` 而没审(在树上,`work_update` 可以把它标成
-        // done)。这时**先让 `review_work` 跑**(优先级 6 < 7),别在还有人没审时整合。
-        if (subtree.some((w) => w.status === "done" && w.reviewState !== "done")) continue;
-        // ── ③ **终止判据**:这条交付还没有 `deliverable` 工件 ──────────
-        //
-        // 「已经整合过了」这个结构化事实落在**工件**上,不在 `works` 的某一列上。
-        // 判据放宽到**整棵子树**(而不只是 R 自己):`board_write` 的产出边是模型
-        // 显式填的,填给子项同样是「这份交付有整合产物」—— 这里宁可少叫一次,
-        // 也不能因为边挂错了地方而反复叫到预算用尽(那是**静默**的一种:
-        // 它长得像「系统跑过很多次」)。
-        if (subtree.some((w) => q.deliverableWorkIds.has(w.id))) continue;
-        // ── 两条「没什么可交付」的处置(设计表里没有,理由是它们各自的现场)──
-        //
-        //   - **R 自己 `cancelled`**:整块范围不要了,没有交付可言。不拦它就会
-        //     叫项目经理去交付一个已经被取消的交付物(它什么都不会写 ⇒ 被反复
-        //     叫醒到预算用尽,然后在会话里留下一条「预算用尽」的噪音)。
-        //   - **子树里一条 `done` 都没有**(全 failed / 全 cancelled):没有产出可
-        //     整合。失败该走的是「向甲方交代」(outbox 里已有 `work_failed`),
-        //     不是「交付」。
-        if (root.status === "cancelled") continue;
-        if (!subtree.some((w) => w.status === "done")) continue;
-        ready.push(root);
+        // ⚠️ 方向:规则要的是「收口了 **且还没有** 交付物」= 该叫醒项目经理去写。
+        // 收口那条走的是「收口了 **且已经有** 交付物」。
+        if (
+          deliveryCollected(root, children) &&
+          !hasDeliverableOnSubtree(root, children, q.deliverableWorkIds)
+        ) {
+          ready.push(root);
+        }
       }
       if (ready.length === 0) return [];
 
@@ -830,8 +918,9 @@ export const RULES: readonly Rule[] = [
       // ① 与这张表里其他「集合谓词」的规则同形(`review_work` / `fix_work_assignment`
       //    的 key 就是 id 集合的 join):**进度 = key 变了**。项目经理整合掉一个根,
       //    那个根从集合里消失 ⇒ key 变 ⇒ 自动拿到新预算(at-least-once,不会漏)。
-      // ② 一条待办 = **一个回合**。真机库是扁平结构(9 work / 9 root / 0 中间),
-      //    每根一条待办会一次排空就叫醒项目经理 9 次,把 `maxRounds`(默认 8)烧光 ——
+      // ② 一条待办 = **一个回合**。那次实测的真机库是扁平结构
+      //    (9 work / 9 root / 0 中间;⚠️ 2026-10-05 复核当前库是 1 根 + 4 子项),
+      //    那一次每根一条待办会一次排空就叫醒项目经理 9 次,把 `maxRounds`(默认 8)烧光 ——
       //    而业务经理的汇报排在它们**后面**,于是「甲方什么都不知道」这件事会
       //    被一次整合风暴掩盖(那是真机上已经出现过一次的形态)。
       const ids = ready.map((w) => w.id).sort();
@@ -920,6 +1009,160 @@ function deliveredArtifactIds(db: Database.Database, projectId: string): Readonl
     .prepare(
       `SELECT deliverable_artifact_id AS id FROM project_sessions
        WHERE project_id = ? AND deliverable_artifact_id IS NOT NULL`,
+    )
+    .all(projectId) as ReadonlyArray<{ id: string }>;
+  return new Set(rows.map((r) => r.id));
+}
+
+/**
+ * 这条根 R 的交付**收口了**吗 —— 设计 1 §2.11.4 的 **①②** + 两条「没什么可交付」
+ * 的处置(**不含 ③**;③ 是 `hasDeliverableOnSubtree`,因为它的两个方向各有读者)。
+ *
+ * **两个读者共用这一份前置判据**,这是它被抽出来的唯一理由:
+ *   ① `integrate` 规则的 `if` = 收口了 **且 还没有**交付物 ⇒ 叫项目经理去写;
+ *   ② `closeIntegratedContainers` = 收口了 **且 已经有**交付物 ⇒ 容器收口成 `done`。
+ * 两处各写一套,迟早出现「规则说整合完了、平台说没有」(或反过来)—— 而这个项目
+ * 为「两份定义会漂」已经付过好几次代价。
+ */
+function deliveryCollected(
+  root: WorkRow,
+  children: ReadonlyMap<string, WorkRow[]>,
+): boolean {
+  const subtree = subtreeOf(root, children);
+  const kids = subtree.slice(1);
+  // ── ① 子树**全部终态** ──────────────────────────────────────
+  //
+  // `cancelled` 按 §2.8 算**收口**(`isTerminalWorkStatus` 含它):取消的定义
+  // 是「这块范围不要了,输入少了一块」,它不阻塞也不产出 —— 若按「必须有产出」
+  // 判,一个取消的子项就能把里程碑**永久钉死**(§2.11.2 的第一条反例)。
+  //
+  // ⚠️ 判的是**后代**;没有后代时判 R **自己**(§9.4:「扁平时每个根就是它
+  // 自己,子树判据退化成单条工作项判据」)。不能反过来只判后代:空集上
+  // 「全部终态」**恒真**,刚拆完就会把项目经理叫来整合。
+  const judged = kids.length > 0 ? kids : [root];
+  if (!judged.every((w) => isTerminalWorkStatus(w.status))) return false;
+  // ── ② 产出都审过 ─────────────────────────────────────────────
+  //
+  // 含 R 自己:容器也可能是 `done` 而没审(在树上,`work_update` 可以把它标成
+  // done)。这时**先让 `review_work` 跑**(优先级 7 < 8),别在还有人没审时整合。
+  if (subtree.some((w) => w.status === "done" && w.reviewState !== "done")) return false;
+  // ── 两条「没什么可交付」的处置(设计表里没有,理由是它们各自的现场)──
+  //
+  //   - **R 自己 `cancelled`**:整块范围不要了,没有交付可言。不拦它就会
+  //     叫项目经理去交付一个已经被取消的交付物(它什么都不会写 ⇒ 被反复
+  //     叫醒到预算用尽,然后在会话里留下一条「预算用尽」的噪音)。
+  //   - **子树里一条 `done` 都没有**(全 failed / 全 cancelled):没有产出可
+  //     整合。失败该走的是「向甲方交代」(outbox 里已有 `work_failed`),
+  //     不是「交付」。
+  if (root.status === "cancelled") return false;
+  if (!subtree.some((w) => w.status === "done")) return false;
+  return true;
+}
+
+/**
+ * 这条交付的**整棵子树**上落着 `deliverable` 工件吗 —— 设计 1 §2.11.4 的 **③**。
+ *
+ * 「已经整合过了」这个结构化事实落在**工件**上,不在 `works` 的某一列上(用户要的
+ * 正是「工件即推动流程」)。判据放宽到**整棵子树**(不只是 R 自己):`board_write`
+ * 的产出边是模型显式填的,填给子项同样是「这份交付有整合产物」—— 这里宁可少叫
+ * 一次,也不能因为边挂错了地方而反复叫到预算用尽(那是**静默**的一种:
+ * 它长得像「系统跑过很多次」)。
+ *
+ * ⚠️ **同一个谓词有两个方向,两个方向都不许各写一份**:
+ *   - **没有它** ⇒ `integrate` 规则该叫醒项目经理去写交付物(规则用 `!`);
+ *   - **有它** ⇒ `closeIntegratedContainers` 该把容器收口(`done`)。
+ * 这正是它被单独抽出来的理由:两处各写一套,迟早出现「规则说整合完了、平台说
+ * 没有」或者反过来 —— 而这个项目为「两份定义会漂」已经付过好几次代价。
+ */
+function hasDeliverableOnSubtree(
+  root: WorkRow,
+  children: ReadonlyMap<string, WorkRow[]>,
+  deliverableWorkIds: ReadonlySet<string>,
+): boolean {
+  return subtreeOf(root, children).some((w) => deliverableWorkIds.has(w.id));
+}
+
+/**
+ * 平台记账:**把已经整合完、却还停在非终态的容器收口成 `done`**。
+ *
+ * ── 为什么必须有它(缺陷丙①的另一半)───────────────────────────
+ *
+ * 丙① 之后容器不进 `execute_work`(判据 = 有子项),而 `integrate` 也**不会**
+ * 再为它产出待办(判据 ③ 已被那条 `deliverable` 满足)⇒ 若没有这一条,
+ * **没有任何东西会再推动这条根**:它会永远停在 `open` / `blocked`,项目看板可能
+ * 因此**整个空掉**(零待办 —— 与「组织已经把活干完了」长得一模一样,这正是本批
+ * 要修的那个形态)。
+ *
+ * ── 为什么是「每次排空先查一次库」,而不是「整合那个回合之后再写」──────
+ *
+ * 后者漏掉一整类现场:**产出边挂在子项上**时(规则刻意容忍,见 ③ 的说明),
+ * 那条根一辈子不会进入任何 `integrate` 回合 ⇒ 永远收不了口。判据是**库里的
+ * 事实**(工件 + 状态),所以它必须是**声明式**的一次查询,而不是某个回合的
+ * 副产品 —— 与 `markWorkReviewed` / `consumePendingDispatchEvents` 同一条纪律:
+ * **回合成功才记账**,而「这件事办过了没有」永远重新查库。
+ *
+ * ⚠️ **必须走唯一写口** `updateWorkStatus`(§2.7):状态迁移表、`review_state`、
+ * outbox 事件三件事都在那个函数里维护 —— 直接 `UPDATE works SET status='done'`
+ * 会静默绕过迁移合法性,并让「根工作项终态 ⇒ 向甲方交代」那条链路断掉。
+ *
+ * ⚠️ **已知后果(刻意留下,不是漏洞)**:根迁入 `done` ⇒ `review_state='pending'`
+ * ⇒ 那条整合产物按既有的 `review_work` 规则被质检修一遍。要跳过它得另外调
+ * `markWorkReviewed` —— 那是**另一条设计决定**(谁审整合产物),不该由收口顺手做掉。
+ */
+function closeIntegratedContainers(
+  db: Database.Database,
+  projectId: string,
+  at: number,
+  log: (line: string) => void,
+): readonly string[] {
+  const works = listWorks(db, projectId);
+  const children = childrenByParent(works);
+  const deliverableWorkIds = new Set(
+    listArtifacts(db, projectId, { kind: "deliverable", limit: 500 })
+      .map((a) => a.workId)
+      .filter((id): id is string => id !== null),
+  );
+  const closed: string[] = [];
+  for (const root of works) {
+    if (root.parentWorkId !== null) continue; // 只看根:容器就是「有子项的根」那一类
+    if (isTerminalWorkStatus(root.status)) continue;
+    if (!deliveryCollected(root, children)) continue;
+    if (!hasDeliverableOnSubtree(root, children, deliverableWorkIds)) continue;
+    const r = updateWorkStatus(db, root.id, "done", at);
+    if (!r.ok) {
+      // not_found / illegal_transition 都会走到这里,而它们都是**装配或迁移表**的
+      // 问题:不许吞(7-N —— 见不到的现场等于没有现场)。
+      log(`dispatcher: ✖ 容器 ${root.id} 收口失败(${r.reason})—— ${r.message}`);
+      continue;
+    }
+    if (r.changed) closed.push(root.id);
+  }
+  return closed;
+}
+
+/**
+ * **挂着至少一个未解决阻塞的工作项** id(一次查库,给 `RuleFacts` 用)。
+ *
+ * ── 为什么这条 SQL 在本文件而不是 `repo/blockers.ts` ────────────────
+ *
+ * `blockersForWork(db, workId)` 已经是那条边的读面,但它是**逐条**查的;规则要的
+ * 是「这个项目里哪些工作项挂着未解决阻塞」—— 按项目查一次。写在这里不另建一个
+ * 仓储入口,是因为宿主侧的「阻塞行存在吗」本来就已经有同样的先例
+ * (`isImmediateEvent` 直接 `SELECT severity FROM blockers WHERE id = ?`)。
+ *
+ * **只读 `status`**:`severity` / `title` / `detail` 一个都不读。规则的 `if` 一旦
+ * 读 `severity` 就会开始猜「这条阻塞该谁修」,而那正是 §2.11.3 禁止的
+ * 「规则做语义判断」。判据只用「有没有」,不用「像不像」。
+ */
+function worksWithUnresolvedBlocker(
+  db: Database.Database,
+  projectId: string,
+): ReadonlySet<string> {
+  const rows = db
+    .prepare(
+      `SELECT DISTINCT bb.work_id AS id
+         FROM blocker_blocks bb JOIN blockers b ON b.id = bb.blocker_id
+        WHERE b.project_id = ? AND b.status IN ('open', 'acknowledged')`,
     )
     .all(projectId) as ReadonlyArray<{ id: string }>;
   return new Set(rows.map((r) => r.id));
@@ -1017,6 +1260,14 @@ function collectRuleFacts(
     deliverableWorkIds: new Set(
       deliverables.map((a) => a.workId).filter((id): id is string => id !== null),
     ),
+    awaitingClient: listArtifacts(db, projectId, {
+      kind: "client_question",
+      status: "open",
+      // 与交付物那两条查询同一条理由:漏一条 = 判据反过来(把「在等甲方」读成
+      // 「没人在等」⇒ 多叫醒一次;或把「没人在等」读成「在等」⇒ 静默少叫一次)。
+      limit: 500,
+    }).length > 0,
+    blockedByBlockerWorks: worksWithUnresolvedBlocker(db, projectId),
     acceptedDeliverables: listArtifacts(db, projectId, {
       kind: "deliverable",
       status: "accepted",
@@ -1109,6 +1360,34 @@ export function renderTask(db: Database.Database, todo: DriverTodo): string {
         renderStrandedWorks(db, todo) +
         "\n\n用 `work_assign` 把它们改派给 worker(或者用 `work_update` 关掉不该存在的)," +
         "然后在同一条回复里说明你怎么处置的。"
+      );
+    case "resolve_blocked_work":
+      // ⚠️ **这一段是「`blocked` 该怎么处置」的第二次陈述吗?** 不是 ——
+      // 它是**平台判据的引用**:下面列出的每条工作项都是平台从库里查出来的
+      // (`works.status='blocked'`),而这里说的是「你有哪几个动词可用」。
+      // 判据本身在 `RULES` 的 `resolve_blocked_work` 里,只有一处。
+      return (
+        "# 现在轮到你了:处置被阻塞的工作项\n\n" +
+        "下面这些工作项**停在 `blocked`**,而它们在挡着后面的活 —— " +
+        "依赖它们的工作项一条都开不了工。**没有任何人会替你处理它们**:\n" +
+        "`blocked` 不在执行待办里(`execute_work` 只看 `open|in_progress`),所以卡住的\n" +
+        "不是某一个回合,而是整个项目 —— 待办会变成空的,而「空待办」与「组织已经把活\n" +
+        "干完了」在日志里长得一模一样。\n\n" +
+        renderBlockedWorks(db, todo) +
+        "\n\n**逐条处置**(阻塞不是一种状态,是一件需要决定的事):\n\n" +
+        "1. 用 `blocker_read` 看它挂着的阻塞现场 —— `detail` 里写着「需要谁做什么决定」\n" +
+        "2. 判它属于哪一种,然后动手:\n" +
+        "   - **依赖边配错了**(例如下游指向了被取消的那一份)→ `work_update` 改 `dependsOn`\n" +
+        "   - **派错了 worker** → `work_assign` 改派(负责人**只能是 worker**:`work_create` /" +
+        " `work_assign` 的调用期门都拒收别的角色)。⚠️ 容器(有子项的工作项)**不需要**归属正确" +
+        " —— 它不由执行者跑,所以「容器派给了 worker」**不是**要修的东西\n" +
+        "   - **阻塞已经解决** → `blocker_update` 落 `resolved`(必须写 `resolution`)," +
+        "再把工作项挪回 `open` / `in_progress`:**不挪回去它永远不会被跑**\n" +
+        "   - **只有甲方能解**(缺数据 / 凭据 / 权限 / 决策)→ `ask_role` 让业务经理去问甲方。" +
+        "**不要**替甲方假设答案,也不要自己承诺一个没有依据的期限\n" +
+        "   - **这块范围不要了** → `work_update` 置 `cancelled`(取消 = 收口,不是失败)\n" +
+        "3. 处置完在**同一条回复**里说清每条的去向 —— 下一 tick 平台会重新查库\n\n" +
+        "**不要自己动手做这些工作项里的活** —— 你不持 `code.*`,执行是 worker 的事。"
       );
     case "decompose_project":
       return (
@@ -1307,6 +1586,33 @@ function renderStrandedWorks(db: Database.Database, todo: DriverTodo): string {
   return lines.join("\n");
 }
 
+/**
+ * 被阻塞的工作项 + **它挂着的未解决阻塞**(查出来的现场:`id` / `severity` / 负责人)。
+ *
+ * 只渲染**结构化的列**,不渲染阻塞正文 —— 与规则的 `if` 同一条纪律(§2.11.3):
+ * 「这条阻塞该谁修」是项目经理的判断,平台只负责把「有哪些东西」摆出来,
+ * 并**明确标出**「一条阻塞都没登记」的那种情况(它是**最需要人看**的一种:
+ * 说不出为什么卡住,而不是说清了在等谁)。
+ */
+function renderBlockedWorks(db: Database.Database, todo: DriverTodo): string {
+  const lines: string[] = [];
+  for (const id of todo.refs) {
+    const w = getWork(db, id);
+    if (w === null) continue;
+    const a = getAgent(db, w.assigneeAgentId);
+    const blockers = blockersForWork(db, id);
+    lines.push(
+      `- \`${w.id}\`「${w.title}」← 负责人 ` +
+        `${a === null ? w.assigneeAgentId : `${a.displayName}(${a.role})`}` +
+        (blockers.length > 0
+          ? `;挂着 ${blockers.length} 个未解决阻塞:` +
+            blockers.map((b) => `\`${b.id}\`[${b.severity}]`).join(" / ")
+          : ";⚠️ **一条阻塞都没登记** —— 没人说得出它为什么 `blocked`"),
+    );
+  }
+  return lines.join("\n");
+}
+
 // ── 排空 ────────────────────────────────────────────────────────
 
 /** 一次 agent 回合的返回形态(宿主按 `TurnResult` / `ExecutionResult` 填)。 */
@@ -1435,6 +1741,21 @@ export async function drainProject(deps: DrainDeps): Promise<DrainResult> {
         `已达单次排空上限 ${maxRounds} 个 agent 回合,仍有待办没跑完 —— ` +
         `已停下(不是静默停:这条会广播并落库)`;
       break;
+    }
+
+    // ── 平台记账(丙②):把**已经整合完**的容器收口 ────────────────────
+    //
+    // 放在查待办**之前**,而且每一轮都查一次(纯查询,没有跨调用状态):
+    //   - 「判据是库里的工件」⇒ 它必须是声明式的,不是某个回合的副产品 ——
+    //     「整合那个回合成功之后再写」会漏掉**产出边挂在子项上**的整类现场。
+    //   - 先收口再查库,新终态的根这一轮就能点亮它的 `review_work`(质检那一条),
+    //     不必等下一个 tick。
+    //   - 收口本身不占 `maxRounds` 的配额:它是平台的账,不是一个 agent 回合。
+    for (const id of closeIntegratedContainers(deps.db, deps.projectId, deps.now(), deps.log)) {
+      deps.log(
+        `dispatcher: 容器 ${id} 已收口 → done(它的交付整合完了);` +
+          "等一下质检会按 review_work 审这条整合产物",
+      );
     }
 
     const board = collectTodos({
