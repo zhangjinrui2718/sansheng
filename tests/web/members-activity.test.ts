@@ -38,6 +38,20 @@
  *     (harness 页的角色页签),那个组件已删 —— 现在由**成员页签**承担,断言就在上面
  *     那两条里。
  *
+ * ── 2026-10-06(同日第三刀):harness 从成员面板里**搬出去单独成卡** ─────
+ *
+ * 用户的原话:「成员中,角色 harness 单独放一个卡片出来,未来角色的 harness 配置
+ * 就放在这个地方」。对本文件的影响:
+ *
+ *   - `MemberPane` 不再接收**任何** harness 相关的 prop(那个 `onHarnessSaved`
+ *     也一起删掉 —— 没有读者了就是死参数),面板里也不再渲染 harness。
+ *   - 判据 ① 里那两条断言**改了方向**:以前断言「成员面板里**有** harness 那一块」,
+ *     现在断言「**没有**」;并新增一条**位置与归属**的断言(组合组件
+ *     `MemberTabPanels` = 页面实际用的结构:面板在上、harness 卡在下)。
+ *     `MembersPage` 依赖 store,SSR 下驱动不了,所以走组合组件而不是硬渲染页面。
+ *   - 卡片头自己的判据(状态摘要、告警 Pill、`embedded` 不出两层 `Section`)
+ *     在 `tests/web/harness-by-role.test.ts` 判据 ⑦⑧ —— 这里不重复一份。
+ *
  * ── 一个渲染细节(写断言时必须知道)────────────────────────────
  *
  * `renderToStaticMarkup` 会在**相邻文本节点**之间插 `<!-- -->`
@@ -64,6 +78,7 @@ import type {
 import {
   MemberPane,
   MemberRoleTabs,
+  MemberTabPanels,
   debtFacts,
   elapsedSinceFetch,
   formatAge,
@@ -304,7 +319,6 @@ const renderPane = (over: {
   dispatch: ProjectLiveView["dispatch"] | null;
   fetchedAt: number | null;
   now: number;
-  onHarnessSaved?: () => void;
 }) => renderToStaticMarkup(createElement(MemberPane, over));
 
 /** 最常用的那一次渲染:host 快照、无本地漂移(fetchedAt === now)。 */
@@ -411,11 +425,63 @@ describe("① 一次只渲染一个成员(这一版要修的正是「四个人�
     const asBm = disclosure(BM.role);
     expect(asBm, "业务经理那块里出现了工程师独有的单元").not.toContain(WK_ONLY_UNIT);
     expect(asBm).toContain(BM_ONLY_UNIT);
+  });
 
-    // 而且成员面板里挂的**就是这一块**(旧的只读「角色能力面」不许还在)
-    const pane = visible(renderWorker());
-    expect(pane, "成员面板里没有 harness 那一块").toContain("角色 harness");
+  it("【harness 单独成卡】它**不在**成员面板卡片里(负样本)", () => {
+    // 2026-10-06(第三刀):用户原话「成员中,角色 harness 单独放一个卡片出来,
+    // 未来角色的 harness 配置就放在这个地方」。所以这条断言的方向**反过来**了 ——
+    // 以前断言成员面板里**有**它,现在断言**没有**。
+    const pane = renderWorker();
+    expect(pane, "「角色 harness」还在成员面板卡片里").not.toContain("角色 harness");
+    expect(pane, "harness 的配置折叠块还在成员面板里").not.toContain("展开配置(提示词单元");
+    expect(pane, "`RoleHarnessSection` 画出来的东西还在面板里").not.toContain(WK_ONLY_UNIT);
     expect(pane, "旧的只读「角色能力面」还在 —— 两处并存了").not.toContain("角色能力面");
+  });
+
+  it("【harness 单独成卡】它在面板**之后**、同一个 tab 面板里另起一块(位置与归属)", () => {
+    // ⚠️ `MembersPage` 依赖 store(`useChatStore`),SSR 下驱动不了 —— 照本文件
+    // 既有做法,把页面里那两块**纯 props** 的组合抽出来断言:`MemberTabPanels`
+    // 就是页面实际用的那个组合(member / harness 两个槽)。
+    const paneHtml = renderWorker();
+    const stack = renderToStaticMarkup(
+      createElement(MemberTabPanels, {
+        member: createElement(MemberPane, {
+          member: WK,
+          activity: WK_ACTIVITY,
+          conversation: WK_CONVERSATION,
+          conversationError: null,
+          artifacts: WK_ARTIFACTS,
+          runtime: "host",
+          dispatch: DISPATCH,
+          fetchedAt: 1_000,
+          now: 1_000,
+        }),
+        harness: createElement(RoleHarnessDisclosure, {
+          role: WK.role,
+          view: HARNESS_VIEW,
+          loading: false,
+          error: null,
+          drafts: {},
+          backups: {},
+          onDraftChange: vi.fn(),
+          onApplied: vi.fn(),
+        }),
+      }),
+    );
+
+    // 归属:面板那一段里没有 harness
+    const paneStart = stack.indexOf("正在做什么");
+    const harnessStart = stack.indexOf("角色 harness");
+    expect(harnessStart, "组合里根本没有 harness 那块").toBeGreaterThan(-1);
+    // 位置:harness 卡排在成员面板之后(用面板自己的内容当锚点)
+    expect(harnessStart, "harness 排在成员面板前面").toBeGreaterThan(paneStart);
+    // 正样本:工件(面板里最后一块)也在 harness 之前 ⇒ 不是「整页只有 harness」
+    expect(stack.indexOf(WK_ARTIFACT_TITLE)).toBeLessThan(harnessStart);
+
+    // 而面板单独渲染时确实没有它(与上一条负样本互为证据)
+    expect(paneHtml).not.toContain("角色 harness");
+    expect(stack).toContain("角色 harness");
+    expect(stack).toContain(WK_ONLY_UNIT);
   });
 
   it("面板里的折叠块默认都不展开(否则一屏又被消息与常量刷满)", () => {

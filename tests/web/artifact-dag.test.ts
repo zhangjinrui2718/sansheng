@@ -28,9 +28,15 @@
  *   6. **环上的诚实** —— 依赖成环的两个环节:页面出现「先后算不出来」的说明,
  *      而且**两个节点都还在**(不许丢)。
  *
- * 组件是纯 props 的(`ArtifactsBody` / `WorkDagCanvas` / `WorkNodePanel` /
- * `UnattachedArtifacts` / `DanglingArtifacts`),与 `tests/web/harness-by-role.test.ts`
- * 同一处置:`renderToStaticMarkup` + 夹具,不起服务、不 stub fetch。
+ * 组件是纯 props 的(`DependencyGraph` / `ArtifactsBody` / `WorkDagCanvas` /
+ * `WorkNodePanel` / `UnattachedArtifacts` / `DanglingArtifacts`),与
+ * `tests/web/harness-by-role.test.ts` 同一处置:`renderToStaticMarkup` + 夹具,
+ * 不起服务、不 stub fetch。
+ *
+ * ⚠️ **2026-10-07 的渲染改动**(用户要求依赖关系图**不默认收起、排在最上面**):
+ * DAG 那一块从 `ArtifactsBody` 里整块提出来成了 `DependencyGraph`,本文件因此改成
+ * 渲染「`DependencyGraph` + `ArtifactsBody`」的组合(见 `renderBody`)。**断言一条
+ * 都没删** —— 变的只有渲染入口、以及 `live` 现在该喂给 ① 而不是 ③④⑤。
  *
  * ⚠️ **断言要落在那个节点上,不能全页 grep。** 页面里同时有 DAG 节点、环节面板、
  * 图例,全页找一个词可能命中别处 —— 所以下面的 `nodeButton()` 取出某个节点卡片的
@@ -42,6 +48,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import type { ArtifactView, WorkView } from "@shared/types/platform";
 import {
   ArtifactsBody,
+  DependencyGraph,
   WorkDagCanvas,
   WorkNodePanel,
   UnattachedArtifacts,
@@ -119,12 +126,12 @@ const qaRunningLive: DagLive = {
 const unavailableLive: DagLive = { runtime: "unavailable", agents: [] };
 
 type BodyProps = Parameters<typeof ArtifactsBody>[0];
+type GraphProps = Parameters<typeof DependencyGraph>[0];
 
 function bodyProps(over: Partial<BodyProps> = {}): BodyProps {
   return {
     works: WORKS,
     artifacts: ARTS,
-    live: null,
     picked: undefined,
     onPick: vi.fn(),
     openId: null,
@@ -133,8 +140,45 @@ function bodyProps(over: Partial<BodyProps> = {}): BodyProps {
   };
 }
 
-const renderBody = (over: Partial<BodyProps> = {}): string =>
-  renderToStaticMarkup(createElement(ArtifactsBody, bodyProps(over)));
+function graphProps(over: Partial<GraphProps> = {}): GraphProps {
+  return {
+    works: WORKS,
+    artifacts: ARTS,
+    live: null,
+    picked: undefined,
+    onPick: vi.fn(),
+    ...over,
+  };
+}
+
+/**
+ * 渲染**图上那段(DAG)+ 面板那段**的组合,顺序与页面一致(图在前、面板在后)。
+ *
+ * ⚠️ 2026-10-07:依赖关系图从 `ArtifactsBody` 里整块提出去、成了自己的导出
+ * `DependencyGraph`(用户要求它**展开**并排在这一页最上面)。原先是
+ * `renderBody` 只渲染 `ArtifactsBody`(DAG 折叠在里面)。下面这一行只是把两块拼回来 ——
+ * 「图在前、面板在后」这个 DOM 顺序与旧版逐字相同,所以 `nodeButton()` 的定位方式
+ * 一个字都不用改(它靠标题的**第一次**出现 + 向左找 `<button>`,而面板里的标题
+ * 不是按钮)。
+ *
+ * ⚠️ `works` / `artifacts` 由**同一份** `over` 同时喂给两块(否则「works 为空 ⇒
+ * 不画节点」那条会假红:块里空了、图里还是老夹具)。只有图的 `live` 要单独喂 ——
+ * `ArtifactsBody` 现在不接 `live`(③④⑤ 一处都不读运行态)。
+ */
+const renderBody = (over: Partial<BodyProps> = {}, graphOver: Partial<GraphProps> = {}): string => {
+  const body = bodyProps(over);
+  return renderToStaticMarkup(
+    createElement(
+      "div",
+      null,
+      createElement(
+        DependencyGraph,
+        graphProps({ works: body.works, artifacts: body.artifacts, picked: body.picked, ...graphOver }),
+      ),
+      createElement(ArtifactsBody, body),
+    ),
+  );
+};
 
 /**
  * 取出某个节点卡片的那一段标记(`<button class="ss-dag-node">…</button>`)。
@@ -239,7 +283,7 @@ describe("② 不挂在任何环节上的工件(workId: null)单独一块", () =
 
 describe("③ 在跑标记:只有真的有回合在跑的节点带 data-running / 呼吸点", () => {
   it("质检在跑 ⇒ 乙节点点亮;甲、丙**不带**(负样本)", () => {
-    const html = renderBody({ live: qaRunningLive, picked: "w1" });
+    const html = renderBody({ picked: "w1" }, { live: qaRunningLive, picked: "w1" });
     expect(countOf(html, /data-running="true"/g), "点亮的节点不是恰好一个").toBe(1);
 
     const b = nodeButton(html, "环节乙");
@@ -255,7 +299,7 @@ describe("③ 在跑标记:只有真的有回合在跑的节点带 data-running 
   });
 
   it("正样本基线:所有回合都空 ⇒ 一个都不点亮(证明上一条不是恒真)", () => {
-    const html = renderBody({ live: idleLive, picked: "w1" });
+    const html = renderBody({ picked: "w1" }, { live: idleLive, picked: "w1" });
     expect(countOf(html, /data-running="true"/g)).toBe(0);
   });
 
@@ -282,7 +326,7 @@ describe("④ 「运行态读不到」不许被渲染成「空闲 / 没有在跑
   const works = [W1, work("w2", { title: "环节乙", status: "in_progress", assigneeAgentId: "agent-qa" })];
 
   it("runtime=unavailable ⇒ 页面上有「读不到」,且没有任何节点被点亮", () => {
-    const html = renderBody({ works, live: unavailableLive, picked: null });
+    const html = renderBody({ works, picked: null }, { works, picked: null, live: unavailableLive });
     expect(html, "读不到运行态时没有说实话").toContain("读不到");
     expect(countOf(html, /data-running="true"/g), "读不到的运行态被画成了「在跑」").toBe(0);
     // 库里的真状态照旧显示 —— 它是过去的事实,不是「此刻」。
@@ -290,18 +334,18 @@ describe("④ 「运行态读不到」不许被渲染成「空闲 / 没有在跑
   });
 
   it("负样本:不许出现「空闲」「没有在跑」这类断言性文案", () => {
-    const html = renderBody({ works, live: unavailableLive, picked: null });
+    const html = renderBody({ works, picked: null }, { works, picked: null, live: unavailableLive });
     expect(html).not.toContain("空闲");
     expect(html).not.toContain("没有在跑");
   });
 
   it("正样本:live 是 host 且都空时,**不出现**「读不到」(证明上面那句是有条件的)", () => {
-    const html = renderBody({ works, live: idleLive, picked: null });
+    const html = renderBody({ works, picked: null }, { works, picked: null, live: idleLive });
     expect(html).not.toContain("读不到");
   });
 
   it("`live === null`(还没拿到过)同样按「读不到」处理,不按「没在跑」", () => {
-    const html = renderBody({ works, live: null, picked: null });
+    const html = renderBody({ works, picked: null }, { works, picked: null, live: null });
     expect(html).toContain("读不到");
     expect(html).not.toContain("空闲");
   });

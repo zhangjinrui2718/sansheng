@@ -2,7 +2,58 @@
 
 ---
 
-# ⚡ 最新一轮 · W7(2026-10-06 深夜)· **先读这一节**
+# ⚡ 最新一轮 · W8(2026-10-07 凌晨)· **先读这一节**
+
+> W7(成员页删两段 + Harness 并入成员 tab)**仍然有效**。这一轮是两处**摆放**的收口。
+
+用户两条:
+
+> 1. 成员中,角色 harness 单独放一个卡片出来,未来角色的 harness 配置就放在这个地方
+> 2. 工作项中,依赖关系图不要默认收起,放在最上面,这个页面的信息依次是:
+>    依赖关系图、推进图、选中的环节详情
+
+## 状态
+
+```
+W8  `本次提交` feat(web): 角色 harness 单独成卡 + 工作项页顺序(依赖图 → 推进图 → 环节详情)
+1396 passed / 65 files · 两条 typecheck 0 · npm run build 绿 · check:design E1–E14 绿 · as any 0
+```
+
+## ① 工作项页:顺序 = 依赖关系图 → 推进图 → 选中的环节
+
+- 依赖关系图从 `ArtifactsBody` 里**整块提出**,成为导出的 `DependencyGraph`:`Section title="依赖关系图"` + `WorkDag`,**不再包 `<Disclosure>`**(用户点名「不要默认收起」)。
+- `ArtifactsScreen` 依次渲染 `DependencyGraph` → 推进图 Section → `ArtifactsBody`(选中的环节 → 不挂在任何环节上的工件 → 环节读不到的工件)。
+- `ArtifactsBody` 的 props 只去掉了 `live`(DAG 搬走后 ③④⑤ 一处都不读运行态 —— 留个没人读的参数会给下一个人错误暗示)。
+- 判据:既有的 22 条一条未删(测试夹具改成 `DependencyGraph` + `ArtifactsBody` 组合,保持「图在前、面板在后」的旧 DOM 顺序);新增**顺序**判据(`依赖关系图` < `推进图` < `选中的环节`,含反向负样本)与**不再收起**判据。后者做了红/绿实测:临时把 `<Disclosure defaultOpen>` 包回去 ⇒ 4 条变红并报出「① 又被包进 `<details>` 了」,改回 ⇒ 31 passed。
+
+## ② 成员页:角色 harness 单独成卡
+
+- `MemberPane` 里那块 ⑤ 拿出去;同一个 tab 面板之下,新增并导出 `MemberTabPanels({ member, harness })`(**成员卡片 + 独立的「角色 harness」卡片**),页面实际就用它。
+- 卡片头(常显,**在 `<details>` 之外**):`Section title="角色 harness"` + 角色名 + `roleIssueCount>0` 的告警 Pill + **状态摘要行**(单元 x/y 已加载 · 能力 n 项 · 实得工具 m 个或「求解不了(组织未播种)」· 集合文件状态)—— 不展开就知道这个角色的 harness 正不正常。
+- 配置内容默认折叠(`summary="展开配置(提示词单元 · 工具面 · 常量)"`);`hintTitle` 明写「**未来角色 harness 的配置就放在这里**」,以及「提示词单元可编辑保存;`ceiling` / `writeKinds` 是代码内常量、界面改不了,要走代码评审」。
+- `HarnessRolePane` 加 `embedded?: boolean`(默认 `false` = 老形状,零影响):为真时不渲染自己的 `Section` / `aside` / 第二层卡片 ⇒ **卡片套卡片彻底避免**(默认态 `sansheng-card` 计数 = 1,有断言)。
+- 写面四条规矩**一字未改**(保存用后端回读值 / 恢复出厂两段式 / `no_factory_copy` 原样 / `strayToolSetFiles` 告警保留);`onHarnessSaved` 从 `MemberPane` 的 prop 变成 `RoleHarnessSection` 的 prop,读者仍在 `applyContent` 里(不是死 prop,`c10-dead-code` 的源码级断言继续绿)。
+
+## ③ 影子(这一轮的验证方式,含一次自摆乌龙)
+
+看渲染图才确认的两件事:工作项页确实是「依赖图 → 推进图 → 环节详情」;成员页每个成员卡片下面确实多了一张独立的 harness 卡(卡片头 `单元 4/4 已加载 · 能力 22 项 · 实得工具 26 个 · 集合文件 无文件 · 按 ceiling 全集`)。
+
+⚠️ 摆乌龙一次,值得记:改影子脚本时把 `renderToStaticMarkup(<组件>, props)` 当成 `createElement(组件, props)` 用 —— **它不报错**,只是第二参被忽略 ⇒ 渲染出一个 props 为空的组件,屏幕上只剩一排页签。**「不报错」不等于「做对了」**(AGENTS.md 三类静默失败 #2 的同款),已把这条写进 `.probe/w5-preview.tsx` 的注释。
+
+## 验收链(本次实跑)
+
+```
+npx tsc -p tsconfig.server.json --noEmit   # 0
+npx tsc -p tsconfig.web.json --noEmit      # 0
+npm test                                   # 1396 passed / 65 files
+npm run build                              # index-*.js 346.53 kB(gzip 112.35)
+npm run check:design                       # ✓ E1–E14
+grep -rn 'as any' src/ web/src/            # 0
+```
+
+---
+
+# ⚡ 上一轮 · W7(2026-10-06 深夜)· 成员页删两段噪音 + Harness 并入成员 tab
 
 > W6(工件页并入工作项页 + 依赖图边方向)**仍然有效**。这一轮是同一件事的第二步:
 > 用户贴出成员页底部的两段说「这个信息不要展示了,我感觉没什么意思」,并要求

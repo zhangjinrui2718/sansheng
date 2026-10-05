@@ -42,6 +42,22 @@
  * 组件是纯 props 的(`HarnessRolePane` / `RoleHarnessDisclosure`),与
  * `ConversationStream` / `TurnView` 同一处置 —— 导出给测试,不需要起服务、
  * 不需要 stub fetch。
+ *
+ * ── 2026-10-06(同日第三刀):harness **单独成卡**后又补了什么 ─────────
+ *
+ * 用户的原话:「成员中,角色 harness 单独放一个卡片出来,未来角色的 harness 配置
+ * 就放在这个地方」。它从 `MemberPane` 里面搬到下面,卡片本体改由
+ * `RoleHarnessDisclosure` 画(标题 + 角色名 + 告警 Pill + 状态摘要 + 默认折叠的配置)。
+ * 于是本文件新增两组判据:
+ *
+ *   - **判据 ⑦ 卡片头状态摘要**(单元 x/y · 能力 n 项 · 实得工具 m 个 · 集合文件
+ *     状态)**必须落在第一个 `<details>` 之前** —— 否则用户还是要展开才知道
+ *     这个角色的 harness 正不正常;「不知道」的三种(读不到 / 正在读 / 没这个
+ *     角色)在卡片头上也各不相同,而且都不许长成「实得工具 0 个」。
+ *   - **判据 ⑧ 告警 Pill 只在 `roleIssueCount > 0` 时出现**,以及 `embedded`:
+ *     嵌进外层卡片时 `HarnessRolePane` **不再画自己那一份 `Section` 外壳**
+ *     (正负样本各一条 —— 否则展开后是卡片套卡片、角色名出现两次)。判据 ② 也
+ *     补了卡片层的「配置默认折叠 + `defaultOpen` 正样本」。
  */
 import { describe, expect, it, vi } from "vitest";
 import { createElement } from "react";
@@ -52,10 +68,26 @@ import type {
 import {
   HarnessRolePane,
   RoleHarnessDisclosure,
+  harnessStatusText,
   roleIssueCount,
   sharedUnitOwners,
 } from "@/components/members/RoleHarness";
 import { Disclosure } from "@/components/ui/primitives";
+
+/**
+ * 只留**可见正文**:去掉属性与 SSR 插在相邻文本节点之间的 `<!-- -->`。
+ *
+ * ⚠️ 为什么必须去掉属性:卡片刻意把判断依据写进了 `title=`(例如告警 Pill 的
+ * 「4 处需要注意」说明、Section 的 `hintTitle`)。在原始 html 上断言「某个词
+ * 不出现」会被自己的说明文字打红,而那种红是假故障(用户看不见 title 里的字)。
+ * 所以本文件的**文字**断言走 `visible()`;要断言属性(如 `open`)才用原始 html。
+ */
+const visible = (html: string): string =>
+  html
+    .replace(/ title="[^"]*"/g, "")
+    .replace(/<!-- -->/g, "")
+    .replace(/<[^>]*>/g, "");
+
 
 // ── 夹具 ────────────────────────────────────────────────────────
 
@@ -133,6 +165,43 @@ const paneProps = (r: RoleHarnessView) => ({
 const renderPane = (r: RoleHarnessView) =>
   renderToStaticMarkup(createElement(HarnessRolePane, paneProps(r)));
 
+/**
+ * 「角色 harness」那张**卡**的完整夹具 —— `RoleHarnessSection` 取到数据之后画的
+ * 就是这一层(`RoleHarnessDisclosure`)。卡片头的状态摘要、告警 Pill、默认折叠
+ * 这几条判据都在这里断言(SSR 下 `RoleHarnessSection` 永远停在「加载中」)。
+ */
+const FULL: HarnessView = {
+  roles: ROLES,
+  promptDir: "/data/harness/system_prompts/",
+  toolsDir: "/data/harness/tools/",
+  strayToolSetFiles: [],
+  writable: true,
+};
+
+const renderDisclosure = (over: Partial<Parameters<typeof RoleHarnessDisclosure>[0]> = {}) =>
+  renderToStaticMarkup(
+    createElement(RoleHarnessDisclosure, {
+      role: "worker",
+      view: FULL,
+      loading: false,
+      error: null,
+      drafts: {},
+      backups: {},
+      onDraftChange: vi.fn(),
+      onApplied: vi.fn(),
+      ...over,
+    }),
+  );
+
+/**
+ * 卡片头那一截标记 —— **第一个 `<details>` 之前**的部分。
+ *
+ * ⚠️ 这是「不展开也读得到」这条判据的**唯一**硬形式:`<details>` 是闭合的,
+ * 里面的字也在 html 里,所以整段 html 上的 `toContain` 无法区分「卡片头」与
+ * 「展开后的面板摘要行」。截到第一个 `<details>` 才真的在断言「折叠状态下可见」。
+ */
+const cardHead = (html: string): string => html.slice(0, html.indexOf("<details"));
+
 // ── 判据 1:一次只渲染一个角色(面板层)──────────────────────────
 
 describe("① 一次只渲染一个角色(面板层;页签层已挪去成员页签的测试)", () => {
@@ -156,7 +225,7 @@ describe("① 一次只渲染一个角色(面板层;页签层已挪去成员页�
 
 // ── 判据 2:编辑器默认折叠 ──────────────────────────────────────
 
-describe("② 提示词编辑器**默认折叠**(否则又是一屏十几段长正文)", () => {
+describe("② 提示词编辑器 / 配置内容**默认折叠**(否则又是一屏十几段长正文)", () => {
   it("负样本:面板里的 `<details>` 一个都不带 open", () => {
     const html = renderPane(WK);
     expect((html.match(/<details/g) ?? []).length, "折叠块存在(details 渲染出来了)").toBeGreaterThan(0);
@@ -171,6 +240,18 @@ describe("② 提示词编辑器**默认折叠**(否则又是一屏十几段长�
       createElement(Disclosure, { summary: "x", defaultOpen: true }, "内容"),
     );
     expect(/<details[^>]*\sopen/.test(opened), "defaultOpen 没渲染 open ⇒ 上一条断言无意义").toBe(true);
+  });
+
+  it("【单独成卡】卡片的配置块 summary 是「展开配置(提示词单元 · 工具面 · 常量)」,且默认不展开", () => {
+    const html = renderDisclosure();
+    expect(html).toContain("展开配置(提示词单元 · 工具面 · 常量)");
+    expect((html.match(/<details/g) ?? []).length, "卡里应该有折叠块").toBeGreaterThan(0);
+    expect(/<details[^>]*\sopen/.test(html), "卡片的配置默认展开了 —— 承诺破了").toBe(false);
+  });
+
+  it("✅ 正样本:`defaultOpen` 时卡片的配置块**必须**带 open(证明上一条不是空转)", () => {
+    const opened = renderDisclosure({ defaultOpen: true });
+    expect(/<details[^>]*\sopen/.test(opened), "defaultOpen 没透到卡片上").toBe(true);
   });
 });
 
@@ -320,38 +401,15 @@ describe("④ 缺单元 / 集合文件坏 / 越权被拒 / 未知工具名 —�
 // 还在取、取回来的视图里根本没有这个角色 —— 这三种都**不是**「它没有提示词单元」。
 // 本项目反复栽的形态就是「把不知道显示成一切正常」,所以这三种状态在这里各钉一条。
 describe("⑥ 取数失败 / 还没取到 / 视图里没有这个角色 —— 都不许说成「没有单元」", () => {
-  const FULL: HarnessView = {
-    roles: ROLES,
-    promptDir: "/data/harness/system_prompts/",
-    toolsDir: "/data/harness/tools/",
-    strayToolSetFiles: [],
-    writable: true,
-  };
-
-  const renderDisclosure = (over: Partial<Parameters<typeof RoleHarnessDisclosure>[0]>) =>
-    renderToStaticMarkup(
-      createElement(RoleHarnessDisclosure, {
-        role: "worker",
-        view: FULL,
-        loading: false,
-        error: null,
-        drafts: {},
-        backups: {},
-        onDraftChange: vi.fn(),
-        onApplied: vi.fn(),
-        ...over,
-      }),
-    );
-
-  it("默认折叠,而且 summary 上是那句写死的话(0 处需要注意时不带数字)", () => {
+  it("默认折叠,而且配置块的 summary 是那句写死的话", () => {
     const html = renderDisclosure({ role: "project_manager" }); // 视图里没有它
-    expect(html).toContain("角色 harness(提示词单元 · 工具面 · 常量)");
+    expect(html).toContain("展开配置(提示词单元 · 工具面 · 常量)");
     expect(/<details[^>]*\sopen/.test(html), "默认折叠的承诺破了").toBe(false);
   });
 
-  it("有需要注意的处数时,summary 上带出那个数(worker 4 处)", () => {
+  it("有需要注意的处数时,卡片头上带出那个数(worker 4 处)", () => {
     const html = renderDisclosure({});
-    expect(html).toContain("角色 harness(提示词单元 · 工具面 · 常量) · 4 处需要注意");
+    expect(cardHead(html)).toContain("4 处需要注意");
   });
 
   it("取数失败 ⇒ 一句错误,并明说「不是这个角色没有提示词单元」", () => {
@@ -381,5 +439,125 @@ describe("⑥ 取数失败 / 还没取到 / 视图里没有这个角色 —— �
     });
     expect(html).toContain("workers.json");
     expect(html).toContain("不会被读取");
+  });
+});
+
+// ── 判据 7:卡片头的**状态摘要**(用户「不展开就知道正不正常」的那一行)──
+//
+// 2026-10-06(第三刀):harness 从成员面板里搬出来**单独成卡**(用户原话:
+// 「成员中,角色 harness 单独一个卡片出来,未来角色的 harness 配置就放在这个
+// 地方」)。搬出来之后多了一条必须钉住的东西:**卡片头**在不展开时就要能回答
+// 「这个角色的 harness 正不正常」—— 否则用户只能靠展开一大堆正文去猜。
+describe("⑦ 卡片头状态摘要:不展开也读得到(单元 x/y · 能力 n 项 · 实得工具 m 个 · 集合文件状态)", () => {
+  it("worker(1/2 单元、能力 2、工具 3、集合文件坏)在**第一个 `<details>` 之前**就写明", () => {
+    const head = visible(cardHead(renderDisclosure()));
+    expect(head, "标题不在卡片头").toContain("角色 harness");
+    expect(head, "角色名不在卡片头").toContain("工程师");
+    expect(head).toContain("单元 1/2 已加载");
+    expect(head).toContain("能力 2 项");
+    expect(head).toContain("实得工具 3 个");
+    expect(head).toContain("集合文件 文件无效 · 已退化成 ceiling 全集");
+  });
+
+  it("三种「不知道」在卡片头上也各不相同(读不到 / 正在读 / 没这个角色)", () => {
+    const failed = visible(cardHead(renderDisclosure({ view: null, error: "internal: 连接被拒绝" })));
+    const loading = visible(cardHead(renderDisclosure({ view: null, loading: true })));
+    const missingRole = visible(cardHead(renderDisclosure({ role: "project_manager" })));
+    expect(failed).toContain("状态摘要读不到");
+    expect(loading).toContain("正在读取 harness 视图");
+    expect(missingRole).toContain("没有角色 project_manager");
+    // ⚠️ 三种都不许长得像「一切正常」的一个 0
+    for (const text of [failed, loading, missingRole]) {
+      expect(text, "把「不知道」显示成了「实得工具 0 个」").not.toContain("实得工具 0 个");
+      expect(text, "把「不知道」显示成了「单元 0/0」").not.toContain("单元 0/0");
+    }
+  });
+
+  it("`toolsSolved === false` ⇒ 卡片头是「求解不了(组织未播种)」,**不是**「0 个」", () => {
+    const unsolved = role("project_manager", "项目经理", {
+      toolsSolved: false,
+      tools: [],
+      promptUnits: [unit("project_manager.core")],
+    });
+    const head = visible(
+      cardHead(renderDisclosure({ role: "project_manager", view: { ...FULL, roles: [unsolved] } })),
+    );
+    expect(head).toContain("求解不了(组织未播种)");
+    expect(head, "把「算不出来」显示成了「实得工具 0 个」").not.toContain("实得工具 0 个");
+  });
+
+  it("✅ 正样本:求解过了、确实一个都没有 ⇒ 卡片头就该写「实得工具 0 个」", () => {
+    const solvedEmpty = role("project_manager", "项目经理", {
+      toolsSolved: true,
+      tools: [],
+      promptUnits: [unit("project_manager.core")],
+    });
+    const head = visible(
+      cardHead(renderDisclosure({ role: "project_manager", view: { ...FULL, roles: [solvedEmpty] } })),
+    );
+    expect(head).toContain("实得工具 0 个");
+    expect(head, "求解过了却报「求解不了」").not.toContain("求解不了");
+  });
+
+  it("字段缺失(前端比后端新)⇒ 退化回显示计数,不许误报「求解不了」", () => {
+    const legacy = role("project_manager", "项目经理", {
+      tools: ["c1", "c2"],
+      promptUnits: [unit("project_manager.core")],
+    });
+    delete (legacy as { toolsSolved?: boolean }).toolsSolved;
+    expect(harnessStatusText(legacy)).toContain("实得工具 2 个");
+    expect(harnessStatusText(legacy)).not.toContain("求解不了");
+  });
+});
+
+// ── 判据 8:卡片头告警 Pill + `embedded` 不许卡片套卡片 ─────────────
+
+describe("⑧ 卡片头告警 Pill 与 `embedded`(同一个角色名/标题不许画两遍)", () => {
+  it("`roleIssueCount > 0` ⇒ 卡片头出现那个处数;= 0 ⇒ 一个字都不出现(负样本)", () => {
+    const dirtyHead = cardHead(renderDisclosure()); // worker 4 处
+    expect(dirtyHead).toContain("4 处需要注意");
+    expect(roleIssueCount(WK), "角标数字必须真的来自 roleIssueCount").toBe(4);
+
+    const clean = role("project_manager", "项目经理", {
+      promptUnits: [unit("project_manager.core")],
+    });
+    expect(roleIssueCount(clean)).toBe(0);
+    const cleanHtml = renderDisclosure({ role: "project_manager", view: { ...FULL, roles: [clean] } });
+    expect(cleanHtml, "0 处也刷了一条要读的字").not.toContain("处需要注意");
+  });
+
+  it("卡片里角色名只出现**一次**(嵌入的面板不再画一遍自己的标题)", () => {
+    const text = visible(renderDisclosure());
+    expect(
+      (text.match(/工程师/g) ?? []).length,
+      "角色名在卡片里出现了两次 —— 卡片套卡片了",
+    ).toBe(1);
+  });
+
+  it("卡片套卡片:**只有一个** `sansheng-card` 外壳(嵌进来的面板不再套第二层)", () => {
+    const html = renderDisclosure();
+    expect(
+      (html.match(/sansheng-card/g) ?? []).length,
+      "卡片里还有第二层 sansheng-card —— 展开后会看到卡中卡",
+    ).toBe(1);
+  });
+
+  it("`embedded` 为真 ⇒ `HarnessRolePane` **不渲染**自己的 `Section` 外壳,内容照旧(正负样本)", () => {
+    const embedded = renderToStaticMarkup(
+      createElement(HarnessRolePane, { ...paneProps(WK), embedded: true }),
+    );
+    expect(embedded, "embedded 时还画了自己的 Section 外壳").not.toContain("<section");
+    // ⚠️ 断言走**可见正文** —— 「共用于 N 个角色」那个 Pill 的 `title=` 里列着
+    // 声明它的角色名(那是悬停才看得见的字,不是画出来的标题)。
+    expect(visible(embedded), "角色名被画了第二遍").not.toContain(WK.displayName);
+    // 内容还在 —— 证明上面两条不是「整块没渲染」的空转
+    expect(embedded).toContain("worker.core");
+    expect(embedded).toContain("提示词单元");
+    expect(embedded).toContain("文件无效 · 已退化成 ceiling 全集");
+
+    // ✅ 正样本:默认(不传 embedded = 老形状)时 Section 外壳与角色名**必须**在
+    const full = renderPane(WK);
+    expect(full).toContain("<section");
+    expect(full).toContain(WK.displayName);
   });
 });

@@ -28,11 +28,12 @@
  * `role` 是渲染层专门为测试留的钩子(见 `web/src/routes/Works.tsx` 文件头)。
  * 属性顺序无关:`tagsWith` 先取「含这个属性的开标签」整段,再由 `attrOf` 读值。
  *
- * ⚠️ **「一个 `.ss-live-dot` 都没有」落在新的主视图(① 与它的图例)上,不是整页**:
- * ⑤ 旧 DAG 的图例里有一个常驻的 `.ss-live-dot`(「点 = 此刻在跑」),它的节点上还有
- * 一个**灰的、不动的** unknown 点 —— 那是旧组件的信息,而 ⑤ 被要求「一个信息都不删」,
- * 所以不能为了让全页出现 0 个类名而删它们。这里另有一条测试把整页的情况钉清楚:
- * **运行态读不到时,`.ss-live-dot` 只允许出现在 ⑤ 那一块**(新主视图 0 个)。
+ * ⚠️ **「一个 `.ss-live-dot` 都没有」落在新的主视图(② 推进图与它的图例)上,不是整页**:
+ * ① 依赖关系图(旧 DAG)的图例里有一个常驻的 `.ss-live-dot`(「点 = 此刻在跑」),
+ * 它的节点上还有一个**灰的、不动的** unknown 点 —— 那是旧组件的信息,而 ① 被要求
+ * 「一个信息都不删」,所以不能为了让全页出现 0 个类名而删它们。这里另有一条测试把
+ * 整页的情况钉清楚:**运行态读不到时,`.ss-live-dot` 只允许出现在 ① 那一块**(② 主视图 0 个)。
+ * (2026-10-07:① = 依赖关系图,原来编号 ⑤、且默认折叠;见判据 7。)
  */
 import { describe, expect, it, vi } from "vitest";
 import { createElement } from "react";
@@ -221,8 +222,26 @@ const screenProps = (over: Partial<ScreenProps> = {}): ScreenProps => ({
 const renderScreen = (over: Partial<ScreenProps> = {}): string =>
   renderToStaticMarkup(createElement(ArtifactsScreen, screenProps(over)));
 
-/** ⑤ 旧 DAG 那一段的起点(它自己的 `<details>`;之前的一切都属于 ①~④)。 */
-const dagStart = (html: string): number => html.indexOf('<details class="ss-disclosure"');
+/**
+ * 依赖关系图那一段在整页 HTML 里的**起止位置**。
+ *
+ * ⚠️ **2026-10-07 改了锚点**(用户要求依赖关系图**不默认收起、排在最上面**):
+ * 它原来是 `<details class="ss-disclosure">`(折叠),现在整块是
+ * `Section`(标题「依赖关系图」)+ `WorkDag`,排在 ② 推进图**之前**。
+ * 于是这一个助手改成「**从 ① 的标题到 ② 的标题**」—— 切片范围还是同一件事
+ * (依赖图那块占的 HTML),只是两端都没了 `<details>` 这个锚。
+ *
+ * 用途只有一处:把「运行态读不到时一个 `.ss-live-dot` 都不许出现在新主视图里」
+ * 那条断言限制在 ① 之内(① 的图例与画布本来就有 `.ss-live-dot`,那是它自己的信息)。
+ */
+function dagRange(html: string): { start: number; end: number } {
+  // 锚用「标题单元格 + 下一块标题」,两端都是纯文本 —— 不依赖区块内部的结构。
+  const start = html.indexOf(">依赖关系图<");
+  const end = html.indexOf(">推进图<");
+  expect(start, "① 依赖关系图那一段不见了").toBeGreaterThan(-1);
+  expect(end, "① 之后没有 ② 推进图 —— 顺序可能被改动了").toBeGreaterThan(start);
+  return { start, end };
+}
 
 // ── 判据 1:每件工件恰好一个点(含不挂环节的)────────────────────
 
@@ -368,7 +387,7 @@ describe("③ 条上的刻度:某条环节的刻度数 = 它的工件数", () =>
 
 // ── 判据 4 / 5:运行态读不到 ⇒ 一个呼吸点都没有 ──────────────────
 
-describe("④ 运行态 `unavailable` / `live === null` ⇒ 新主视图一个 `.ss-live-dot` 都没有", () => {
+describe("④ 运行态 `unavailable` / `live === null` ⇒ ② 推进图一个 `.ss-live-dot` 都没有", () => {
   it("runtime unavailable ⇒ 0 个呼吸点,而且明说「读不到」", () => {
     const html = renderTimeline({ live: UNAVAILABLE });
     expect(countOf(html, /ss-live-dot/g), "读不到运行态却点亮了呼吸点").toBe(0);
@@ -398,16 +417,22 @@ describe("④ 运行态 `unavailable` / `live === null` ⇒ 新主视图一个 `
     expect(countOf(off, /ss-live-dot/g)).toBe(0);
   });
 
-  it("整页:读不到运行态时,`.ss-live-dot` **只允许**出现在 ⑤ 旧 DAG 那一块", () => {
+  it("整页:读不到运行态时,`.ss-live-dot` **只允许**出现在 ① 依赖关系图那一块", () => {
     const html = renderScreen({ live: UNAVAILABLE });
-    const at = dagStart(html);
-    expect(at, "⑤ 的 <details> 不见了 —— 折叠不等于删除").toBeGreaterThan(-1);
+    const { start, end } = dagRange(html);
+    // ① 排在 ② 之前(用户要求的第一条顺序)—— 这一条只钉相对位置,不钉它是不是字节 0
+    // (`ArtifactsScreen` 外面还包着一层 `div.grid`,锚不该依赖那层壳)
+    expect(start, "依赖关系图跑到推进图后面去了").toBeLessThan(end);
+    // ① 之外(它前面 + 它后面 = ② 主视图 / 图例 / ③ 面板 / ④⑤)一个点都不许有
     expect(
-      countOf(html.slice(0, at), /ss-live-dot/g),
+      html
+        .slice(0, start)
+        .concat(html.slice(end))
+        .match(/ss-live-dot/g) ?? [],
       "新主视图 / 图例 / 面板里出现了点(它们一个都不许有)",
-    ).toBe(0);
-    // ⑤ 里那些点是旧组件的既有信息(图例 + 灰的 unknown 点),一个都没删
-    expect(countOf(html.slice(at), /ss-live-dot/g)).toBeGreaterThan(0);
+    ).toHaveLength(0);
+    // ① 里那些点是它自己的既有信息(图例 + 灰的 unknown 点),一个都没删
+    expect(countOf(html.slice(start, end), /ss-live-dot/g)).toBeGreaterThan(0);
   });
 
   it("可点元素键盘可达:每条条、每个点都是 role=button + tabindex=0", () => {
@@ -444,46 +469,78 @@ describe("⑥ 刻度渲染出来了;「此刻」线只在读得到运行态且�
   });
 });
 
-// ── 判据 7:旧 DAG 还在 DOM 里,但默认折叠 ───────────────────────
+// ── 判据 9:依赖关系图 = 页面第一块,而且**不再默认收起** ─────────
+//
+// ⚠️ **两条新判据放在这份文件里的理由**:这里已经有 `ArtifactsScreen` 的整页渲染
+// (`renderScreen`)与顺序助手(`dagRange`),而这两条都是**整页级**的判据(顺序、
+// 有没有被折起来)—— 放进只渲染局部组合的 `artifact-dag.test.ts` 会重复搭一套整页夹具。
+// (2026-10-07 加,对应这条要求:「工作项中,依赖关系图不要默认收起,放在最上面,
+//  这个页面的信息依次是:依赖关系图、推进图、选中的环节详情」。)
 
-describe("⑦ ⑤ 依赖关系图:结构不变,默认折叠", () => {
-  it("`class=\"ss-dag-node\"` 的数量仍对得上(折叠 ≠ 删除)", () => {
+describe("⑨ ① 依赖关系图:排在最上面,而且不再默认收起", () => {
+  it("顺序:依赖关系图 < 推进图 < 选中的环节(负样本:反过来说不成立)", () => {
     const html = renderScreen();
-    expect(countOf(html, /class="ss-dag-node"/g), "旧 DAG 的节点被弄丢了").toBe(WORKS.length);
-    expect(html).toContain("依赖关系图(分层排布,可能较宽)");
+    const graph = html.indexOf("依赖关系图");
+    const timeline = html.indexOf("推进图");
+    const panel = html.indexOf("选中的环节");
+    // 三个锚都必须真的找到 —— 否则下面的大小比较会因为 -1 而「恰好」成立
+    expect(graph, "页面上没有「依赖关系图」").toBeGreaterThan(-1);
+    expect(timeline, "页面上没有「推进图」").toBeGreaterThan(-1);
+    expect(panel, "页面上没有「选中的环节」").toBeGreaterThan(-1);
+    expect(graph, "依赖关系图不在推进图之前").toBeLessThan(timeline);
+    expect(timeline, "推进图不在选中的环节之前").toBeLessThan(panel);
+    // 负样本:反过来一律不成立(证明上面两条不是恒真)
+    expect(graph, "顺序被读反了").not.toBeGreaterThan(timeline);
+    expect(timeline, "顺序被读反了").not.toBeGreaterThan(panel);
   });
 
-  it("那个 `<details>` 没有 `open`(默认展开就等于把主视图位置又让回去了)", () => {
+  it("`class=\"ss-dag-node\"` 的数量仍对得上(展开 ≠ 换了渲染)", () => {
     const html = renderScreen();
-    const at = dagStart(html);
-    expect(at).toBeGreaterThan(-1);
-    const tagEnd = html.indexOf(">", at);
-    const tag = html.slice(at, tagEnd + 1);
-    expect(tag).toContain("ss-disclosure");
-    expect(tag, "旧 DAG 被默认展开了").not.toMatch(/\sopen(=|\s|>)/);
+    expect(countOf(html, /class="ss-dag-node"/g), "旧 DAG 的节点被弄丢了").toBe(WORKS.length);
+    // ① 的标题还在。**它现在带自己的计数**(works.length),不再是 `<summary>` 里
+    // 那句「依赖关系图(分层排布,可能较宽)」—— 那句话随 `<Disclosure>` 一起没了。
+    expect(html).toContain(">依赖关系图<");
+    expect(html, "折叠的那层壳又回来了").not.toContain("依赖关系图(分层排布,可能较宽)");
+  });
+
+  it("不再默认收起:标题与画布节点在**同一个 Section 块**里,且节点真的渲染出来了", () => {
+    const html = renderScreen();
+    const { start, end } = dagRange(html);
+    const block = html.slice(start, end);
+    // ① 这一块里有画布节点 —— 说明标题与内容并排渲染,中间没有折叠层拦着
+    expect(block, "① 那一块里一个画布节点都没有(内容被折起来了?)").toContain(
+      'class="ss-dag-node"',
+    );
+    // 负样本:① 这块里没有 `<details>` / `<summary>` / `<Disclosure`
+    expect(block, "① 又被包进 <details> 了").not.toContain("<details");
+    expect(block, "① 又被包进 <summary> 了").not.toContain("<summary");
+    // 并且节点在**整页** HTML 里出现(不是只在某个折叠容器的内部 markup 里)
+    expect(html).toContain('class="ss-dag-node"');
   });
 
   it("负样本:整页里没有任何 `<details>` 是展开的(夹具无长 body / 无 goal)", () => {
     const html = renderScreen();
     expect(html).not.toMatch(/<details[^>]*\sopen(=|\s|>)/);
-    expect(html).toContain("<details");
+    expect(html, "④ 的清单仍然该是折叠的 —— 一个 <details> 都没有反倒说明它被拆掉了").toContain(
+      "<details",
+    );
   });
 });
 
-// ── 判据 8:选中联动(① 与 ② 是同一个选中态)──────────────────────
+// ── 判据 10:选中联动(① 或 ② 上选的,就是 ③ 面板显示的那个)──────────
 
-describe("⑧ 选中联动:① 上选中的那条 = ② 面板显示的那个环节", () => {
+describe("⑩ 选中联动:① 或 ② 上选中的那条 = ③ 面板显示的那个环节", () => {
   /**
-   * ② 面板那一段(`>选中的环节<` → ③ 的标题)。
+   * ③ 面板那一段(`>选中的环节<` → ④ 的标题)。
    *
-   * ⚠️ 端点的锚必须带 `>` / `<`:① 的 tooltip 里逐字写着「产出环节:不挂在任何环节上」,
-   * 只按那句话切会把切片起点切到 ① 里去(`>不挂在任何环节上的工件<` 才是 ③ 的标题)。
+   * ⚠️ 端点的锚必须带 `>` / `<`:② 的 tooltip 里逐字写着「产出环节:不挂在任何环节上」,
+   * 只按那句话切会把切片起点切到 ② 里去(`>不挂在任何环节上的工件<` 才是 ④ 的标题)。
    */
   function panelSection(html: string): string {
     const from = html.indexOf(">选中的环节<");
     const to = html.indexOf(">不挂在任何环节上的工件<");
-    expect(from, "② 面板不见了").toBeGreaterThan(-1);
-    expect(to, "③ 那一块不见了(夹具里 6 件决策,应该一直在)").toBeGreaterThan(from);
+    expect(from, "③ 面板不见了").toBeGreaterThan(-1);
+    expect(to, "④ 那一块不见了(夹具里 6 件决策,应该一直在)").toBeGreaterThan(from);
     return html.slice(from, to);
   }
 

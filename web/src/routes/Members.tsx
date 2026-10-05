@@ -70,6 +70,27 @@
  *      集合文件坏 / 越权被拒 / 未知工具名)。后者是原 harness 页页签角标的功能,
  *      合并后不能丢。
  *
+ * ── 2026-10-06(同日第三刀):为什么 harness 要**单独成一张卡**──────────
+ *
+ * 用户的原话(逐字):
+ *
+ *   「成员中,角色 harness 单独放一个卡片出来,未来角色的 harness 配置就放在
+ *     这个地方」
+ *
+ * 所以 `MemberPane` 里第 5 块(harness)被**拿了出来**,在同一个 tab 面板里、
+ * 面板**之下**单独渲染一块(`MemberTabPanels` 的两个槽:member / harness)。
+ * 为什么值得单独一张卡,而不是「成员面板的第 5 块」:
+ *
+ *   1. **归属不同** —— 那一块描述的是**角色**(能力面 / 提示词单元 / 工具集合
+ *      文件),不是**这个人此刻在干什么**。夹在「他产生了什么对话 / 他产出了什么
+ *      工件」中间,它会被读成这个成员的又一项活动。
+ *   2. **去处明确** —— 它是**未来角色 harness 配置的唯一落点**(用户原话)。
+ *      卡片头一行就摆出「这个角色的 harness 正不正常」(状态摘要 + 告警 Pill),
+ *      可编辑的内容默认折叠;`Section` 的 `hintTitle`(悬停)里写清「这里改什么、
+ *      什么改不了(ceiling / writeKinds 是代码内常量)」。
+ *   3. `MemberPane` 因此**不再接收任何 harness 相关的 prop** —— 「这个人此刻
+ *      怎么样」与「这个角色能干什么」两块各自成立,不再互相拖着一堆参数。
+ *
  * ── 这一版最硬的一条纪律:三种「不知道」不许长得像「一切正常」────────
  *
  * 契约 `MemberActivityView` / `ProjectLiveView` 的注释逐字写着这件事,前端照做:
@@ -446,11 +467,13 @@ function turnStatusNode(
  *   1. 摘要行 —— 名字 / 角色 / 专长 / id / **此刻状态**;
  *   2. 「正在做什么」—— 库里的活 + 排空器的待办 + 最近一次动 + 排空器心跳;
  *   3. 「他产生了什么对话」—— **默认折叠**(否则一屏又被消息刷满);
- *   4. 「他产出了什么工件」—— 把成员页与工件页连起来;
- *   5. **角色 harness** —— `RoleHarnessSection`(默认折叠,它自己取数、自己持有
- *      草稿与备份)。2026-10-06 合并:这里原来是块**只读**的「角色能力面」,
- *      与 harness 页显示同一份数据的两半 —— 用户要求把两个页签合并,所以换成
- *      那一份**可写**的实现,同一处只留一块。
+ *   4. 「他产出了什么工件」—— 把成员页与工件页连起来。
+ *
+ * ⚠️ 2026-10-06(第三刀):这里原来还有第 5 块 —— 角色的 harness。用户原话是
+ * 「成员中,角色 harness 单独放一个卡片出来,未来角色的 harness 配置就放在这个
+ * 地方」,所以它**搬出去了**,由本文件在面板**之下**另起一块
+ * (`RoleHarnessSection`,见 `MemberTabPanels`)。`MemberPane` 因此不再接收
+ * 任何 harness 相关的 prop —— 它只回答「这个人此刻怎么样」。
  *
  * 纯 props(与 `HarnessRolePane` / `ConversationCard` 同一处置):导出给测试,
  * 不需要起服务、不需要 stub fetch。
@@ -465,7 +488,6 @@ export function MemberPane({
   dispatch,
   fetchedAt,
   now,
-  onHarnessSaved,
 }: {
   member: MemberView;
   /** 这个人在这份运行态快照里的那一条;`null` = 还没拿到快照(或快照里没有他) */
@@ -489,8 +511,6 @@ export function MemberPane({
   fetchedAt: number | null;
   /** 页面这一刻的本地时钟 */
   now: number;
-  /** harness 里一次保存 / 恢复成功后通知页面(页签角标据此重算) */
-  onHarnessSaved?: () => void;
 }) {
   const drift = elapsedSinceFetch(fetchedAt, now);
   /** 快照值 → 屏上此刻的年龄(加法为什么成立,见 `elapsedSinceFetch`)。 */
@@ -740,18 +760,30 @@ export function MemberPane({
             ))
           )}
         </div>
-
-        {/* ── ⑤ 角色 harness —— 这一版从只读能力面换成可写的 harness 管理 ──
-            ⚠️ **同一处只留一块**:以前这里是「角色能力面」只读折叠块,而 harness
-            页又有一份可写的同源视图 —— 用户要的正是别再有两处。现在只有
-            `RoleHarnessSection`(它自己取整份 `GET /api/harness`、自己持有草稿与
-            备份,默认折叠)。`MemberPane` 因此**不再**接收那个只读能力面的 prop:
-            那块只读视图的三条判据(「求解不了」≠「0 个」、四类需要注意、
-            共用单元标注)现在由 `HarnessRolePane` 承担,断言在
-            `tests/web/harness-by-role.test.ts`。 */}
-        <RoleHarnessSection role={member.role} onSaved={onHarnessSaved} />
       </article>
     </Section>
+  );
+}
+
+/**
+ * 同一个成员 tab 面板里的**两块**:成员面板 + 它下面单独一张「角色 harness」卡。
+ *
+ * 为什么要抽成一个组件、而不是在页面里并排写两个元素:`MembersPage` 从 store
+ * (`useChatStore`)取 `projectId`,SSR 下读的是 server snapshot ⇒ 驱动不了
+ * (`renderToStaticMarkup` 里它是恒定的空页)。把这两块的**位置与归属**抽成纯
+ * props 的组合,测试才能断言:
+ *
+ *   - harness **不在**成员面板那张卡**里面**(它是角色的配置面,不是这个成员
+ *     此刻的活动 —— 见 `RoleHarness.tsx` 文件头);
+ *   - 它在面板**之后**、同一个 tab 面板里另起一块(用户原话:「成员中,角色
+ *     harness 单独放一个卡片出来,未来角色的 harness 配置就放在这个地方」)。
+ */
+export function MemberTabPanels({ member, harness }: { member: ReactNode; harness: ReactNode }) {
+  return (
+    <div className="flex flex-col gap-3">
+      {member}
+      {harness}
+    </div>
   );
 }
 
@@ -994,23 +1026,37 @@ export function MembersPage() {
           />
 
           {selected !== null && (
-            <MemberPane
-              member={selected}
-              activity={activityOf(selected.id)}
-              conversation={groupOf.get(selected.id) ?? null}
-              // 过滤在页面层做:面板是纯展示,不持有「怎么找这个人的工件」的判据。
-              // ⚠️ 角色 harness 不由页面传下去 —— 面板里那个 `RoleHarnessSection`
-              // 是**自足**的(要整份视图才能算「共用于 N 个角色」)。页面这一份
-              // `harness` 只用来画页签上的告警角标。
-              artifacts={artifacts.data.filter((a) => a.authorAgentId === selected.id)}
-              runtime={runtime}
-              dispatch={live.data?.dispatch ?? null}
-              fetchedAt={live.fetchedAt}
-              now={now}
-              // 「读不到对话记录」不是「没有发言」—— 两者在屏幕上长得一样,所以
-              // 必须把错误本身传下去(见 `MemberPane` 里那一处分支)。
-              conversationError={conversations.error}
-              onHarnessSaved={() => setHarnessRevision((r) => r + 1)}
+            <MemberTabPanels
+              member={
+                <MemberPane
+                  member={selected}
+                  activity={activityOf(selected.id)}
+                  conversation={groupOf.get(selected.id) ?? null}
+                  // 过滤在页面层做:面板是纯展示,不持有「怎么找这个人的工件」的判据。
+                  artifacts={artifacts.data.filter((a) => a.authorAgentId === selected.id)}
+                  runtime={runtime}
+                  dispatch={live.data?.dispatch ?? null}
+                  fetchedAt={live.fetchedAt}
+                  now={now}
+                  // 「读不到对话记录」不是「没有发言」—— 两者在屏幕上长得一样,所以
+                  // 必须把错误本身传下去(见 `MemberPane` 里那一处分支)。
+                  conversationError={conversations.error}
+                />
+              }
+              // ── 角色 harness:**单独一张卡**,在成员面板**之下** ──────────
+              // 用户原话:「成员中,角色 harness 单独放一个卡片出来,未来角色的
+              // harness 配置就放在这个地方」。它是**自足**的(自己取整份
+              // `GET /api/harness` —— 要整份才能算「共用于 N 个角色」,并自己持有
+              // 草稿与备份),所以这里不传数据、只传角色。
+              // ⚠️ 页面上那一份 `harness` 只用来画**页签**上的告警角标;保存成功后
+              // `onHarnessSaved` 把 `harnessRevision` 推一格,让角标跟上(否则它会顶着旧数
+              // 说「N 处需要注意」—— 见 `lib/data.ts` 里 `revision` 的说明)。
+              harness={
+                <RoleHarnessSection
+                  role={selected.role}
+                  onHarnessSaved={() => setHarnessRevision((r) => r + 1)}
+                />
+              }
             />
           )}
         </>

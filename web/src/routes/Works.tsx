@@ -24,9 +24,12 @@
  * 导出名一个都没改(`ArtifactsScreen` / `ArtifactsBody` / `ProgressTimeline` /
  * `TimelineLegend` / `WorkDag*` / `WorkNodePanel` / `ArtifactRow` / `ArtifactGroups` /
  * `UnattachedArtifacts` / `DanglingArtifacts` / `resolveSelectedWorkId` / `DagLive`):
- * 它们钉在 `tests/web/artifact-dag.test.ts` 与 `tests/web/artifact-timeline.test.ts` 上,
- * 那两份测试这一版只有 import 路径从旧的工件页模块改成了 `@/routes/Works`,
- * 一条断言都没动。改名的是页面本身:上一版那个 `Artifacts` 页导出 → `WorksPage`。
+ * 它们钉在 `tests/web/artifact-dag.test.ts` 与 `tests/web/artifact-timeline.test.ts` 上。
+ * (页面名上一版改过:旧的 `ArtifactsPage` → `WorksPage`。)
+ * ⚠️ **2026-10-07 起 `DependencyGraph` 是新增的导出**(旧的折叠块从 `ArtifactsBody`
+ * 里整块提出来、去掉 `<Disclosure>`),两份测试相应改成渲染「`DependencyGraph` +
+ * `ArtifactsBody`」的组合(保持图在前、面板在后的 DOM 顺序);断言一条都没删,
+ * 只有切片助手跟着新顺序换了锚点。
  *
  * ── 这一版为什么把主视图从分层 DAG 换成时间轴泳道 ────────────────
  *
@@ -39,40 +42,49 @@
  * 边必然互相穿。时间轴上没有这个问题 —— **x 是时间的函数**,位置不需要解
  * (`lib/timeline.ts` 文件头逐字写着这一条),结构上不可能缠。所以主视图换成
  * `layoutTimeline`(纯函数)算出的泳道图:横轴一次线性映射,纵轴一条工作项一道、
- * 一种工件 kind 一道。换掉的只是**主视图** —— 旧 DAG 的组件与导出一个都没动,只是
- * 收进默认折叠的 `<Disclosure>`(⑤),因为它回答的是「谁在等谁」,那是推进图答不了的。
+ * 一种工件 kind 一道。换掉的只是**主视图** —— 旧 DAG 的组件与导出一个都没动,
+ * 它当时被收进默认折叠的 `<Disclosure>`(本版又按用户要求提到最上面并展开,
+ * 见下「五块各答什么问题」),因为它回答的是「谁在等谁」,那是推进图答不了的。
  *
  * ── 五块各答什么问题(顺序即重要性)────────────────────────────
  *
- *   ① **推进图**(`ProgressTimeline`)—— 整个项目在时间上推进到哪了:
+ * ⚠️ **这一版的顺序是用户定的**(2026-10-07 原话:「工作项中,依赖关系图不要默认
+ * 收起,放在最上面,这个页面的信息依次是:依赖关系图、推进图、选中的环节详情」)。
+ * 照做的依据:依赖关系回答的是「**谁在等谁**」—— 读这一页的第一问就是「现在卡在
+ * 哪一步、谁在等谁交东西」,不知道这个,时间轴上的先后只是「发生了些什么」;
+ * 而它此前默认折叠,等于把第一问藏在一个标题行后面。折叠是**可见性**问题,
+ * 不是「它没用」—— 所以只改位置与展开状态,组件与信息一个都没删。
+ *
+ *   ① **依赖关系图**(`DependencyGraph` = `Section` + `WorkDag`)**展开、最上面**
+ *      —— 谁在等谁 / 谁是谁的子项(两类边都是「先后」:前置 → 本条、子项 → 父项)。
+ *   ② **推进图**(`ProgressTimeline`)—— 整个项目在时间上推进到哪了:
  *      上区一条工作项一道(条 = 创建→收口,条上的刻度 = 它产出的工件),
  *      下区一种工件 kind 一道(点 = 一件工件,**含 `workId === null` 的**决策 /
  *      会议 / 变更 / 甲方问答 —— 这正是用户要的「没在 dag 上的也放进来」);
  *      另有「此刻」竖线与「在跑」的呼吸点。
- *   ② **选中的环节**(`WorkNodePanel`)—— 这一步是谁的、在等谁、要什么、留下了什么。
- *      **点一条工作项(绿色条)⇒ 下面显示它挂着的工件**:推进图与这块联动,共用一个
- *      选中态(`resolveSelectedWorkId`),这就是用户要的那条交互。
- *   ③ **不挂在任何环节上的工件** —— `workId === null` 的那批(它们本来就不由某条
+ *   ③ **选中的环节**(`WorkNodePanel`)—— 这一步是谁的、在等谁、要什么、留下了什么。
+ *      **点一条工作项(绿色条)⇒ 下面显示它挂着的工件**:推进图、依赖图与这块联动,
+ *      共用一个选中态(`resolveSelectedWorkId`),这就是用户要的那条交互。
+ *   ④ **不挂在任何环节上的工件** —— `workId === null` 的那批(它们本来就不由某条
  *      工作项产出,不是「还没归位」)。
- *   ④ **环节读不到的工件** —— `workId` 指向一条本次没加载到的工作项(读面容错)。
- *   ⑤ **依赖关系图**(分层 DAG,默认折叠)—— 谁在等谁 / 谁是谁的子项。
+ *   ⑤ **环节读不到的工件** —— `workId` 指向一条本次没加载到的工作项(读面容错)。
  *
  * ── 三条「不许说假话」的落点 ────────────────────────────────────
  *
- *  1. **计数一律来自真实数组长度**:① 的小字用 `works.length` / `artifacts.length`,
- *     节点上的 `工件 N` 用布局给的 `artifactCount`,③④ 只有真的有条目才渲染,
+ *  1. **计数一律来自真实数组长度**:② 的小字用 `works.length` / `artifacts.length`,
+ *     ① 节点上的 `工件 N` 用布局给的 `artifactCount`,④⑤ 只有真的有条目才渲染,
  *     整页的「加载中…」只在 `loading && works.length === 0 && artifacts.length === 0`
  *     时出现(见 `lib/data.ts` 文件头:「还没查过」不等于「查过了,是空」)。
  *  2. **「读不到运行态」不是「空闲」**:`live === null` 或
  *     `live.runtime === "unavailable"` 时布局给 `running: false` / `unknown: true`
- *     —— ① 一条都不点亮、端点色转 `var(--bone-mute)`、图例那一行明说「运行态读不到」;
- *     ② 的节点边框不点亮(旧行为不变);库里那条 `in_progress` 仍由状态标如实显示
+ *     —— ② 一条都不点亮、端点色转 `var(--bone-mute)`、图例那一行明说「运行态读不到」;
+ *     ① 的节点边框不点亮(旧行为不变);库里那条 `in_progress` 仍由状态标如实显示
  *     —— 它是**过去的事实**,不是「此刻」。
  *  3. **终态 ≠ 精确完成时刻**:工作项条右端在终态时取 `updatedAt`,而
  *     `markWorkReviewed` 也会碰这一列(`repo/works.ts`)⇒ tooltip 只敢写
  *     「收口(最后一次变更,不是精确完成时刻)」;未终态画成**开口端**并写
  *     「未收口(还在推进,右端 = 此刻)」。排不出先后的环节也不许丢、不许静默
- *     (`workGraph` 的 `unlayeredIds` 在 ⑤ 里照旧说明)。
+ *     (`workGraph` 的 `unlayeredIds` 在 ① 里照旧说明)。
  *
  * ── 可访问性(为什么 SVG 里不用 `<button>`)──────────────────────
  *
@@ -174,7 +186,7 @@ export interface DagLive {
   readonly agents: ReadonlyArray<{ readonly agentId: string; readonly turn: unknown | null }>;
 }
 
-// ── ① 推进图:横轴 = 时间,纵轴 = 泳道 ───────────────────────────
+// ── ② 推进图:横轴 = 时间,纵轴 = 泳道 ───────────────────────────
 
 /**
  * 运行态「读不到」= 还没拿到快照(`live === null`)或宿主没接上运行期快照
@@ -210,7 +222,7 @@ export function TimelineLegend({ runtimeUnknown }: { runtimeUnknown: boolean }) 
 }
 
 /**
- * ① 推进图本体 —— 一张 SVG,横轴 = 时间,纵轴 = 泳道。
+ * ② 推进图本体 —— 一张 SVG,横轴 = 时间,纵轴 = 泳道。
  *
  * **不自己算布局**:坐标全由 `layoutTimeline`(纯函数)给,这里只消费 —— 于是
  * 「每条工作项恰好一道 / 每件工件恰好一点 / 终态封口、未终态开口」这些判据能在
@@ -245,7 +257,7 @@ export function ProgressTimeline({
   live: DagLive | null;
   /** 页面这一刻的本地时钟(「此刻」线的位置与未收口的右端都用它) */
   now: number;
-  /** 当前选中的环节 id —— 与 ② 是**同一个**(由 `resolveSelectedWorkId` 解析三态后传入) */
+  /** 当前选中的环节 id —— 与 ③ 是**同一个**(由 `resolveSelectedWorkId` 解析三态后传入) */
   selectedId: string | null;
   /** 点条:选中它;再点一次同一个 ⇒ `null`(与旧 DAG 节点同一手势) */
   onSelectWork: (workId: string | null) => void;
@@ -537,7 +549,7 @@ export function ProgressTimeline({
                 `产出环节:${workLabel}`;
               const openDetail = (): void => {
                 onOpenArtifact(mark.id);
-                // 挂在哪条环节上就选它(② 跟着切);`workId === null` 的工件**不动**
+                // 挂在哪条环节上就选它(③ 跟着切);`workId === null` 的工件**不动**
                 // 选中态 —— 它本来就不属于任何环节,顺手把别人的选中清掉才是撒谎。
                 if (mark.workId !== null) onSelectWork(mark.workId);
               };
@@ -620,21 +632,25 @@ export function ProgressTimeline({
   );
 }
 
-// ── ⑤ 依赖关系图(旧的产出图,现在默认折叠)──────────────────────
+// ── ① 依赖关系图(旧的产出图,现在在最上面且展开)──────────────────
 
 /**
- * ⑤ 的**理由**(用户说它「缠在一起」,为什么还留着):
+ * ① 的**理由**(用户说它「缠在一起」,为什么现在反而放在最上面):
  *
  * 用户的原话是「现在都缠在一起了」—— 那是对**主视图**的判断,不是对这张图里
- * 信息的判断。主视图因此换成了推进图(①:x 是时间的函数,位置不需要解,结构上
+ * 信息的判断。主视图因此换成了推进图(②:x 是时间的函数,位置不需要解,结构上
  * 不可能缠)。但 DAG 回答的是**另一个问题**:「谁在等谁 / 谁是谁的子项」——
  * 推进图答不了它(时间上的先后 ≠ 依赖上的先后:`dependsOn` 可以有环,时间轴对
  * 环没有意见,而这正是 DAG 必须如实报出来的那件事)。
  *
- * 所以这一次**一个组件、一条信息都没删**:组件与导出保持原样,只是收进默认折叠的
- * `<Disclosure>`。默认不展开 = 不拿它去争主视图的位置;折叠 ≠ 删除 ——
- * `<details>` 在 SSR 里照样渲染内部 markup(`tests/web/artifact-dag.test.ts` 的
- * 节点计数判据因此仍然成立)。
+ * ⚠️ **2026-10-07 改动**(用户原话:「工作项中,依赖关系图不要默认收起,放在最上面,
+ * 这个页面的信息依次是:依赖关系图、推进图、选中的环节详情」):
+ *  · 原来它包在 `<Disclosure>` 里、排在 ②③④ 之后(当时编号 ⑤);
+ *  · 现在整块提出来做成导出的 `DependencyGraph`,**去掉 `<Disclosure>` 直接渲染**、
+ *    由 `ArtifactsScreen` 排在最前。
+ *  · 「缠」的问题不由折叠来解 —— 那只是把第一问藏起来。真正处理它的是这里:
+ *    `WorkDagCanvas` 的横向滚动 + 纵向 `maxHeight` 上限(见那里的注释)。
+ *  · **一个组件、一条信息都没删**,只是换了位置与展开状态。
  */
 
 /**
@@ -882,6 +898,67 @@ export function WorkDag({
   );
 }
 
+/**
+ * **① 依赖关系图整块** = `Section` + `WorkDag`(**展开,没有 `<Disclosure>`**)。
+ *
+ * 为什么单列成一个导出组件(而不是留在 `ArtifactsBody` 里):
+ * 用户要求它**排在最上面**(2026-10-07,见文件头),而 `ArtifactsBody` 那一块
+ * 现在是 ③④⑤ —— 顺序由 `ArtifactsScreen` 决定。它是**纯 props** 的,于是
+ * `tests/web/artifact-dag.test.ts` 那 22 条节点判据仍然能在
+ * 「`DependencyGraph` + `ArtifactsBody`」这个组合上钉住(保持图在前、面板在后
+ * 的旧 DOM 顺序),不必起服务。
+ *
+ * 两块小字的实质**沿用原来那段说明**,只把它从「默认折叠是怕它抢主视图的位置」
+ * 改成「为什么它在最上面」:节点 = 工作项,实线 = 拆解(子项 → 父项),
+ * 虚线 = 前置依赖(前置 → 本条),两条边的方向**都是先后**;它排最前是因为
+ * 「谁在等谁」是读这一页的第一问(推进图回答的是「什么时候发生的」)。
+ *
+ * ⚠️ 选中态在这里也要解析一次(`resolveSelectedWorkId`)—— 与 ②(推进图)和
+ * ③(面板)用的是同一个纯函数、同一份 `picked`,所以三处必然指向同一条工作项。
+ */
+export function DependencyGraph({
+  works,
+  artifacts,
+  live,
+  picked,
+  onPick,
+}: {
+  works: readonly WorkView[];
+  artifacts: readonly ArtifactView[];
+  live: DagLive | null;
+  /** 用户选中的环节(三态:见 `resolveSelectedWorkId`)—— 与 ②③ 同一个来源 */
+  picked: string | null | undefined;
+  onPick: (workId: string | null) => void;
+}) {
+  const layout = layoutWorkDag(works, artifacts);
+  const selectedId = resolveSelectedWorkId(layout, picked);
+  return (
+    <Section
+      title="依赖关系图"
+      count={works.length}
+      hint="分层排布,可能较宽"
+      // ⚠️ 这一段是**悬停**才出现的整段解释(不是屏幕上那一行小字):两句必须说的话
+      // 都在这里 —— 两类边各是什么、方向是哪边;以及它为什么排在最上面。
+      hintTitle={
+        "节点 = 工作项,实线 = 拆解(子项 → 父项),虚线 = 前置依赖(前置 → 本条)。" +
+        "两条边的方向都是**先后**(前置 → 本条;子项 → 父项,容器由子项推动),所以从左到右读就是「先做什么、后做什么」。" +
+        "它排在这一页最上面,是因为「谁在等谁」是读这一页的第一问 —— 不知道这个,推进图上的先后只是「发生了些什么」;" +
+        "推进图回答的是「什么时候发生的」,两张图答的是不同的问题,都不许少。"
+      }
+    >
+      {works.length === 0 ? (
+        <EmptyState>
+          这个项目还没有工作项 —— 依赖关系要等项目经理拆出第一条工作项才有节点。
+        </EmptyState>
+      ) : (
+        // ⚠️ 这里**只有** `WorkDag`,没有 `<Disclosure>` / `<details>` —— 展开是
+        // 用户明确要求的(「不要默认收起」)。别顺手把它折回去。
+        <WorkDag layout={layout} live={live} selectedId={selectedId} onSelect={onPick} />
+      )}
+    </Section>
+  );
+}
+
 // ── 工件行 / 工件分组(③ 与 ② 共用同一套渲染代码)──────────────────
 
 /** links 的 rel 是契约里的闭合联合(parent | depends_on | answers);未知值原样透出。 */
@@ -1020,7 +1097,7 @@ export function ArtifactGroups({
   );
 }
 
-// ── ② 选中的环节 ────────────────────────────────────────────────
+// ── ③ 选中的环节 ────────────────────────────────────────────────
 
 /**
  * 一个环节的面板:**这一条工作项是谁的、在等谁、要什么,以及它留下了什么**。
@@ -1028,7 +1105,7 @@ export function ArtifactGroups({
  * `artifacts` 是**只有这个环节的**那几条(调用方用 `splitArtifactsByWork().byWork`
  * 取),不是整个项目的工件 —— 把全项目的工件铺进每个节点是这一版最要防的那种错。
  *
- * 选中来源有两个(① 推进图上的条 / ⑤ DAG 上的节点),但组件只认一个
+ * 选中来源有两个(② 推进图上的条 / ① 依赖关系图上的节点),但组件只认一个
  * `work` —— 谁选中它不关它的事,面板的形态与文案因此一个字都没改。
  */
 export function WorkNodePanel({
@@ -1142,7 +1219,7 @@ export function WorkNodePanel({
   );
 }
 
-// ── ③ 不挂在任何环节上的工件 ────────────────────────────────────
+// ── ④ 不挂在任何环节上的工件 ────────────────────────────────────
 
 /**
  * `workId === null` 的工件:决策 / 会议记录 / 变更记录 / 甲方问答。
@@ -1190,7 +1267,7 @@ export function UnattachedArtifacts({
   );
 }
 
-// ── ④ 环节读不到的工件 ──────────────────────────────────────────
+// ── ⑤ 环节读不到的工件 ──────────────────────────────────────────
 
 /**
  * `workId` 指向一条**本次没加载到**的工作项。理论上被外键挡住,但读面必须容错:
@@ -1235,10 +1312,10 @@ export function DanglingArtifacts({
   );
 }
 
-// ── ②③④⑤ 的组织(纯 props,测试直接渲染它)──────────────────────
+// ── ③④⑤ 的组织(纯 props,测试直接渲染它)──────────────────────
 
 /**
- * 选中的环节 id(三态 → 一个 id)。**① 推进图与 ② 面板共用的唯一一处判据**:
+ * 选中的环节 id(三态 → 一个 id)。**① 依赖关系图、② 推进图、③ 面板共用的唯一一处判据**:
  * 两处各写一份必然漂(一个高亮 A、另一个显示 B,页面上看起来只是「有点怪」)。
  *
  * `picked` 的三态:
@@ -1263,20 +1340,27 @@ export function resolveSelectedWorkId(
 }
 
 /**
- * 本页(工作项页)的 **②③④⑤**。**纯 props**:选择态由 `picked` 传入,默认选中也在这一层定,
+ * 本页(工作项页)的 **③④⑤**。**纯 props**:选择态由 `picked` 传入,默认选中也在这一层定,
  * 于是「默认选谁」这件事可以在测试里被钉住,而不是散在 hook 之间。
  *
- * ①(推进图)不在这里 —— 它由 `ArtifactsScreen` 与这一块并列渲染。这样切分的好处是
- * 这一块的判据(面板只挂自己的工件 / 无环节工件单独列 / 环节读不到 / DAG 折叠)
- * 与推进图的判据(点数、条数、端点语义)可以**分开**钉,互不干扰。
+ * ①(依赖关系图)与 ②(推进图)不在这里 —— 它们由 `ArtifactsScreen` 排在这一块**前面**。
+ * 这样切分的好处是这一块的判据(面板只挂自己的工件 / 无环节工件单独列 / 环节读不到)
+ * 与两张图的判据(节点计数、点数、条数、端点语义)可以**分开**钉,互不干扰。
  *
- * ⚠️ **块内的 DOM 顺序是 ⑤ → ② → ③ → ④**(⑤ 那个折叠的 DAG 在最前,理由与硬约束
- * 写在 ⑤ 那一段的注释里);阅读顺序仍是「先看选中的环节,再看两个边角清单」。
+ * ⚠️ **2026-10-07 起这一块不再渲染 DAG**(用户要求它展开并排在最上面,整块搬进
+ * `DependencyGraph`),所以它的 `live` 参数也一并去掉了 —— ③④⑤ 里没有任何一处
+ * 读运行态(「读不到运行态」那两行小字属于 ①)。留一个没人读的参数等于给下一个人
+ * 一个错误的暗示(「这块也看 live」)。
+ *
+ * ⚠️ **块内的 DOM 顺序是 ③ → ④ → ⑤**;阅读顺序是「先看选中的环节,再看两个边角清单」。
+ * 位置有一条硬约束:`tests/web/artifact-dag.test.ts` 的 `nodeButton()` 用**工作项标题的
+ * 第一次出现**来定位节点卡片(`html.indexOf(title)` + `lastIndexOf("<button", …)`),
+ * 而 ③ 面板里也会出现同一条标题(它不是 `<button>`)—— 所以 ① 的节点标记必须排在
+ * ③ 之前。`ArtifactsScreen` 就是这样摆的(这也是本块不能把 ① 排到后面的原因)。
  */
 export function ArtifactsBody({
   works,
   artifacts,
-  live,
   picked,
   onPick,
   openId,
@@ -1284,7 +1368,6 @@ export function ArtifactsBody({
 }: {
   works: readonly WorkView[];
   artifacts: readonly ArtifactView[];
-  live: DagLive | null;
   picked: string | null | undefined;
   onPick: (workId: string | null) => void;
   openId: string | null;
@@ -1297,33 +1380,6 @@ export function ArtifactsBody({
 
   return (
     <div className="grid gap-4">
-      {/* ⑤ 依赖关系图(**排在 ② 之前**,折叠着)。
-          两个理由:
-            1. 它和 ① 是同一件事的两种读法(时间 vs 依赖),挨着放 —— 读者从
-               「推进到哪」换到「谁在等谁」只需往下挪一行;折叠状态只占一个标题行,
-               不争主视图的位置。
-            2. ⚠️ **位置有一条硬约束**:`tests/web/artifact-dag.test.ts` 的
-               `nodeButton()` 用**工作项标题的第一次出现**来定位节点卡片
-               (`html.indexOf(title)` + `lastIndexOf("<button", …)`),而 ② 面板里
-               也会出现同一条标题(它不是 `<button>`)—— 所以 DAG 的标记必须排在
-               ② 之前。那条测试一个字都不许改,这里按它的定位方式摆。 */}
-      <Section
-        title="依赖关系图"
-        count={works.length}
-        hint="分层排布,可能较宽"
-        hintTitle="节点 = 工作项,实线 = 拆解(子项 → 父项),虚线 = 前置依赖(前置 → 本条)。两条边的方向都是**先后**,所以从左到右读就是「先做什么、后做什么」;推进图回答的是「什么时候发生的」。默认折叠是怕它抢主视图的位置,不是因为它没用了。"
-      >
-        {works.length === 0 ? (
-          <EmptyState>
-            这个项目还没有工作项 —— 产出流程要等项目经理拆出第一条工作项才有节点。
-          </EmptyState>
-        ) : (
-          <Disclosure summary="依赖关系图(分层排布,可能较宽)">
-            <WorkDag layout={layout} live={live} selectedId={selectedId} onSelect={onPick} />
-          </Disclosure>
-        )}
-      </Section>
-
       {works.length > 0 &&
         (selectedWork === null ? (
           <EmptyState>点一个环节看它的产出。</EmptyState>
@@ -1338,7 +1394,7 @@ export function ArtifactsBody({
           />
         ))}
 
-      {/* ③ 与 ④ 只有**真的有条目**才渲染(空块会被读成「漏了东西」)。 */}
+      {/* ④ 与 ⑤ 只有**真的有条目**才渲染(空块会被读成「漏了东西」)。 */}
       {split.noWork.length > 0 && (
         <UnattachedArtifacts
           artifacts={split.noWork}
@@ -1360,16 +1416,24 @@ export function ArtifactsBody({
   );
 }
 
-// ── 页面正文:① + ②③④⑤(纯 props)───────────────────────────────
+// ── 页面正文:①② + ③④⑤(纯 props)───────────────────────────────
 
 /**
- * 本页正文 = **① 推进图 + ②③④⑤**。
+ * 本页正文 = **① 依赖关系图 + ② 推进图 + ③④⑤**。
  *
  * 抽成纯 props 组件、而不是写死在 `WorksPage` 的 JSX 里,是为了让测试渲染的
- * 就是页面真正渲染的那棵树 —— 否则「点 ① 上的条,② 面板跟着切」这类判据只能在
+ * 就是页面真正渲染的那棵树 —— 否则「点 ② 上的条,③ 面板跟着切」这类判据只能在
  * 测试自己拼的组合上验证,页面真接线错了也不会红。
  *
- * ① 与 ② 的选中态来自**同一次** `resolveSelectedWorkId(...)` 调用。
+ * ⚠️ **顺序就是用户定的那一句**(2026-10-07 原话:「工作项中,依赖关系图不要默认
+ * 收起,放在最上面,这个页面的信息依次是:依赖关系图、推进图、选中的环节详情」):
+ * ① `DependencyGraph` → ② 推进图 `Section` → ③④⑤ `ArtifactsBody`。
+ * 别把 ① 挪到后面 —— 除了用户的要求,`nodeButton()` 的定位方式也依赖「节点排在面板
+ * 之前」(见 `ArtifactsBody` 的注释)。
+ *
+ * ② 与 ③ 的选中态来自**同一次** `resolveSelectedWorkId(...)` 调用;① 内部另调一次
+ * 同一个纯函数(`DependencyGraph` 保持纯 props,不必把布局从外面塞进去 —— 同一份
+ * `works` / `artifacts` / `picked` 进同一个纯函数,结果必然相同)。
  */
 export function ArtifactsScreen({
   works,
@@ -1394,10 +1458,19 @@ export function ArtifactsScreen({
   const selectedId = resolveSelectedWorkId(layoutWorkDag(works, artifacts), picked);
   return (
     <div className="grid gap-4">
+      {/* ① 依赖关系图 —— **第一块,而且是展开的**(用户原话见上)。 */}
+      <DependencyGraph
+        works={works}
+        artifacts={artifacts}
+        live={live}
+        picked={picked}
+        onPick={onPick}
+      />
+
       <Section
         title="推进图"
         hint={`${works.length} 条工作项 · ${artifacts.length} 件工件 · 点一条工作项(绿色条)⇒ 下面显示它挂着的工件`}
-        hintTitle="点一条工作项(绿色条)⇒ 下面(②「选中的环节」)显示它挂着的工件。横轴 = 时间(x 是时间的线性映射,位置不需要解 —— 所以不存在分层 DAG 那种边交叉);上区每条工作项一道(条 = 创建→收口,刻度 = 它产出的工件),下区每种工件一道(点 = 一件工件,含不挂任何环节的决策 / 会议 / 变更 / 甲方问答)。点条选中环节(与下面的面板联动),点圆点看那件工件。"
+        hintTitle="点一条工作项(绿色条)⇒ 下面(③「选中的环节」)显示它挂着的工件。横轴 = 时间(x 是时间的线性映射,位置不需要解 —— 所以不存在分层 DAG 那种边交叉);上区每条工作项一道(条 = 创建→收口,刻度 = 它产出的工件),下区每种工件一道(点 = 一件工件,含不挂任何环节的决策 / 会议 / 变更 / 甲方问答)。点条选中环节(与下面的面板联动),点圆点看那件工件。上面那张图回答「谁在等谁」,这张回答「什么时候发生的」。"
       >
         <ProgressTimeline
           works={works}
@@ -1413,7 +1486,6 @@ export function ArtifactsScreen({
       <ArtifactsBody
         works={works}
         artifacts={artifacts}
-        live={live}
         picked={picked}
         onPick={onPick}
         openId={openId}

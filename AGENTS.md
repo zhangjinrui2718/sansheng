@@ -16,16 +16,18 @@
 - **导航现在只有 7 个 tab**:对话 / 项目 / 工作项 / 待办 / 成员 / 记忆 / 设置。两次合并:
   **「工件」并入「工作项」**(`web/src/routes/Works.tsx`,2026-10-06)与
   **「Harness」并入「成员」**(`web/src/components/members/RoleHarness.tsx`,同日)。
-  工作项页的主视图是**时间轴泳道**(`web/src/lib/timeline.ts`,纯函数:x = 时间,一条工作项
-  一道、一种工件 kind 一道;点绿色条 ⇒ 下面显示那条工作项挂着的工件);依赖关系图
-  (`web/src/lib/workGraph.ts`)默认折叠。成员页一个成员一块面板(按角色页签切换),面板里
-  有「正在做什么」(`GET /api/projects/:id/live`)、他产出的工件、以及**该角色的 harness 管理**
-  (提示词单元的编辑 / 恢复出厂 / 备份数;写面四条规矩与后端一致)。
+  **工作项页的信息顺序 = 依赖关系图 → 推进图 → 选中的环节**(前者**不折叠**,用户点名的顺序);
+  推进图是时间轴泳道(`web/src/lib/timeline.ts`,纯函数:x = 时间,一条工作项一道、一种工件
+  kind 一道;点绿色条 ⇒ 下面显示那条工作项挂着的工件),依赖图是分层 DAG
+  (`web/src/lib/workGraph.ts`)。**成员页一个成员一块面板**(按角色页签切换):面板里有
+  「正在做什么」(`GET /api/projects/:id/live`)与他产出的工件;面板**之下另起一张独立的
+  「角色 harness」卡片**(`Section` + 常显的状态摘要行 + 默认折叠的配置)—— 提示词单元的
+  编辑 / 恢复出厂 / 备份数都在那里,写面四条规矩与后端一致。**未来角色 harness 的配置就放这张卡**。
 - **依赖图的边方向 = 先后**(前置 → 本条;**子项 → 父项**,容器由子项推动)。这个方向是
   判据的一部分:同一对节点上两类边**方向一致**时不是环(真机那份数据就是这样),方向相反
   才是环(`mutualPairs` 会点名是哪两条边)。写反会让「交付」跑到最左、并且把一个不存在的
   环报出来(`web/src/lib/workGraph.ts` 的 `collectEdges`)。
-- 基线:**1382 passed / 65 test files** · 两条 typecheck 0 error · `check:design` E1–E14 全绿。
+- 基线:**1396 passed / 65 test files** · 两条 typecheck 0 error · `check:design` E1–E14 全绿。
 - **角色中文名只有一处**:`src/platform/runtime/org.ts` 的 `ORG`(播种 + `RoleHarnessView.displayName`
   共用);前端兜底表 `web/src/lib/vocab.ts` 的 `ROLE_LABEL` 必须逐项相同,由
   `tests/web/role-names.test.ts` 跨边界对照。**不许在某个页面里再写一张名字表**
@@ -190,7 +192,7 @@ help
 ```
 npx tsc -p tsconfig.server.json --noEmit
 npx tsc -p tsconfig.web.json --noEmit
-npm test                  # 1382 passed / 65 files
+npm test                  # 1396 passed / 65 files
 npm run build
 npm run check:design      # 设计一致性 E1–E14
 ```

@@ -33,7 +33,8 @@ import type {
   MemberView, ProjectLiveView, ProjectSummary, WorkView,
 } from "@shared/types/platform";
 import { ArtifactsScreen, WorkDag } from "@/routes/Works";
-import { MemberPane, MemberRoleTabs } from "@/routes/Members";
+import { MemberPane, MemberRoleTabs, MemberTabPanels } from "@/routes/Members";
+import { RoleHarnessDisclosure } from "@/components/members/RoleHarness";
 import { layoutWorkDag } from "@/lib/workGraph";
 
 const PORT = process.env.PORT ?? "2732";
@@ -146,23 +147,42 @@ const tabs = renderToStaticMarkup(
 );
 
 // 真机一次只渲染一个面板;影子里把四个都渲染出来(每个都是「选中它时」的样子)
+//
+// 组合方式与真机**同一份** `MemberTabPanels`(成员卡片 + 独立的「角色 harness」卡片)。
+// ⚠️ 必须是 `createElement(组件, props)` —— 写成 `renderToStaticMarkup(组件, props)`
+// 不报错,但它渲染的是一个 **props 为空** 的组件(第二个参数被忽略)⇒ 屏幕上只剩一排
+// 页签(第一次改这份影子时踩到了)。
+// ⚠️ harness 那一块走**纯展示层** `RoleHarnessDisclosure` 并直接喂真实视图:
+// `RoleHarnessSection` 自己 `getHarness()` 而 SSR 不跑 effect,喂它只会停在「正在读取」。
 const panes = members
   .map((m) =>
     renderToStaticMarkup(
-      createElement(MemberPane, {
-        member: m,
-        activity: activityOf(m.id),
-        conversation: byAgent.get(m.id) ?? null,
-        // 影子里这次请求是成功的(数据就是从它拿的)⇒ 如实传 null
-        conversationError: null,
-        // ⚠️ 角色 harness 不再由页面传下去:面板里那个 `RoleHarnessSection` 自己取数
-        // (它要整份视图才能算「共用于 N 个角色」)。影子是无状态渲染 ⇒ 它会停在
-        // 「读取中」,这是**影子的失真**(真机上有 effect),下面那段说明里点出来。
-        artifacts: artifacts.filter((a) => a.authorAgentId === m.id),
-        runtime: live.runtime,
-        dispatch: live.dispatch,
-        fetchedAt: Date.now(),
-        now: Date.now(),
+      createElement(MemberTabPanels, {
+        member: createElement(MemberPane, {
+          member: m,
+          activity: activityOf(m.id),
+          conversation: byAgent.get(m.id) ?? null,
+          // 影子里这次请求是成功的(数据就是从它拿的)⇒ 如实传 null
+          conversationError: null,
+          artifacts: artifacts.filter((a) => a.authorAgentId === m.id),
+          runtime: live.runtime,
+          dispatch: live.dispatch,
+          fetchedAt: Date.now(),
+          now: Date.now(),
+        }),
+        harness: createElement(RoleHarnessDisclosure, {
+          role: m.role,
+          view: harness,
+          loading: false,
+          error: null,
+          // 盘上正文当草稿(影子不编辑);备份份数在影子里不查 ⇒ 显示「—」
+          drafts: Object.fromEntries(
+            harness.roles.flatMap((r) => r.promptUnits.map((u) => [u.id, u.content])),
+          ),
+          backups: {},
+          onDraftChange: () => {},
+          onApplied: () => {},
+        }),
       }),
     ),
   )
@@ -177,9 +197,11 @@ writeFileSync(
       `runningTurns = ${live.runningTurns},排空兜底间隔 ${live.dispatch.intervalMs}ms、` +
       `上一次 ${live.dispatch.lastRunAgeMs === null ? "本进程还没跑过" : `${Math.round(live.dispatch.lastRunAgeMs / 1000)}s 前`}。<br>` +
       `真机上**一次只显示一个成员**(上面那行页签切换);这里把四个面板都摊开,方便横向比。` +
-      `面板里的「对话」与「角色 harness」在真机上是默认折叠的 <code>&lt;details&gt;</code>(影子里同样是折叠的,点一下才开)。<br>` +
-      `⚠️ 这一份是**无状态影子**:<code>RoleHarnessSection</code> 自己 <code>getHarness()</code>` +
-      `(SSR 不跑 effect)⇒ 它那一格停在「读取中」;真机上会显示该角色的提示词单元编辑器与工具面。`,
+      `每个成员卡片下面是**独立的「角色 harness」卡片**(2026-10-06 第四刀:从成员面板里拿出来,` +
+      `未来角色的 harness 配置就放这里)—— 卡片头常显状态摘要,配置内容默认折叠。` +
+      `「对话」那一块也是默认折叠的 <code>&lt;details&gt;</code>(影子里同样折叠,点一下才开)。<br>` +
+      `⚠️ 影子里的 harness 卡片走的是**纯展示那一层**(直接喂真实 <code>GET /api/harness</code> 视图);` +
+      `真机上那一块是自足的 <code>RoleHarnessSection</code>(自己取数、自己持草稿与备份),行为一致。`,
     `${tabs}<div class="grid gap-4" style="padding-top:12px">${panes}</div>`,
   ),
 );
