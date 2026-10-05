@@ -12,7 +12,7 @@
 ```
 W3-① `516ae93` fix(origin): 闭合刷新缺口 —— 封套落库(migration 019)+ 前端判据同形
 W3-②③ 本次提交:文档欠账 + 端到端(证据在 .probe/w3-e2e-*)
-1206 passed / 57 files · 两条 typecheck 0 · npm run build 绿 · check:design E1–E14 绿 · as any 0
+1210 passed / 57 files · 两条 typecheck 0 · npm run build 绿 · check:design E1–E14 绿 · as any 0
 全部已推送到 origin/master(上一轮那 15 个提交也已推送 —— GitHub 443 当时不通,后来通了)
 ```
 
@@ -173,6 +173,47 @@ SqliteError: FOREIGN KEY constraint failed  at resetPlatformData (reset.js:62)
 静态预览(用**你 `~/.sansheng` 的真实数据**渲染,没起服务):
 `.probe/harness-by-role-preview.html` —— 4 个页签 · 5 个折叠块**0 个展开** ·
 4 个单元行 · 摘要行 `能力 22 项 · 实得工具 26 个`。
+
+## 追加 · 成员页「实得工具 0 个」—— 又一处**看起来正常其实在撒谎**(用户当场问到)
+
+用户贴了一屏成员页的输出:「能力 22 项 · 可写 3 类 · **实得工具 0 个**」并问这两栏是什么。
+
+**两栏的含义**(先答问题):
+
+| 栏 | 来源 | 含义 |
+|---|---|---|
+| 能力 N 项 | `ROLE_SPECS[role].ceiling` | 这个角色的**架构上界**,是一组**能力**(capability)条目,代码内常量 |
+| 可写 N 类 | `writeKinds` | 它能往库里写哪几类记录(同样是代码内常量) |
+| 实得工具 N 个 | `solveToolset(...).tools` | 过完三道门后的**工具名**。⚠️ **与「能力」不是分数关系**:一条能力可展开成多个工具(`blackboard.read` → `board_list` + `board_read`),所以真机上「工具 26 > 能力 22」是正常的 |
+
+**0 是假的**(服务器当时返回的就是 26/28/32/20,我 curl 过)。两个叠加的原因:
+
+1. **`tools` 的算法**:`buildHarnessView` 拿**库里该角色的 agent 行**去求解工具面;
+   **没有那一行时 `solved === null` ⇒ `tools: []`**。而那一刻你的库里 agents 表是空的
+   (16:44:27 才被 `ensureOrg` 重新播种 —— 即**你刚点过一次「重置 Sansheng」**),
+   于是「算不出来」被渲染成「0 个」。ceiling / writeKinds 是代码常量,照常显示
+   ⇒ 界面看起来完全正常。
+2. **前端把那份响应缓存了整个标签页**:`lib/data.ts` 的 `loadHarnessOnce()` 是
+   **模块级 promise 缓存**(只在失败时不缓存),没有任何失效口 ⇒ 组织后来播种了,
+   页面还显示 0,直到整页刷新。
+
+**修**(契约只增一维 + 两处显示 + 一个失效口 + 一句真话):
+
+| 落点 | 改动 |
+|---|---|
+| `shared/types/platform.ts` | `RoleHarnessView` 加 **`toolsSolved: boolean`**(只增字段)。`false` = 连 agent 行都没有 ⇒ 「算不出来」;**注意 `true` + `tools: []` 是合法的**(接待阶段某些角色确实一个工具都拿不到)—— 两种状态必须分开 |
+| `http.ts` `buildHarnessView` | `toolsSolved: solved !== null` |
+| `Harness.tsx` / `Members.tsx` | `toolsSolved === false` ⇒ 显示「**实得工具 求解不了(组织未播种)**」,**不许显示 0** |
+| `lib/data.ts` | 新增 `invalidateHarnessCache()` —— 这份判据**随上下文变**(接待 vs 项目内工具面不同),而缓存是标签页级的。`chat.ts` 的 `project_opened` 与重置之后各调一次 |
+| `SettingsPanel.tsx` | 「已清空…**页面即将刷新**」以前是**假的**(全文件 `location.reload` 零命中)⇒ 现在真的刷新(留 900ms 让结果可见) |
+
+⚠️ **写测试时又被自己的正样本抓了一次**:负样本断言 `not.toContain("实得工具 0 个")`
+是**恒真**的 —— 实际标记是 `实得工具 <span…>0</span> 个`,那个字面量永远不会出现。
+改成按真实形状断言后才有效(判据⑤两条:unsolved 不显示计数 + solved 且 0 **才**显示 0;
+注入「忽略 toolsSolved」的突变 ⇒ 红)。
+
+**你这边的动作**:刷新一下页面即可(服务器返回的本来就是对的)。
+`1206 → 1210 passed / 57 files`,其余验证链全绿。
 
 ## ⚠️ 还没做的(如实标注,不是遗漏)
 

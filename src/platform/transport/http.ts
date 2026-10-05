@@ -565,6 +565,10 @@ export function buildHarnessView(db: Database.Database, dataDir: string): Harnes
       boundaryDeny: [...spec.boundaryDeny],
       promptUnits,
       tools: solved !== null ? [...solved.tools] : [],
+      // 「这一栏求解过了没有」——没有 agent 行时 `tools: []` **不是「0 个」,是
+      // 「算不出来」**。两者在界面上必须分开,否则成员页会显示一个看起来很正常的
+      // 「实得工具 0 个」(2026-10-05 真机现场)。
+      toolsSolved: solved !== null,
       blockedByCeiling: solved !== null ? solved.blockedByCeiling.map((d) => d.subject) : [],
       unknownTools: solved !== null ? solved.unknownTools.map((d) => d.subject) : [],
       toolSet: {

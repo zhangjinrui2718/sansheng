@@ -205,8 +205,22 @@ export function MembersPage() {
                   <span className="ss-meta ml-auto font-mono">{r.role}</span>
                 </div>
                 <div className="ss-meta mt-1">
-                  能力 {r.ceiling.length} 项 · 可写 {r.writeKinds.length} 类 · 实得工具{" "}
-                  {r.tools.length} 个
+                  能力 {r.ceiling.length} 项 · 可写 {r.writeKinds.length} 类 ·{" "}
+                  {/* ⚠️ `toolsSolved === false` 时**不许显示「0 个」**:那是「算不出来」
+                      (库里连这个角色的 agent 行都没有 —— 组织未播种 / 刚被重置),
+                      不是「一个工具都没有」。两种状态在界面上长得一样是这个项目
+                      反复栽过的形态(2026-10-05 真机现场:这里显示了「实得工具 0 个」,
+                      而真相是那一刻组织还没播种)。 */}
+                  {r.toolsSolved ? (
+                    `实得工具 ${r.tools.length} 个`
+                  ) : (
+                    <span
+                      style={{ color: "var(--cinnabar)" }}
+                      title="库里没有这个角色的 agent 行(组织还没播种,或刚被重置)—— 工具面求解不了。它**不是**「0 个工具」。"
+                    >
+                      实得工具 求解不了(组织未播种)
+                    </span>
+                  )}
                   {r.blockedByCeiling.length > 0 && ` · 越界 ${r.blockedByCeiling.length} 项`}
                 </div>
                 {r.tools.length > 0 && (

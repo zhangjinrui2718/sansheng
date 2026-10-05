@@ -70,6 +70,7 @@ function role(
     boundaryDeny: [],
     promptUnits: [],
     tools: ["c1"],
+    toolsSolved: true,
     blockedByCeiling: [],
     unknownTools: [],
     toolSet: toolSet(),
@@ -180,6 +181,46 @@ describe("③ 共用单元标注「共用于 N 个角色」", () => {
     expect(OWNERS.get("business_manager.core")).toEqual(["业务经理"]);
     // 非空自检:夹具真的有两个角色、三个不同单元
     expect(OWNERS.size).toBe(3);
+  });
+});
+
+// ── 判据 5:「求解不了」与「真的是 0」必须分开说 ──────────────────
+//
+// 2026-10-05 真机现场:成员页显示「实得工具 0 个」,而那一刻库里连 agent 行都没有
+// (组织刚被重置)。`tools` 是空数组没错,但「0 个工具」与「算不出来」是两件事,
+// 而它们在界面上长得一模一样 —— 这正是本项目反复栽的形态。
+describe("⑤ 工具面「求解不了」不许显示成「0 个」", () => {
+  /**
+   * 「已求解 ⇒ 实得工具 N 个」在标记里的真实形状:数字外面套了一层上色的 span。
+   * ⚠️ 必须用这个形状断言 —— 直接找字面量 `实得工具 0 个` **永远匹配不到**,
+   * 那样的负样本断言恒真(写这一版时正是被下面的正样本当场抓出来的)。
+   */
+  const showsSolvedCount = (html: string, n: number) =>
+    new RegExp(`实得工具 <span[^>]*>${n}</span> 个`).test(html);
+
+  it("toolsSolved=false ⇒ 显示「求解不了」,而且**不显示计数**", () => {
+    const unsolved = role("project_manager", "项目经理", {
+      toolsSolved: false,
+      tools: [],
+      promptUnits: [unit("project_manager.core")],
+    });
+    const html = renderPane(unsolved);
+    expect(html).toContain("求解不了");
+    expect(
+      showsSolvedCount(html, 0),
+      "把「算不出来」显示成了「实得工具 0 个」",
+    ).toBe(false);
+  });
+
+  it("正样本:toolsSolved=true 且 tools 真的为空 ⇒ **这才是**「0 个」(接待阶段的合法形状)", () => {
+    const solvedEmpty = role("project_manager", "项目经理", {
+      toolsSolved: true,
+      tools: [],
+      promptUnits: [unit("project_manager.core")],
+    });
+    const html = renderPane(solvedEmpty);
+    expect(showsSolvedCount(html, 0), "求解过了、确实是 0 —— 该显示 0").toBe(true);
+    expect(html).not.toContain("求解不了");
   });
 });
 

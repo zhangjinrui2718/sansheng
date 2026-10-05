@@ -158,7 +158,8 @@ export function HarnessRoleTabs({
             title={
               `role = ${r.role}\n` +
               `提示词单元 ${r.promptUnits.filter((u) => u.loaded).length}/${r.promptUnits.length} 已加载 · ` +
-              `能力 ${r.ceiling.length} 项 · 实得工具 ${r.tools.length} 个 · ` +
+              (r.toolsSolved ? `能力 ${r.ceiling.length} 项 · 实得工具 ${r.tools.length} 个` : `能力 ${r.ceiling.length} 项 · 工具面求解不了(组织未播种)`) +
+              ` · ` +
               `集合文件 ${r.toolSet.state}` +
               (issues > 0 ? `\n⚠️ ${issues} 处需要注意(页签上的数字)` : "")
             }
@@ -250,13 +251,26 @@ export function HarnessRolePane({
           {/* ⚠️ 这两个数**不是分数关系**:ceiling 是**能力**条目、tools 是**工具名**,
               而一条能力可以展开成多个工具(`blackboard.read` → `board_list` +
               `board_read`)⇒ 真机上「工具 26 / 能力 22」是正常的。写成 `26/22`
-              会被读成「26 用掉了 22 里的 26」(渲染真实数据时当场看出来的一处错)。 */}
+              会被读成「26 用掉了 22 里的 26」(渲染真实数据时当场看出来的一处错)。
+              ⚠️ 另外 `toolsSolved === false`(库里连这个角色的 agent 行都没有)时
+              **不许显示「0 个」** —— 那是「算不出来」,不是「一个都没有」。 */}
           <span
             className="ss-meta"
             title="能力 = ceiling 的条目数(代码内常量);实得工具 = 工具名个数 —— 一条能力可展开成多个工具,所以工具数常大于能力数,两者不是分数关系"
           >
-            能力 <span style={{ color: "var(--bone-dim)" }}>{role.ceiling.length}</span> 项 · 实得工具{" "}
-            <span style={{ color: "var(--bone)" }}>{role.tools.length}</span> 个
+            能力 <span style={{ color: "var(--bone-dim)" }}>{role.ceiling.length}</span> 项 ·{" "}
+            {role.toolsSolved ? (
+              <>
+                实得工具 <span style={{ color: "var(--bone)" }}>{role.tools.length}</span> 个
+              </>
+            ) : (
+              <span
+                style={{ color: "var(--cinnabar)" }}
+                title="库里没有这个角色的 agent 行(组织还没播种,或刚被重置)—— 工具面求解不了。它**不是**「0 个工具」。"
+              >
+                实得工具 求解不了(组织未播种)
+              </span>
+            )}
           </span>
           <span className="ss-meta" title={role.toolSet.path}>
             集合文件{" "}

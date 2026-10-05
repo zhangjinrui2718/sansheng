@@ -299,6 +299,18 @@ export function useProjectUsage(
  */
 let harnessPromise: Promise<HarnessView> | null = null;
 
+/**
+ * 丢掉模块级缓存。**上下文变了就必须调它** —— 这份判据里有一半是**随上下文变**的:
+ * 有项目 / 没项目时同一角色的**工具面不同**(scope 门),而缓存是**标签页级**的。
+ * 不失效的后果与「0 个工具」是同一类谎:组织刚播种(或被重置)之后,页面还拿着
+ * 那一刻的旧响应,而它**看起来完全正常**。
+ *
+ * 调用点:`project_opened`(接待 → 项目的迁移,scope 变了)与「重置数据」之后。
+ */
+export function invalidateHarnessCache(): void {
+  harnessPromise = null;
+}
+
 export function loadHarnessOnce(): Promise<HarnessView> {
   if (harnessPromise === null) {
     harnessPromise = api.getHarness().catch((e: unknown) => {

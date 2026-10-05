@@ -237,6 +237,45 @@ describe("生产接线:bootPlatform 真的把 toolSetFor 交出去了", () => {
   });
 });
 
+/**
+ * 2026-10-05 真机现场:成员页显示「能力 22 项 · 可写 3 类 · **实得工具 0 个**」——
+ * 而那一刻库里连这个角色的 agent 行都没有(组织刚被重置、还没播种)。
+ *
+ * `tools` 是空数组没错,但**「0 个工具」与「算不出来」是两件事**,而它们在界面上
+ * 长得一模一样。所以契约里多了一维 `toolsSolved`,这组测试钉住它的两个方向:
+ *   · 没有 agent 行 ⇒ `toolsSolved === false`(界面显示「求解不了」,不许显示 0);
+ *   · 有 agent 行   ⇒ `toolsSolved === true`(此时 `tools: []` 才是真的 0 —— 例如
+ *     接待阶段某个角色在 scope 门下确实一个都拿不到)。
+ */
+describe("② harness 视图:工具面「求解不了」与「真的是 0」必须能分开", () => {
+  it("组织未播种(库里没有这个角色的 agent 行)⇒ toolsSolved = false", () => {
+    db = openPlatformMemoryDb(); // 注意:不插任何 agent
+    const v = buildHarnessView(db, dataDir);
+    expect(v.roles.length, "四个角色的**规格**仍然照报(它们是代码内常量)").toBe(4);
+    for (const r of v.roles) {
+      expect(r.tools, `${r.role} 的工具面求解不了,所以是空数组`).toEqual([]);
+      expect(r.toolsSolved, `${r.role} 必须如实报「求解不了」`).toBe(false);
+      // 而 ceiling / writeKinds 是代码内常量,照常显示 —— 这正是真机上那个
+      // 「22 / 3 / 0」的形状:看起来像「这个角色没有工具」。
+      expect(r.ceiling.length).toBeGreaterThan(0);
+    }
+  });
+
+  it("播种之后同一份视图变成 solved = true(负样本的另一半)", () => {
+    db = openPlatformMemoryDb();
+    insertAgent(db, {
+      id: "ag_bm", role: "business_manager", specialization: null,
+      displayName: "业务经理", createdAt: CLOCK,
+    });
+    const bm = buildHarnessView(db, dataDir).roles.find((r) => r.role === "business_manager")!;
+    expect(bm.toolsSolved).toBe(true);
+    expect(bm.tools.length, "接待模式(无项目)下业务经理拿得到 project_open 一类").toBeGreaterThan(0);
+    // 其余三个角色仍然没有 agent 行 ⇒ 仍然「求解不了」
+    const wk = buildHarnessView(db, dataDir).roles.find((r) => r.role === "worker")!;
+    expect(wk.toolsSolved).toBe(false);
+  });
+});
+
 describe("harness 只读视图:集合文件生效的**证据**必须可见", () => {
   beforeEach(() => {
     db = openPlatformMemoryDb();
@@ -270,6 +309,8 @@ describe("harness 只读视图:集合文件生效的**证据**必须可见", () 
   it("没有集合文件 → tools 是 ceiling 全集,removedByToolSet 为空", () => {
     const r = roleView("worker");
     expect(r.toolSet.state).toBe("absent");
+    // 正样本:库里**有**这个角色的 agent 行 ⇒ 工具面是求解过的
+    expect(r.toolsSolved, "有 agent 行 ⇒ 求解过了").toBe(true);
     expect(r.toolSet.removedByToolSet).toEqual([]);
     expect(norm(r.tools)).toEqual(norm(factoryToolset("worker")));
     expect(view().toolsDir).toBe(toolSetDir(dataDir));

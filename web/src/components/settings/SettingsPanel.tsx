@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useSettingsStore } from "@/stores/settings";
 import { resetData } from "@/lib/api";
+import { invalidateHarnessCache } from "@/lib/data";
 import type { ProviderConfig, ThinkingLevel } from "@shared/types/settings";
 
 /** 编辑中的 provider 草稿。apiKey="" 表示「不改动」(服务端会保留旧真值) */
@@ -347,6 +348,15 @@ function ResetSection() {
       setInfo(
         `已清空 ${data.totalRows} 行数据(${data.cleared.length} 张表)。页面即将刷新。`,
       );
+      // ⚠️ **这句提示以前是假的** —— 它说「页面即将刷新」,而这里**没有**任何
+      // 刷新调用(全文件 `location.reload` 零命中)。后果不是「少了一次刷新」而已:
+      // 重置把库里清空了,而这个标签页还攥着重置**之前**拉到的数据 —— 项目列表、
+      // 会话、`GET /api/harness`(它有一份标签页级的模块缓存)全是旧的,而它们
+      // **看起来完全正常**。真机上已经踩到过它的一个具体形态:成员页显示
+      // 「实得工具 0 个」,而那一刻组织还没播种(2026-10-05)。
+      // ⇒ 文案承诺了刷新,那就真的刷新。留 900ms 让上面那行结果看得见。
+      invalidateHarnessCache();
+      window.setTimeout(() => window.location.reload(), 900);
     } catch (err) {
       setDone("err");
       setInfo(err instanceof Error ? err.message : String(err));

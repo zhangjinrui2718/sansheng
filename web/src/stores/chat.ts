@@ -31,6 +31,7 @@ import {
   type WsToolInfo,
 } from "@shared/types/platform";
 import * as api from "../lib/api";
+import { invalidateHarnessCache } from "../lib/data";
 import { errorMessage } from "../lib/api";
 import type { PlatformSocket } from "../lib/ws";
 
@@ -832,6 +833,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
         // **只在接待中才切**:同一事件也可能来自「用户在项目 A 里让业务经理又立了一个
         // 项目 B」,那时把用户从 A 拽走比让他自己点过去更糟。
         const onIntake = get().intakeActive;
+        // ⚠️ **工具面带上下文**:接待阶段(project = null)与项目内同一角色的工具面
+        // 不一样(scope 门)。而这份判据是**标签页级缓存**的 ⇒ 不失效的话,用户立完
+        // 项之后打开成员页,看到的仍是「接待阶段」那一份(某些角色是 0 个工具),
+        // 而它看起来完全正常。
+        invalidateHarnessCache();
         set((s) => ({ projectsRevision: s.projectsRevision + 1 }));
         if (onIntake) void get().selectProject(e.projectId);
         return;
