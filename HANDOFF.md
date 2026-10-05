@@ -16,7 +16,7 @@
 ## 状态
 
 ```
-W11 🔖 提交号见紧随其后的 docs(handoff) 提交
+W11 20f92c0 feat(web): 对话页不再留平台通知半截 + 项目页「组织推进」带派生状态 / 「合规记录」不派生
     feat(web): 对话页不再留平台通知半截 + 项目页「组织推进」带派生状态 / 「合规记录」不派生
 1429 passed / 67 files · 两条 typecheck 0 · npm run build 绿 · check:design E1–E14 绿 · as any 0
 ```
