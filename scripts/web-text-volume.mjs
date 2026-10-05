@@ -41,8 +41,9 @@ const FILES = [
   // 「三类静默失败」#3)。2026-10-06:工件页已并入工作项页(Artifacts.tsx →
   // Works.tsx);Goals.tsx / Timeline.tsx 是更早删掉的页面,一并清掉。
   "web/src/routes/Works.tsx",
-  "web/src/routes/Harness.tsx",
   "web/src/routes/Memory.tsx",
+  // harness 页已并入成员页(2026-10-06)⇒ 文件搬到 components 下
+  "web/src/components/members/RoleHarness.tsx",
 ];
 
 /**

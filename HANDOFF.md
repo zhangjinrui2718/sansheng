@@ -2,7 +2,56 @@
 
 ---
 
-# ⚡ 最新一轮 · W6(2026-10-06 晚)· **先读这一节**
+# ⚡ 最新一轮 · W7(2026-10-06 深夜)· **先读这一节**
+
+> W6(工件页并入工作项页 + 依赖图边方向)**仍然有效**。这一轮是同一件事的第二步:
+> 用户贴出成员页底部的两段说「这个信息不要展示了,我感觉没什么意思」,并要求
+> 「成员的 harness 管理放在成员的 tab 下面,把『成员』『harness』这两个 tab 也合并了」。
+
+## 状态
+
+```
+W7  `本次提交` feat(web): 成员页删两段噪音 + Harness 并入成员 tab + 两处诚实接线
+1382 passed / 65 files · 两条 typecheck 0 · npm run build 绿 · check:design E1–E14 绿 · as any 0
+导航:**9 个 tab → 7 个**(W6 去掉「工件」,W7 去掉「Harness」)
+```
+
+## ① 成员页:删掉那两段
+
+| 删了什么 | 为什么可以删(判据去哪了) |
+|---|---|
+| **「本项目成员一览」整段** | 它是页签的复述(标签=角色、值=显示名、悬停=id,屏幕上出现「业务经理 业务经理 bm」)。角色名在面板标题/页签,显示名(与角色名不同时)与等宽 id 在面板摘要行,专长也在那儿。**唯一少掉**的是「成员总数」这个聚合数字 |
+| **「甲方(你)/平台通知」那张卡** | 用户点名要删的重复:甲方自己的话在对话页、平台通知走对话页的**系统带**(`data-channel="system"`)。逐条消息仍在端点里,少的只是「甲方 N 条 · 平台通知 M 条」这两行 kind 计数 |
+| `ConversationCard` 的 `note` 参数 | 它唯一的调用方是上面那张卡 ⇒ 一起清掉,不留死参数/死分支 |
+| **保留了** `strangers` 段 | 它只在**真的**有人不在成员表里时才渲染(真机 0 个 ⇒ 整段不出现),且 hints 写明「列出来是为了不静默丢证据」。**一份证据被折叠可以,被删掉不行** |
+
+## ② Harness 并入成员 tab
+
+- `git mv web/src/routes/Harness.tsx web/src/components/members/RoleHarness.tsx`:删掉 `HarnessPage`(路由页)与 `HarnessRoleTabs`(角色页签),新增自足的 `RoleHarnessSection({ role })`(**逐字照抄**原来的取数 / 草稿 / 备份 / 写面四条规矩)。
+- 成员面板里那块**只读的「角色能力面」换成它**(不再两块并存)。三条判据一条没丢:`toolsSolved===false` ⇒「求解不了」而非「0 个」、四类告警可见、共用单元标注 —— 全部由 `HarnessRolePane` 承担,测试从 members 挪到 harness 那份。
+- 「一次只渲染一个角色」改由**成员页签**承担;原页签的四类告警角标 → `roleIssueCount` 落到成员页签的**第二个**角标(与「欠活」角标各有各的 title)。
+- 导航:`App.tsx` 的 `Route` union / 分支 + TopBar 页签去掉 `harness`。
+
+## ③ 合并暴露出来的两处「会静默说假话」(我补的,都在合并后可见)
+
+1. **保存提示词单元之后,页签角标会拿着旧数**。页签那个「N 处需要注意」算的是 `useHarnessRoles()` 的**模块级缓存**,而面板里保存只更新面板自己那份 ⇒ 用户刚补上最后一个缺单元,角标仍显示旧数,直到刷新页面。修法:`useHarnessRoles({ revision })`,面板保存成功后通过 `onSaved` 把页面那一格 +1(并在 revision>0 时先失效模块级缓存)。**源码级断言**钉住这条接线(`c10-dead-code.test.ts`)。
+2. **`member-conversations` 读不到 ≠「他没有说过话」**。合并时删掉的那一段正好是页面上**唯一**渲染 `conversations.error` 的地方 ⇒ 端点一失败,每个人的对话块都显示「他产生了什么对话 · 0 条 / 还没有发言。」—— 而那是假的。现在错误传进面板:标题写「读不到」+ 给出原因,并有正负样本测试。
+3. 顺手:`scripts/web-text-volume.mjs` 的 FILES 又少了两个已不存在的文件(`routes/Harness.tsx` / `routes/Artifacts.tsx`)⇒ 已改成实际存在的项(它的 `readAll()` 是 `catch { continue; }`,列错 = 文字量**静默不算**)。
+
+## 验收链(本次实跑)
+
+```
+npx tsc -p tsconfig.server.json --noEmit   # 0
+npx tsc -p tsconfig.web.json --noEmit      # 0
+npm test                                   # 1382 passed / 65 files
+npm run build                              # index-*.js 344.73 kB(gzip 111.45)
+npm run check:design                       # ✓ E1–E14
+grep -rn 'HarnessPage|HarnessRoleTabs|harnessRole' web/src/ tests/web/   # 0
+```
+
+---
+
+# ⚡ 上一轮 · W6(2026-10-06 晚)· 工件页并入工作项页 + 依赖图边方向修正
 
 > W5(命名统一 + 工件页主视图换时间轴)那一节在下面,**仍然有效**;这一节是它的两步收口。
 

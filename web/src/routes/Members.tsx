@@ -38,6 +38,38 @@
  *      新增「正在做什么」,数据源是 `useProjectLive`(它自带 2.5s 轮询,是全项目
  *      唯一破例轮询的 hook:WS 只覆盖状态迁移,而「现在」只能由定时器回答)。
  *
+ * ── 2026-10-06(同日第二刀):又合并了什么、删了什么 ────────────────
+ *
+ * 用户的原话(两条,逐字):
+ *
+ *   「(成员页底部的「不在成员表里的发言」与「本项目成员一览」)这个信息不要
+ *     展示了,我感觉没什么意思」
+ *   「成员的 harness 管理可以放在成员的 tab 下面,可以把「成员」「harness」
+ *     这两个 tab 也合并了」
+ *
+ * 所以这一版:
+ *
+ *   ① **「本项目成员一览」整段删除。** 它复述的就是页签上的东西(标签 = 角色、
+ *      值 = 显示名、悬停 = agentId),屏幕上会出现「业务经理 业务经理 bm」这种
+ *      重复 —— 用户说它「没什么意思」是准确的。删掉不丢任何判据:成员的身份
+ *      仍在页签的 tooltip(`agentId = …`)、面板标题(角色名)与摘要行的等宽 id 里。
+ *   ② **「不在成员表里的发言」只保留有信息量的那一半** —— 真的不在成员表里的
+ *      agent 的发言(`strangers`);**删掉「甲方(你)/平台通知」那张卡**:甲方
+ *      自己的话在对话页,平台通知走对话页的系统带,成员页再抄一份就是重复。
+ *      整段**只在 `strangers` 非空时才渲染**(真机数据里是 0 个 ⇒ 整段不出现)。
+ *      ⚠️ 这不是「静默丢数据」:`strangers` 一旦非空,那一段会写明「这些发言的
+ *      作者不在本项目成员表里(可能是历史身份的残留);列出来是为了不静默丢证据」。
+ *   ③ **harness 管理并进这一屏** —— 见 `components/members/RoleHarness.tsx`
+ *      (它从 `routes/Harness.tsx` 搬来;那个路由页面与它那一行角色页签都已删)。
+ *      `MemberPane` 里那块**只读**的「角色能力面」换成自足的
+ *      `RoleHarnessSection`(同一处,不许两块并存 —— 那正是用户一直在清理的
+ *      重复),那个「只读角色能力面」的 prop 随之删除。旧角色页签承担的「一次只看一个角色」
+ *      改由**成员页签**承担(一人一角色)。
+ *      ⚠️ 页签角标因此变成**两个**且各有自己的 `title`:「欠活」(本页原有口径:
+ *      `readyWorks + todos.length`)+ `roleIssueCount` 的告警角标(缺单元 /
+ *      集合文件坏 / 越权被拒 / 未知工具名)。后者是原 harness 页页签角标的功能,
+ *      合并后不能丢。
+ *
  * ── 这一版最硬的一条纪律:三种「不知道」不许长得像「一切正常」────────
  *
  * 契约 `MemberActivityView` / `ProjectLiveView` 的注释逐字写着这件事,前端照做:
@@ -65,7 +97,7 @@ import type {
   MemberConversationView,
   MemberView,
   ProjectLiveView,
-  RoleHarnessView,
+  ProjectRole,
   SessionMessageKind,
   TriggerTodoKind,
   TurnTrigger,
@@ -73,12 +105,12 @@ import type {
 import {
   Disclosure,
   EmptyState,
-  KV,
   PageHeader,
   Pill,
   Section,
   StatStrip,
 } from "@/components/ui/primitives";
+import { RoleHarnessSection, roleIssueCount } from "@/components/members/RoleHarness";
 import {
   useArtifacts,
   useHarnessRoles,
@@ -242,13 +274,23 @@ function useNow(intervalMs: number): number {
 
 /**
  * 成员页签。**一次只看一个人** —— 四个人同时铺开时,消息与卡片会把彼此的结构淹掉
- * (这一版要修的就是那个)。形态照 `HarnessRoleTabs`,主体从「角色」换成「人」。
+ * (这一版要修的就是那个)。形态照旧的 harness 角色页签(那个组件已删除,「一次
+ * 只看一个角色」这条判据现在由这里承担),主体从「角色」换成「人」。
+ *
+ * 页签上可以有**两个**角标,而且它们回答的是不同的问题(所以 `title` 必须不同):
+ *
+ *   - `debt`(`memberDebt`)—— 「它欠着几件事」:库里的活 + 排空器要叫醒它的待办;
+ *   - `issues`(`roleIssueCount`)—— 「这个**角色**的 harness 有几处需要注意」:
+ *     缺单元 / 集合文件坏 / 越权被拒 / 未知工具名。它是原 harness 页页签角标
+ *     的功能,合并后搬到这里 —— 不搬就等于把「这个角色的提示词/工具面有问题」
+ *     这条可见性静默丢掉。
  */
 export function MemberRoleTabs({
   members,
   active,
   onSelect,
   activityOf,
+  issuesOf,
   runtime,
 }: {
   members: readonly MemberView[];
@@ -257,6 +299,8 @@ export function MemberRoleTabs({
   onSelect: (agentId: string) => void;
   /** 取这个人在这份运行态快照里的那一条;没拿到快照时返回 `null` */
   activityOf: (agentId: string) => MemberActivityView | null;
+  /** 这个**角色**身上需要注意的处数(`roleIssueCount`);没读到 harness 视图时返回 0 */
+  issuesOf: (role: ProjectRole) => number;
   /** 这份快照的运行期来源;`null` = 还没拿到过快照 */
   runtime: ProjectLiveView["runtime"] | null;
 }) {
@@ -266,6 +310,7 @@ export function MemberRoleTabs({
         const isActive = m.id === active;
         const activity = activityOf(m.id);
         const debt = memberDebt(activity);
+        const issues = issuesOf(m.role);
         // ⚠️ 只有 `runtime === "host"` 时 `turn` 才是事实 —— 其余两种「不知道」
         // 一律不许被读成「没在跑」,所以这里连点都不点亮的绿点也不给,只给灰点。
         const turn = runtime === "host" ? (activity?.turn ?? null) : null;
@@ -286,7 +331,10 @@ export function MemberRoleTabs({
                 : unknown
                   ? `\n运行态${runtime === null ? "还没读到" : "读不到"} —— 这一刻不下任何结论`
                   : "\n此刻没有回合在它身上跑") +
-              (debt > 0 ? `\n它欠着 ${debt} 件(优先做的活 + 排空器要叫醒它的待办)` : "")
+              (debt > 0 ? `\n它欠着 ${debt} 件(优先做的活 + 排空器要叫醒它的待办)` : "") +
+              (issues > 0
+                ? `\n这个角色有 ${issues} 处需要注意(缺单元 / 集合文件坏 / 越权被拒 / 未知工具名 —— 来自 GET /api/harness)`
+                : "")
             }
             style={{
               padding: "6px 10px",
@@ -296,7 +344,7 @@ export function MemberRoleTabs({
               borderColor: isActive ? "var(--ink-4)" : "transparent",
             }}
           >
-            {/* ⚠️ 页签主体 = **角色名**(与 harness 页逐字相同,2026-10-06)。
+            {/* ⚠️ 页签主体 = **角色名**(与 harness 的面板逐字相同,2026-10-06)。
                 人的名字(`agents.display_name`)进 tooltip:一人一角色的组织里它与
                 角色名一模一样,同时显示两遍就是用户说的「解释」。 */}
             <span style={{ fontSize: 12 }}>{ROLE_LABEL[m.role]}</span>
@@ -317,6 +365,17 @@ export function MemberRoleTabs({
                 title={`它欠着 ${debt} 件 = 优先做的活 ${activity?.readyWorks ?? 0} 件 + 排空器现在要叫醒它的待办 ${activity?.todos.length ?? 0} 条(两个来源会重叠,所以这是「需要它动手的处数」)`}
               >
                 {debt}
+              </Pill>
+            )}
+            {/* ⚠️ 第二个角标:角色 harness 那边需要注意的处数。与上面那个「欠活」
+                角标**不是一回事**(一个说活、一个说配置),所以 title 必须不同 ——
+                两个 cinnabar 数字长得一样而没有各自的说明,就是把两件事糊成一个。 */}
+            {issues > 0 && (
+              <Pill
+                tone="cinnabar"
+                title={`这个角色的 harness 有 ${issues} 处需要注意:缺单元 / 集合文件坏 / 越权被拒 / 未知工具名(来自 GET /api/harness;不是它手上的活)`}
+              >
+                {issues}
               </Pill>
             )}
           </button>
@@ -388,7 +447,10 @@ function turnStatusNode(
  *   2. 「正在做什么」—— 库里的活 + 排空器的待办 + 最近一次动 + 排空器心跳;
  *   3. 「他产生了什么对话」—— **默认折叠**(否则一屏又被消息刷满);
  *   4. 「他产出了什么工件」—— 把成员页与工件页连起来;
- *   5. 角色能力面 —— **默认折叠**(它是只读常量,不该占首屏)。
+ *   5. **角色 harness** —— `RoleHarnessSection`(默认折叠,它自己取数、自己持有
+ *      草稿与备份)。2026-10-06 合并:这里原来是块**只读**的「角色能力面」,
+ *      与 harness 页显示同一份数据的两半 —— 用户要求把两个页签合并,所以换成
+ *      那一份**可写**的实现,同一处只留一块。
  *
  * 纯 props(与 `HarnessRolePane` / `ConversationCard` 同一处置):导出给测试,
  * 不需要起服务、不需要 stub fetch。
@@ -397,19 +459,26 @@ export function MemberPane({
   member,
   activity,
   conversation,
-  harnessRole,
+  conversationError,
   artifacts,
   runtime,
   dispatch,
   fetchedAt,
   now,
+  onHarnessSaved,
 }: {
   member: MemberView;
   /** 这个人在这份运行态快照里的那一条;`null` = 还没拿到快照(或快照里没有他) */
   activity: MemberActivityView | null;
   conversation: MemberConversationView | null;
-  /** 这个**角色**的能力面(`useHarnessRoles()` 里按 `role` 取的那一条) */
-  harnessRole: RoleHarnessView | null;
+  /**
+   * `GET /api/projects/:id/member-conversations` 的错误。
+   *
+   * ⚠️ **「读不到」不许显示成「没有发言」**:两者在屏幕上都是「0 条 + 一句空态」,
+   * 而前者是「这次请求失败了」—— 用户会据此以为这个人一句话都没说过(2026-10-06
+   * 合并 harness 时把页面上仅有的那个错误落点删掉了,于是这条变得看得见)。
+   */
+  conversationError: string | null;
   /** 已按 `authorAgentId === member.id` **过滤好**的工件 —— 过滤在页面层做 */
   artifacts: readonly ArtifactView[];
   /** 这份快照的运行期来源;`null` = 还没拿到过快照 */
@@ -420,6 +489,8 @@ export function MemberPane({
   fetchedAt: number | null;
   /** 页面这一刻的本地时钟 */
   now: number;
+  /** harness 里一次保存 / 恢复成功后通知页面(页签角标据此重算) */
+  onHarnessSaved?: () => void;
 }) {
   const drift = elapsedSinceFetch(fetchedAt, now);
   /** 快照值 → 屏上此刻的年龄(加法为什么成立,见 `elapsedSinceFetch`)。 */
@@ -621,7 +692,19 @@ export function MemberPane({
         {/* ── ③ 他产生了什么对话 —— **默认折叠**,标题写清条数 ─────── */}
         {/* `conversation === null` 就是真的 0:端点会把有消息的组都返回,没有这个组
             = 库里确实没有它的行(见 `ConversationCard` 的注释)。 */}
-        <Disclosure summary={`他产生了什么对话 · ${conversation?.total ?? 0} 条`}>
+        <Disclosure
+          summary={
+            conversationError !== null
+              ? "他产生了什么对话 · 读不到"
+              : `他产生了什么对话 · ${conversation?.total ?? 0} 条`
+          }
+        >
+          {conversationError !== null && (
+            <div className="ss-note" style={{ color: "var(--cinnabar)" }}>
+              {`对话记录读不到:${conversationError} —— 这一次请求失败了,`}
+              {"所以「0 条」不代表他没说过话(端点会重试)。"}
+            </div>
+          )}
           <ConversationCard
             title={member.displayName}
             role={ROLE_LABEL[member.role]}
@@ -658,63 +741,15 @@ export function MemberPane({
           )}
         </div>
 
-        {/* ── ⑤ 角色能力面 —— 只读常量,折起来不占首屏 ───────────── */}
-        <Disclosure
-          summary={
-            harnessRole === null
-              ? "角色能力面(还没读到)"
-              : `角色能力面(只读)· 能力 ${harnessRole.ceiling.length} 项`
-          }
-        >
-          {harnessRole === null ? (
-            <div className="ss-note">
-              还没读到这个角色的能力面(`GET /api/harness` 未就绪,或这个角色不在返回里)。
-            </div>
-          ) : (
-            <div className="flex flex-col gap-1">
-              <div className="ss-meta" title="ceiling 是 ROLE_SPECS 里的代码内常量,不是可编辑文件 —— 界面改不了它。">
-                能力 {harnessRole.ceiling.length} 项 · 代码内常量,改不了
-              </div>
-              {/* ⚠️ `toolsSolved === false` 时**不许显示「0 个」**:那是「算不出来」
-                  (库里连这个角色的 agent 行都没有 —— 组织未播种 / 刚被重置),
-                  不是「一个工具都没有」。两种状态在界面上长得一样是这个项目反复
-                  栽过的形态(2026-10-05 真机现场:这里显示了「实得工具 0 个」)。
-                  ⚠️ 判据是 **`=== false`**,不是 `!toolsSolved`:字段缺失(前端比后端新)
-                  要退化回旧行为照常显示计数,别把「旧后端没这个字段」误报成「组织未播种」。 */}
-              {harnessRole.toolsSolved !== false ? (
-                <div className="ss-meta">
-                  实得工具 {harnessRole.tools.length} 个
-                  {harnessRole.tools.length > 0
-                    ? ` · ${harnessRole.tools.slice(0, 6).join(" · ")}${harnessRole.tools.length > 6 ? ` …(+${harnessRole.tools.length - 6})` : ""}`
-                    : ""}
-                </div>
-              ) : (
-                <div
-                  className="ss-meta"
-                  style={{ color: "var(--cinnabar)" }}
-                  title="库里没有这个角色的 agent 行(组织还没播种,或刚被重置)—— 工具面求解不了。它**不是**「0 个工具」。"
-                >
-                  实得工具 求解不了(组织未播种)
-                </div>
-              )}
-              {harnessRole.blockedByCeiling.length > 0 && (
-                <div className="ss-meta" style={{ color: "var(--cinnabar)" }}>
-                  超出架构上界(被 ceiling 拒绝):{harnessRole.blockedByCeiling.join(" · ")}
-                </div>
-              )}
-              <div className="flex flex-wrap gap-1" style={{ marginTop: 4 }}>
-                {harnessRole.ceiling.slice(0, 8).map((c) => (
-                  <span key={c} className="ss-pill" data-tone="bone">
-                    {c}
-                  </span>
-                ))}
-                {harnessRole.ceiling.length > 8 && (
-                  <span className="ss-meta">…(+{harnessRole.ceiling.length - 8})</span>
-                )}
-              </div>
-            </div>
-          )}
-        </Disclosure>
+        {/* ── ⑤ 角色 harness —— 这一版从只读能力面换成可写的 harness 管理 ──
+            ⚠️ **同一处只留一块**:以前这里是「角色能力面」只读折叠块,而 harness
+            页又有一份可写的同源视图 —— 用户要的正是别再有两处。现在只有
+            `RoleHarnessSection`(它自己取整份 `GET /api/harness`、自己持有草稿与
+            备份,默认折叠)。`MemberPane` 因此**不再**接收那个只读能力面的 prop:
+            那块只读视图的三条判据(「求解不了」≠「0 个」、四类需要注意、
+            共用单元标注)现在由 `HarnessRolePane` 承担,断言在
+            `tests/web/harness-by-role.test.ts`。 */}
+        <RoleHarnessSection role={member.role} onSaved={onHarnessSaved} />
       </article>
     </Section>
   );
@@ -739,7 +774,6 @@ export function ConversationCard({
   group,
   kinds,
   emptyText,
-  note,
 }: {
   title: string;
   role: string;
@@ -747,7 +781,6 @@ export function ConversationCard({
   group: MemberConversationView | null;
   kinds: readonly SessionMessageKind[];
   emptyText: string;
-  note?: string;
 }) {
   const total = group?.total ?? 0;
   const messages = group?.messages ?? [];
@@ -763,11 +796,11 @@ export function ConversationCard({
           {total} 条
         </span>
       </div>
-      {(summary !== "" || note !== undefined) && (
-        <div className="ss-meta mt-0.5">
-          {note !== undefined ? note : summary}
-        </div>
-      )}
+      {/* ⚠️ 这里的摘要**只**来自 `kindSummary`(真实条数)。2026-10-06 删掉了
+          `note` 参数:它唯一的调用方是「甲方(你)/平台通知」那张卡,而那张卡
+          整段已删(甲方的话在对话页、平台通知走对话页的系统带)。删掉参数的同时
+          删掉这条分支 —— 留一个没有调用方的可选参数就是死分支。 */}
+      {summary !== "" && <div className="ss-meta mt-0.5">{summary}</div>}
       {messages.length === 0 ? (
         <div className="ss-note mt-1">{emptyText}</div>
       ) : (
@@ -810,7 +843,15 @@ export function MembersPage() {
   const projects = useChatStore((s) => s.projects);
   const members = useProjectMembers(projectId);
   const conversations = useMemberConversations(projectId);
-  const harness = useHarnessRoles();
+  /**
+   * 页面这一份 harness **只画页签角标**(`roleIssueCount`)。
+   *
+   * ⚠️ `revision`:成员面板里的 `RoleHarnessSection` 保存成功后会把这一格 +1 ——
+   * 它读的是模块级缓存,不推这一格的话,刚补上的缺单元仍会顶着「N 处需要注意」
+   * 不放(屏幕上说着与事实相反的话)。见 `lib/data.ts` 里 `revision` 的说明。
+   */
+  const [harnessRevision, setHarnessRevision] = useState(0);
+  const harness = useHarnessRoles({ revision: harnessRevision });
   const artifacts = useArtifacts({ projectId });
   const live = useProjectLive(projectId);
   /** 本地时钟(1s)—— 让快照里的年龄在两次 2.5s 轮询之间也继续走。 */
@@ -840,7 +881,25 @@ export function MembersPage() {
     [conversations.data, members.data],
   );
 
-  const nullGroup = groupOf.get(null) ?? null;
+  /**
+   * 角色 → 这一角色「需要注意的处数」(`roleIssueCount`)。页签上那个告警角标用它。
+   *
+   * ⚠️ 读不到 harness 视图时返回 0(不显示角标)—— 那是「还不知道」,不是一个
+   * 「一切正常」的断言;角标只是**加分项**,缺了它不会把有问题的角色说成没问题
+   * (面板里的 `RoleHarnessSection` 会如实说「读不到」)。
+   */
+  const roleHarnessOf = useMemo(
+    () => new Map(harness.roles.map((r) => [r.role, r] as const)),
+    [harness.roles],
+  );
+  const issuesOf = useCallback(
+    (role: ProjectRole) => {
+      const r = roleHarnessOf.get(role);
+      return r === undefined ? 0 : roleIssueCount(r);
+    },
+    [roleHarnessOf],
+  );
+
   const selected =
     members.data.length === 0
       ? null
@@ -893,7 +952,7 @@ export function MembersPage() {
       <div className="ss-page">
         <PageHeader
           title="成员"
-          hintTitle="本项目成员来自 GET /api/projects/:id/members;运行态来自 GET /api/projects/:id/live(2.5s 轮询);角色能力面来自只读的 GET /api/harness。"
+          hintTitle="本项目成员来自 GET /api/projects/:id/members;运行态来自 GET /api/projects/:id/live(2.5s 轮询);角色 harness 来自 GET /api/harness(每个成员面板里那一块,提示词单元可直接改)。"
         />
         <EmptyState>先在「对话」页的左栏选一个项目。</EmptyState>
       </div>
@@ -905,7 +964,7 @@ export function MembersPage() {
       <PageHeader
         title="成员"
         hint={projectName}
-        hintTitle="本项目成员来自 GET /api/projects/:id/members;运行态来自 GET /api/projects/:id/live(2.5s 轮询);角色能力面来自只读的 GET /api/harness。"
+        hintTitle="本项目成员来自 GET /api/projects/:id/members;运行态来自 GET /api/projects/:id/live(2.5s 轮询);角色 harness 来自 GET /api/harness(每个成员面板里那一块,提示词单元可直接改)。"
         aside={liveAside}
       />
 
@@ -919,14 +978,18 @@ export function MembersPage() {
         <EmptyState>这个项目还没有成员。</EmptyState>
       ) : (
         <>
-          {/* ── 按成员分栏:一次只看一个人(照 Harness 的组织方式)─────
+          {/* ── 按成员分栏:一次只看一个人(照 harness 的组织方式)─────
               上一版把成员 KV / 每个人的对话 / 每个角色的能力面同时铺开,
-              4 个人 × 3 块内容挤在一屏里 —— 这一版要修的就是那个。 */}
+              4 个人 × 3 块内容挤在一屏里 —— 这一版要修的就是那个。
+              「一次只看一个角色」这条判据原来由 harness 页的角色页签承担,
+              那个组件已删 —— 现在由**这一行成员页签**承担(一人一角色),
+              断言见 `tests/web/members-activity.test.ts`。 */}
           <MemberRoleTabs
             members={members.data}
             active={selected?.id ?? null}
             onSelect={setActiveId}
             activityOf={activityOf}
+            issuesOf={issuesOf}
             runtime={runtime}
           />
 
@@ -935,31 +998,44 @@ export function MembersPage() {
               member={selected}
               activity={activityOf(selected.id)}
               conversation={groupOf.get(selected.id) ?? null}
-              // 能力面按**角色**取:同一个人身上只有一份角色属性(角色只有一处真相)。
-              harnessRole={harness.roles.find((r) => r.role === selected.role) ?? null}
               // 过滤在页面层做:面板是纯展示,不持有「怎么找这个人的工件」的判据。
+              // ⚠️ 角色 harness 不由页面传下去 —— 面板里那个 `RoleHarnessSection`
+              // 是**自足**的(要整份视图才能算「共用于 N 个角色」)。页面这一份
+              // `harness` 只用来画页签上的告警角标。
               artifacts={artifacts.data.filter((a) => a.authorAgentId === selected.id)}
               runtime={runtime}
               dispatch={live.data?.dispatch ?? null}
               fetchedAt={live.fetchedAt}
               now={now}
+              // 「读不到对话记录」不是「没有发言」—— 两者在屏幕上长得一样,所以
+              // 必须把错误本身传下去(见 `MemberPane` 里那一处分支)。
+              conversationError={conversations.error}
+              onHarnessSaved={() => setHarnessRevision((r) => r + 1)}
             />
           )}
         </>
       )}
 
-      {/* ── 不在成员表里的发言 —— 上一版有这一块,这一版**不许静默丢掉** ──
-          ⚠️ `agent_id IS NULL` 那一组**不是「甲方」的同义词**:甲方(`kind='user'`)
-          与平台通知(`kind='system'`,排空器异常停下时落的那条)都在里面,所以它
-          按 kind 分开显示 —— 把系统通知算成甲方说的话正是 A1 实测到的坑。 */}
-      {(strangers.length > 0 || nullGroup !== null) && (
+      {/* ── 不在成员表里的发言 —— **只在真的有人不在成员表里时才渲染** ────
+          2026-10-06 用户原话:「(这两段)这个信息不要展示了,我感觉没什么意思」。
+          这一版按**信息量**把它切了一半:
+            - **删掉「甲方(你)/平台通知」那张卡** —— 甲方自己的话在对话页、平台
+              通知走对话页的系统带,成员页再抄一份就是重复。
+            - **留下 `strangers`**(真的不在成员表里的 agent 的发言)。
+          ⚠️ 这不是「静默丢数据」:`strangers` 一旦非空,这一段就**必须**写清
+          「这些发言的作者不在本项目成员表里(可能是历史身份的残留);列出来是为了
+          不静默丢证据」—— 一份证据被折叠起来可以,被删掉不行。
+          ⚠️ 真机数据里 `strangers` 是 0 个 ⇒ 整段不出现(这才是用户要的效果)。
+          ⚠️ `agent_id IS NULL` 那一组(甲方 / 平台通知)不再在这里出现 —— 它
+          不是「不在成员表里」,它是「没有角色作者」,两者不是一回事。 */}
+      {strangers.length > 0 && (
         <Section
           title="不在成员表里的发言"
-          count={strangers.length + (nullGroup?.total ?? 0)}
-          hint="甲方与平台通知在库里都是 agent_id IS NULL,靠 kind 分开"
-          hintTitle="数据来自 GET /api/projects/:id/member-conversations(按 session_messages.agent_id 在 SQL 里 GROUP BY)。这一块与成员面板里的清单是同一个端点、同一套判据,只是发言者不属于本项目成员表。"
+          count={strangers.length}
+          hint="这些发言的作者不在本项目成员表里(可能是历史身份的残留);列出来是为了不静默丢证据"
+          hintTitle="数据来自 GET /api/projects/:id/member-conversations(按 session_messages.agent_id 在 SQL 里 GROUP BY)。与成员面板里的清单是同一个端点、同一套判据,只是发言者不属于本项目成员表 —— 它们**不在**上面那行页签里,所以不会被成员面板渲染出来。"
         >
-          <Disclosure summary={`展开查看 · ${strangers.length + (nullGroup?.total ?? 0)} 条`}>
+          <Disclosure summary={`展开查看 · ${strangers.length} 组`}>
             <div className="grid gap-2">
               {strangers.map((g) => (
                 <ConversationCard
@@ -972,48 +1048,10 @@ export function MembersPage() {
                   emptyText="还没有发言。"
                 />
               ))}
-
-              <ConversationCard
-                title="甲方(你)"
-                role="没有角色作者"
-                agentId={null}
-                group={nullGroup}
-                kinds={["user", "system"]}
-                emptyText="这段对话里还没有你说的话。"
-                note={
-                  nullGroup !== null
-                    ? `甲方 ${nullGroup.byKind.user ?? 0} 条 · 平台通知 ${nullGroup.byKind.system ?? 0} 条` +
-                      "(两者在库里都是 agent_id IS NULL,靠 kind 分开)"
-                    : "甲方 0 条 · 平台通知 0 条"
-                }
-              />
             </div>
           </Disclosure>
         </Section>
       )}
-
-      {/* ── 本项目成员一览(四个固定职能)—— 放在页面底部 ────────── */}
-      <Section
-        title="本项目成员一览"
-        count={members.data.length}
-        hint="四个固定职能:业务经理 / 项目经理 / 工程师 / 质检"
-        hintTitle="这一行是**组织**的答案(谁在这个项目里);上面那行页签是**运行**的答案(他们此刻在干什么)。"
-      >
-        {members.data.length === 0 ? (
-          <EmptyState>这个项目还没有成员。</EmptyState>
-        ) : (
-          <div className="sansheng-card px-3 py-1.5">
-            {members.data.map((m) => (
-              <KV
-                key={m.id}
-                label={ROLE_LABEL[m.role]}
-                value={m.displayName}
-                title={m.specialization !== null ? `专长 ${m.specialization} · ${m.id}` : m.id}
-              />
-            ))}
-          </div>
-        )}
-      </Section>
     </div>
   );
 }

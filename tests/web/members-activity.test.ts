@@ -16,6 +16,28 @@
  * 组件是纯 props 的(`MemberRoleTabs` / `MemberPane`),与 `HarnessRolePane`
  * / `ConversationCard` / `TurnView` 同一处置 —— 导出给测试,不起服务、不 stub fetch。
  *
+ * ── 2026-10-06(同日第二刀):这一版又改了什么 ─────────────────────
+ *
+ * 用户的原话:「(成员页底部的两段)这个信息不要展示了,我感觉没什么意思」+
+ * 「成员的 harness 管理可以放在成员的 tab 下面,可以把「成员」「harness」这两个
+ * tab 也合并了」。对本文件的影响:
+ *
+ *   - `MemberPane` 上那个传「只读角色能力面」的 prop **删掉了**(那块内容换成
+ *     成员面板里的 `RoleHarnessSection`,它自己取数)。测试夹具原来与那个 prop
+ *     同名,也一并改名成 `roleHarness(...)` —— 这样「删干净」可以由一条 grep
+ *     (三个已删除的名字:harness 路由页 / 角色页签 / 那个 prop)在 `web/src/`
+ *     与 `tests/web/` 里 **0 命中**来验证,而不是靠读代码。
+ *   - 原来的判据 ⑧(「求解不了」≠「0 个」)原来是断言成员页那块只读能力面的;
+ *     那块已删,**整组挪到 `tests/web/harness-by-role.test.ts` 判据 ⑤**,断言对象
+ *     换成 `HarnessRolePane`。
+ *   - 新增两条:
+ *       · 判据 ① 里的「成员页签一次只渲染一个成员的 harness 面板」(正负样本);
+ *       · 判据 ⑩「页签角标 = 欠活数字 + `roleIssueCount` 告警」(原 harness 页
+ *         页签那个角标的功能,两个页签合并后不能丢)。
+ *     ⚠️ 「一次只渲染一个角色」这条判据原来是 harness 页的角色页签承担的
+ *     (harness 页的角色页签),那个组件已删 —— 现在由**成员页签**承担,断言就在上面
+ *     那两条里。
+ *
  * ── 一个渲染细节(写断言时必须知道)────────────────────────────
  *
  * `renderToStaticMarkup` 会在**相邻文本节点**之间插 `<!-- -->`
@@ -29,11 +51,13 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import type {
   ArtifactView,
+  HarnessView,
   MemberActivityView,
   MemberConversationView,
   MemberView,
   ProjectLiveView,
   ProjectRole,
+  PromptUnitView,
   RoleHarnessView,
   SessionMessageView,
 } from "@shared/types/platform";
@@ -45,6 +69,7 @@ import {
   formatAge,
   memberDebt,
 } from "@/routes/Members";
+import { RoleHarnessDisclosure, roleIssueCount } from "@/components/members/RoleHarness";
 
 /**
  * 只留**可见正文**:去掉标签(属性跟在里面一起走)与 SSR 插的 `<!-- -->`。
@@ -154,7 +179,14 @@ const WK_ARTIFACTS: ArtifactView[] = [
 
 const BM_ARTIFACTS: ArtifactView[] = [artifact("b1", { title: BM_ARTIFACT_TITLE, authorAgentId: BM_ID })];
 
-function harnessRole(
+/**
+ * 一个角色的 harness 视图夹具。
+ *
+ * ⚠️ 名字(2026-10-06)刻意**不叫**那个已删除的 prop 名 —— 那个名字是本轮验收里
+ * 「三个旧名字在 `web/src/` 与 `tests/web/` 0 命中」时必须消失的词。改名让
+ * 「删干净」这件事可以被一条命令验证,而不是靠读代码。
+ */
+function roleHarness(
   role: ProjectRole,
   displayName: string,
   over: Partial<RoleHarnessView> = {},
@@ -182,7 +214,45 @@ function harnessRole(
   };
 }
 
-const WK_ROLE = harnessRole("worker", "工程师");
+const WK_HARNESS = roleHarness("worker", "工程师");
+
+/**
+ * 两段删除之后**唯一**还会渲染的 body(如果它非空的话)需要的夹具。
+ *
+ * ⚠️ 「不在成员表里的发言」整段现在只在 `strangers` 非空时才渲染,而且
+ * `MemberPane` 里那一块 harness 面板是**自足**的(自己 `getHarness()`,SSR 下
+ * `useEffect` 不跑 ⇒ 永远停在「加载中」)。所以本文件要钉住「一次只渲染一个成员的
+ * harness 面板」时,得走 `RoleHarnessDisclosure`(那正是 `RoleHarnessSection`
+ * 取到数据之后画的东西)拿**带完整数据**的视图断言 —— 在「加载中」的 html 上断言
+ * 「B 的单元不许出现」是恒真的假检查。
+ */
+const promptUnit = (id: string, over: Partial<PromptUnitView> = {}): PromptUnitView => ({
+  id,
+  loaded: true,
+  chars: id.length,
+  content: `# ${id}`,
+  path: `/data/harness/system_prompts/${id}.md`,
+  ...over,
+});
+
+const BM_ONLY_UNIT = "business_manager.core";
+const WK_ONLY_UNIT = "worker.core";
+const SHARED_UNIT = "collaboration.ask";
+
+const BM_HARNESS = roleHarness("business_manager", "业务经理", {
+  promptUnits: [promptUnit(BM_ONLY_UNIT), promptUnit(SHARED_UNIT)],
+});
+const WK_HARNESS_FULL = roleHarness("worker", "工程师", {
+  promptUnits: [promptUnit(SHARED_UNIT), promptUnit(WK_ONLY_UNIT)],
+});
+
+const HARNESS_VIEW: HarnessView = {
+  roles: [BM_HARNESS, WK_HARNESS_FULL],
+  promptDir: "/data/harness/system_prompts/",
+  toolsDir: "/data/harness/tools/",
+  strayToolSetFiles: [],
+  writable: true,
+};
 
 /** 只有一份快照能给的东西:`runtime` 与排空器心跳。 */
 const DISPATCH: ProjectLiveView["dispatch"] = {
@@ -224,12 +294,17 @@ const renderPane = (over: {
   member: MemberView;
   activity: MemberActivityView | null;
   conversation: MemberConversationView | null;
-  harnessRole: RoleHarnessView | null;
+  /**
+   * ⚠️ **必填** —— 「读不到对话记录」与「他没有说过话」在屏幕上都是「0 条 + 一句
+   * 空态」,所以调用点必须显式表态(传 `null` = 这次请求没出错)。
+   */
+  conversationError: string | null;
   artifacts: readonly ArtifactView[];
   runtime: ProjectLiveView["runtime"] | null;
   dispatch: ProjectLiveView["dispatch"] | null;
   fetchedAt: number | null;
   now: number;
+  onHarnessSaved?: () => void;
 }) => renderToStaticMarkup(createElement(MemberPane, over));
 
 /** 最常用的那一次渲染:host 快照、无本地漂移(fetchedAt === now)。 */
@@ -238,7 +313,7 @@ const renderWorker = (over: Partial<Parameters<typeof renderPane>[0]> = {}) =>
     member: WK,
     activity: WK_ACTIVITY,
     conversation: WK_CONVERSATION,
-    harnessRole: WK_ROLE,
+    conversationError: null,
     artifacts: WK_ARTIFACTS,
     runtime: "host",
     dispatch: DISPATCH,
@@ -270,7 +345,7 @@ describe("① 一次只渲染一个成员(这一版要修的正是「四个人�
         member: BM,
         activity: BM_ACTIVITY,
         conversation: BM_CONVERSATION,
-        harnessRole: harnessRole("business_manager", "业务经理"),
+        conversationError: null,
         artifacts: BM_ARTIFACTS,
         runtime: "host",
         dispatch: DISPATCH,
@@ -292,6 +367,7 @@ describe("① 一次只渲染一个成员(这一版要修的正是「四个人�
         active: WK_ID,
         onSelect: vi.fn(),
         activityOf: (id: string) => (id === WK_ID ? WK_ACTIVITY : BM_ACTIVITY),
+        issuesOf: () => 0,
         runtime: "host",
       }),
     );
@@ -305,6 +381,41 @@ describe("① 一次只渲染一个成员(这一版要修的正是「四个人�
     // 现在主体就是角色名(与 harness 页逐字相同),人的名字进 tooltip。
     expect(text, "角色名只出现一次语义,不再有第二个说法").not.toContain("执行者");
     expect(text).not.toContain("质检审查员");
+  });
+
+  it("【harness 合并】一次只渲染一个成员的 harness 面板:A 成员的角色渲染出来,B 成员独有的单元一个都不许出现", () => {
+    // 为什么走 `RoleHarnessDisclosure` 而不是 `MemberPane` 本身:`MemberPane` 里挂的
+    // `RoleHarnessSection` **自己取数**(`useEffect`),而 `renderToStaticMarkup`
+    // 不跑 effect ⇒ SSR 下它永远停在「加载中」,一个单元 id 都不渲染。在那种 html 上
+    // 断言「B 的单元不许出现」是**恒真**的假检查(本项目对「空转的检查」有明确警惕)。
+    // `RoleHarnessDisclosure` 正是 `RoleHarnessSection` 取到数据之后画的那一层 ——
+    // 同一条渲染路径,只是把数据从 props 喂进来,于是正负样本都不空转。
+    const disclosure = (role: ProjectRole) =>
+      renderToStaticMarkup(
+        createElement(RoleHarnessDisclosure, {
+          role,
+          view: HARNESS_VIEW,
+          loading: false,
+          error: null,
+          drafts: {},
+          backups: {},
+          onDraftChange: vi.fn(),
+          onApplied: vi.fn(),
+        }),
+      );
+
+    const asWorker = disclosure(WK.role);
+    expect(asWorker, "工程师那块里出现了业务经理独有的单元").not.toContain(BM_ONLY_UNIT);
+    expect(asWorker, "工程师自己的单元不在 ⇒ 上面的负样本是空转的").toContain(WK_ONLY_UNIT);
+
+    const asBm = disclosure(BM.role);
+    expect(asBm, "业务经理那块里出现了工程师独有的单元").not.toContain(WK_ONLY_UNIT);
+    expect(asBm).toContain(BM_ONLY_UNIT);
+
+    // 而且成员面板里挂的**就是这一块**(旧的只读「角色能力面」不许还在)
+    const pane = visible(renderWorker());
+    expect(pane, "成员面板里没有 harness 那一块").toContain("角色 harness");
+    expect(pane, "旧的只读「角色能力面」还在 —— 两处并存了").not.toContain("角色能力面");
   });
 
   it("面板里的折叠块默认都不展开(否则一屏又被消息与常量刷满)", () => {
@@ -474,6 +585,7 @@ describe("③ runtime=unavailable 是「读不到」,不是「空闲」", () => 
         onSelect: vi.fn(),
         // ⚠️ 即便快照里带着 turn:runtime 不是 host,就不许点亮
         activityOf: () => activity(WK_ID, { turn: { elapsedMs: 1_000, trigger: { kind: "user" } } }),
+        issuesOf: () => 0,
         runtime: "unavailable",
       }),
     );
@@ -491,7 +603,7 @@ describe("④ live.data === null(还没拿到过)⇒ 「正在读取」,不是�
     member: WK,
     activity: null,
     conversation: null,
-    harnessRole: null,
+    conversationError: null,
     artifacts: [],
     runtime: null,
     dispatch: null,
@@ -523,7 +635,7 @@ describe("④ live.data === null(还没拿到过)⇒ 「正在读取」,不是�
         member: WK,
         activity: null,
         conversation: WK_CONVERSATION,
-        harnessRole: WK_ROLE,
+        conversationError: null,
         artifacts: WK_ARTIFACTS,
         runtime: null,
         dispatch: null,
@@ -563,6 +675,7 @@ describe("⑤ 页签角标 = 它欠着几件事(口径:readyWorks + todos.length
         active: null,
         onSelect: vi.fn(),
         activityOf: (id: string) => (id === WK_ID ? debtful : clean),
+        issuesOf: () => 0,
         runtime: "host",
       }),
     );
@@ -581,10 +694,60 @@ describe("⑤ 页签角标 = 它欠着几件事(口径:readyWorks + todos.length
         onSelect: vi.fn(),
         activityOf: (id: string) =>
           id === WK_ID ? activity(WK_ID, { turn: { elapsedMs: 1_000, trigger: { kind: "user" } } }) : activity(BM_ID),
+        issuesOf: () => 0,
         runtime: "host",
       }),
     );
     expect((html.match(/class="ss-live-dot"><\/span>/g) ?? []).length, "只有在跑的那一个有点").toBe(1);
+  });
+
+  // ⚠️ 原 harness 页那一行角色页签带的**告警角标**(四类需要注意的处数),合并之后
+  // 挂在这里 —— 不搬就等于把那条可见性静默丢掉。
+  it("⑩ 页签角标之二 = `roleIssueCount`(角色 harness 的告警),与「欠活」各有一个 title", () => {
+    // 构造一个 `promptUnits` 里带 `loaded: false` 的角色 ⇒ 它的 roleIssueCount 是 1
+    const dirty = roleHarness("worker", "工程师", {
+      promptUnits: [promptUnit(WK_ONLY_UNIT, { loaded: false, content: "" })],
+    });
+    const clean = roleHarness("business_manager", "业务经理");
+    const roles = [dirty, clean];
+    const issuesOf = (role: ProjectRole) => {
+      const r = roles.find((x) => x.role === role);
+      return r === undefined ? 0 : roleIssueCount(r);
+    };
+    // 那个数必须**真的**来自 `loaded: false`(不是手写的一个 1)
+    expect(issuesOf("worker"), "roleIssueCount 没把缺单元算进去").toBe(1);
+    expect(issuesOf("business_manager")).toBe(0);
+
+    const activityOf = (id: string) =>
+      id === WK_ID ? activity(WK_ID, { readyWorks: 2 }) : activity(BM_ID);
+    const html = renderToStaticMarkup(
+      createElement(MemberRoleTabs, {
+        members: [WK, BM],
+        active: null,
+        onSelect: vi.fn(),
+        activityOf,
+        issuesOf,
+        runtime: "host",
+      }),
+    );
+    // 欠活 2 + harness 告警 1 ⇒ 两个 cinnabar 角标,而且各自的 title 说不同的事
+    expect((html.match(/data-tone="cinnabar"/g) ?? []).length, "欠活 + harness 告警 = 两个角标").toBe(2);
+    expect(html).toContain("它欠着 2 件");
+    expect(html).toContain("这个角色的 harness 有 1 处需要注意");
+
+    // 负样本:全部正常(告警 0)⇒ 只剩「欠活」那一个角标,告警那句一个字都不出现
+    const okHtml = renderToStaticMarkup(
+      createElement(MemberRoleTabs, {
+        members: [WK],
+        active: null,
+        onSelect: vi.fn(),
+        activityOf,
+        issuesOf: () => 0,
+        runtime: "host",
+      }),
+    );
+    expect((okHtml.match(/data-tone="cinnabar"/g) ?? []).length, "正常时不该有告警角标").toBe(1);
+    expect(okHtml).not.toContain("这个角色的 harness 有");
   });
 });
 
@@ -658,41 +821,16 @@ describe("⑦ 「N 条」「N 件」的 N 必须来自真实数据", () => {
   });
 });
 
-// ── 判据 8:能力面「求解不了」≠「0 个」 ──────────────────────────
-
-describe("⑧ 角色能力面:工具面「求解不了」不许显示成「0 个」", () => {
-  it("toolsSolved=false ⇒ 「求解不了(组织未播种)」且不显示计数", () => {
-    const text = visible(
-      renderWorker({
-        harnessRole: harnessRole("worker", "工程师", { toolsSolved: false, tools: [] }),
-      }),
-    );
-    expect(text).toContain("求解不了(组织未播种)");
-    expect(text, "把「算不出来」显示成了「实得工具 0 个」").not.toMatch(/实得工具\s*0\s*个/);
-  });
-
-  it("✅ 正样本:toolsSolved=true 且 tools 为空 ⇒ **这才是**「0 个」(合法形状)", () => {
-    const text = visible(
-      renderWorker({ harnessRole: harnessRole("worker", "工程师", { toolsSolved: true, tools: [] }) }),
-    );
-    expect(text).toMatch(/实得工具\s*0\s*个/);
-    expect(text).not.toContain("求解不了");
-  });
-
-  it("越界项与 ceiling 都如实显示", () => {
-    const text = visible(
-      renderWorker({
-        harnessRole: harnessRole("worker", "工程师", {
-          ceiling: ["board_list", "board_read", "code_write"],
-          blockedByCeiling: ["org.reset"],
-        }),
-      }),
-    );
-    expect(text).toContain("超出架构上界");
-    expect(text).toContain("org.reset");
-    expect(text).toContain("code_write");
-  });
-});
+// ── 判据 8 已移动 ────────────────────────────────────────────────
+//
+// 原来的判据 ⑧「角色能力面:工具面『求解不了』不许显示成『0 个』」断言的是
+// `MemberPane` 里那块**只读的**能力面。2026-10-06 把「成员 + harness」两个页签
+// 合并时,那块视图整块删掉(换成可写的 harness 面板),三条判据**一条没丢**:
+// **整组挪到 `tests/web/harness-by-role.test.ts` 的判据 ⑤**,断言对象换成
+// `HarnessRolePane`(它自己就实现了那三例:求解不了 ≠ 0、正样本 0 个、
+// blockedByCeiling 与 ceiling 条目可见)。
+//
+// 这里不再重复一份 —— 同一条判据在两个文件里各写一遍,正是这次要清掉的重复。
 
 // ── 判据 9:时间真的在走(展示层面的推进)────────────────────────
 
@@ -723,5 +861,25 @@ describe("⑨ 年龄会随本地时间往前推(时间看起来在走)", () => {
       }),
     );
     expect(text).toContain("已跑 15s");
+  });
+});
+
+// ── 判据 ⑪:`member-conversations` 读不到 ≠「他没有说过话」 ────────────
+//
+// 2026-10-06 合并 harness 到成员页时,页面上**唯一**渲染 `conversations.error`
+// 的那一处被删掉了 ⇒ 端点失败时每个人的对话块都会显示「还没有发言。」(0 条),
+// 而那句话是假的:这一次请求根本没成功。两者在屏幕上一模一样,所以必须分开。
+describe("⑪ 对话记录「读不到」不许显示成「没有发言」", () => {
+  it("有错误 ⇒ 标题写「读不到」并给出原因,而**不是**一句 0 条的空态", () => {
+    const text = visible(renderWorker({ conversationError: "Failed to fetch" }));
+    expect(text).toContain("读不到");
+    expect(text).toContain("Failed to fetch");
+    expect(text, "把请求失败说成「0 条」就是撒谎").not.toContain("他产生了什么对话 · 0 条");
+  });
+
+  it("负样本:没有错误时才走「N 条」与空态(证明上面那条不是恒真)", () => {
+    const ok = visible(renderWorker({ conversationError: null }));
+    expect(ok).toContain("他产生了什么对话 · 2 条");
+    expect(ok).not.toContain("读不到");
   });
 });

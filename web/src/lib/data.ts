@@ -424,17 +424,30 @@ export function loadHarnessOnce(): Promise<HarnessView> {
  * `ready === false` 表示**还没有拿到这份判据** —— 调用方不许据此断言
  * 「这个人不面向甲方」(见 `channelOf` 的 fail-closed 分支与其后果说明)。
  */
-export function useHarnessRoles(): {
+export function useHarnessRoles(options?: {
+  /**
+   * 调用方**知道盘上的东西变了**时把它 +1(例:成员页里刚保存了一个提示词单元)。
+   *
+   * 为什么要这一位:这一份读的是**模块级缓存**(`loadHarnessOnce`),而成员页的
+   * 页签角标(`roleIssueCount`)就是拿它算的。面板里保存之后若不重取,角标会
+   * **继续显示「N 处需要注意」,而用户刚把它修完** —— 屏幕上说着与事实相反的话,
+   * 而且看起来完全正常(2026-10-06 合并 harness 到成员页时把两个读者摆到同一屏才暴露)。
+   * `revision > 0` 时先失效缓存再读;**默认 0 = 沿用既有的「一次读、会话级缓存」**。
+   */
+  revision?: number;
+}): {
   roles: RoleHarnessView[];
   ready: boolean;
   error: string | null;
 } {
+  const revision = options?.revision ?? 0;
   const [roles, setRoles] = useState<RoleHarnessView[]>([]);
   const [ready, setReady] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
+    if (revision > 0) invalidateHarnessCache();
     loadHarnessOnce()
       .then((h) => {
         if (cancelled) return;
@@ -450,7 +463,7 @@ export function useHarnessRoles(): {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [revision]);
 
   return { roles, ready, error };
 }

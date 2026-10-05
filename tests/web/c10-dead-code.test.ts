@@ -82,3 +82,37 @@ describe("C10 · ChatComposer 的「Esc 中断」要么接线要么不承诺", (
     expect(promisesEsc && !wired).toBe(false);
   });
 });
+
+// ── 2026-10-06 追加:两处「会静默说假话」的接线,用源码级断言守住 ──────────
+//
+// 这两条的失效形态都是**屏幕上说着与事实相反的话**,而没有任何运行时报错 ——
+// 正是 §C10 要抓的那一类。web 侧没有 jsdom(见文件头),所以仍然走源码级断言:
+// 断言的是「接线在不在」,不是「渲染出来长什么样」(后者由各自页面的 SSR 测试管)。
+describe("C10 追加 · 两处诚实接线不许被顺手删掉", () => {
+  const members = readFileSync(join(WEB_SRC, "routes/Members.tsx"), "utf8");
+
+  it("① 成员页把对话端点的错误传进面板(「读不到」≠「没有发言」)", () => {
+    expect(
+      /conversationError=\{conversations\.error\}/.test(members),
+      "Members.tsx 必须把 conversations.error 传给 MemberPane —— 删掉它,端点失败时" +
+        "每个人的对话块都会显示「还没有发言。」(0 条),而那句话是假的",
+    ).toBe(true);
+    // 正样本自检:同一条正则对一个**必然不匹配**的串要给 false(防止这条断言恒真)
+    expect(/conversationError=\{conversations\.error\}/.test("conversationError={null}")).toBe(false);
+  });
+
+  it("② 面板里保存 harness 之后,页签角标那一份必须重取(revision 要接上)", () => {
+    expect(
+      /useHarnessRoles\(\{\s*revision:\s*harnessRevision\s*\}\)/.test(members),
+      "Members.tsx 必须用 revision 驱动 useHarnessRoles —— 否则保存之后角标会一直" +
+        "显示旧的「N 处需要注意」,而用户刚把它修完",
+    ).toBe(true);
+    expect(
+      /onHarnessSaved=\{\(\)\s*=>\s*setHarnessRevision/.test(members),
+      "保存成功后的通知没有接上(setHarnessRevision)",
+    ).toBe(true);
+    // 负样本自检:这两个模式都不是「随便什么串都能过」
+    expect(/useHarnessRoles\(\{\s*revision:\s*harnessRevision\s*\}\)/.test("const h = useHarnessRoles();")).toBe(false);
+    expect(/onHarnessSaved=\{\(\)\s*=>\s*setHarnessRevision/.test("onHarnessSaved={noop}")).toBe(false);
+  });
+});

@@ -88,8 +88,9 @@
  * 五块全是**纯 props** 的导出组件(`ArtifactsScreen` / `ProgressTimeline` /
  * `TimelineLegend` / `ArtifactsBody` / `WorkDag` / `WorkDagCanvas` /
  * `WorkNodePanel` / `ArtifactGroups` / `ArtifactRow` / `UnattachedArtifacts` /
- * `DanglingArtifacts`),与 `Harness.tsx` 导出 `HarnessRoleTabs` / `HarnessRolePane`
- * 同一处置:`renderToStaticMarkup` + 夹具就能钉住判据,不起服务、不 stub fetch。
+ * `DanglingArtifacts`),与 `components/members/RoleHarness.tsx` 导出
+ * `RoleHarnessDisclosure` / `HarnessRolePane` 同一处置:`renderToStaticMarkup` +
+ * 夹具就能钉住判据,不起服务、不 stub fetch。
  * `WorksPage` 自己只做三件事:取数(`useWorks` / `useArtifacts` /
  * `useProjectLive`)、持有两个交互态(选中的环节、展开了详情的那条工件)、
  * 项目切换时重置它们。

@@ -13,15 +13,19 @@
   (`hub.runningTurns()`,重启即清零)/ 库里的工作项与 `collectTodos` 的待办 / 落库痕迹。
   `runtime: "unavailable"` 是**读不到**,不是「空闲」—— 前端不许把它渲染成后者。
   工件页的产出图靠 `ArtifactView.workId`(migration 014 的产出边)把工件挂回环节。
-- **「工件」页已并入「工作项」页**(2026-10-06,`web/src/routes/Works.tsx`):主视图是
-  **时间轴泳道**(`web/src/lib/timeline.ts`,纯函数:x = 时间,一条工作项一道、一种工件
-  kind 一道;点绿色条 ⇒ 下面显示那条工作项挂着的工件)。「依赖关系图」
-  (`web/src/lib/workGraph.ts`)默认折叠 —— 它答的是「谁在等谁」。
+- **导航现在只有 7 个 tab**:对话 / 项目 / 工作项 / 待办 / 成员 / 记忆 / 设置。两次合并:
+  **「工件」并入「工作项」**(`web/src/routes/Works.tsx`,2026-10-06)与
+  **「Harness」并入「成员」**(`web/src/components/members/RoleHarness.tsx`,同日)。
+  工作项页的主视图是**时间轴泳道**(`web/src/lib/timeline.ts`,纯函数:x = 时间,一条工作项
+  一道、一种工件 kind 一道;点绿色条 ⇒ 下面显示那条工作项挂着的工件);依赖关系图
+  (`web/src/lib/workGraph.ts`)默认折叠。成员页一个成员一块面板(按角色页签切换),面板里
+  有「正在做什么」(`GET /api/projects/:id/live`)、他产出的工件、以及**该角色的 harness 管理**
+  (提示词单元的编辑 / 恢复出厂 / 备份数;写面四条规矩与后端一致)。
 - **依赖图的边方向 = 先后**(前置 → 本条;**子项 → 父项**,容器由子项推动)。这个方向是
   判据的一部分:同一对节点上两类边**方向一致**时不是环(真机那份数据就是这样),方向相反
   才是环(`mutualPairs` 会点名是哪两条边)。写反会让「交付」跑到最左、并且把一个不存在的
   环报出来(`web/src/lib/workGraph.ts` 的 `collectEdges`)。
-- 基线:**1373 passed / 65 test files** · 两条 typecheck 0 error · `check:design` E1–E14 全绿。
+- 基线:**1382 passed / 65 test files** · 两条 typecheck 0 error · `check:design` E1–E14 全绿。
 - **角色中文名只有一处**:`src/platform/runtime/org.ts` 的 `ORG`(播种 + `RoleHarnessView.displayName`
   共用);前端兜底表 `web/src/lib/vocab.ts` 的 `ROLE_LABEL` 必须逐项相同,由
   `tests/web/role-names.test.ts` 跨边界对照。**不许在某个页面里再写一张名字表**
@@ -153,14 +157,16 @@ shared/types/            跨端协议类型(platform.ts / settings.ts)
 - 运行时从**数据目录**读:`<dataDir>/harness/system_prompts/{unitId}.md`(`src/platform/runtime/promptAssembly.ts`)。
 - 角色→单元的声明在 `ROLE_SPECS[].promptUnits`:4 个角色共 **15 处声明**、12 个唯一单元。跨角色共享的只有两个 —— `collaboration.ask`(3 个角色)与 `collaboration.convene`(2 个角色)。
 - 系统提示 = 机械生成的角色简报(从 `ROLE_SPECS` 转写)+ 盘上真正装载到的单元。**盘上没有的单元如实报为 missing,不静默吞掉。**
-- **工具集合文件**在 `<dataDir>/harness/tools/{role}.json`(L2;文件名必须正好是角色名,写错了不会被读取,Harness 页会把落空的文件名列出来)。读取 = `src/platform/harness/toolSet.ts`,对用户可见 = `GET /api/harness` 每个角色的 `toolSet`。**不提供写面** —— 直接编辑文件即可,改完不用重启(每个新会话现读一次)。
+- **工具集合文件**在 `<dataDir>/harness/tools/{role}.json`(L2;文件名必须正好是角色名,写错了不会被读取,成员页该角色的 harness 面板会把落空的文件名列出来)。读取 = `src/platform/harness/toolSet.ts`,对用户可见 = `GET /api/harness` 每个角色的 `toolSet`。**不提供写面** —— 直接编辑文件即可,改完不用重启(每个新会话现读一次)。
 
 > ⚠️ **两个方向都不会自动同步(2026-10-05 实测,第二个方向此前没记)。**
 >
 > - **新数据目录**:用 `--data <临时目录>` 首跑时,`platform smoke` 会打印「声明了但盘上没有」,模型只拿到角色简报。要用新目录就先把出厂单元放进 `<dataDir>/harness/system_prompts/`。
 > - **已存在的数据目录:改了仓库提示词、不做一次 reset,运行期一个字节都收不到** —— boot 既不播撒也不覆盖。实测 `~/.sansheng/` 有 4 个单元停在 W2 之前(`business_manager.core.md` 只有 39 行,出厂 215 行)—— **「仓库里写了」≠「模型收到了」**(7-B 的同款复发,只是这次断在部署那一步)。
 >
-> 写回走 `src/platform/harness/write.ts` 的写面:`POST /api/harness/units/:unitId/reset` → `resetPromptUnit`(校验 id → **备份** → 原子写 → 回读),备份落在 `<dataDir>/harness/backups/prompts/*.bak`。全量写回一次:`npx tsx .probe/w3-reset-prompts.mts <dataDir>`。
+> 写回走 `src/platform/harness/write.ts` 的写面(前端入口在成员页每个成员面板里的
+  「角色 harness」折叠块,`RoleHarnessSection`;保存成功后它会通知页面把
+  `useHarnessRoles({ revision })` 推一格 —— 否则页签角标会拿着旧数继续显示「N 处需要注意」):`POST /api/harness/units/:unitId/reset` → `resetPromptUnit`(校验 id → **备份** → 原子写 → 回读),备份落在 `<dataDir>/harness/backups/prompts/*.bak`。全量写回一次:`npx tsx .probe/w3-reset-prompts.mts <dataDir>`。
 >
 > ⚠️ **reset 之后要重启进程才对已存在的会话生效** —— 系统提示在**建会话那一刻**读盘一次,而会话池(`(上下文, agent)`)在进程活着时一直复用。实测:同一个进程里 reset 后再触发,系统提示仍是 **5722 字符**;重启后同一次触发是 **14340 字符**。上面「工具集合文件改完不用重启」同样只对**新会话**成立。
 
@@ -184,7 +190,7 @@ help
 ```
 npx tsc -p tsconfig.server.json --noEmit
 npx tsc -p tsconfig.web.json --noEmit
-npm test                  # 1373 passed / 65 files
+npm test                  # 1382 passed / 65 files
 npm run build
 npm run check:design      # 设计一致性 E1–E14
 ```

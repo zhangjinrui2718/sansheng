@@ -6,10 +6,15 @@
  *  1. **路由表换成新模型的页面**:旧的是「对话 / Agent / 总线 / 记忆 / 工件 /
  *     目标 / Harness / 设置」。其中「总线」在新架构里已删除(MessageBus 没了),
  *     「目标」是计划时代的投影(已换成工作项),「Agent」的主体变成了项目成员。
- *     新的:`chat / project / works / inbox / members / memory /
- *     harness / settings`。**「工件」页签已并入「工作项」**(用户要求:推进图上本来
+ *     新的:`chat / project / works / inbox / members / memory / settings`。
+ *     **「工件」页签已并入「工作项」**(用户要求:推进图上本来
  *     就同时画着工作项与工件,点绿色条 ⇒ 下面显示它挂着的工件),所以 `Route` 里
  *     没有工件这个成员 —— 合并后的唯一页面是 `routes/Works.tsx` 的 `WorksPage`。
+ *     **「Harness」页签已并入「成员」**(2026-10-06,用户原话:「成员的 harness
+ *     管理可以放在成员的 tab 下面,可以把「成员」「harness」这两个 tab 也合并了」)
+ *     —— 角色 harness 现在是成员面板里的一块(`components/members/RoleHarness.tsx`
+ *     的 `RoleHarnessSection`),所以 `Route` 里也没有 `harness` 这个成员,
+ *     顶层不再有那个页面。
  *  2. **`POST /api/kernel/reset` 已不存在**,「重置 Kernel」按钮删除;相关的
  *     `vecLoaded` 降级提示也删除 —— 新契约的 `HealthResponse` 里没有 `vecLoaded`,
  *     旧 `/api/health` 的 `d.ts`(服务器时间)同样不在契约里,所以顶栏改为显示
@@ -31,7 +36,6 @@ import { WorksPage } from "./routes/Works";
 import { InboxPage } from "./routes/Inbox";
 import { MembersPage } from "./routes/Members";
 import { MemoryPage } from "./routes/Memory";
-import { HarnessPage } from "./routes/Harness";
 import { useSettingsStore, activeProviderOf } from "./stores/settings";
 import { useChatStore } from "./stores/chat";
 import { initAppSocket } from "./lib/appSocket";
@@ -48,7 +52,6 @@ export type Route =
   | "inbox"
   | "members"
   | "memory"
-  | "harness"
   | "settings";
 
 export function App() {
@@ -151,8 +154,6 @@ export function App() {
         page(<MembersPage />)
       ) : route === "memory" ? (
         page(<MemoryPage />)
-      ) : route === "harness" ? (
-        page(<HarnessPage />)
       ) : (
         <main className="overflow-y-auto" style={{ background: "var(--ink-0)", minHeight: 0 }}>
           <div className="ss-page" style={{ maxWidth: 720 }}>

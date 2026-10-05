@@ -129,6 +129,18 @@ const tabs = renderToStaticMarkup(
     active: members[0]?.id ?? null,
     onSelect: () => {},
     activityOf,
+    // 页签第二个角标:角色 harness 那边需要注意的处数(与「欠活」不是一回事)
+    issuesOf: (agentId) => {
+      const m = members.find((x) => x.id === agentId);
+      const r = harness.roles.find((x) => x.role === m?.role);
+      if (r === undefined) return 0;
+      return (
+        r.promptUnits.filter((u) => !u.loaded).length +
+        (r.toolSet.state === "invalid" ? 1 : 0) +
+        r.blockedByCeiling.length +
+        r.unknownTools.length
+      );
+    },
     runtime: live.runtime,
   }),
 );
@@ -141,7 +153,11 @@ const panes = members
         member: m,
         activity: activityOf(m.id),
         conversation: byAgent.get(m.id) ?? null,
-        harnessRole: harness.roles.find((r) => r.role === m.role) ?? null,
+        // 影子里这次请求是成功的(数据就是从它拿的)⇒ 如实传 null
+        conversationError: null,
+        // ⚠️ 角色 harness 不再由页面传下去:面板里那个 `RoleHarnessSection` 自己取数
+        // (它要整份视图才能算「共用于 N 个角色」)。影子是无状态渲染 ⇒ 它会停在
+        // 「读取中」,这是**影子的失真**(真机上有 effect),下面那段说明里点出来。
         artifacts: artifacts.filter((a) => a.authorAgentId === m.id),
         runtime: live.runtime,
         dispatch: live.dispatch,
@@ -155,13 +171,15 @@ const panes = members
 writeFileSync(
   join(process.cwd(), ".probe/w5-members-preview.html"),
   page(
-    "W4 预览 · 成员页",
+    "W6 预览 · 成员页(harness 已并入)",
     `静态影子(无脚本)· 数据来自 <code>${BASE}</code> 上的真数据副本 · 项目「${project.name}」· ` +
       `${members.length} 个成员 · live.runtime = <code>${live.runtime}</code>,` +
       `runningTurns = ${live.runningTurns},排空兜底间隔 ${live.dispatch.intervalMs}ms、` +
       `上一次 ${live.dispatch.lastRunAgeMs === null ? "本进程还没跑过" : `${Math.round(live.dispatch.lastRunAgeMs / 1000)}s 前`}。<br>` +
       `真机上**一次只显示一个成员**(上面那行页签切换);这里把四个面板都摊开,方便横向比。` +
-      `面板里的「对话」与「角色能力面」在真机上是默认折叠的 <code>&lt;details&gt;</code>(影子里同样是折叠的,点一下才开)。`,
+      `面板里的「对话」与「角色 harness」在真机上是默认折叠的 <code>&lt;details&gt;</code>(影子里同样是折叠的,点一下才开)。<br>` +
+      `⚠️ 这一份是**无状态影子**:<code>RoleHarnessSection</code> 自己 <code>getHarness()</code>` +
+      `(SSR 不跑 effect)⇒ 它那一格停在「读取中」;真机上会显示该角色的提示词单元编辑器与工具面。`,
     `${tabs}<div class="grid gap-4" style="padding-top:12px">${panes}</div>`,
   ),
 );

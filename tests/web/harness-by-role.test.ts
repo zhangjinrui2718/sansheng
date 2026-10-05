@@ -1,39 +1,60 @@
 /**
- * Harness 屏的**按角色分栏**(2026-10-05)—— 可读性改造的判据
+ * 角色 harness 面板的**判据**(2026-10-05 建立;2026-10-06 随「成员 + harness
+ * 两个页签合并」从 `@/routes/Harness` 搬到 `@/components/members/RoleHarness`)
  *
- * ── 为什么要这份测试 ────────────────────────────────────────────
+ * ── 这一版(2026-10-06)改了什么 ─────────────────────────────────
  *
- * 改的是**摆放**:以前四个角色同时铺开(每个 5 行 KV + 每个单元一个展开的
- * textarea ⇒ 一屏十几段长正文,而且共用单元会重复出现多次)。「摆放」最容易
- * 悄悄退回去 —— 没有一条断言的话,下次有人「顺手」把 mapping 改成 all-roles-inline
- * 也不会有任何东西红,而页面上看起来只是「又变长了」。
+ * 用户的原话:「成员的 harness 管理可以放在成员的 tab 下面,可以把「成员」
+ * 「harness」这两个 tab 也合并了」。于是:
  *
- * 钉住的四条(每条都对应一个具体的可读性承诺):
+ *   - `routes/Harness.tsx` 搬成 `components/members/RoleHarness.tsx`
+ *     ⇒ **import 路径改了**(`@/routes/Harness` → `@/components/members/RoleHarness`);
+ *   - 那个路由页面与它那一行角色页签删除
+ *     ⇒ 本文件里所有画页签的用例一并删除;
+ *   - 「一次只渲染一个角色」这条判据**分成两层**了:
+ *       · **面板层**(一个 `HarnessRolePane` 只画一个角色)仍然钉在本文件判据 ①;
+ *       · **页签层**(页签一次只选中一个角色、页签上有告警角标)**改由成员页签
+ *         承担** —— 断言挪到 `tests/web/members-activity.test.ts` 的判据 ①
+ *         (「成员页签一次只渲染一个成员的 harness 面板」)与判据 ⑩
+ *         (「页签角标 = 欠活数字 + roleIssueCount 告警」)。**不要在这里再补一份
+ *         页签渲染断言** —— 那正是这次要清掉的重复。
  *
- *   1. **一次只渲染一个角色** —— 传入 worker 时,业务经理独有的单元**不许出现**;
+ * ── 为什么还需要这份测试 ────────────────────────────────────────
+ *
+ * 钉住的都是**悄悄退回去**的东西(没有断言的话,下次有人「顺手」改一下也不会有
+ * 任何东西红,而页面上看起来只是「又变长了」):
+ *
+ *   1. **一次只渲染一个角色**(面板层)—— 传入 worker 时,业务经理独有的单元
+ *      **不许出现**;
  *   2. **编辑器默认折叠** —— `<details>` 不带 `open`(否则又是一屏长正文)。
  *      ⚠️ 这一条自带正样本:同一个 `Disclosure` 组件在 `defaultOpen` 时**必须**
  *      渲染出 `open`,否则「没有 open」可能只是因为属性从来没被渲染过;
  *   3. **共用单元标注** —— `collaboration.ask` 被 2 个角色声明 ⇒ 显示「共用于 2 个角色」,
  *      而独有单元**不许**显示这个标注(负样本);
  *   4. **四类需要注意的东西都可见** —— 缺单元 / 集合文件坏 / 越权被拒 / 未知工具名,
- *      并且页签角标把它们的**和**显示出来。
+ *      并且 `roleIssueCount` 是它们的**和**(那个数字现在画在**成员页签**的告警
+ *      角标上,渲染断言在 members-activity 里);
+ *   5. **`toolsSolved=false`(算不出来)≠ `tools=[]`(真的是 0)**。
+ *      这一条 2026-10-06 从 `tests/web/members-activity.test.ts` 的判据 ⑧
+ *      **整体挪来**(成员页那块只读的「角色能力面」已删,同一条判据现在由
+ *      `HarnessRolePane` 承担 —— 它自己就实现了这三例)。
  *
- * 组件是纯 props 的(`HarnessRoleTabs` / `HarnessRolePane`),与 `ConversationStream`
- * / `TurnView` 同一处置 —— 导出给测试,不需要起服务、不需要 stub fetch。
+ * 组件是纯 props 的(`HarnessRolePane` / `RoleHarnessDisclosure`),与
+ * `ConversationStream` / `TurnView` 同一处置 —— 导出给测试,不需要起服务、
+ * 不需要 stub fetch。
  */
 import { describe, expect, it, vi } from "vitest";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import type {
-  ProjectRole, PromptUnitView, RoleHarnessView, ToolSetFileView,
+  HarnessView, ProjectRole, PromptUnitView, RoleHarnessView, ToolSetFileView,
 } from "@shared/types/platform";
 import {
   HarnessRolePane,
-  HarnessRoleTabs,
+  RoleHarnessDisclosure,
   roleIssueCount,
   sharedUnitOwners,
-} from "@/routes/Harness";
+} from "@/components/members/RoleHarness";
 import { Disclosure } from "@/components/ui/primitives";
 
 // ── 夹具 ────────────────────────────────────────────────────────
@@ -112,9 +133,9 @@ const paneProps = (r: RoleHarnessView) => ({
 const renderPane = (r: RoleHarnessView) =>
   renderToStaticMarkup(createElement(HarnessRolePane, paneProps(r)));
 
-// ── 判据 1:一次只渲染一个角色 ──────────────────────────────────
+// ── 判据 1:一次只渲染一个角色(面板层)──────────────────────────
 
-describe("① 一次只渲染一个角色(这一版要修的正是「四个角色同时铺开」)", () => {
+describe("① 一次只渲染一个角色(面板层;页签层已挪去成员页签的测试)", () => {
   it("传 worker ⇒ 业务经理**独有**的单元不许出现", () => {
     const html = renderPane(WK);
     expect(html, "worker 面板里出现了 business_manager.core").not.toContain("business_manager.core");
@@ -128,15 +149,9 @@ describe("① 一次只渲染一个角色(这一版要修的正是「四个角�
     expect(html).toContain("business_manager.core");
   });
 
-  it("页签:每个角色一个 tab,只有选中的那个 aria-selected=true", () => {
-    const html = renderToStaticMarkup(
-      createElement(HarnessRoleTabs, { roles: ROLES, active: "worker", onSelect: vi.fn() }),
-    );
-    expect((html.match(/role="tab"/g) ?? []).length, "两个角色 ⇒ 两个 tab").toBe(2);
-    expect((html.match(/aria-selected="true"/g) ?? []).length, "只有一个选中").toBe(1);
-    expect(html).toContain("业务经理");
-    expect(html).toContain("工程师");
-  });
+  // ⚠️ 这里原本还有一条「页签:每个角色一个 tab,只有选中的那个 aria-selected=true」。
+  // 那个组件(harness 页的角色页签)已随「成员 / harness 两个页签合并」删除,这一条
+  // 判据现在由**成员页签**承担:见 `tests/web/members-activity.test.ts` 判据 ①。
 });
 
 // ── 判据 2:编辑器默认折叠 ──────────────────────────────────────
@@ -189,6 +204,10 @@ describe("③ 共用单元标注「共用于 N 个角色」", () => {
 // 2026-10-05 真机现场:成员页显示「实得工具 0 个」,而那一刻库里连 agent 行都没有
 // (组织刚被重置)。`tools` 是空数组没错,但「0 个工具」与「算不出来」是两件事,
 // 而它们在界面上长得一模一样 —— 这正是本项目反复栽的形态。
+//
+// ⚠️ 2026-10-06:这三例原先在 `tests/web/members-activity.test.ts` 的判据 ⑧ 里
+// (那时它们断言的是成员页那块只读的「角色能力面」)。那块已删,判据整体挪到这里,
+// 由 `HarnessRolePane`(它自己就实现了这三例)承担。
 describe("⑤ 工具面「求解不了」不许显示成「0 个」", () => {
   /**
    * 「已求解 ⇒ 实得工具 N 个」在标记里的真实形状:数字外面套了一层上色的 span。
@@ -234,9 +253,24 @@ describe("⑤ 工具面「求解不了」不许显示成「0 个」", () => {
     expect(showsSolvedCount(html, 0), "求解过了、确实是 0 —— 该显示 0").toBe(true);
     expect(html).not.toContain("求解不了");
   });
+
+  it("越界项与 ceiling 的条目都如实显示(从 members-activity 的判据 ⑧ 第三例挪来)", () => {
+    // 那一例断言的是「`blockedByCeiling` 与 ceiling 的条目名都在屏幕上」——
+    // 成员页那块只读视图删掉后,它必须由这里继续钉住。
+    const html = renderPane(
+      role("worker", "工程师", {
+        ceiling: ["board_list", "board_read", "code_write"],
+        blockedByCeiling: ["org.reset"],
+        promptUnits: [unit("worker.core")],
+      }),
+    );
+    expect(html).toContain("超出架构上界");
+    expect(html).toContain("org.reset");
+    expect(html, "ceiling 的条目名没有逐条列出").toContain("code_write");
+  });
 });
 
-// ── 判据 4:四类「需要注意」都可见 + 页签角标 ────────────────────
+// ── 判据 4:四类「需要注意」都可见 + roleIssueCount 是它们的和 ────
 
 describe("④ 缺单元 / 集合文件坏 / 越权被拒 / 未知工具名 —— 四类都可见", () => {
   it("四类告警都在 worker 面板里出现,且缺失单元点了名", () => {
@@ -260,15 +294,12 @@ describe("④ 缺单元 / 集合文件坏 / 越权被拒 / 未知工具名 —�
     expect(html).not.toContain("盘上没有文件");
   });
 
-  it("页签角标 = 四类之和(worker 1+1+1+1 = 4;业务经理 = 0 ⇒ 不显示角标)", () => {
+  it("`roleIssueCount` = 四类之和(worker 1+1+1+1 = 4;业务经理 = 0)", () => {
     expect(roleIssueCount(WK)).toBe(4);
     expect(roleIssueCount(BM)).toBe(0);
-    const html = renderToStaticMarkup(
-      createElement(HarnessRoleTabs, { roles: ROLES, active: "worker", onSelect: vi.fn() }),
-    );
-    expect(html).toContain(">4<");
-    // 干净的角色不该有角标 —— 数一下 cinnabar 语气的小标签正好一个
-    expect((html.match(/data-tone="cinnabar"/g) ?? []).length).toBe(1);
+    // ⚠️ 这个数字**渲染**在哪里,断言就在哪里:它是**成员页签**上的告警角标
+    // (原来 harness 页的角色页签已删)。渲染断言在
+    // `tests/web/members-activity.test.ts` 判据 ⑩,这里只钉「它是四类之和」。
   });
 
   it("摘要行给出「能力面 / 集合文件」的现状(判断这角色正常吗,三个数就够)", () => {
@@ -280,5 +311,75 @@ describe("④ 缺单元 / 集合文件坏 / 越权被拒 / 未知工具名 —�
     expect(html).toMatch(/能力 <span[^>]*>2<\/span> 项 · 实得工具\s*<span[^>]*>3<\/span> 个/);
     expect(html, "把工具数写成了能力数的分子 —— 会被读成 3 用掉了 2 里的 3").not.toContain("3/2");
     expect(html).toContain("文件无效 · 已退化成 ceiling 全集");
+  });
+});
+
+// ── 判据 6:三种「不知道」不许说成「这个角色没有单元」────────────────
+//
+// `RoleHarnessSection`(成员面板里那一块)自己取整份 `GET /api/harness`。取数失败、
+// 还在取、取回来的视图里根本没有这个角色 —— 这三种都**不是**「它没有提示词单元」。
+// 本项目反复栽的形态就是「把不知道显示成一切正常」,所以这三种状态在这里各钉一条。
+describe("⑥ 取数失败 / 还没取到 / 视图里没有这个角色 —— 都不许说成「没有单元」", () => {
+  const FULL: HarnessView = {
+    roles: ROLES,
+    promptDir: "/data/harness/system_prompts/",
+    toolsDir: "/data/harness/tools/",
+    strayToolSetFiles: [],
+    writable: true,
+  };
+
+  const renderDisclosure = (over: Partial<Parameters<typeof RoleHarnessDisclosure>[0]>) =>
+    renderToStaticMarkup(
+      createElement(RoleHarnessDisclosure, {
+        role: "worker",
+        view: FULL,
+        loading: false,
+        error: null,
+        drafts: {},
+        backups: {},
+        onDraftChange: vi.fn(),
+        onApplied: vi.fn(),
+        ...over,
+      }),
+    );
+
+  it("默认折叠,而且 summary 上是那句写死的话(0 处需要注意时不带数字)", () => {
+    const html = renderDisclosure({ role: "project_manager" }); // 视图里没有它
+    expect(html).toContain("角色 harness(提示词单元 · 工具面 · 常量)");
+    expect(/<details[^>]*\sopen/.test(html), "默认折叠的承诺破了").toBe(false);
+  });
+
+  it("有需要注意的处数时,summary 上带出那个数(worker 4 处)", () => {
+    const html = renderDisclosure({});
+    expect(html).toContain("角色 harness(提示词单元 · 工具面 · 常量) · 4 处需要注意");
+  });
+
+  it("取数失败 ⇒ 一句错误,并明说「不是这个角色没有提示词单元」", () => {
+    const html = renderDisclosure({ view: null, error: "internal: 连接被拒绝" });
+    expect(html).toContain("加载失败");
+    expect(html).toContain("连接被拒绝");
+    expect(html, "把「读不到」说成了「这个角色没有单元」").toContain("不是「这个角色没有提示词单元」");
+    expect(html).not.toContain("这个角色没有声明任何提示词单元");
+  });
+
+  it("还在取 ⇒ 「正在读取」,不许留白也不许说没有", () => {
+    const html = renderDisclosure({ view: null, loading: true });
+    expect(html).toContain("正在读取 harness 视图");
+    expect(html).not.toContain("这个角色没有声明任何提示词单元");
+  });
+
+  it("视图里没有这个角色 ⇒ 明说与「它没有单元」是两件事(负样本)", () => {
+    const html = renderDisclosure({ role: "project_manager" });
+    expect(html).toContain("这一份 harness 视图里没有角色 project_manager");
+    expect(html).toContain("与「它没有提示词单元」是两件事");
+    expect(html).not.toContain("这个角色没有声明任何提示词单元");
+  });
+
+  it("文件名写错的工具集合文件必须报出来(原来在 harness 页页级,合并后不能丢)", () => {
+    const html = renderDisclosure({
+      view: { ...FULL, strayToolSetFiles: ["workers.json"] },
+    });
+    expect(html).toContain("workers.json");
+    expect(html).toContain("不会被读取");
   });
 });

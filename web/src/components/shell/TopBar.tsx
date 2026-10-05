@@ -8,6 +8,10 @@
  *     (计划概念已删),「Agent」现在是项目成员。新的见 `TABS`。
  *     ⚠️ **「工件」页签已删除**:它并入「工作项」(推进图上本来就同时画着工作项与
  *     工件,点绿色条 ⇒ 下面显示它挂着的工件)—— 所以导航里没有工件这一项。
+ *     ⚠️ **「Harness」页签已删除**(2026-10-06,用户原话:「成员的 harness 管理
+ *     可以放在成员的 tab 下面,可以把「成员」「harness」这两个 tab 也合并了」)
+ *     —— 角色 harness 现在是成员面板里的一块,一个项目的 harness 属于那个项目的
+ *     成员,不该是顶层平级的一站。
  *  2. **右侧运行态不再有「服务器时间」**:它读的是旧 `/api/health` 的 `d.ts`,
  *     而新契约的 `HealthResponse` 里**没有 `ts`**,也没有 `vecLoaded`
  *     (`ok/version/modelId/provider/cwd/dataDir`)。继续显示一个本地编造的时间
@@ -36,7 +40,6 @@ const TABS: ReadonlyArray<{ route: Route; label: string }> = [
   { route: "inbox", label: "待办" },
   { route: "members", label: "成员" },
   { route: "memory", label: "记忆" },
-  { route: "harness", label: "Harness" },
   { route: "settings", label: "设置" },
 ];
 
