@@ -13,11 +13,15 @@
   (`hub.runningTurns()`,重启即清零)/ 库里的工作项与 `collectTodos` 的待办 / 落库痕迹。
   `runtime: "unavailable"` 是**读不到**,不是「空闲」—— 前端不许把它渲染成后者。
   工件页的产出图靠 `ArtifactView.workId`(migration 014 的产出边)把工件挂回环节。
-- **工件页的主视图是时间轴泳道**(`web/src/lib/timeline.ts`,纯函数:x = 时间,一条工作项一道、
-  一种工件 kind 一道)。分层 DAG(`web/src/lib/workGraph.ts`)降级成默认折叠的「依赖关系图」——
-  真机数据里**存在依赖环**,分层排不出来,五条工作项全挤在一列、边互相穿(用户的原话是
-  「缠在一起了」);时间轴上 x 是时间的函数,**不需要解位置**。
-- 基线:**1364 passed / 65 test files** · 两条 typecheck 0 error · `check:design` E1–E14 全绿。
+- **「工件」页已并入「工作项」页**(2026-10-06,`web/src/routes/Works.tsx`):主视图是
+  **时间轴泳道**(`web/src/lib/timeline.ts`,纯函数:x = 时间,一条工作项一道、一种工件
+  kind 一道;点绿色条 ⇒ 下面显示那条工作项挂着的工件)。「依赖关系图」
+  (`web/src/lib/workGraph.ts`)默认折叠 —— 它答的是「谁在等谁」。
+- **依赖图的边方向 = 先后**(前置 → 本条;**子项 → 父项**,容器由子项推动)。这个方向是
+  判据的一部分:同一对节点上两类边**方向一致**时不是环(真机那份数据就是这样),方向相反
+  才是环(`mutualPairs` 会点名是哪两条边)。写反会让「交付」跑到最左、并且把一个不存在的
+  环报出来(`web/src/lib/workGraph.ts` 的 `collectEdges`)。
+- 基线:**1373 passed / 65 test files** · 两条 typecheck 0 error · `check:design` E1–E14 全绿。
 - **角色中文名只有一处**:`src/platform/runtime/org.ts` 的 `ORG`(播种 + `RoleHarnessView.displayName`
   共用);前端兜底表 `web/src/lib/vocab.ts` 的 `ROLE_LABEL` 必须逐项相同,由
   `tests/web/role-names.test.ts` 跨边界对照。**不许在某个页面里再写一张名字表**
@@ -180,7 +184,7 @@ help
 ```
 npx tsc -p tsconfig.server.json --noEmit
 npx tsc -p tsconfig.web.json --noEmit
-npm test                  # 1364 passed / 65 files
+npm test                  # 1373 passed / 65 files
 npm run build
 npm run check:design      # 设计一致性 E1–E14
 ```

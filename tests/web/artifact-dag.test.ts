@@ -1,6 +1,12 @@
 /**
  * 工件页 · **产出流程(DAG)** 的判据(2026-10-06)
  *
+ * ⚠️ 页面已改名/改位置:「工件」tab 与「工作项」tab 合并成一个 tab(用户要求:
+ * 推进图上本来就同时画着工作项与工件,点绿色条 ⇒ 下面显示它挂着的工件),
+ * 合并后的唯一页面是 `web/src/routes/Works.tsx`(`ArtifactsPage` 随之改名
+ * `WorksPage`,其余导出名一个都没动)。下面只有 import 路径变了 ——
+ * 断言一条都没改,也不许改。
+ *
  * ── 为什么要这份测试 ────────────────────────────────────────────
  *
  * 这一版把工件页从「按 kind 平铺」换成「先看流程(DAG)再看环节产出」。改的是
@@ -41,7 +47,7 @@ import {
   UnattachedArtifacts,
   DanglingArtifacts,
   type DagLive,
-} from "@/routes/Artifacts";
+} from "@/routes/Works";
 import { layoutWorkDag, splitArtifactsByWork } from "@/lib/workGraph";
 
 // ── 夹具(不连真库:全部字段自己造)────────────────────────────
@@ -350,18 +356,25 @@ describe("⑥ 排不出先后(Kahn 未出队):说明写出来,两个环节都不
     expect(countOf(html, /class="ss-dag-node"/g)).toBe(2);
   });
 
-  it("环**下游**的节点也进这一列 —— 但归因文案不许说它「依赖成环」", () => {
-    // 这一条钉的是 subagent 复核出来的**假归因**:上一版布局用松弛迭代,把
-    // `C`(环的子项)也说成「依赖成环」,而 `C` 根本不在环上。现在布局取的是
-    // Kahn 的未出队集合(语义 = 环上 ∪ 环下游),文案相应只说「或环的下游」。
+  it("归因文案不许说「依赖成环」—— 环上/环下游才进这一列", () => {
+    // 这一条钉的是 subagent 复核出来的**假归因**:更早一版用松弛迭代,把 `C` 也说成
+    // 「依赖成环」,而 `C` 根本不在环上。文案相应只说「或环的下游」。
+    //
+    // ⚠️ 判据在 2026-10-06 又变过一次:**父边的方向改成「子 → 父」**(容器由子项
+    // 推动)之后,`C`(环甲/环乙的子项)成了环的**上游**,它排得出来 ⇒ 不进这一列。
+    // 所以这条用例现在钉的是「上游不连坐 + 文案仍然只说环上/环下游」。
     const A1 = work("a1", { title: "环甲", dependsOn: ["a2"] });
     const A2 = work("a2", { title: "环乙", dependsOn: ["a1"] });
-    const C = work("c1", { title: "下游丙", parentWorkId: "a2" });
+    const C = work("c1", { title: "上游丙", parentWorkId: "a2" });
     const layout = layoutWorkDag([A1, A2, C], []);
-    expect([...layout.unlayeredIds].sort(), "C 排不出先后,必须同列").toEqual(["a1", "a2", "c1"]);
+    expect([...layout.unlayeredIds].sort(), "只有环上的两个进这一列").toEqual(["a1", "a2"]);
+    expect(
+      layout.nodes.find((n) => n.work.id === "c1")?.unlayered,
+      "C 在环的上游(子先于父),不该被连坐",
+    ).toBe(false);
     const html = renderBody({ works: [A1, A2, C], artifacts: [], picked: null });
     expect(html).toContain("或环的下游");
-    expect(html, "对环下游的节点说「依赖成环」是一句假归因").not.toContain("(依赖成环)");
+    expect(html, "对上游节点说「依赖成环」是一句假归因").not.toContain("(依赖成环)");
   });
 });
 

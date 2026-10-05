@@ -5,7 +5,7 @@
  * 真的等于库里的流程形状」的唯一落点。它一旦错,页面上表现为**一条线画歪了**
  * 或**少了一个节点** —— 两者都极难在截图里看出来,而它们都是假话:
  *
- *   ① 分层必须是**最长路径**(不是父深度 + 1),否则跨层依赖会反向画;
+ *   ① 分层 = **按先后**(前置在前;子项在父项之前完成 —— 容器由子项推动),
  *   ② 边去重、去自环 —— 真机库的 `work_deps` 里同一条边出现过两次;
  *   ③ **有环就说有环**,而且环上的节点**一个都不许丢**(拓扑排序会在环上
  *      静默丢节点,那种「少了一条工作项」在界面上几乎看不出来);
@@ -79,39 +79,61 @@ function realShape(): WorkView[] {
 
 // ── ① 分层 ──────────────────────────────────────────────────────
 
-describe("① 最长路径分层", () => {
-  it("跨层依赖把目标推到**更长**的那一层(不能只看父节点深度)", () => {
-    const { nodes } = layoutWorkDag(realShape(), []);
-    const at = (id: string) => nodes.find((n) => n.work.id === id);
+describe("① 分层 = 按先后(前置在前;子项在父项之前)", () => {
+  it("真机那份数据的形状:模块 → 节律 → 整合 → 交付,五条排成四列", () => {
+    // 这一条是用户那句「现在的 dag 完全是乱的,你检查一下」的回归。
+    // 真机五条:根 khu + 四个子项,且 khu 又 depends_on kv0(整合)。
+    // ⚠️ 父边的方向是**子 → 父**(容器由子项推动),于是这份数据的先后是
+    //    基础打断/全双工(0) → 节律(1) → 整合(2) → 交付(3) —— **没有环**。
+    const works = [
+      work("khu", { at: 1, deps: ["kv0"] }),
+      work("mile", { parent: "khu", at: 2 }),
+      work("mim", { parent: "khu", at: 3 }),
+      work("kph", { parent: "khu", at: 4, deps: ["mim"] }),
+      work("kv0", { parent: "khu", at: 5, deps: ["mile", "mim", "kph"] }),
+    ];
+    const layout = layoutWorkDag(works, []);
+    const depth = new Map(layout.nodes.map((n) => [n.work.id, n.depth]));
 
-    // root=0;a/b/c=1;integrate 依赖 a/b/c ⇒ 2(它同时也挂在 root 下,
-    // 只看 `parentWorkId` 会得出 1 —— 那就是「反向边」的来源)
-    expect(at("root")?.depth).toBe(0);
-    expect(at("a")?.depth).toBe(1);
-    expect(at("c")?.depth, "c 依赖 b ⇒ 必须在 b 右边").toBe(2);
-    expect(at("integrate")?.depth).toBe(3);
-    // 正样本自检:`dependsOn` 真的参与分层了 —— 否则 integrate 只会是 1
-    expect(at("integrate")?.depth).not.toBe(1);
+    expect(depth.get("mile")).toBe(0);
+    expect(depth.get("mim"), "全双工与基础打断同时起头").toBe(0);
+    expect(depth.get("kph"), "节律等全双工").toBe(1);
+    expect(depth.get("kv0"), "整合等前三个").toBe(2);
+    expect(depth.get("khu"), "交付(容器)在最后").toBe(3);
+    expect(layout.layers, "四列,不是一列").toBe(4);
+    expect(layout.unlayeredIds, "这份数据里**没有**排不出先后的节点").toEqual([]);
+    expect(layout.mutualPairs, "也没有互相咬住的边").toEqual([]);
+    // 没有任何节点被迫进尾列(旧实现的形态:五个全在一列)
+    const tail = Math.max(...layout.nodes.map((n) => n.depth));
+    expect(layout.nodes.filter((n) => n.depth === tail).length).toBe(1);
+  });
+
+  it("**每条边都从左指向右**(分层的最长路径保证;反向边=读者会读错的那种图)", () => {
+    const layout = layoutWorkDag(realShape(), []);
+    const depth = new Map(layout.nodes.map((n) => [n.work.id, n.depth]));
+    expect(layout.edges.length, "夹具里的边数(4 条父 + 4 条前置)").toBe(8);
+    for (const e of layout.edges) {
+      expect(
+        depth.get(e.to)!,
+        `${e.kind} 边 ${e.from}→${e.to} 画成了反向`,
+      ).toBeGreaterThan(depth.get(e.from)!);
+    }
   });
 
   it("x/y 由层与层内序号算出来,画布尺寸容得下所有节点", () => {
     const layout = layoutWorkDag(realShape(), []);
-    const root = layout.nodes.find((n) => n.work.id === "root");
     const a = layout.nodes.find((n) => n.work.id === "a");
-    expect(root?.x).toBe(DAG_PAD);
-    expect(a?.x).toBe(DAG_PAD + (DAG_NODE_W + DAG_COL_GAP));
-    expect(layout.width).toBeGreaterThanOrEqual(
-      DAG_PAD * 2 + layout.layers * DAG_NODE_W + (layout.layers - 1) * DAG_COL_GAP,
-    );
+    const root = layout.nodes.find((n) => n.work.id === "root");
+    expect(a?.x, "第 0 列在最左").toBe(DAG_PAD);
+    expect(root?.x, "根(容器)在最右的第 3 列").toBe(DAG_PAD + 3 * (DAG_NODE_W + DAG_COL_GAP));
     for (const n of layout.nodes) {
       expect(n.x + DAG_NODE_W).toBeLessThanOrEqual(layout.width);
       expect(n.y + DAG_NODE_H).toBeLessThanOrEqual(layout.height);
     }
-    // 同层不重叠:相邻行的间距**正好**是「节点高 + 行距」(写死一个小上界
-    // 会让这条断言在布局把间距算错时照样绿)
-    const layer1 = layout.nodes.filter((n) => n.depth === 1).sort((p, q) => p.y - q.y);
-    expect(layer1.length).toBe(2);
-    expect((layer1[1]?.y ?? 0) - (layer1[0]?.y ?? 0)).toBe(DAG_NODE_H + DAG_ROW_GAP);
+    // 同层不重叠:相邻行的间距**正好**是「节点高 + 行距」
+    const layer0 = layout.nodes.filter((n) => n.depth === 0).sort((p, q) => p.y - q.y);
+    expect(layer0.length, "第 0 列是两个同时起头的子项").toBe(2);
+    expect((layer0[1]?.y ?? 0) - (layer0[0]?.y ?? 0)).toBe(DAG_NODE_H + DAG_ROW_GAP);
   });
 
   it("层内顺序稳定:同一份数据两次布局,坐标逐项相同", () => {
@@ -126,13 +148,14 @@ describe("① 最长路径分层", () => {
 // ── ② 边 ────────────────────────────────────────────────────────
 
 describe("② 边:去重、去自环、不画幽灵线,并且如实报出丢了几条", () => {
-  it("父子边与依赖边分开保留(同两个节点之间两条语义不同)", () => {
+  it("父子边与依赖边分开保留,而且**父边的方向是子 → 父**", () => {
     const { edges } = layoutWorkDag(realShape(), []);
     const kinds = new Set(edges.map((e) => `${e.from}->${e.to}:${e.kind}`));
-    expect(kinds.has("root->a:parent")).toBe(true);
+    expect(kinds.has("a->root:parent"), "父边从子项指向父项(先后方向)").toBe(true);
+    expect(kinds.has("root->a:parent"), "反过来写就把「交付在最后」读成「交付在最前」").toBe(false);
     expect(kinds.has("b->c:depends_on")).toBe(true);
     // c 既在 root 下、又依赖 b ⇒ 两条边都在
-    expect(kinds.has("root->c:parent")).toBe(true);
+    expect(kinds.has("c->root:parent")).toBe(true);
   });
 
   it("重复的依赖边画一条(真机库里有 `A→B` 出现两次的行)", () => {
@@ -158,8 +181,8 @@ describe("② 边:去重、去自环、不画幽灵线,并且如实报出丢了�
 
 // ── ③ 环 ────────────────────────────────────────────────────────
 
-describe("③ 排不出先后:说清先后算不出来,但**一个节点都不许丢**", () => {
-  it("两个节点互相依赖 ⇒ 都保留、都标 unlayered、分层数收敛", () => {
+describe("③ 排不出先后:真环仍然被报出来,而且**说出是哪两条边**", () => {
+  it("两条前置互相指 ⇒ 两个节点都保留、都标 unlayered、同处尾列", () => {
     const layout = layoutWorkDag(
       [work("a", { deps: ["b"], at: 1 }), work("b", { deps: ["a"], at: 2 })],
       [],
@@ -167,46 +190,58 @@ describe("③ 排不出先后:说清先后算不出来,但**一个节点都不�
     expect(layout.nodes.length, "拓扑排序的实现常见错法是环上节点静默不进结果 —— 这里必须都在").toBe(2);
     expect(layout.unlayeredIds.sort()).toEqual(["a", "b"]);
     for (const n of layout.nodes) expect(n.unlayered).toBe(true);
-    // 排不出先后的节点排在**单独一层**(正常的层之后)
-    expect(layout.layers).toBe(1);
+    expect(layout.layers, "没有可分层 ⇒ 只有那一个尾列").toBe(1);
     expect(new Set(layout.nodes.map((n) => n.depth)).size, "它们同处一列").toBe(1);
+    // 病灶:一对边,两条 kind 都是前置
+    expect(layout.mutualPairs.length).toBe(1);
+    expect([layout.mutualPairs[0]!.ab, layout.mutualPairs[0]!.ba]).toEqual([
+      "depends_on", "depends_on",
+    ]);
   });
 
-  it("环 + 正常节点并存:正常的那几个照常分层,不许被环拖成同一层", () => {
+  it("⚠️ 归因精度:环**上游**的节点照常分层(它不依赖环能不能解开)", () => {
+    // C 是 B 的子项 ⇒ 父边是 C→B(子先于父)⇒ C 在环之前,排得出来。
+    // (旧实现把「环下游」的节点也塞进尾列;方向改成先后之后,上游不再被连坐。)
     const layout = layoutWorkDag(
-      [work("x", { at: 1 }), work("y", { parent: "x", at: 2 }), work("a", { deps: ["b"], at: 3 }), work("b", { deps: ["a"], at: 4 })],
-      [],
-    );
-    const at = (id: string) => layout.nodes.find((n) => n.work.id === id);
-    expect(at("x")?.depth).toBe(0);
-    expect(at("y")?.depth).toBe(1);
-    expect(layout.unlayeredIds.sort()).toEqual(["a", "b"]);
-    expect(at("a")?.unlayered).toBe(true);
-    expect(at("y")?.unlayered).toBe(false);
-    // 正常层 2 层 + 排不出先后的那 1 列
-    expect(layout.layers).toBe(3);
-  });
-
-  it("⚠️ 归因精度:环的**下游**节点也排不出先后,但它不在环上", () => {
-    // 这一条钉的是 subagent 复核出来的假归因(旧实现用松弛迭代 + 「最后一轮还在
-    // 变」近似,会把下游节点算成环成员)。Kahn 的未出队集合的**语义**恰好是
-    // 「环上 ∪ 环下游」—— 所以集合不变,但**措辞**必须只说「排不出先后」。
-    const layout = layoutWorkDag(
-      [work("a", { deps: ["b"], at: 1 }), work("b", { deps: ["a"], at: 2 }), work("c", { parent: "b", at: 3 })],
-      [],
-    );
-    expect([...layout.unlayeredIds].sort()).toEqual(["a", "b", "c"]);
-    // 边界样本:环下游的**下游**同样排不出来(深度在环上无界),Kahn 也照收
-    const chain = layoutWorkDag(
       [
         work("a", { deps: ["b"], at: 1 }),
         work("b", { deps: ["a"], at: 2 }),
         work("c", { parent: "b", at: 3 }),
-        work("d", { parent: "c", at: 4 }),
       ],
       [],
     );
-    expect([...chain.unlayeredIds].sort()).toEqual(["a", "b", "c", "d"]);
+    expect([...layout.unlayeredIds].sort()).toEqual(["a", "b"]);
+    const c = layout.nodes.find((n) => n.work.id === "c")!;
+    expect(c.unlayered, "C 在环的上游,不该被标成排不出先后").toBe(false);
+    expect(c.depth).toBe(0);
+    expect(layout.layers, "正常层 1 + 尾列 1").toBe(2);
+  });
+
+  it("**互相咬住的一对边**要说清 kind:拆解与前置方向相反才是环", () => {
+    // khu 是 kv0 的父(父边 kv0→khu);而 kv0 depends_on khu(前置边 khu→kv0)⇒ 相反。
+    const layout = layoutWorkDag(
+      [work("khu", { at: 1 }), work("kv0", { parent: "khu", at: 2, deps: ["khu"] })],
+      [],
+    );
+    expect(layout.mutualPairs.length, "闭环的那一对只报一次").toBe(1);
+    const pair = layout.mutualPairs[0]!;
+    expect([pair.a, pair.b].sort()).toEqual(["khu", "kv0"]);
+    expect([pair.ab, pair.ba].sort()).toEqual(["depends_on", "parent"]);
+    expect([...layout.unlayeredIds].sort()).toEqual(["khu", "kv0"]);
+  });
+
+  it("✅ 负样本:「拆解 + 前置」方向**一致**时不是环(真机那份数据就是这样)", () => {
+    // khu 是 kv0 的父(子→父:kv0→khu),同时 khu depends_on kv0(前置:kv0→khu)
+    // ⇒ 两条边同向,先后关系自洽,不该报环。
+    const layout = layoutWorkDag(
+      [work("khu", { at: 1, deps: ["kv0"] }), work("kv0", { parent: "khu", at: 2 })],
+      [],
+    );
+    expect(layout.mutualPairs).toEqual([]);
+    expect(layout.unlayeredIds).toEqual([]);
+    const depth = new Map(layout.nodes.map((n) => [n.work.id, n.depth]));
+    expect(depth.get("kv0")).toBe(0);
+    expect(depth.get("khu")).toBe(1);
   });
 });
 

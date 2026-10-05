@@ -36,11 +36,13 @@ const FILES = [
   "web/src/components/chat/ToolCallCard.tsx",
   "web/src/components/settings/SettingsPanel.tsx",
   "web/src/routes/Agents.tsx",
-  "web/src/routes/Artifacts.tsx",
-  "web/src/routes/Goals.tsx",
+  // ⚠️ 这份清单**必须**与 `web/src/routes/` 实际有的文件对齐 —— 列错的表现是
+  // 「这一页的文字量静默不算」(脚本照常退出 0,而结果是假的;见 AGENTS.md 的
+  // 「三类静默失败」#3)。2026-10-06:工件页已并入工作项页(Artifacts.tsx →
+  // Works.tsx);Goals.tsx / Timeline.tsx 是更早删掉的页面,一并清掉。
+  "web/src/routes/Works.tsx",
   "web/src/routes/Harness.tsx",
   "web/src/routes/Memory.tsx",
-  "web/src/routes/Timeline.tsx",
 ];
 
 /**

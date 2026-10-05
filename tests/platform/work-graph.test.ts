@@ -24,7 +24,7 @@ import { insertProject, loadProjectForAuthz } from "../../src/platform/storage/r
 import { ensureProjectOrg } from "../../src/platform/runtime/org.js";
 import {
   insertWork, getWork, updateWorkStatus, checkWorkTransition, isWorkTransitionAllowed,
-  nextWorkStatuses, setWorkDeps, listDeps, listDependents, WORK_TRANSITIONS,
+  nextWorkStatuses, setWorkDeps, listDeps, listDependents, createsCycle, addDep, WORK_TRANSITIONS,
   WORK_STATUSES, isTerminalWorkStatus, type WorkStatus,
 } from "../../src/platform/storage/repo/works.js";
 import {
@@ -385,10 +385,16 @@ describe("任务 1.2 · 取消一个有后继依赖的工作项", () => {
   });
 
   it("取消**中间**工作项时同样给警告(位置不影响这条警告)", () => {
+    // ⚠️ 夹具改过一次(2026-10-06):原来把 `leaf` 建成 `mid` 的**子项**、再让
+    // `leaf` 依赖 `mid` —— 那是「子等父」,现在是**被拒绝**的形状(父要等子项收口
+    // 才完成 ⇒ 那条活永远开不了工,`setWorkDeps` 会以 reason=ancestor 拒绝,
+    // 于是这个用例的边根本没画上,警告也就不会出现)。要测的是「有后继依赖」,
+    // 那就用合法的形状:两条平级工作项之间一条前置。
     const root = mkWork();
     const mid = mkWork({ parentWorkId: root });
-    const leaf = mkWork({ parentWorkId: mid });
-    setWorkDeps(db, leaf, [mid]);
+    const leaf = mkWork({ parentWorkId: root });
+    const applied = setWorkDeps(db, leaf, [mid]);
+    expect(applied.ok, "夹具本身必须是合法的依赖").toBe(true);
     const text = okText(callPm("work_update", { workId: mid, status: "cancelled" }));
     expect(text).toContain("非阻塞警告");
     expect(text).toContain(leaf);
@@ -866,5 +872,103 @@ describe("真机事故复现:取消旧项 + 新建同名项 + 下游指向被取
        WHERE w.status = 'cancelled'`,
     ).all();
     expect(dangling).toEqual([]);
+  });
+});
+
+// ── 任务 5(2026-10-06)· 环检测的方向必须与「先后」一致 ─────────────
+//
+// 「先后」的定义(与前端分层图同一份):前置先、本条后;子先、父后(容器由子项推动)。
+// 于是三种组合里**只有一种有害**:
+//
+//   `P depends_on C`(父等子)⇒ 子本来就先于父 ⇒ 无害(冗余)⇒ **放行**
+//   `C depends_on P`(子等父)⇒ 成环,而且在 `depsSatisfied` 里是**死锁**
+//                              (父要等子项全收口才 done,子却要等父 done)⇒ **拦**
+//   兄弟之间 ⇒ 正常排期 ⇒ **放行**
+//
+// ⚠️ 这条判据的第一版**写反了**:它沿「我依赖谁 + 我的父」走,于是把无害的
+// 「父等子」拦掉,却放过了真正会死锁的「子等父」。真机库里那条
+// `khu depends_on kv0`(父等子,无害)就是被它误判成环的 —— 而「dag 完全是乱的」
+// 的真因是**前端把父边的方向画反了**,不是数据有环。
+describe("任务 5 · 环检测的方向必须与「先后」一致", () => {
+  const mk = (id: string, parent: string | null = null): void => {
+    insertWork(db, {
+      id, projectId: "p1", parentWorkId: parent, title: id, goal: "g", status: "open",
+      assigneeAgentId: "wk", createdAt: T0, updatedAt: T0,
+    });
+  };
+
+  it("✅ 真机那条边:父项 `depends_on` 自己的子项 ⇒ **放行**(子本来就先于父)", () => {
+    mk("khu");
+    mk("kv0", "khu");
+    expect(createsCycle(db, "khu", "kv0"), "父等子不是环").toBe(false);
+    expect(addDep(db, "khu", "kv0").ok, "冗余但无害,不该拦").toBe(true);
+    expect(listDeps(db, "khu")).toEqual(["kv0"]);
+  });
+
+  it("⛔ 子项 `depends_on` 自己的父项 ⇒ 拦(它会变成一条永远开不了工的活)", () => {
+    mk("khu");
+    mk("kv0", "khu");
+    expect(createsCycle(db, "kv0", "khu"), "子等父 = 成环 + 死锁").toBe(true);
+    const r = addDep(db, "kv0", "khu");
+    expect(r.ok).toBe(false);
+    expect(r.ok === false ? r.reason : null).toBe("cycle");
+    // 负样本:真的**一个字节都没写**
+    expect(listDeps(db, "kv0")).toEqual([]);
+  });
+
+  it("⛔ 沿着**父链**多跳也算:孙项等祖父 ⇒ 拦", () => {
+    mk("khu");
+    mk("mid", "khu");
+    mk("leaf", "mid");
+    expect(createsCycle(db, "leaf", "khu"), "leaf 先于 mid 先于 khu ⇒ 反向").toBe(true);
+    expect(createsCycle(db, "mid", "khu")).toBe(true);
+    // 负样本:反过来(祖父等孙项)无害
+    expect(createsCycle(db, "khu", "leaf")).toBe(false);
+  });
+
+  it("✅ 兄弟之间的前置**照常放行**(判据不能严到把正常排期也拦掉)", () => {
+    mk("khu");
+    mk("b", "khu");
+    mk("a", "khu");
+    expect(addDep(db, "a", "b").ok, "同层兄弟之间的依赖是正常的").toBe(true);
+    expect(listDeps(db, "a")).toEqual(["b"]);
+    // 负样本:**两条都加**就是纯前置环(不是「换个先后」),必须拦住
+    const back = addDep(db, "b", "a");
+    expect(back.ok).toBe(false);
+    expect(back.ok === false ? back.reason : null).toBe("cycle");
+  });
+
+  it("⛔ 纯前置环仍然拦得住(原有行为不许退化)", () => {
+    mk("a");
+    mk("b");
+    expect(addDep(db, "a", "b").ok).toBe(true);
+    const r = addDep(db, "b", "a");
+    expect(r.ok).toBe(false);
+    expect(r.ok === false ? r.reason : null).toBe("cycle");
+  });
+
+  it("⛔ 拒绝的原因要**说得出口**:子等父报 `ancestor` 并点明「会永远开不了工」", () => {
+    const root = mkWork();
+    const child = mkWork({ parentWorkId: root });
+    const r = setWorkDeps(db, child, [root]);
+    expect(r.ok).toBe(false);
+    expect(r.ok === false ? r.reason : null).toBe("ancestor");
+    expect(r.ok === false ? r.message : "").toContain("死锁");
+    expect(r.ok === false ? r.message : "").toContain("永远开不了工");
+    expect(r.ok === false ? r.message : "").toContain("一个字节都没写");
+    // 负样本:普通环报的仍是 cycle(两种原因不许混成一句话)
+    const a = mkWork();
+    const b = mkWork();
+    db.prepare(`INSERT INTO work_deps (work_id, depends_on_work_id) VALUES (?, ?)`).run(a, b);
+    const cyc = setWorkDeps(db, b, [a]);
+    expect(cyc.ok === false ? cyc.reason : null).toBe("cycle");
+  });
+
+  it("⚠️ 存量数据不自动修:库里已有的边照实读出来,新写入才受判据约束", () => {
+    mk("khu");
+    mk("kv0", "khu");
+    db.prepare(`INSERT INTO work_deps (work_id, depends_on_work_id) VALUES (?, ?)`).run("kv0", "khu");
+    expect(listDeps(db, "kv0"), "存量边照实读出").toEqual(["khu"]);
+    expect(createsCycle(db, "kv0", "khu"), "而新的同样一条会被拦").toBe(true);
   });
 });

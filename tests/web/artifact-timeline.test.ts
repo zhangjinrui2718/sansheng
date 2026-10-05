@@ -1,6 +1,12 @@
 /**
  * 工件页 · **推进图(时间轴 × 泳道)** 的渲染判据(2026-10-07)
  *
+ * ⚠️ 页面已改名/改位置:「工件」tab 与「工作项」tab 合并成一个 tab(用户要求:
+ * 推进图上本来就同时画着工作项与工件,点绿色条 ⇒ 下面显示它挂着的工件),
+ * 合并后的唯一页面是 `web/src/routes/Works.tsx`(`ArtifactsPage` 随之改名
+ * `WorksPage`,其余导出名一个都没动)。下面只有 import 路径与这处指路变了 ——
+ * 断言一条都没改,也不许改。
+ *
  * ── 为什么这份测试长这样 ────────────────────────────────────────
  *
  * 用户要的主视图是「横轴是时间,纵轴是工件的类型,即使没在 dag 上的工件也可以放在
@@ -19,7 +25,7 @@
  *
  * `data-mark-id` / `data-span-id` / `data-open` / `data-selected` /
  * `data-milestone-id` / `data-milestone-span` / `data-now-line` / `tabindex` /
- * `role` 是渲染层专门为测试留的钩子(见 `web/src/routes/Artifacts.tsx` 文件头)。
+ * `role` 是渲染层专门为测试留的钩子(见 `web/src/routes/Works.tsx` 文件头)。
  * 属性顺序无关:`tagsWith` 先取「含这个属性的开标签」整段,再由 `attrOf` 读值。
  *
  * ⚠️ **「一个 `.ss-live-dot` 都没有」落在新的主视图(① 与它的图例)上,不是整页**:
@@ -37,7 +43,7 @@ import {
   ProgressTimeline,
   TimelineLegend,
   type DagLive,
-} from "@/routes/Artifacts";
+} from "@/routes/Works";
 import { layoutTimeline } from "@/lib/timeline";
 
 // ── 夹具(不连真库:字段全自己造)────────────────────────────────

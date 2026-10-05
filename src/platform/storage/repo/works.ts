@@ -701,25 +701,93 @@ export function deleteWork(db: Database.Database, id: string): void {
  * 用已访问集合 + 显式栈做 DFS —— 不设深度上限(工作项树本来可能很深),
  * 靠 visited 保证终止。
  */
+/**
+ * **先后**关系上的后继:`start` 之后还会发生什么。
+ *
+ * ── 方向必须与「先后」一致,否则拦错(2026-10-06,一次真机 + 一次自测抓出来)──
+ *
+ * 先后的定义(与前端分层图**同一个定义**,见 `web/lib/workGraph.ts` 的 `collectEdges`):
+ *
+ *   - `depends_on`:前置先、本条后 ⇒ 边是 `dep → work`;
+ *   - `parent_work_id`:**子先、父后**(容器由子项推动,`integrate` 在子项收口之后才跑)
+ *     ⇒ 边是 `child → parent`。
+ *
+ * 所以在先后图上,`X` 的**后继**是:
+ *
+ *   ① 依赖 `X` 的那些工作项(`listDependents`);② `X` 的**父**(子先于父)。
+ *
+ * ── 三种组合里只有一种有害(这是判据的全部)────────────────────────
+ *
+ *   组合                                    | 先后图 | 该不该拦
+ *   `P depends_on C`(父等子)               | 无环   | **放行**(子本来就先于父;冗余但无害)
+ *   `C depends_on P`(子等父)               | 成环   | **拦**(而且它在 `depsSatisfied` 里是**死锁**:
+ *                                           |        |  父要等子项全收口才 `done`,子却要等父 `done`)
+ *   兄弟之间 `A depends_on B`               | 无环   | **放行**
+ *
+ * ⚠️ **上一版把方向写反了**(沿「我依赖谁 + 我的父」走),结果是:
+ *   - 把真机那份**无害**的 `khu depends_on kv0`(父等子)拦掉 —— 那一版还据此断言
+ *     「平台本该拦住这个环」,而真相是那份数据的先后关系本来就自洽:是我自己的
+ *     分层图把父边的方向画反了才看起来像环;
+ *   - 同时**漏掉**了真正有害的 `C depends_on P`(它不报错,只在运行时变成一条
+ *     永远开不了工的活)。
+ */
+function precedesReaches(db: Database.Database, start: string, target: string): boolean {
+  const parentStmt = db.prepare(`SELECT parent_work_id AS id FROM works WHERE id = ?`);
+  const visited = new Set<string>();
+  const stack = [start];
+  while (stack.length > 0) {
+    const cur = stack.pop() as string;
+    if (cur === target) return true;
+    if (visited.has(cur)) continue;
+    visited.add(cur);
+    // ① 依赖它的那些(它们是「之后」)
+    for (const d of listDependents(db, cur)) stack.push(d);
+    // ② 它的父(子先于父)
+    const p = parentStmt.get(cur) as { id: string | null } | undefined;
+    if (p !== undefined && p.id !== null) stack.push(p.id);
+  }
+  return false;
+}
+
+/**
+ * `maybeAncestor` 是不是 `node` 的**祖先**(沿 `parent_work_id` 向上,含直接父项)。
+ *
+ * 用在「把父项当前置」这一种拒绝上:它是环的一个特例,但**后果更有指导性**
+ * (死锁),所以单独给它一个 reason,而不是笼统报「成环」。走到根为止;父链成环
+ * (理论上有,FK 之外的数据可能造出来)用 `visited` 兜住,不会死循环。
+ */
+export function isAncestor(
+  db: Database.Database,
+  maybeAncestor: string,
+  node: string,
+): boolean {
+  const stmt = db.prepare(`SELECT parent_work_id AS id FROM works WHERE id = ?`);
+  const visited = new Set<string>();
+  let cur: string | null = node;
+  while (cur !== null) {
+    if (visited.has(cur)) return false;
+    visited.add(cur);
+    const row = stmt.get(cur) as { id: string | null } | undefined;
+    cur = row?.id ?? null;
+    if (cur !== null && cur === maybeAncestor) return true;
+  }
+  return false;
+}
+
+/**
+ * 加一条前置 `workId → depId`(先后边 `depId → workId`)会不会成环。
+ *
+ * 判据:**先后图上 `workId` 能不能到达 `depId`**(能 ⇒ 这条新边反向接上,成环)。
+ * 走法见 `precedesReaches` —— **前置与父两条腿都要走**,方向是「之后」那一侧。
+ * 自环单独先判(schema 也拦,这里给出更早的失败)。
+ */
 export function createsCycle(
   db: Database.Database,
   workId: string,
   depId: string,
 ): boolean {
-  if (workId === depId) return true; // 自环(schema 也拦,这里给出更早的失败)
-  const stmt = db.prepare(`SELECT depends_on_work_id FROM work_deps WHERE work_id = ?`);
-  const visited = new Set<string>();
-  const stack = [depId];
-  while (stack.length > 0) {
-    const cur = stack.pop()!;
-    if (cur === workId) return true;
-    if (visited.has(cur)) continue;
-    visited.add(cur);
-    for (const r of stmt.all(cur) as Array<{ depends_on_work_id: string }>) {
-      stack.push(r.depends_on_work_id);
-    }
-  }
-  return false;
+  if (workId === depId) return true;
+  return precedesReaches(db, workId, depId);
 }
 
 export type AddDepResult =
@@ -790,7 +858,7 @@ export type SetWorkDepsResult =
     }
   | {
       readonly ok: false;
-      readonly reason: "self" | "not_found" | "cross_project" | "cycle";
+      readonly reason: "self" | "not_found" | "cross_project" | "cycle" | "ancestor";
       /** 出问题的那条边的另一端(便于模型自纠) */
       readonly offending: string;
       readonly message: string;
@@ -841,6 +909,19 @@ export function setWorkDeps(
   const toAdd = wanted.filter((d) => !before.includes(d));
 
   for (const d of toAdd) {
+    // ⚠️ **先把「把父项当前置」这一种挑出来单独说**(2026-10-06)。它确实也是环
+    // (先后图上反向),但「成环」这个词对模型毫无指导意义;真正的后果是**死锁**:
+    // 父项要等子项全部收口才 `done`(`integrate` 的判据),而这条活在等父项 `done`
+    // ⇒ 它**永远开不了工**,而排空器只会一遍遍把它们互相叫醒。
+    if (isAncestor(db, d, workId)) {
+      return {
+        ok: false, reason: "ancestor", offending: d,
+        message:
+          `前置 ${d} 是 ${workId} 的**父项**(或更上层的祖先):父项要等子项全部收口` +
+          `才算完成,把父项当前置会让 ${workId} 永远开不了工(死锁)。` +
+          `要表达「先后」请用兄弟之间的 dependsOn,或调整拆解树 —— 一个字节都没写`,
+      };
+    }
     // `createsCycle` 就是 `addDep` 内部用的那一个 —— 同一套环检测,不是复制品。
     if (createsCycle(db, workId, d)) {
       return {

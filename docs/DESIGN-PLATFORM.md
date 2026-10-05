@@ -1134,6 +1134,26 @@ ensureSession(...)           const existing = listSessions(...); if (existing.le
 
 分层 DAG **降级成默认折叠的「依赖关系图」**(它答的是「谁在等谁」,时间轴答不了 —— 一个信息都没删)。验收判据:`tests/web/timeline.test.ts`(25,布局语义 + 计数 + 端点语义 + `unavailable` 不许点亮)· `tests/web/artifact-timeline.test.ts`(29,页面与图形钩子)· `tests/web/artifact-dag.test.ts`(22,**一字不改**仍绿,证明折叠没有删信息)。
 
+**再一处(2026-10-06 晚):「工件」页并入「工作项」页 + 依赖图的边方向。** 用户的原话是「把工作项和工件合并成一个 tab,就叫做『工作项』,这个图表就放在工作项这个 tab 下面,点击对应的绿色进度条,就可以展示在这个工作项上都有哪些工件」——于是路由 `artifacts` 撤销,推进图成为工作项页的主视图(点条 ⇒ 下面面板显示该环节的工件),分层 DAG 仍是默认折叠的「依赖关系图」。
+
+同一轮里查清了一件**看起来像数据脏、实际是判据写反**的事:用户说「现在的 dag 完全是乱的,你检查一下」。真机读数:
+
+```
+khu --parent--> mile / mim / kph / kv0      (拆解:根 + 四个子项)
+khu --depends_on--> kv0                     (根又等整合)
+```
+
+上一版把父边画成「父先于子」,于是 `khu ⇄ kv0` 方向矛盾 ⇒ Kahn 一个都排不出来 ⇒ **五个节点全挤进「排不出先后」那一列**。而平台自己的语义是**子先于父**(容器由子项推动、`integrate` 在子树收口后才跑),按这个方向重算:**一个环都没有**,五条排成四列(模块 → 节律 → 整合 → 交付)。
+
+由此得到两条**判据层**的结论,已写进代码:
+
+| 结论 | 落点 |
+|---|---|
+| 依赖图的边方向 = **先后**(前置 → 本条;**子 → 父**),它不是画法偏好,而是「有没有环」的一部分 | `web/lib/workGraph.ts` 的 `collectEdges` |
+| 环检测的正确方向是**先后图的后继**(依赖它的 + 它的父);写反会同时**漏掉**真正有害的 `C depends_on P`(死锁)并**误判**无害的 `P depends_on C` | `repo/works.ts` 的 `precedesReaches` / `createsCycle` |
+| 「子项把父项当前置」= 死锁(父要等子项收口才 `done`),单独给一个可诊断的 reason(`ancestor`)+ 说清后果的 message | `repo/works.ts` 的 `setWorkDeps` + `isAncestor` |
+| 环的**报法**要落到「哪两条边」(`mutualPairs`),而不是列出所有通往环的边(那种报法一次报九条,等于没报) | `web/lib/workGraph.ts` 的 `mutualPairs` |
+
 **同一轮的另一处:界面用词只有一处来源。** 用户提的是「harness 页面 和 成员页面 的四个角色的命名统一一下,就不要有解释了」。查下来同一个角色有**三个名字**:harness 页 `transport/http.ts` 的私有表(`Worker(执行者)` —— 名字里塞了解释)、成员页 `agents.display_name`(播种自 `runtime/org.ts` 的 `ORG`)、前端兜底 `web/src/lib/vocab.ts` 的 `ROLE_LABEL`(`执行者` / `质检审查员`)。现在:角色中文名的唯一来源是 **`runtime/org.ts` 的 `ORG`**,harness 视图与播种共用它,前端兜底表逐项对齐,并由 `tests/web/role-names.test.ts` 做**跨边界对照**(角色名里出现括号 / 斜杠 / 空格即红 —— 那就是「解释」的机器表达)。
 
 ---

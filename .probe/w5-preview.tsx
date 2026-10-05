@@ -21,7 +21,7 @@
  * ⚠️ 排空定时器与调度器都要调大:宿主跑在**真数据的副本**上,不该顺手跑起一个回合
  * (`--data` 指向副本,所以真库一个字节都不会被改)。
  *
- * 产物:`.probe/w5-artifacts-preview.html` / `.probe/w5-members-preview.html`
+ * 产物:`.probe/w5-works-preview.html` / `.probe/w5-members-preview.html`
  * (内联 dist/web 的构建 CSS,双击即可看;纯静态,没有任何脚本)。
  */
 import { writeFileSync, readdirSync, readFileSync } from "node:fs";
@@ -32,8 +32,9 @@ import type {
   ArtifactView, HarnessView, MemberActivityView, MemberConversationView,
   MemberView, ProjectLiveView, ProjectSummary, WorkView,
 } from "@shared/types/platform";
-import { ArtifactsScreen } from "@/routes/Artifacts";
+import { ArtifactsScreen, WorkDag } from "@/routes/Works";
 import { MemberPane, MemberRoleTabs } from "@/routes/Members";
+import { layoutWorkDag } from "@/lib/workGraph";
 
 const PORT = process.env.PORT ?? "2732";
 const BASE = `http://127.0.0.1:${PORT}`;
@@ -99,9 +100,9 @@ const artifactsBody = renderToStaticMarkup(
 );
 
 writeFileSync(
-  join(process.cwd(), ".probe/w5-artifacts-preview.html"),
+  join(process.cwd(), ".probe/w5-works-preview.html"),
   page(
-    "W5 预览 · 工件页(推进图)",
+    "W5 预览 · 工作项页(推进图)",
     `静态影子(无脚本)· 数据来自 <code>${BASE}</code> 上的真数据副本 · 项目「${project.name}」· ` +
       `${works.length} 个环节 / ${artifacts.length} 件工件(其中 ` +
       `${artifacts.filter((a) => a.workId !== null).length} 件挂在环节上)· ` +
@@ -165,6 +166,32 @@ writeFileSync(
   ),
 );
 
+// ── ③ 依赖关系图(**展开**,专门用来核「缠不缠」)──────────────────
+//
+// 页面里它是默认折叠的;这一份把它摊开,好对着真数据看分层有没有排对。
+const dag = layoutWorkDag(works, artifacts);
+const dagHtml = renderToStaticMarkup(
+  createElement(WorkDag, {
+    layout: dag,
+    live: { runtime: live.runtime, agents: live.agents },
+    selectedId: dag.nodes.find((n) => n.artifactCount > 0)?.work.id ?? null,
+    onSelect: () => {},
+  }),
+);
+writeFileSync(
+  join(process.cwd(), ".probe/w5-dag-preview.html"),
+  page(
+    "W5 预览 · 依赖关系图(展开)",
+    `静态影子 · 真数据 · 项目「${project.name}」· ${works.length} 个环节 · ` +
+      `${dag.layers} 列 · 排不出先后的 ${dag.unlayeredIds.length} 个 · ` +
+      `互相咬住的 ${dag.mutualPairs.length} 对。<br>` +
+      `实线 = 拆解(子项 → 父项),虚线 = 前置依赖(前置 → 本条) —— **两条边的方向都是先后**,` +
+      `所以从左到右就是「先做什么、后做什么」。`,
+    dagHtml,
+  ),
+);
+
 console.log("写好了:");
-console.log("  .probe/w5-artifacts-preview.html");
+console.log("  .probe/w5-works-preview.html");
 console.log("  .probe/w5-members-preview.html");
+console.log("  .probe/w5-dag-preview.html");

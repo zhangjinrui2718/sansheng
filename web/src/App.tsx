@@ -6,8 +6,10 @@
  *  1. **路由表换成新模型的页面**:旧的是「对话 / Agent / 总线 / 记忆 / 工件 /
  *     目标 / Harness / 设置」。其中「总线」在新架构里已删除(MessageBus 没了),
  *     「目标」是计划时代的投影(已换成工作项),「Agent」的主体变成了项目成员。
- *     新的:`chat / project / works / inbox / artifacts / members / memory /
- *     harness / settings`。
+ *     新的:`chat / project / works / inbox / members / memory /
+ *     harness / settings`。**「工件」页签已并入「工作项」**(用户要求:推进图上本来
+ *     就同时画着工作项与工件,点绿色条 ⇒ 下面显示它挂着的工件),所以 `Route` 里
+ *     没有工件这个成员 —— 合并后的唯一页面是 `routes/Works.tsx` 的 `WorksPage`。
  *  2. **`POST /api/kernel/reset` 已不存在**,「重置 Kernel」按钮删除;相关的
  *     `vecLoaded` 降级提示也删除 —— 新契约的 `HealthResponse` 里没有 `vecLoaded`,
  *     旧 `/api/health` 的 `d.ts`(服务器时间)同样不在契约里,所以顶栏改为显示
@@ -27,7 +29,6 @@ import { SettingsPanel } from "./components/settings/SettingsPanel";
 import { ProjectDetailPage } from "./routes/ProjectDetail";
 import { WorksPage } from "./routes/Works";
 import { InboxPage } from "./routes/Inbox";
-import { ArtifactsPage } from "./routes/Artifacts";
 import { MembersPage } from "./routes/Members";
 import { MemoryPage } from "./routes/Memory";
 import { HarnessPage } from "./routes/Harness";
@@ -45,7 +46,6 @@ export type Route =
   | "project"
   | "works"
   | "inbox"
-  | "artifacts"
   | "members"
   | "memory"
   | "harness"
@@ -147,8 +147,6 @@ export function App() {
         page(<WorksPage />)
       ) : route === "inbox" ? (
         page(<InboxPage />)
-      ) : route === "artifacts" ? (
-        page(<ArtifactsPage />)
       ) : route === "members" ? (
         page(<MembersPage />)
       ) : route === "memory" ? (

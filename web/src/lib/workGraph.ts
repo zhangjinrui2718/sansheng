@@ -60,8 +60,8 @@ export interface DagNodeLayout {
   /** 挂在这个环节上的工件数(含「关于」语义的评审发现,见契约 `ArtifactView.workId`) */
   artifactCount: number;
   /**
-   * **排不出先后**的节点 ⇒ 分层对它不成立(单独一层,界面上必须说明)。
-   * ⚠️ 它是「在依赖环上**或**环的下游」,不全是环的成员 —— 见 `layerize`。
+   * 「在依赖环上**或**环的下游」—— **仅用于标注**(界面上必须说明),
+   * **不决定摆位**(摆位按拆解树;只有父子成环的节点才进尾列)。
    */
   unlayered: boolean;
 }
@@ -83,18 +83,49 @@ export interface WorkDagLayout {
   /** 层数(0 = 没有节点) */
   layers: number;
   /**
-   * **排不出先后**的工作项 id(Kahn 未出队的那些:环上的 ∪ 环的下游)。
+   * **环上或环的下游**的工作项 id(Kahn 未出队的那些)。
    * **必须显示**出「这几个的先后算不出来」,而且归因只到这一步。
+   * ⚠️ 它**不再决定摆位** —— 摆位由拆解树(`parentWorkId`)决定,见 `parentDepths`。
    */
   unlayeredIds: string[];
+  /**
+   * **互相咬住的一对边**(`u→v` 与 `v→u` 同时存在,任意 kind 组合)。
+   *
+   * 界面据此说出病灶 —— 真机现场是「`khu --parent--> kv0` 与
+   * `kv0 --depends_on--> khu`」,只有列出这两条边才读得懂为什么这一块标了环,
+   * 而且它直接指向该改哪一条。
+   */
+  mutualPairs: Array<{ a: string; b: string; ab: "parent" | "depends_on"; ba: "parent" | "depends_on" }>;
   /** 去重 / 去自环时被丢掉的边条数(诊断用:>0 说明库里本来就有脏边) */
   droppedEdges: number;
 }
 
 /**
- * 入边:一个节点「依赖谁 / 挂在哪」。两条边来源合并去重。
+ * 边:**方向 = 先后**(谁必须先发生)。两条来源:
  *
- * 去重键是 `(from, to, kind)`:同一条 `dependsOn` 在库里写了两遍(真机实测有过)
+ *   - `depends_on`:`dep → work`(前置先,本条后);
+ *   - `parent_work_id`:**`child → parent`** —— ⚠️ 这个方向是 2026-10-06 定下来的,
+ *     它同时修掉了真机那份数据的「环」。
+ *
+ * ── 为什么父边是「子 → 父」而不是「父 → 子」────────────────────────
+ *
+ * 把父边画成「父先于子」时,真机数据立刻出现一个**假环**:`khu` 是 `kv0` 的父
+ * (父先于子),同时 `khu` 又 `depends_on kv0`(子先于父)⇒ 方向矛盾 ⇒ Kahn 一个都
+ * 排不出来 ⇒ **五个节点全挤进一列**,用户的原话是「现在的 dag 完全是乱的」。
+ *
+ * 而平台自己的语义是**子先于父**:容器根工作项由子项推动、`integrate` 在子项全部
+ * 收口之后才跑(`runtime/dispatcher.ts` 的 `integrate` 规则就是这个判据)。于是
+ * 那份数据的先后关系是:
+ *
+ *     基础打断 / 全双工 → 节律(等全双工) → 整合(等前三个) → 交付(等整合)
+ *
+ * —— **一个环都没有**,五个节点排在四列上,「交付在最后」也正是事实。
+ *
+ * ⚠️ 所以「有没有环」这件事**依赖方向的定义**:同一对节点上「拆解 + 前置」方向
+ * **一致**时不是环(真机就是这样),方向**相反**时才是(`mutualPairs` 会指出来)。
+ * 这个定义写在代码里,不由读者猜。
+ *
+ * 去重键是 `(kind, from, to)`:同一条 `dependsOn` 在库里写了两遍(真机实测有过)
  * 只画一条;而「既是父子又互相依赖」是两条**语义不同**的边,都要画。
  */
 function collectEdges(
@@ -126,31 +157,27 @@ function collectEdges(
   };
 
   for (const w of works) {
-    if (w.parentWorkId !== null) push(w.parentWorkId, w.id, "parent");
+    // ⚠️ 子 → 父(先后方向,见上)
+    if (w.parentWorkId !== null) push(w.id, w.parentWorkId, "parent");
     for (const dep of w.dependsOn) push(dep, w.id, "depends_on");
   }
   return { edges: out, dropped };
 }
 
 /**
- * 分层 = **Kahn 拓扑排序 + 最长路径松弛**。
+ * 分层 = **Kahn 拓扑排序 + 最长路径**(边的方向即先后)。
  *
- * ── 为什么是 Kahn(而不是「松弛法跑 N 轮,看谁还在动」)────────────────
+ * 入度为 0 的先出队;出队时把后继的深度推到 `max(现深度, 本深度 + 1)`。这一趟同时
+ * 拿到两件事:
  *
- * 上一版用松弛迭代 + 「最后一轮还在变的节点就是环上的」。它在真机上被
- * subagent 复核出一个**归因错误**:`A ↔ B` 成环、`C` 是 `B` 的子项时,`C` 也
- * 被标成「环上的」—— 其实 `C` 不在环上,它只是**环的下游**。
+ *   - `depth`     —— 每个节点的列号(最长路径 ⇒ 任何一条边都**从左指向右**);
+ *   - `unlayered` —— **没能出队**的节点 = 在环上 ∪ 环的下游(Kahn 的精确语义)。
  *
- * Kahn 的答案**恰好**是「排不出先后」的那个精确集合:**环上的节点 + 从环出发
- * 能到达的节点**(它们的入度永远减不到 0)。于是措辞可以精确到:
- * 「这几个环节的先后算不出来(它们在依赖环上或环的下游)」—— 而上一版只能说
- * 「依赖成环」,那对下游节点是一句**假归因**。
- *
- * 顺带两件事:复杂度从 O(n²) 降到 O(n + m);而且**一个节点都不会丢**
- * (拓扑排序的实现常见错法是「环上节点静默不进结果」,这里未出队的节点被
- * 单独收进 `unlayered`,由调用方摆在尾层并如实标注)。
+ * `unlayered` 是**保守**集合:真机那种「根 ⇄ 子项」的组合会把它下游的子项也算进来。
+ * 所以界面上那句「先后算不出来」必须写全,并且用 `mutualPairs` 说出**具体是哪两条边**
+ * (只报集合的话,读者知道有环但不知道该改哪条)。
  */
-function layerize(
+function precedenceDepths(
   nodeIds: readonly string[],
   edges: ReadonlyArray<{ from: string; to: string }>,
 ): { depth: Map<string, number>; unlayered: Set<string> } {
@@ -164,7 +191,6 @@ function layerize(
   }
 
   const depth = new Map<string, number>(nodeIds.map((id) => [id, 0]));
-  // 入度为 0 的先入队;队列顺序按 `nodeIds` 的给定顺序(稳定)
   const queue = nodeIds.filter((id) => (indeg.get(id) ?? 0) === 0);
   const ordered = new Set<string>();
   while (queue.length > 0) {
@@ -178,17 +204,34 @@ function layerize(
       if (left === 0) queue.push(to);
     }
   }
-
-  const unlayered = new Set(nodeIds.filter((id) => !ordered.has(id)));
-  return { depth, unlayered };
+  return { depth, unlayered: new Set(nodeIds.filter((id) => !ordered.has(id))) };
 }
 
 /**
- * 把工作项 + 工件装成一张可渲染的图。
+ * **互相咬住的一对边**(`u→v` 与 `v→u` 同时存在,任意 kind 组合)。
  *
- * **不请求任何东西**:`works` / `artifacts` 由调用方从 `useWorks` / `useArtifacts`
- * 拿到(那两条 hook 已经是「WS 事件 → revision → 回查」的既有读者)。
+ * 这才是**能读懂、能动手改**的病灶。真机上一版曾把「所有反向可达的边」都报出来,
+ * 在这样的图上会一次报九条边(环在顶部,所有边都通往环)—— 那等于把「有环」说了
+ * 九遍,一句病灶都没说。判据要落到人手上能改的那一条边。
  */
+function mutualPairs(
+  edges: ReadonlyArray<{ from: string; to: string; kind: DagEdgeLayout["kind"] }>,
+): WorkDagLayout["mutualPairs"] {
+  const kindOf = new Map<string, DagEdgeLayout["kind"]>();
+  for (const e of edges) kindOf.set(`${e.from}|${e.to}`, e.kind);
+  const out: WorkDagLayout["mutualPairs"] = [];
+  const seen = new Set<string>();
+  for (const e of edges) {
+    const back = kindOf.get(`${e.to}|${e.from}`);
+    if (back === undefined) continue;
+    const key = [e.from, e.to].sort().join("|");
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({ a: e.from, b: e.to, ab: e.kind, ba: back });
+  }
+  return out;
+}
+
 export function layoutWorkDag(
   works: readonly WorkView[],
   artifacts: readonly ArtifactView[],
@@ -201,9 +244,10 @@ export function layoutWorkDag(
 
   const { edges, dropped } = collectEdges(works);
   const ids = works.map((w) => w.id);
-  const { depth, unlayered } = layerize(ids, edges);
+  const { depth, unlayered } = precedenceDepths(ids, edges);
+  const pairs = mutualPairs(edges);
 
-  // 环上的节点统一放到**最后一层**(在正常层之后),并在界面上标注。
+  // 排不出先后的节点统一放**最后一列**(在正常层之后),并在界面上说明。
   const layered = works.filter((w) => !unlayered.has(w.id));
   const unlayeredWorks = works.filter((w) => unlayered.has(w.id));
   const maxDepth = layered.reduce((m, w) => Math.max(m, depth.get(w.id) ?? 0), -1);
@@ -272,6 +316,7 @@ export function layoutWorkDag(
     height,
     layers: layerCount,
     unlayeredIds: unlayeredWorks.map((w) => w.id),
+    mutualPairs: pairs,
     droppedEdges: dropped,
   };
 }
@@ -291,7 +336,13 @@ function edgePath(from: DagNodeLayout, to: DagNodeLayout): string {
   const y2 = to.y + DAG_NODE_H / 2;
   // 水平外推量:取两端水平距离的一半(反向边时它也是正的,曲线会绕成一圈)
   const dx = Math.max(24, Math.abs(x2 - x1) / 2);
-  return `M ${x1} ${y1} C ${x1 + dx} ${y1}, ${x2 - dx} ${y2}, ${x2} ${y2}`;
+  const spans = x2 - x1;
+  // ⚠️ **跨列(超过一格)的边要"让路"**(2026-10-06 看真机渲染图补的):两端同一
+  // 行时贝塞尔退化成一条水平直线,而它正好从中间那些卡片的**垂直中心**穿过 ——
+  // 卡片是不透明的,线在卡片后面时看不见、在缝隙里又露出来,读者会以为「这条线
+  // 断成两截」。这里给跨列边一个向下的弧度,让它从卡片**下方**绕过去。
+  const dip = spans > (DAG_NODE_W + DAG_COL_GAP) * 1.5 ? Math.min(26, DAG_NODE_H / 2 + 6) : 0;
+  return `M ${x1} ${y1} C ${x1 + dx} ${y1 + dip}, ${x2 - dx} ${y2 + dip}, ${x2} ${y2}`;
 }
 
 /**
