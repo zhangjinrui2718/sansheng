@@ -8,7 +8,7 @@
 - **Sansheng(三生)** = 单用户本机常驻 Node 服务:Pi SDK 驱动**四个角色的 agent 组织**,SQLite 持久化,HTTP + WS + 托管前端。
 - **组织架构是一等数据**:`agents` / `projects` / `project_assignments` 在库里,**角色属性在代码里**(`ROLE_SPECS`)。制品是工件(`artifacts` 表),不是聊天记录。
 - 默认 `127.0.0.1:2719`;数据目录默认 `~/.sansheng/`,可用 `--data` 或 `SANSHENG_DATA` 覆盖。
-- 基线:**1065 passed / 44 test files** · 两条 typecheck 0 error · `check:design` E1–E14 全绿。
+- 基线:**1169 passed / 53 test files** · 两条 typecheck 0 error · `check:design` E1–E14 全绿。
 - 日志只走 stdout:`~/.sansheng/logs/sansheng.log` 恒为 0 字节,别去 tail 它。
 
 ## 源码地图(`find src -name '*.ts' | wc -l` = 56)
@@ -100,7 +100,7 @@ shared/types/            跨端协议类型(platform.ts / settings.ts)
 
 > 前两层管「**还要不要叫醒**」,第三层管「**已经叫醒的那一个回合还能跑多久**」—— 一个回合卡在某个工具上时前两层都拦不住(它占着项目 busy 闩,而账本记的是次数不是时长;真机现场是一个 worker 回合跑了 16 分钟还在 `curl` 文档)。到点由平台 `AgentSession.abort()` **真的打断**,然后**按超时处置**:还没终态就记 `failed`(经唯一写口写出 `work_failed` 事件 → 业务经理的汇报待办),它自己已终态 / 已 blocked 就不覆盖。**为什么是 `failed` 而不是留在 `in_progress`**:留着 = 静默死(不在任何 outbox 事件里、会被反复叫醒直到预算用尽、然后永久停在原地),而每次叫醒再买一个完整的墙钟上界。**Wave 1 只做完了判定与打断,运行期吃不到它**(宿主没把 `ServeOptions.turnWallClockMs` 接出去,于是「我调了上界」与「它根本没生效」在真机上长得一样);Wave 2 把那条线接上了,而且**两条路都要接**(`runAgentTurn` 聊天那条 + `runWorkInSession` 执行那条 —— 只接前者等于没接)。
 
-**合并唤醒:少打扰甲方的第二刀(判定侧的时机收窄)**。写入侧只对「根工作项终态 / 里程碑 / `work_failed` / high|critical 阻塞」写 outbox —— **但真机复核发现它在扁平结构下是空转的**:用户自己的库是 `9 work → 9 root → 0 中间`,而**运行期任务提示词里明写着要建树**(`runtime/dispatcher.ts:517-518` 的 `decompose_project` 正文:
+**合并唤醒:少打扰甲方的第二刀(判定侧的时机收窄)**。写入侧只对「根工作项终态 / 里程碑 / `work_failed` / high|critical 阻塞」写 outbox —— **但真机复核发现它在扁平结构下是空转的**:用户自己的库**当时**是 `9 work → 9 root → 0 中间`(⚠️ **2026-10-05 复核:该库现在已是 `1 根 + 4 子`的真树,这段归因的载体变了 —— 但结论不变**:按「是根」判会让扁平库里的每条真活失去执行者),而**运行期任务提示词里明写着要建树**(`runtime/dispatcher.ts:517-518` 的 `decompose_project` 正文:
 「多件产出同属**一个交付物**时,用 `parentWorkId` 把它们挂到一条根工作项下面」),
 真机库却仍是 `9 work → 9 root → 0 中间` ⇒ **不是「没人告诉它」,而是「告诉了没做到」**(§9.4 已按此更正归因)。于是每条工作项终态都是「根终态」,全部照写。
 
@@ -160,7 +160,7 @@ help
 ```
 npx tsc -p tsconfig.server.json --noEmit
 npx tsc -p tsconfig.web.json --noEmit
-npm test                  # 1065 passed / 44 files
+npm test                  # 1169 passed / 53 files
 npm run build
 npm run check:design      # 设计一致性 E1–E14
 ```
