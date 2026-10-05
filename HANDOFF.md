@@ -16,7 +16,7 @@
 ## 状态
 
 ```
-W6  `本次提交` feat(web+repo): 工件页并入工作项页 + 依赖图边方向改成「先后」+ 环检测方向修正
+W6  `8bdb42d` feat(web+repo): 工件页并入工作项页 + 依赖图边方向改成「先后」+ 环检测方向修正
 1373 passed / 65 files · 两条 typecheck 0 · npm run build 绿 · check:design E1–E14 绿 · as any 0
 ```
 
