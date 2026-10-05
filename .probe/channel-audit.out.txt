@@ -1,0 +1,170 @@
+npm notice run sansheng@0.1.0 npx
+npm notice run 'tsx' .probe/channel-audit.mjs
+
+══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+⓪ 用户贴的那串 ⚙ 工具,谁的工具面里有?(真 `factoryToolset`,由 ceiling 推导)
+══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+工具                 | business_manager   | project_manager    | worker             | quality_reviewer  
+----------------------------------------------------------------------------------------------------------------------
+meeting_read       | ✔                  | ✔                  | ✔                  | ✔                 
+meeting_respond    | ✔                  | ✔                  | ✔                  | ✔                 
+ask_client         | ✔                  | —                  | —                  | —                 
+blocker_read       | ✔                  | ✔                  | ✔                  | ✔                 
+project_read       | ✔                  | ✔                  | ✔                  | ✔                 
+tell_client        | ✔                  | —                  | —                  | —                 
+board_write        | ✔                  | ✔                  | ✔                  | ✔                 
+----------------------------------------------------------------------------------------------------------------------
+只有业务经理拿得到的:ask_client, tell_client
+worker **拿不到**的:ask_client, tell_client
+⇒ 用户贴出的序列里有 2 个工具是**业务经理独有**的(含 ask_client / tell_client) ⇒ 那串 ⚙ 不可能是 worker 的过程。
+
+══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+坐标
+══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+HEAD 工作区 = /Users/fuyao/projects/sansheng
+projectId = pj_muujuaia2cx8bpvp
+真库副本 = /var/folders/rm/kg3j0vq55rzc0pm_097z4gq00000gn/T/ss-channel-audit-FzgjQ7/live.db(原库 ~/.sansheng/sansheng.db 只读,跑完删除)
+载荷来源: messages=HTTP /api/projects/pj_muujuaia2cx8bpvp/messages
+          members =HTTP /api/projects/pj_muujuaia2cx8bpvp/members
+          harness =HTTP /api/harness
+harness 角色面(clientFacing 的来源):
+   business_manager   clientFacing=true
+   project_manager    clientFacing=false
+   worker             clientFacing=false
+   quality_reviewer   clientFacing=false
+成员表(agentId → role 的来源,逐条抄自真响应):
+   bm   business_manager
+   pm   project_manager
+   qa   quality_reviewer
+   wk   worker
+channelContextOf → rolesByAgentId=[["bm","business_manager"],["pm","project_manager"],["qa","quality_reviewer"],["wk","worker"]]
+channelContextOf → clientFacingRoles=["business_manager"]
+
+══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+① 逐轮归属表 —— 历史面(真 REST → 真 messageToTurn → 真 channelOf/partitionTurns)
+══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+messageId            | agentId  | role       | channelOf  | 落点        | 内容前 40 字
+----------------------------------------------------------------------------------------------------------------------
+m_muujpmnly5fyy3yo   | null     | user       | client     | timeline  | 我是做催收的，我想基于omni大模型做一个语音机器人，帮我向用户打电话，你帮我做…
+m_muujrbur24up3ow0   | bm       | assistant  | client     | timeline  | 我先看一下记忆里有没有关于你这个项目背景的信息,免得重复问你已经说过的事。行,诉…
+m_muujt7a05bg52xmh   | null     | user       | client     | timeline  | 1. 做信用贷款的 2. 小规模运行 。3 B，外呼之前有一套asr nlp/l…
+m_muujugrveb2627i3   | bm       | assistant  | client     | timeline  | 收到。信息我整理一下,准备立项。 **关键事实我都吃进去了**: - 场景:信用…
+m_muuk0854yv57gy85   | pm       | assistant  | internal   | hidden    | 我先看黑板和已有工作项——都已经确认是空的。现在拆解。 这是一个**调研 + 改…
+m_muuk2vq02wipx3op   | bm       | assistant  | client     | timeline  | 我先看一下会议详情,然后表态。议题已经看到,涉及到四项验收判据的细化。我把方向性…
+m_muuk4eu6e2yn8v3i   | pm       | assistant  | internal   | hidden    | 业务经理给了具体方向,我的判断:整体方向正确,但有几个需要在执行端落实的细节——…
+m_muukc4yt5232n4vb   | wk       | assistant  | internal   | hidden    | 我需要先把工作项 `wk_muujz3qc05kz9cew` 的全貌摸清楚 ——…
+m_muukig8fu4hxveto   | wk       | assistant  | internal   | hidden    | 这次落到一个真活 —— 接入方案设计。要产 3 份工件:omni 选型决策、接口…
+m_muukl24jj85cqacr   | wk       | assistant  | internal   | hidden    | 这个工作项的判据全是「真实运行/真实测试集/真实 diff」级别的东西,不是设计…
+m_muukn69ppbb0f82n   | qa       | assistant  | internal   | hidden    | 我先把所有上下文捞齐了:工作项目标、三份工件正文、项目立项书、会议共识、以及它衍…
+m_muukoc48ien01hmd   | bm       | assistant  | client     | timeline  | 试点推进到工程实施环节,worker 反馈需要 4 项前置配合才能跑通真实链路:…
+m_muukogg9gmgrpcj1   | null     | system     | system     | timeline  | ⚠️ 组织停止推进(8 个回合后):已达单次排空上限 8 个 agent 回合,…
+m_muukogg9hbzfrbg0   | bm       | assistant  | client     | timeline  | 先把现场查清楚再判断。读完现场判断:两件事性质不同,处理方式也不同。 **阻塞 …
+m_muuksxt1ob8t3xjt   | null     | user       | client     | timeline  | 1. 阿里云的omni模型，用api调用的 2. 接口率这个我理解你不用考虑 3…
+m_muukw1ialjxcuwgd   | bm       | assistant  | client     | timeline  | 收到甲方的回应。我重新解读 —— 这 4 条回应不是对应我之前 ask_clie…
+----------------------------------------------------------------------------------------------------------------------
+timeline=10  hidden=6  turns=16
+被滤掉的 id:m_muuk0854yv57gy85, m_muuk4eu6e2yn8v3i, m_muukc4yt5232n4vb, m_muukig8fu4hxveto, m_muukl24jj85cqacr, m_muukn69ppbb0f82n
+
+══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+② 真 SDK 转录里的工具调用顺序(这是「用户看到的那串 ⚙」的真身)
+══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+业务经理(bm) · 2026-10-05T01-11-08-352Z_01a1099d-5540-7666-8dfd-770d15133df2.jsonl
+   角色=业务经理  起于 2026-10-05T01:11:08.353Z
+     工具序列: meeting_read → meeting_respond → ask_client
+   角色=业务经理  起于 2026-10-05T01:28:59.008Z
+     工具序列: blocker_read → blocker_read → project_read → tell_client → board_write
+   角色=业务经理  起于 2026-10-05T01:33:27.974Z
+     工具序列: board_write → ask_client
+
+质检(qa) · 2026-10-05T01-27-20-337Z_01a109ac-2a11-7666-8dfd-771046c5c1d3.jsonl
+   角色=质检审查员  起于 2026-10-05T01:27:20.340Z
+     工具序列: work_read → board_list → board_read → board_read → board_read → board_read → blocker_read → board_read → project_read → board_write
+
+══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+②-a 流式面(进行中):业务经理回合 1 —— meeting_read → meeting_respond → ask_client
+══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+messageId          | agentId  | channelOf  | 落点        | 块构成 | 工具卡
+----------------------------------------------------------------------------------------------------------------------
+msg_probe_bm_1     | bm       | client     | timeline  | think=4 text=3 tool=3        | meeting_read,meeting_respond,ask_client
+----------------------------------------------------------------------------------------------------------------------
+timeline=1  hidden=0  turns=1
+
+══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+②-b 流式面(进行中):业务经理回合 2 + 质检回合
+══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+messageId          | agentId  | channelOf  | 落点        | 块构成 | 工具卡
+----------------------------------------------------------------------------------------------------------------------
+msg_probe_bm_2     | bm       | client     | timeline  | think=3 text=3 tool=5        | blocker_read,blocker_read,project_read,tell_client,board_write
+msg_probe_qa_1     | qa       | internal   | hidden    | think=5 text=2 tool=10       | work_read,board_list,board_read,board_read,board_read,board_read,blocker_read,board_read,project_read,board_write
+----------------------------------------------------------------------------------------------------------------------
+timeline=1  hidden=1  turns=2
+
+══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+②-c 历史面(`turns`):业务经理回合 1 已收口 —— 工具卡仍然在甲方时间线上(刷新前)
+══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+messageId          | agentId  | channelOf  | 落点        | 块构成 | 工具卡
+----------------------------------------------------------------------------------------------------------------------
+msg_probe_bm_1     | bm       | client     | timeline  | think=4 text=3 tool=3        | meeting_read,meeting_respond,ask_client
+----------------------------------------------------------------------------------------------------------------------
+timeline=1  hidden=0  turns=1
+
+══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+③ 「业务经理做的一切都进甲方通道」的结构证明
+══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+业务经理那一轮 channelOf = client
+它的 blocks 里有 3 张工具卡:
+   [思考块 24 字,默认折叠但同一轮]
+   ⚙ meeting_read
+   [思考块 7594 字,默认折叠但同一轮]
+   ⚙ meeting_respond
+   [思考块 384 字,默认折叠但同一轮]
+   ⚙ ask_client
+   [思考块 118 字,默认折叠但同一轮]
+
+⇒ 这些 ⚙ 卡与思考块是**同一个 Turn(= 同一条 messageId)** 的 blocks,
+  而 channelOf 只看 Turn.agentId ⇒ 整轮(含工具卡与思考)一起进甲方时间线。
+
+══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+⑤ 业务经理的**正文**里有没有把过程写进去(真库逐字)
+══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+真库里 bm 的 assistant 消息 6 条
+
+── m_muujrbur24up3ow0  1086 字
+   正文里出现的工具名: (无)
+   splitWorkLog 切出的段: speech(1086字)
+── m_muujugrveb2627i3  608 字
+   正文里出现的工具名: (无)
+   splitWorkLog 切出的段: speech(608字)
+── m_muuk2vq02wipx3op  346 字
+   正文里出现的工具名: ask_client
+   splitWorkLog 切出的段: speech(346字)
+      > 我先看一下会议详情,然后表态。议题已经看到,涉及到四项验收判据的细化。我把方向性判断(相对值/绝对值)直接表态,需要甲方提供的具体数据/决策(队列、阈值、历史标注)由我用 ask_client 推出去。表态完成。现在按承诺顺序,先把议题 4(生产队列指定)推给甲方。已处理:
+      > - 在对齐会议上表态 **支持**,并把四项议题的方向定下来(相对值口径、接通率 95% 是相对值、意图基线靠甲方标注库、队列/标注/阈值三项由我用 ask_client 推给甲方)。
+── m_muukoc48ien01hmd  219 字
+   正文里出现的工具名: ask_client
+   splitWorkLog 切出的段: speech(219字)
+      > 试点推进到工程实施环节,worker 反馈需要 4 项前置配合才能跑通真实链路:① omni 厂商选型(我们内部 POC 推进);② 历史标注数据 + 接通率基线(已通过 ask_client 在推,等您回);③ 项目现有三段式对话代码的访问权限(供我们做接口契约对照);④ omni 厂商 API 凭据 + 外呼基础设施测试接入。其中 ②③④ 都依赖您这边提供,我接下来会按 ②→③→④ 的顺序一项一项问过来,先确认环境再启动实际跑批。
+── m_muukogg9hbzfrbg0  493 字
+   正文里出现的工具名: ask_client, tell_client, board_write
+   splitWorkLog 切出的段: speech(493字)
+      > **阻塞 1(high, omni 接入四项结构性缺口)** —— 4 项里 ① 选型 PM/worker 内部推、② 基线数据我已在 ask_client 推、但 ③ 项目现有代码访问 + ④ omni API 凭据 / 外呼基础设施 是**新浮现**的甲方配合项。甲方在立项时大概率没意识到要提供这些,提前告知有价值(让甲方 IT 提前准备,不要等我们问到再启动)。处理完毕:
+      > - **阻塞 1**(4 项结构性缺口)—— 已 tell_client 给甲方刷新预期(让 IT 提前准备代码访问/API 凭据),并 board_write 落库留痕。
+      > 下一轮 ask_client(基线数据 + 工程环境接入)排在甲方回完队列指定之后,我现在仍 blocked 等甲方回 q_muuk2r80g8wis85u。
+── m_muukw1ialjxcuwgd  606 字
+   正文里出现的工具名: ask_client
+   splitWorkLog 切出的段: speech(606字)
+      > 收到甲方的回应。我重新解读 —— 这 4 条回应不是对应我之前 ask_client 的"队列指定",而是**回应阻塞 1 的 4 项结构性缺口**:
+      > - 已发 ask_client 澄清"没有"的具体范围(4 候选 + 倾向 C),这是最影响验收判据 ③ 可执行性的项。
+      > - 下一轮 ask_client 排在回完之后,澄清"接口率"具体含义(影响范围理解但不阻塞推进)。
+
+含「未播报」四个字的消息总数(全库)= 0  —— A4 的行首分流器在真数据上**一次都不会触发**
+
+══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+④ 负样本自检 —— 这个检查本身可信吗
+══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+必须 hidden 的正样本 wk 轮        → internal
+必须 hidden 的正样本 未知 agent 轮 → internal
+必须 client 的正样本 bm 轮        → client
+必须 system 的正样本 system 轮    → system
+partitionTurns 汇总:hidden=3(含 2 条人造负样本)
