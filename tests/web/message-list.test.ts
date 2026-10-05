@@ -20,11 +20,16 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { TurnView } from "@/components/chat/MessageList";
 import type { Turn } from "@/stores/chat";
 
-function turn(role: Turn["role"], blocks: Turn["blocks"]): Turn {
-  // `projectId` 是 `Turn` 的必填字段(`tests/` 不在两条 tsconfig 的 include 里,
-  // 漏填 tsc 不会报 —— 见 `tests/web/channel-filter.test.ts` 的同一处说明)。
+function turn(
+  role: Turn["role"],
+  blocks: Turn["blocks"],
+  // ⚠️ W2-④ 起 `origin` 是必填(`TurnOrigin`),而 `tests/` 不受 tsc 约束 ——
+  // 手搓的 `Turn` 字面量漏了它,`channelOf` 会在 `turn.origin.source` 上抛。
+  // 本文件只测渲染面(不判通道),但字段还是补齐,别让下一个读的人以为可以漏。
   // ⚠️ `agentId` 这一处**仍然漏着**(A2 加它时就没补,不是本次改动的产物)。
-  return { id: "t1", projectId: "p-test", role, blocks, startedAt: 0 };
+  origin: Turn["origin"] = { source: "turn", trigger: { kind: "user" } },
+): Turn {
+  return { id: "t1", projectId: "p-test", role, blocks, startedAt: 0, origin };
 }
 
 function render(role: Turn["role"], blocks: Turn["blocks"], streaming = false): string {

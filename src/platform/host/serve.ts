@@ -58,7 +58,131 @@ import { getAgent } from "../storage/repo/agents.js";
 import { log } from "../../shared/log.js";
 import { applySettingsPatch, toPublicSettings } from "../infra/settingsApply.js";
 import { listProviders, resolveModel, syncActiveProviderApiKeyEnv } from "../infra/providers.js";
-import type { ServerEvent } from "@shared/types/platform.js";
+import { listPendingDispatchEvents } from "../storage/repo/dispatch.js";
+import type { ServerEvent, TriggerTodoKind, TurnTrigger } from "@shared/types/platform.js";
+
+// ══ 检测器:工件触发的回合没留工作记录(W2-③)══════════════════════════
+//
+// ── 为什么需要它(真机证据,不是假想)────────────────────────────
+//
+// 提示词要求(`harness/system_prompts/business_manager.core.md`「每个回合的正文
+// 都以一行工作记录开头」):**平台把你叫醒的回合,没调 `tell_client` 的,正文第一行
+// 就必须是 `[未播报] …`**。理由是 7-N —— 少了这一行,「**判断过**」与「**漏了**」
+// 在会话记录里长得一模一样,而这一行是它们唯一的分界。
+//
+// 真机复核:`[未播报]` 在**全库 0 条**。⇒ 提示词可能压不住,而提示词是软的。
+// 所以这里加一条**平台侧检测**,命中就落一条**平台自己的**告警 ——
+// ⚠️ **绝不替模型补那一行日志**:平台上补的字会被后来的读者当成
+// 「业务经理当时判断过了」,那是**编造现场**,比没有现场更坏。
+//
+// ── 判据的四个条件:哪几个真能拿到 ───────────────────────────────
+//
+//   ① **工件触发** —— **真值**。`trigger` 由 `drainProject` 经
+//      `DrainDeps.runAgentTurn` 的 `todoKind` 形参传进来(那里是唯一同时持有
+//      「待办」与「回合」的地方);本文件不再从 `agentId` 反推。
+//   ② **本回合 ≥1 条未消费事件** —— ⚠️ **回合级的形式拿不到**。
+//      `dispatch_events` 的未消费行是**项目级**的,而叫醒业务经理的那条
+//      `report_downstream` 待办**不携带事件身份**(`refs: []`,key 只有
+//      `report_downstream:{maxSeq}`)⇒「**这一回合属于哪几条事件**」这个绑定
+//      **库里根本不存在**,平台也读不出来。所以它**不进判据**,改成:
+//      **真读一次项目级未消费条数**(`listPendingDispatchEvents`),作为**现场**
+//      记进告警(见 `UnannouncedTurn.pendingEventCount`)—— 它是现场,不是闸门。
+//      ⚠️ 把它当闸门的两个坏处都是实的:(a) 在非 `report_downstream` 的回合上
+//      它是**别的事件**的读数(相邻噪音);(b) 判据会从「平台叫醒的回合」
+//      缩到「下游事件叫醒的回合」,而提示词那条规矩覆盖的是**前者**。
+//   ③ **未调 `tell_client`** —— **真值**(`turn.toolCalls`)。只认**成功**的调用:
+//      调用失败 = 没播出去 = 仍然要留痕。
+//   ④ **正文无行首 `[未播报]`** —— **真值**。判据是 `WORK_LOG_LINE`,
+//      与前端 `web/src/components/chat/MessageList.tsx` 的 `splitWorkLog`
+//      **逐字同形**(重复一份的理由:契约面 `shared/` 与 `web/` 都不归本批改;
+//      漂了的表现是「平台认、界面不认」或反过来 —— 见报告里的 open question)。
+//
+// ── 只在「回合成功结束」这一支调用它 ─────────────────────────────
+//
+// 失败 / 被中断的回合**不**算:那时 `dispatch_events` 不会被消费
+// (`dispatcher.ts` 的 `if (!aborted && !failed)`),证据还在,下一轮还会重来
+// —— 在那一支上报警是**误报**。反过来,成功的 `report_downstream` 回合
+// **紧接着**就会把它们标成已交代(`consumePendingDispatchEvents`),那一行
+// 正文是它们**唯一**的现场。
+
+/**
+ * 工作记录的**行首**判据。
+ *
+ * `^` 是**行首**(不是包含):正文中段引述 `"[未播报]"` 不算 —— 那是**对甲方说的话**。
+ * `[ \t]*` 允许行首的水平空白(提示词示例写在代码块里);破折号开头的列表项
+ * (`- [未播报] …`)因此**不**匹配 —— 那已经是一条正文。
+ *
+ * ⚠️ 与 `web/src/components/chat/MessageList.tsx` 的 `WORK_LOG_LINE` 必须一致:
+ * 平台按它判「留没留痕」,界面按它判「分不分流」。两处不一致 = 平台报「合规」
+ * 而甲方在气泡里看到那行字(或反过来)。
+ */
+const WORK_LOG_LINE = /^[ \t]*\[未播报\]/;
+
+/** 告警里带的**正文前若干字** —— 够定位「它当时写了什么」,不把正文整段抄进告警。 */
+export const UNANNOUNCED_TEXT_HEAD_CHARS = 120;
+
+/** 检测命中时的现场(平台自己的产物,不含任何补写的正文)。 */
+export interface UnannouncedTurn {
+  /** 平台是因为哪一类待办把它叫醒的(`trigger.todoKind`) */
+  readonly todoKind: TriggerTodoKind;
+  /** 正文前若干字(截断)—— 7-N:事后要能看出当时它写了什么 */
+  readonly textHead: string;
+  /** 本回合调了 `tell_client` 几次(全是失败时也 >0 —— 见 `tellClientDelivered` 的判据) */
+  readonly tellClientCalls: number;
+  /** 收尾时**项目级**未消费事件的条数(真读;不是回合级的读数 —— 见文件头) */
+  readonly pendingEventCount: number;
+}
+
+/** 这一回合**有没有把播报发出去**:只认**成功**的 `tell_client`。 */
+function tellClientDelivered(toolCalls: readonly ToolCallRecord[]): boolean {
+  return toolCalls.some((t) => t.name === "tell_client" && !t.isError);
+}
+
+/**
+ * 判据本体(**纯函数**,导出给测试)。
+ *
+ * 返回 `null` = 不命中(不是工件触发的回合 / 调过 `tell_client` / 正文留了痕)。
+ * 返回对象 = 命中,调用方落一条平台告警(见 `host/serve.ts` 的
+ * `reportUnannouncedTurn`)。
+ *
+ * ⚠️ **它不产出任何正文**:`textHead` 是从**模型自己写的**正文里截出来的原样
+ * 片段,`[未播报]` 那一行**永远不会**由平台补写。
+ */
+export function detectUnannouncedTurn(input: {
+  readonly trigger: TurnTrigger;
+  /**
+   * 这个回合的正文**会不会进甲方通道**(`channelForAgent`:只有 `clientFacing`
+   * 的角色是 `client`,今天 = 业务经理一个人)。
+   *
+   * ⚠️ 这不是一条可有可无的加严:那条「没播就得留一行 `[未播报]`」的规矩
+   * **只写给业务经理**(`business_manager.core.md`)。项目经理拆解、质检审查
+   * 这些**平台叫醒的内部回合**同样满足「工件触发 + 没调 `tell_client`」,
+   * 但它们**根本没有对甲方的通道** —— 提示词从没要求过它们留痕。
+   * 把它们也算命中 = 每个项目一开张就连着几条假告警,而假告警会把这条计数
+   * 变成噪音(那时它就不再是「提示词压不住」的证据了)。
+   */
+  readonly channel: SessionChannel;
+  readonly text: string;
+  readonly toolCalls: readonly ToolCallRecord[];
+  readonly pendingEventCount: number;
+}): UnannouncedTurn | null {
+  // ⓪ 只有**对甲方说话**的那个角色有这条规矩(今天 = 业务经理)
+  if (input.channel !== "client") return null;
+  // ① 工件触发 = 平台叫醒的回合。甲方亲口触发的那一轮(`{ kind: "user" }`)
+  //    不在提示词那条规矩的作用域里:它的正文**本来就是**对甲方说的话,
+  //    不必再挂一个「我没播」的标记(见 `business_manager.core` 那处例外)。
+  if (input.trigger.kind !== "todo") return null;
+  // ③ 没把播报发出去
+  if (tellClientDelivered(input.toolCalls)) return null;
+  // ④ 正文留了行首标记
+  if (input.text.split("\n").some((line) => WORK_LOG_LINE.test(line))) return null;
+  return {
+    todoKind: input.trigger.todoKind,
+    textHead: input.text.slice(0, UNANNOUNCED_TEXT_HEAD_CHARS),
+    tellClientCalls: input.toolCalls.filter((t) => t.name === "tell_client").length,
+    pendingEventCount: input.pendingEventCount,
+  };
+}
 
 export interface ServeOptions {
   readonly dataDir: string;
@@ -427,7 +551,7 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
     appendSessionMessage(db, {
       id: userMessageId, sessionId, agentId: null, kind: "user", content, createdAt: at,
     });
-    hub.emitMessageStart(projectId, userMessageId, "user", null);
+    hub.emitMessageStart(projectId, userMessageId, "user", null, { kind: "user" });
     hub.emitDelta(projectId, userMessageId, content);
     hub.emitMessageEnd(projectId, userMessageId);
 
@@ -445,7 +569,9 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
     // 各自 fire-and-forget),那就是「同一个角色两条流打进同一条会话」的入口。
     hub.setBusy(projectId, bm.id, true);
     try {
-      const out = await runAgentTurn(projectId, bm.id, content);
+      // ⚠️ `{ kind: "user" }` 是这一句的**唯一**合法值 —— 这一轮存在的原因就是
+      // 甲方自己开了口(见 `runAgentTurn` 的 `trigger` 形参)。
+      const out = await runAgentTurn(projectId, bm.id, content, { kind: "user" });
       openedProjectIds = out.openedProjectIds;
 
       // 3. 立项 → 收口。**必须在回合结束之后做** —— 回合中途换上下文会让半个
@@ -640,11 +766,25 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
    * `inflight` 的登记**每回合一次、键是 `(上下文, agent)`**,这是刻意的:中断要能
    * 准确地停住**正在跑的那一个回合**,而不是「这个项目里随便哪个角色」。前者按
    * 项目记时,同项目两角色并发会让后登记的覆盖前一个(R1 的雷 (b))。
+   *
+   * ── `trigger`:**必填**,不给默认值 ─────────────────────────────
+   *
+   * 这一轮**为什么存在**要写进 `message_start` 的封套(`shared/types/platform.ts`
+   * 的 `TurnTrigger`):`{ kind:"user" }` = 甲方亲口发起(`handleUserMessage`),
+   * `{ kind:"todo", todoKind }` = 排空器按待办叫醒 —— 值由 `drainProject` 经
+   * `DrainDeps.runAgentTurn` 的 `todoKind` 形参传进来,本文件**不从 `agentId` 反推**
+   * (业务经理既会被甲方叫醒、也会被 `answer_ask` / `report_downstream` 叫醒,
+   * 反推会得到一个「看起来对、换一个场景就错」的值,而错了的表现是
+   * **工件触发的回合正文被当成对甲方说的话**进对话页 —— 静默判错)。
+   *
+   * ⚠️ **不给默认值是刻意的**(与 `agentId` 同一条纪律):默认值会让漏传的调用点
+   * 编译通过,而漏传那一支恰好就是会判错的那一支。
    */
   async function runAgentTurn(
     projectId: string | null,
     agentId: string,
     task: string,
+    trigger: TurnTrigger,
   ): Promise<AgentTurnOutcome> {
     const got = await getOrCreateSession(projectId, agentId);
     if (!got.ok) {
@@ -673,7 +813,8 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
     const messageId = newId("msg");
     // 建轮那一刻就把说话人钉住 —— 这一条是**跑这个回合的那个 agent**(参数,不是常量):
     // `handleUserMessage` 传业务经理,排空器传项目经理 / 质检(见 `drainOne` 的回调)。
-    hub.emitMessageStart(projectId, messageId, "assistant", agentId);
+    // `trigger` 同理,而且是**两个互相独立**的维度(见 `TurnTrigger` 上方那张表)。
+    hub.emitMessageStart(projectId, messageId, "assistant", agentId, trigger);
     const textBuf: string[] = [];
     const thinkBuf: string[] = [];
 
@@ -747,6 +888,16 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
           error: { code: "turn_timeout", message: `${agentId} 的回合超时收尾,结果可能不完整` },
         });
       }
+      // ── 回合收尾的检测(W2-③)────────────────────────────────────
+      //
+      // **只在这一支**(成功结束、且没被中断)跑。失败 / 被中断的回合**不消费**
+      // `dispatch_events`(见 `dispatcher.ts` 的 `if (!aborted && !failed)`),
+      // 证据还在、下一轮还会重来 —— 在那一支报警是**误报**。反过来,成功的
+      // `report_downstream` 回合结束后那些事件立刻被标成「已交代」,而
+      // 「这一回合留没留工作记录」是它们**唯一**的现场。
+      if (!aborted) {
+        reportUnannouncedTurn(projectId, agentId, messageId, trigger, text, turn.toolCalls);
+      }
       return {
         aborted, timedOut: turn.timedOut, text, toolCalls: turn.toolCalls,
         openedProjectIds: turn.openedProjectIds, failed: false,
@@ -790,6 +941,7 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
     projectId: string,
     agentId: string,
     workId: string,
+    trigger: TurnTrigger,
   ): Promise<DrainWorkReport> {
     const before = getWork(db, workId);
     const title = before?.title ?? workId;
@@ -811,8 +963,10 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
     const sessionId = ensureSession(db, projectId, now(), newId, "internal");
     const messageId = newId("msg");
     // 执行那条路的说话人是 `agentId`(worker,或派活的角色)—— 不是写死的 bm:
-    // 它由 `drainOne` 的 `runWork` 回调按待办把 agent 传进来。
-    hub.emitMessageStart(projectId, messageId, "assistant", agentId);
+    // 它由 `drainOne` 的 `runWork` 回调按待办把 agent 传进来。`trigger` 同理:
+    // 这一支**只**可能由 `execute_work` 待办触发,而那个值仍然是**从 `todo.kind`
+    // 传下来的真值**(不是这里写的字面量)—— 见 `dispatcher.ts` 的 `DrainDeps.runWork`。
+    hub.emitMessageStart(projectId, messageId, "assistant", agentId, trigger);
     const textBuf: string[] = [];
     const thinkBuf: string[] = [];
     let aborted = false;
@@ -1124,9 +1278,13 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
         ? { reportMaxDelayMs: opts.reportMaxDelayMs }
         : {}),
       isCancelled: () => cancelled,
-      runAgentTurn: async (agentId, task): Promise<DrainTurnReport> => {
+      // `todoKind` 是 `drainProject` 传下来的**真值**(`todo.kind`)。宿主在这里
+      // 把它翻成契约的 `trigger` —— 这是「runtime 的待办种类」跨到「回合为什么
+      // 存在」的**唯一**一处接缝:`runAgentTurn` 不可能自己知道,因为它拿到的
+      // 只是 `(agentId, task)`。
+      runAgentTurn: async (agentId, task, todoKind): Promise<DrainTurnReport> => {
         return withTurnLatch(projectId, agentId, async () => {
-          const r = await runAgentTurn(projectId, agentId, task);
+          const r = await runAgentTurn(projectId, agentId, task, { kind: "todo", todoKind });
           if (r.aborted) cancelled = true;
           return {
             aborted: r.aborted, timedOut: r.timedOut, text: r.text, toolCalls: r.toolCalls,
@@ -1134,9 +1292,9 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
           };
         });
       },
-      runWork: async (agentId, workId): Promise<DrainWorkReport> => {
+      runWork: async (agentId, workId, todoKind): Promise<DrainWorkReport> => {
         return withTurnLatch(projectId, agentId, async () => {
-          const r = await runWorkInSession(projectId, agentId, workId);
+          const r = await runWorkInSession(projectId, agentId, workId, { kind: "todo", todoKind });
           if (r.aborted) cancelled = true;
           return r;
         });
@@ -1176,6 +1334,66 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
       } finally {
         release();
       }
+    });
+  }
+
+  /**
+   * **工件触发的回合没留工作记录**时,落一条平台自己的告警(W2-③)。
+   *
+   * 判据在 `detectUnannouncedTurn`(**纯函数**,导出给测试)。这里只负责**产物**:
+   *
+   *   ① 平台日志(`log.warn`)—— 可 grep、可计数,运维看得见;
+   *   ② 一条 `system` 会话消息(通道 `internal`,**落库**)—— 「计数」的可见形态:
+   *      它就是一行可 `SELECT COUNT(*)` 的记录,而且用户在工作记录里看得见。
+   *      与 `announceDrain` 的 `cascade_stopped` 同形:平台检测到的异常,
+   *      不是任何一个角色对甲方说的话。
+   *
+   * ⚠️ **产物里没有、也不会有 `[未播报]` 那一行。** 平台**不替模型写工作记录**:
+   * 补写的字会被后来的读者当成「业务经理当时判断过了」—— 那是**编造现场**,
+   * 比没有现场更坏(7-N 要的是「事后看得出当时发生了什么」,不是「事后看起来
+   * 一切都合规」)。
+   *
+   * ⚠️ 告警正文里刻意**不让任何行以 `[未播报]` 开头**:那行字本身带方括号标记
+   * 的语义,一旦落在行首会被前端 `splitWorkLog` 当成工作记录块 —— 平台告警
+   * 不该长成一个「业务经理的判断」。
+   */
+  function reportUnannouncedTurn(
+    projectId: string | null,
+    agentId: string,
+    messageId: string,
+    trigger: TurnTrigger,
+    text: string,
+    toolCalls: readonly ToolCallRecord[],
+  ): void {
+    // 判据 ② 的**真读**:项目级未消费条数。⚠️ 它**不进判据**,只作为现场 ——
+    // 理由(「本回合属于哪条事件」库里不存在)见 `detectUnannouncedTurn` 上方。
+    const pendingEventCount =
+      projectId === null ? 0 : listPendingDispatchEvents(db, projectId).length;
+    // `channel` 用**与建会话同一个判据**(`channelForAgent`):这条规矩只写给
+    // 对甲方说话的那个角色(今天 = 业务经理)。见 `detectUnannouncedTurn` 的说明。
+    const hit = detectUnannouncedTurn({
+      trigger, channel: channelForAgent(db, agentId), text, toolCalls, pendingEventCount,
+    });
+    if (hit === null) return;
+    const where = `${channelLabel(projectId)} · ${agentId} · 回合 ${messageId}`;
+    const facts =
+      `待办类别 ${hit.todoKind};成功投递的 tell_client 0 次(共调用 ${hit.tellClientCalls} 次);` +
+      `收尾时项目级未消费事件 ${hit.pendingEventCount} 条`;
+    log.warn(
+      `platform: ⚠️ 平台叫醒的回合没留工作记录 —— ${where}(${facts})。` +
+        `正文前 ${UNANNOUNCED_TEXT_HEAD_CHARS} 字:${JSON.stringify(hit.textHead)}`,
+    );
+    if (projectId === null) return;
+    const sessionId = ensureSession(db, projectId, now(), newId, "internal");
+    appendSessionMessage(db, {
+      id: newId("m"),
+      sessionId,
+      agentId: null,
+      kind: "system",
+      content:
+        `⚠️ 平台检测:平台叫醒的回合没留工作记录(未调 tell_client,正文也没有行首标记)\n` +
+        `${where}\n${facts}\n正文前 ${UNANNOUNCED_TEXT_HEAD_CHARS} 字:${hit.textHead}`,
+      createdAt: now(),
     });
   }
 

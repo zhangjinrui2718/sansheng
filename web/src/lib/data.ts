@@ -346,18 +346,49 @@ export function useHarnessRoles(): {
   return { roles, ready, error };
 }
 
-// ── 通道分离:对话页 = 甲方 ↔ 业务经理(设计 1 §2.10 / §2.12 的 A3)──────
+// ── 通道分离:对话页 = **由用户触发在页面上展示的那条通道**(设计 1 §2.10 / W2-④)──
 //
-// 「谁面向甲方」**不需要新字段**:`agentId` → `MemberView.role` →
-// `HarnessView.roles[].clientFacing` 两跳,两个端点都已经在页面上被读过。
+// ── 判据换过一次(W2-④,2026-10-06):角色级 → 封套级 ──────────────────
+//
+// **旧判据**(A3):`agentId → MemberView.role → HarnessView.clientFacing` 两跳,
+// 「谁面向甲方」⇒ 进甲方通道。它答的是**这个人是谁**。
+//
+// **新判据**(用户的原话):页面上只展示「**由用户触发在页面上展示的通道**」。
+// 其实还有由工件触发的(与项目经理的对话)、某个角色触发的(多人会议)等等,
+// 而那些不进页面。⇒ 判据是**这一轮为什么存在**,与「谁在说话」「他是不是甲方接口」
+// **无关**:
+//
+//     进甲方通道 ⟺ 用户消息(`agentId === null`)
+//                ∨ `source === "broadcast"`(tell_client 的播报,**无条件**显示)
+//                ∨ `trigger.kind === "user"` 的回合正文
+//     其余一律不进 —— 无论它由谁触发、是哪个角色
+//
+// **为什么 `clientFacing` 不再是判据**:业务经理**被工件叫醒的那一轮正文也不显示**
+// —— 它若真对甲方说了话,那话在 `tell_client` 的**播报**里(那是另一条独立消息,
+// 带 `source: "broadcast"`,无条件显示)。
+//
+// ⚠️ **`ctx` 还在,但它的地位被降级了(只剩回退)**:`origin === {source:"unknown"}`
+// 的那些轮是**封套没到**的轮 —— 只有一种真实现场:**REST 回填**
+// (`chat.ts` 的 `messageToTurn`)。`SessionMessageView` 上没有 `source` / `trigger`
+// (库里没落这两维)⇒ 刷新之后前端**拿不到新判据**。那时两条路:
+//
+//   - 判成 `internal`(fail-closed):**刷新一次,与业务经理的整段对话就没了**
+//     (库里的助手消息全是 unknown 轮)—— 而且它同时抹掉播报(判据②在刷新后失效);
+//   - 按角色 `clientFacing` 回退(现状):对话保住、播报保住,但**工件触发的
+//     业务经理回合在刷新后仍会显示**(判据①只在流式那条路上成立)。
+//
+// 选后者:**回退是有据可依的最好判据**,而前者的代价是「页面看起来被清空了」。
+// 这条缺口**必须在 `src/` 侧闭合**(`SessionMessageView` 加 `channel` 或 `trigger`,
+// 那一侧不在本批次的可碰清单里)—— 它写在 `channelOf` 的注释里,并有一条测试
+// (`tests/web/channel-new-criterion.test.ts` 的「unknown 回退」)钉着它的方向。
 
 /** 一轮属于哪条通道。三值而不是布尔:系统提示既不是甲方说的,也不是内部角色的。 */
 export type TurnChannel = "client" | "system" | "internal";
 
 export interface ChannelContext {
-  /** agentId → role(`GET /api/projects/:id/members`) */
+  /** agentId → role(`GET /api/projects/:id/members`)—— **只在 unknown 回退里读** */
   readonly rolesByAgentId: ReadonlyMap<string, ProjectRole>;
-  /** 面向甲方的角色(`GET /api/harness` 的 `RoleHarnessView.clientFacing`) */
+  /** 面向甲方的角色(`GET /api/harness` 的 `RoleHarnessView.clientFacing`)—— 同左 */
   readonly clientFacingRoles: ReadonlySet<ProjectRole>;
   /** 判据是否已就绪(harness 拿到了没)—— 只影响提示的措辞,不影响分类 */
   readonly ready: boolean;
@@ -387,27 +418,58 @@ export function channelContextOf(input: {
 }
 
 /**
- * 这一轮该进哪条通道。
+ * 这一轮该进哪条通道(设计 1 §2.10 的**新判据**,W2-④)。
  *
- * ── 判据(三条,顺序不能换)────────────────────────────────────
+ * ── 判据(顺序不能换)────────────────────────────────────────────
  *
- * 1. **`agentId === null` 不等于「甲方」** —— `session_messages.agent_id` 的 null
- *    有**两个**作者:`kind='user'`(甲方)与 `kind='system'`(平台通知,
- *    `host/serve.ts` 的 `announceDrain` 在排空器异常停下时落的那条)。所以必须
- *    **同时看 kind**;`Turn.role` 就是 kind 的投影(kind `user` → role `user`,
- *    kind `system` → role `system`)。
- * 2. `agentId !== null` → 两跳查该 agent 的角色是否 `clientFacing`。
- * 3. **映射缺失时**(这个 agent 不在本项目成员表里,或接待会话根本没有成员表):
- *    - 接待会话:`client` —— 那条会话的对象就是业务经理(界面头部也这么写),
- *      而成员表是**按项目**的,接待会话没有项目 ⇒ 这里拿不到判据,不该假装拿得到;
- *    - 项目里:`internal`(**fail-closed**)。宁可暂时看不见业务经理的发言,也不
- *      把内部角色的发言放进甲方通道 —— 后者是**通道分离失效**,前者只是晚一拍,
- *      而且被滤掉的**条数**会显示在页面上(见 `partitionTurns().hidden`)。
+ * 1. **平台通知**(`role === "system"`)走**独立的系统带**。
+ *    `agentId === null` **不等于「甲方」** —— 它有**两个**作者:`kind='user'`
+ *    (甲方)与 `kind='system'`(平台通知,`host/serve.ts` 的 `announceDrain`)。
+ *    所以先按 `Turn.role`(kind 的投影)把 system 摘出去。
+ * 2. **甲方自己说的话**(`agentId === null`)⇒ `client`。
+ * 3. **播报封套**(`origin.source === "broadcast"`,只有 `tell_client` 发它)⇒
+ *    `client`,**无条件** —— 它是一条独立落库的消息,不属于任何回合,所以
+ *    「工件触发的那一轮」里的播报**不被连坐**(验收判据②的方向)。
+ * 4. **回合封套**(`origin.source === "turn"`)⇒ 只有 `trigger.kind === "user"`
+ *    的那一轮正文进;`todo`(排空器按待办叫醒的,`todoKind` 说清是哪条)
+ *    **一律不进** —— 无论说话人是谁、是不是 `clientFacing`。
+ * 5. **封套没到**(`origin.source === "unknown"`)⇒ **回退到角色的两跳判据**
+ *    (`agentId → role → clientFacing`),映射缺失时 fail-closed。理由与缺口见上面
+ *    那段「`ctx` 还在,但它的地位被降级了」。
+ *
+ * ── 为什么 `ctx` 这个参数还留着(而不是简化签名)──────────────────
+ *
+ * 第 5 步**真的会读它**:`unknown` 轮在今天不是罕见分支,而是**刷新后的全部历史**
+ * (`chat.ts` 的 `messageToTurn`)。把 `ctx` 从签名里删掉,就得在「刷新即清空对话」
+ * 与「所有 unknown 轮一律显示」之间二选一 —— 两个都错。删掉参数省下的是两个调用点
+ * (`MessageList` / `ChatSurface` 经 `channelActivityOf`),代价是判据**无声地**
+ * 倒向一侧。等 `src/` 侧把 `SessionMessageView` 补上这两维之后,第 5 步与整个
+ * `ChannelContext` 才能一起删 —— 那是另一次改动,不是顺手。
  */
 export function channelOf(turn: Turn, ctx: ChannelContext): TurnChannel {
-  if (turn.agentId === null) {
-    return turn.role === "user" ? "client" : "system";
+  if (turn.role === "system") return "system";
+  if (turn.agentId === null) return "client";
+  const origin = turn.origin;
+  if (origin.source === "broadcast") return "client";
+  if (origin.source === "turn") {
+    return origin.trigger.kind === "user" ? "client" : "internal";
   }
+  return fallbackChannelOf(turn, ctx);
+}
+
+/**
+ * `origin === unknown` 时的回退判据 —— **A3 的两跳原样保留**(§2.10.2):
+ * `agentId → 成员 role → clientFacing`,映射缺失时 fail-closed。
+ *
+ * - **接待会话**(没有项目 ⇒ 没有成员表):`client` —— 那条会话的对象就是业务经理
+ *   (界面头部也这么写),而成员表是**按项目**的,接待会话没有项目 ⇒ 这里拿不到
+ *   判据,不该假装拿得到;
+ * - **项目里**:`internal`(**fail-closed**)。宁可暂时看不见业务经理的发言,也不把
+ *   内部角色的发言放进甲方通道 —— 后者是**通道分离失效**,前者只是晚一拍,而且
+ *   被滤掉的**条数**会显示在页面上(见 `partitionTurns().hidden`)。
+ */
+function fallbackChannelOf(turn: Turn, ctx: ChannelContext): TurnChannel {
+  if (turn.agentId === null) return turn.role === "user" ? "client" : "system";
   const role = ctx.rolesByAgentId.get(turn.agentId);
   if (role === undefined) {
     return ctx.intake ? "client" : "internal";
@@ -417,13 +479,17 @@ export function channelOf(turn: Turn, ctx: ChannelContext): TurnChannel {
 
 /** 一屏里要看的两类轮 + 被滤掉的条数。 */
 export interface ConversationPartition {
-  /** 按时间正序,只含 `client` 与 `system`(内部角色的发言不在里面) */
+  /** 按时间正序,只含 `client` 与 `system`(不进甲方通道的轮不在里面) */
   timeline: Array<{ turn: Turn; channel: Exclude<TurnChannel, "internal"> }>;
   /**
-   * 被滤掉的内部角色发言**条数**。
+   * 被滤掉的轮**条数**(`channel === "internal"`)。
    *
    * ⚠️ **必须有读者**:看不到就等于平台替甲方删了证据(设计 1 §2.10.4 的同一条
    * 纪律)。调用方把它显示成一行「另有 N 条不在这条通道里」。
+   *
+   * ⚠️ W2-④ 起这一侧的**成分变了**:从前是「其他角色的回合」,现在既可能是其他
+   * 角色,也可能是**被工件 / 待办叫醒的业务经理那几轮**(它的正文不是对甲方说的话)。
+   * 所以调用方的措辞不能写死成「其他角色的回合」。
    */
   hidden: number;
 }
@@ -457,8 +523,15 @@ export function partitionTurns(
 //
 // 所以运行态在这里**按通道重算**,不读那个全局位:
 //
-//     输入框禁用 ⟺ **甲方通道**在**本上下文**里有在飞的轮(业务经理正在回你)
-//     内部角色在跑 ⟹ 只影响显示(「内部推进中」)+ 中断按钮,**不影响可用性**
+//     输入框禁用 ⟺ **甲方通道**在**本上下文**里有在飞的轮
+//     其余在跑 ⟹ 只影响显示(「内部推进中」)+ 中断按钮,**不影响可用性**
+//
+// ⚠️ **W2-④ 起「甲方通道」的含义跟着 `channelOf` 一起换了**(这是刻意的:
+// 输入框与显示**必须**是同一个判据,否则会出现「页面上没有一条甲方消息,而输入框
+// 说甲方正在说话」那种两个答案的现场):
+//
+//   - 原来:甲方说的 ∪ **业务经理**(按角色)正在说的;
+//   - 现在:甲方说的 ∪ **播报**(`tell_client`)∪ **用户触发**的那一轮。
 //
 // 两处刻意的取舍(都有理由,别顺手改回去):
 //   ① `status === "streaming"` 这一位**被忽略** —— 它答的是「有没有人在跑」,
@@ -469,9 +542,9 @@ export function partitionTurns(
 
 /** 一条在飞轮按通道的三分。 */
 export interface ChannelActivity {
-  /** 甲方通道:甲方自己说的 ∪ 面向甲方的角色(只有业务经理)正在说的 */
+  /** 甲方通道:甲方说的 ∪ 播报 ∪ 用户触发的那一轮 —— 只有这一侧禁用输入框 */
   readonly client: readonly Turn[];
-  /** 内部角色(pm / wk / qa)—— **不**禁用输入框,只提示「内部推进中」 */
+  /** 不进甲方通道的轮(其他角色的、被待办叫醒的业务经理的那个回合;含 unknown 回退) */
   readonly internal: readonly Turn[];
   /** 平台通知(`role: "system"`)—— 两边都不算 */
   readonly system: readonly Turn[];

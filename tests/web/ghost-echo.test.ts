@@ -43,7 +43,7 @@ beforeEach(() => {
 describe("server 回显的用户消息不产生幽灵气泡", () => {
   it("**用户 delta 不建助手轮**(修复前:currentTurn 会变成 assistant)", () => {
     const s = useChatStore.getState();
-    s.applyEvent({ type: "message_start", projectId: P, messageId: "m-user", role: "user", agentId: null });
+    s.applyEvent({ type: "message_start", projectId: P, messageId: "m-user", role: "user", agentId: null , source: "turn", trigger: { kind: "user" }});
     s.applyEvent({ type: "delta", projectId: P, messageId: "m-user", text: "帮我调研一个语音机器人" });
     s.applyEvent({ type: "message_end", projectId: P, messageId: "m-user" });
 
@@ -54,7 +54,7 @@ describe("server 回显的用户消息不产生幽灵气泡", () => {
 
   it("用户消息的 thinking_delta 同样被忽略(两条流都不能漏)", () => {
     const s = useChatStore.getState();
-    s.applyEvent({ type: "message_start", projectId: P, messageId: "m-user", role: "user", agentId: null });
+    s.applyEvent({ type: "message_start", projectId: P, messageId: "m-user", role: "user", agentId: null , source: "turn", trigger: { kind: "user" }});
     s.applyEvent({ type: "thinking_delta", projectId: P, messageId: "m-user", text: "用户的内心戏" });
     expect(useChatStore.getState().currentTurn).toBeNull();
   });
@@ -62,10 +62,10 @@ describe("server 回显的用户消息不产生幽灵气泡", () => {
   it("**助手那条照常工作** —— 忽略逻辑不能误伤真消息", () => {
     const s = useChatStore.getState();
     // 先走一遍用户回显
-    s.applyEvent({ type: "message_start", projectId: P, messageId: "m-user", role: "user", agentId: null });
+    s.applyEvent({ type: "message_start", projectId: P, messageId: "m-user", role: "user", agentId: null , source: "turn", trigger: { kind: "user" }});
     s.applyEvent({ type: "delta", projectId: P, messageId: "m-user", text: "用户的话" });
     // 助手真的开始流
-    s.applyEvent({ type: "message_start", projectId: P, messageId: "m-bm", role: "assistant", agentId: "ag_bm" });
+    s.applyEvent({ type: "message_start", projectId: P, messageId: "m-bm", role: "assistant", agentId: "ag_bm" , source: "turn", trigger: { kind: "user" }});
     s.applyEvent({ type: "delta", projectId: P, messageId: "m-bm", text: "好的," });
     s.applyEvent({ type: "delta", projectId: P, messageId: "m-bm", text: "我来收敛一下" });
 
@@ -76,12 +76,12 @@ describe("server 回显的用户消息不产生幽灵气泡", () => {
 
   it("会话里出现第二个用户消息时,回显判定跟着更新", () => {
     const s = useChatStore.getState();
-    s.applyEvent({ type: "message_start", projectId: P, messageId: "m-u1", role: "user", agentId: null });
+    s.applyEvent({ type: "message_start", projectId: P, messageId: "m-u1", role: "user", agentId: null , source: "turn", trigger: { kind: "user" }});
     s.applyEvent({ type: "delta", projectId: P, messageId: "m-u1", text: "第一句" });
     expect(useChatStore.getState().currentTurn).toBeNull();
 
     // 第二条用户消息
-    s.applyEvent({ type: "message_start", projectId: P, messageId: "m-u2", role: "user", agentId: null });
+    s.applyEvent({ type: "message_start", projectId: P, messageId: "m-u2", role: "user", agentId: null , source: "turn", trigger: { kind: "user" }});
     s.applyEvent({ type: "delta", projectId: P, messageId: "m-u2", text: "第二句" });
     expect(useChatStore.getState().currentTurn).toBeNull();
 
@@ -104,7 +104,7 @@ describe("server 回显的用户消息不产生幽灵气泡", () => {
 describe("A1 · 契约带 agentId 不破坏前端既有消费路径", () => {
   it("message_start 带 agentId 时照常建轮(字段今天无读者,行为不变)", () => {
     const s = useChatStore.getState();
-    s.applyEvent({ type: "message_start", projectId: P, messageId: "m-pm", role: "assistant", agentId: "ag_pm" });
+    s.applyEvent({ type: "message_start", projectId: P, messageId: "m-pm", role: "assistant", agentId: "ag_pm" , source: "turn", trigger: { kind: "todo", todoKind: "execute_work" }});
     s.applyEvent({ type: "delta", projectId: P, messageId: "m-pm", text: "我来拆解" });
 
     const cur = useChatStore.getState().currentTurn;

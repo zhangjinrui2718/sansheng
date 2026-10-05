@@ -12,11 +12,23 @@
  *    (业务经理「先说话 → 播报 → 再说话」时前半段看不见)。这里改成
  *    `inFlightTurns(state).map(...)`,并用 `contentSignalOf(turns, streaming)`
  *    这个**列表**信号驱动滚动 —— 只算一轮的话,第二轮的 delta 不会触发跟随。
- * 2. **通道分离**:只把「甲方说的」与「该角色面向甲方」的轮渲染成对话;其余角色
- *    的轮被滤掉并**如实报出条数**(看不见 ≠ 不存在,见 §2.10.4)。判据是
+ * 2. **通道分离**:只把「由用户触发在页面上展示的那条通道」渲染成对话;其余回合
+ *    被滤掉并**如实报出条数**(看不见 ≠ 不存在,见 §2.10.4)。判据是
  *    `lib/data.ts` 的 `channelOf` / `partitionTurns`(纯函数,有单测)。
  *    ⚠️ `agentId === null` **不等于**甲方 —— 它有两个作者(kind `user` / kind
  *    `system`),所以系统通知走一条**独立的提示带**,不冒充任何人的气泡。
+ *
+ * ── W2-④(2026-10-06):判据换成「为什么有这一轮」+ **块级过滤** ─────
+ *
+ * ① **通道判据不再是角色的 `clientFacing`**(那是「谁在说话」,答不了「这一轮
+ *    为什么存在」)。新判据三支:甲方消息 / `source: "broadcast"`(播报,无条件)/
+ *    `trigger.kind === "user"` 的回合正文 ⇒ **业务经理被工件叫醒的那一轮正文也
+ *    不上屏**;它若真对甲方说了话,那话在同轮的**播报**里,那条照常显示。
+ * ② **块级过滤**:判成 client 之后,一轮的 `blocks` 里**同时装着** thinking +
+ *    工具卡 + 正文 —— 整轮一起进时间线,于是业务经理那个**用户触发**回合的三张
+ *    工具卡与 7594 字思考条就摆在甲方的屏上(用户贴出的那串 ⚙ 的直接原因)。
+ *    现在 `thinking` / `tool` 折进一行「内部过程 N 步」(`layerBlocks` +
+ *    `InternalProcessDisclosure`),**可展开、不是删**(§2.10.4 的纪律)。
  *
  * ── 本批次(设计 1 §2.12 的 A4):`[未播报]` 行首分流 ────────────────
  *
@@ -50,7 +62,7 @@
  *      · 滚到顶加载历史 → **未做**(后端无分页/游标,见 lib/scroll.ts 文件头)
  */
 import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { inFlightTurns, useChatStore, type Turn } from "@/stores/chat";
+import { inFlightTurns, useChatStore, type Block, type Turn } from "@/stores/chat";
 import {
   channelContextOf,
   partitionTurns,
@@ -91,6 +103,178 @@ export function contentSignalOf(turns: readonly Turn[], streaming: readonly Turn
     for (const b of t.blocks) textLength += b.kind === "tool" ? 1 : b.text.length;
   }
   return `${turns.length}:${streaming.length}:${textLength}`;
+}
+
+/**
+ * 一轮的块按**「甲方该看到什么」**分成三摞(W2-④ 的块级过滤)。
+ *
+ * ── 为什么要在**块**这一层再筛一次 ──────────────────────────────
+ *
+ * 通道判据的粒度是**轮**(= 一条 `messageId`),而一轮的 `blocks` 里**同时装着**
+ * `thinking` + 工具卡 + 正文 —— 判成 `client` 之后**整轮所有块**一起进时间线。
+ * 取证(用户真机贴出的那串 ⚙ `meeting_read → meeting_respond → ask_client → …`
+ * 全部是业务经理自己调的工具,而那一轮是**用户触发**的 ⇒ 它进甲方通道)⇒
+ * 三张工具卡 + 一个 7594 字的思考条就摆在甲方的屏上,**点一下就是它完整的内部推理**。
+ *
+ * ── 判据 ──────────────────────────────────────────────────────
+ *
+ *   - `text` —— **留下**(它就是「对甲方说的话」,由 `splitWorkLog` 再分一次流);
+ *   - `thinking` / `tool` —— **折进一行可展开的「内部过程 N 步」**。
+ *
+ * ⚠️ **不是删**(设计 1 §2.10.4 的纪律:看不到 = 平台替甲方删证据)。所以这里
+ * 只是把块**分层**,并没有丢掉任何一块 —— 折叠行展开后它们**原样渲染**
+ * (工具卡还是 `ToolCallCard`,思考块还是 `ThinkingBlock`,连各自的折叠都保留)。
+ *
+ * ── 为什么只有「一摞」internal(而不是按连续段切)────────────────
+ *
+ * 用户要的形状是「**折成一行**可展开的『内部过程 N 步』」。按段切会在
+ * `[text, tool, text, tool, text]` 这种真实形状里产生三条折叠行,屏幕上反而更吵。
+ * 折叠行落在**第一个内部块原来所在的位置**:`[thinking, tool, tool, text]` ⇒
+ * 「内部过程 3 步」在正文上方(与真实回合的形状一致 —— 先想、再做、最后说)。
+ */
+export interface BlockLayers {
+  /** 折叠行**之前**渲染的块(按构造:全是 `text`) */
+  readonly before: readonly Block[];
+  /** 折进「内部过程 N 步」那一行的块(`thinking` / `tool`),**原序**,一块不丢 */
+  readonly internal: readonly Block[];
+  /** 折叠行**之后**渲染的块(按构造:全是 `text`) */
+  readonly after: readonly Block[];
+}
+
+/** 把一轮的块分成三摞(纯函数,导出给测试)。 */
+export function layerBlocks(blocks: readonly Block[]): BlockLayers {
+  const firstInternal = blocks.findIndex((b) => b.kind !== "text");
+  if (firstInternal === -1) return { before: blocks, internal: [], after: [] };
+  return {
+    before: blocks.slice(0, firstInternal),
+    internal: blocks.filter((b) => b.kind !== "text"),
+    after: blocks.slice(firstInternal + 1).filter((b) => b.kind === "text"),
+  };
+}
+
+/**
+ * 「内部过程」那一行的**折叠状态持有者**(与 `ThinkingBlock` 同款:
+ * 状态壳 + 纯展示面分开,理由见 `ThinkingBlock.tsx` 的注释)。
+ *
+ * 默认**折叠** —— 常量导出,好让「默认值是折叠」在测试里可断言,而不是藏在
+ * `useState(false)` 的字面量里。
+ */
+export const INTERNAL_PROCESS_DEFAULT_OPEN = false;
+
+export function InternalProcessBlock({
+  blocks,
+  streaming,
+}: {
+  blocks: readonly Block[];
+  streaming?: boolean;
+}) {
+  // 组件内状态,每轮一份(**不进 store** —— 它是一块正文的展示状态,进了 store
+  // 就变成第二处真相,还要为它编「刷新 / 换项目 / 换轮时怎么清」的规则)。
+  const [open, setOpen] = useState(INTERNAL_PROCESS_DEFAULT_OPEN);
+  return (
+    <InternalProcessDisclosure
+      blocks={blocks}
+      open={open}
+      onToggle={() => setOpen((v) => !v)}
+      streaming={streaming}
+    />
+  );
+}
+
+/**
+ * 「内部过程 N 步」的**纯展示面**(导出给测试)。
+ *
+ * ── 折叠态:只有元信息,没有内容 ────────────────────────────────
+ *
+ * 与 `ThinkingDisclosure` 同一条纪律:折叠态**不进渲染产物**。所以这里只报
+ * **步数与构成**(`内部过程 3 步 · 思考 1 段 · 工具 2 次`),**不报工具名、不报
+ * 一个字的推理** —— 工具名本身就是被折叠掉的那部分证据(`meeting_read` /
+ * `tell_client` 这些名字在说什么,用户已经很清楚了)。
+ *
+ * ⚠️ 但 `思考 N 段` 这半句是**刻意留的**:它让「折叠」与「这一轮内部压根没有推理」
+ * 在屏幕上区分得开(§2.10.4 的同一条纪律:判断过 ≠ 漏了)。
+ *
+ * ── 展开态:原样交回每一个块 ────────────────────────────────────
+ *
+ * `ToolCallCard` / `ThinkingBlock` 都是既有组件 —— 展开**不重新实现**它们,
+ * 也就不可能在这里把证据改写或丢掉。`ThinkingBlock` 自己仍默认折叠:§2.10.4 的
+ * 裁决是「思考留,但默认折叠」,展开「内部过程」不该等于把 7594 字推理直接倒到
+ * 屏幕上(它一条一块、各有各的展开)。
+ */
+export function InternalProcessDisclosure({
+  blocks,
+  open,
+  onToggle,
+  streaming,
+}: {
+  blocks: readonly Block[];
+  open: boolean;
+  onToggle: () => void;
+  streaming?: boolean;
+}) {
+  const thinkingCount = blocks.filter((b) => b.kind === "thinking").length;
+  const toolCount = blocks.filter((b) => b.kind === "tool").length;
+  return (
+    <div
+      className="rounded-md self-start"
+      data-channel="internal-process"
+      style={{
+        background: "rgba(94, 139, 126, 0.06)",
+        border: "1px solid rgba(94, 139, 126, 0.25)",
+        maxWidth: "85%",
+      }}
+    >
+      <button
+        onClick={onToggle}
+        aria-expanded={open}
+        className="w-full flex items-center gap-2 px-3 py-1.5 text-left"
+        style={{ color: "var(--bone-dim)", fontSize: 12 }}
+        title={
+          open
+            ? "收起内部过程(思考与工具调用)"
+            : "展开内部过程:这一轮里模型想了什么、调了哪些工具(内部过程,不是对你说的话)"
+        }
+      >
+        <span
+          style={{
+            color: "var(--jade)",
+            display: "inline-block",
+            transition: "transform var(--duration-160) var(--ease-out)",
+            transform: open ? "rotate(90deg)" : "none",
+          }}
+        >
+          ›
+        </span>
+        <span className="font-mono" style={{ fontSize: 11 }}>
+          内部过程 {blocks.length} 步
+        </span>
+        {!open && (
+          // 折叠态只报**构成**,不报内容(工具名与推理正文都不进 DOM)。
+          <span className="sansheng-text-mute ml-2" style={{ fontSize: 11 }}>
+            {thinkingCount > 0 ? `思考 ${thinkingCount} 段 · ` : ""}工具 {toolCount} 次
+          </span>
+        )}
+      </button>
+      {open && (
+        <div
+          className="px-3 py-2 flex flex-col gap-2"
+          style={{ borderTop: "1px solid rgba(94, 139, 126, 0.2)" }}
+        >
+          {blocks.map((b, i) =>
+            b.kind === "thinking" ? (
+              <ThinkingBlock
+                key={i}
+                text={b.text}
+                streaming={streaming && i === blocks.length - 1}
+              />
+            ) : b.kind === "tool" ? (
+              <ToolCallCard key={i} block={b} />
+            ) : null,
+          )}
+        </div>
+      )}
+    </div>
+  );
 }
 
 /**
@@ -209,7 +393,7 @@ export function MessageList() {
       : !harness.ready
         ? `另有 ${hidden} 条消息暂时无法归类 —— 角色能力面(GET /api/harness)还没读到` +
           (harness.error !== null ? `:${harness.error}` : "")
-        : `另有 ${hidden} 条发言不在这条通道里(其他角色的回合)—— 到「成员」页逐人查看`;
+        : `另有 ${hidden} 条回合不在这条通道里(不是由你触发、也不是播报)—— 到「成员」页逐人查看`;
 
   const ref = useRef<HTMLDivElement>(null);
   /** 跟随状态用 ref 持有 —— onScroll 每帧都在读它,不该为它触发一次渲染。 */
@@ -460,7 +644,7 @@ function SystemNotice({ turn }: { turn: Turn }) {
 /**
  * 「有多少条没显示」。
  *
- * 通道分离把其他角色的回合挡在对话页之外 —— 但**不能静默**:看不到就等于平台
+ * 通道分离把不进甲方通道的回合挡在对话页之外 —— 但**不能静默**:看不到就等于平台
  * 替甲方删了证据(§2.10.4)。所以滤掉多少条必须写在屏幕上,并指向「成员」页
  * 那份逐人清单。
  */
@@ -494,6 +678,22 @@ export const TurnView = memo(function TurnView({
   const isUser = turn.role === "user";
   const usage = turn.usage;
   const showUsage = !!usage && usage.input + usage.output > 0;
+  /**
+   * **块级过滤**(W2-④):思考块与工具卡折进一行「内部过程 N 步」,正文留下。
+   *
+   * 这一层**不判通道** —— 它判的是「一轮里哪几块是给甲方看的话」。判通道是
+   * `lib/data.ts` 的 `channelOf`,而它作用在**轮**上:能走到 `TurnView` 的轮
+   * 只有 `client` / `system` 两种(`internal` 的轮被 `partitionTurns` 滤掉,
+   * `system` 走 `SystemNotice` 不经过这里)⇒ 这里折的就是**甲方通道那一轮**的
+   * 内部过程。**内部轮根本不必折 —— 它们压根不上屏。**
+   */
+  const layers = useMemo(() => layerBlocks(turn.blocks), [turn.blocks]);
+  /** 渲染序列:正文摞 → (有内部块时)折叠行 → 正文摞。折叠行落在第一个内部块原位。 */
+  const items: Array<{ kind: "text"; text: string } | { kind: "internal" }> = [
+    ...layers.before.map((b) => ({ kind: "text" as const, text: b.kind === "text" ? b.text : "" })),
+    ...(layers.internal.length > 0 ? [{ kind: "internal" as const }] : []),
+    ...layers.after.map((b) => ({ kind: "text" as const, text: b.kind === "text" ? b.text : "" })),
+  ];
   return (
     <div className={`flex flex-col gap-2 ${isUser ? "items-end" : "items-start"}`}>
       {/* 说话人 + usage 合并成一行:用户轮不标说话人(气泡靠右已经说明了),
@@ -525,39 +725,38 @@ export const TurnView = memo(function TurnView({
             }}
           />
         )}
-        {turn.blocks.map((b, i) => {
-          const isLastBlock = i === turn.blocks.length - 1;
-          if (b.kind === "thinking") {
-            // 思维链是内部推理,不是给用户看的正式输出 —— **不渲染 markdown**,
-            // 保持纯文本(等宽字体 + pre-wrap,见 ThinkingBlock)。
-            return <ThinkingBlock key={i} text={b.text} streaming={streaming && isLastBlock} />;
-          }
-          if (b.kind === "text") {
-            // **只有助手的正文**参与工作记录分流:甲方自己打的字按字面渲染
-            // (`Bubble` 的 user 分支),把人打的字重新分类是替他改写输入;
-            // 平台通知走 `SystemNotice`,根本不到这里。
-            const segments: readonly TextSegment[] = isUser
-              ? [{ kind: "speech", text: b.text }]
-              : splitWorkLog(b.text);
+        {items.map((item, i) => {
+          const isLastItem = i === items.length - 1;
+          if (item.kind === "internal") {
             return (
-              // Fragment 不产生 DOM 节点 ⇒ 这些块仍是那一列 flex 的直接子元素,
-              // 气泡间距(`gap-1`)与分流前一致。
-              <Fragment key={i}>
-                {segments.map((seg, j) => {
-                  const isLastSegment = streaming && isLastBlock && j === segments.length - 1;
-                  return seg.kind === "work_log" ? (
-                    <WorkLogBlock key={j} text={seg.text} streaming={isLastSegment} />
-                  ) : (
-                    <Bubble key={j} user={isUser} text={seg.text} streaming={isLastSegment} />
-                  );
-                })}
-              </Fragment>
+              <InternalProcessBlock
+                key={i}
+                blocks={layers.internal}
+                streaming={streaming && isLastItem}
+              />
             );
           }
-          if (b.kind === "tool") {
-            return <ToolCallCard key={i} block={b} />;
-          }
-          return null;
+          // 这一层只剩正文(思考 / 工具卡已全部折进 `layers.internal`)——
+          // **只有助手的正文**参与工作记录分流:甲方自己打的字按字面渲染
+          // (`Bubble` 的 user 分支),把人打的字重新分类是替他改写输入;
+          // 平台通知走 `SystemNotice`,根本不到这里。
+          const segments: readonly TextSegment[] = isUser
+            ? [{ kind: "speech", text: item.text }]
+            : splitWorkLog(item.text);
+          return (
+            // Fragment 不产生 DOM 节点 ⇒ 这些块仍是那一列 flex 的直接子元素,
+            // 气泡间距(`gap-1`)与分流前一致。
+            <Fragment key={i}>
+              {segments.map((seg, j) => {
+                const isLastSegment = streaming && isLastItem && j === segments.length - 1;
+                return seg.kind === "work_log" ? (
+                  <WorkLogBlock key={j} text={seg.text} streaming={isLastSegment} />
+                ) : (
+                  <Bubble key={j} user={isUser} text={seg.text} streaming={isLastSegment} />
+                );
+              })}
+            </Fragment>
+          );
         })}
       </div>
     </div>

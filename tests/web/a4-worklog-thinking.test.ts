@@ -29,10 +29,18 @@ import { THINKING_DEFAULT_OPEN, ThinkingDisclosure } from "@/components/chat/Thi
 import type { ConversationPartition } from "@/lib/data";
 import type { Turn } from "@/stores/chat";
 
-function turn(id: string, role: Turn["role"], agentId: string | null, blocks: Turn["blocks"]): Turn {
+function turn(
+  id: string,
+  role: Turn["role"],
+  agentId: string | null,
+  blocks: Turn["blocks"],
+  // ⚠️ W2-④ 起 `origin` 是必填(`TurnOrigin`)。这些样本都是**甲方通道**里的轮
+  // (工作记录 / 思考折叠都只在能上屏的轮里才有意义)⇒ 默认给「用户触发的那一轮」。
+  origin: Turn["origin"] = { source: "turn", trigger: { kind: "user" } },
+): Turn {
   // `projectId` 是 `Turn` 的必填字段(`tests/` 不在两条 tsconfig 的 include 里,
   // 漏填 tsc 不会报 —— 见 `tests/web/channel-filter.test.ts` 的同一处说明)。
-  return { id, projectId: "p-test", role, agentId, blocks, startedAt: 0 };
+  return { id, projectId: "p-test", role, agentId, blocks, startedAt: 0, origin };
 }
 
 function assistant(text: string): Turn {

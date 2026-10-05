@@ -1635,10 +1635,39 @@ export interface DrainDeps {
   readonly db: Database.Database;
   readonly projectId: string;
   readonly now: () => number;
-  /** 跑一个非执行类的 agent 回合(宿主负责建会话 / 桥事件 / 落库)。 */
-  readonly runAgentTurn: (agentId: string, task: string) => Promise<DrainTurnReport>;
-  /** 跑一个工作项(宿主走 `runWorkItem`)。 */
-  readonly runWork: (agentId: string, workId: string) => Promise<DrainWorkReport>;
+  /**
+   * 跑一个非执行类的 agent 回合(宿主负责建会话 / 桥事件 / 落库)。
+   *
+   * ── `todoKind`:为什么它是**形参**而不是宿主自己猜的(W2-③)──────────
+   *
+   * 宿主要把「这一轮为什么存在」写进 `message_start` 的 `trigger`
+   * (`{ kind: "todo", todoKind }`,见 `shared/types/platform.ts` 的 `TurnTrigger`)。
+   * 而 `drainProject` 是**唯一**同时持有「待办」与「回合」的地方 ⇒ 这个值
+   * **只能**在这里跨过边界。宿主侧没有第二个合法来源:它拿到的是
+   * `(agentId, task)`,而同一个 agent 既可能被用户消息叫醒(`business_manager`),
+   * 也可能被 `answer_ask` / `report_downstream` / `handover` 叫醒 —— 从
+   * `agentId` 反推 trigger 会得到一个「看起来对、换一个场景就错」的值,
+   * 而错了的表现是**工件触发的回合正文被当成对甲方说的话**进对话页(静默判错)。
+   *
+   * ⚠️ **不是 `string`,是 `TodoKind`** —— 漏传 / 拼错必须编译不过。
+   */
+  readonly runAgentTurn: (
+    agentId: string,
+    task: string,
+    todoKind: TodoKind,
+  ) => Promise<DrainTurnReport>;
+  /**
+   * 跑一个工作项(宿主走 `runWorkItem`)。`todoKind` 的理由与
+   * {@link DrainDeps.runAgentTurn} 逐字相同:值**只能**从这里的 `todo.kind`
+   * 跨过去。⚠️ 这一支在**今天**恒为 `"execute_work"`(调用点是下面那条
+   * `if (todo.kind === "execute_work")`),但那正是「今天恰好是个常量」而不是
+   * 「它是一个常量」—— 传**真值**而不是写字面量,改判据时才不会漏掉这一处。
+   */
+  readonly runWork: (
+    agentId: string,
+    workId: string,
+    todoKind: TodoKind,
+  ) => Promise<DrainWorkReport>;
   readonly log: (line: string) => void;
   /** 单次**排空**最多跑几个 agent 回合。默认 8。**必须保守** —— 它是烧 token 的上界。 */
   readonly maxRounds?: number;
@@ -1818,11 +1847,11 @@ export async function drainProject(deps: DrainDeps): Promise<DrainResult> {
           stopDetail = "execute_work 待办没有带工作项 id —— 装配错误,已停下";
           break;
         }
-        const r = await deps.runWork(todo.agentId, todo.target);
+        const r = await deps.runWork(todo.agentId, todo.target, todo.kind);
         aborted = r.aborted;
         failed = r.failed === true;
       } else {
-        const r = await deps.runAgentTurn(todo.agentId, renderTask(deps.db, todo));
+        const r = await deps.runAgentTurn(todo.agentId, renderTask(deps.db, todo), todo.kind);
         aborted = r.aborted;
         failed = r.failed === true;
       }

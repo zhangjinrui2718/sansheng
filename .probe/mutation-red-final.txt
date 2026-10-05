@@ -1,0 +1,86 @@
+npm notice run sansheng@0.1.0 npx
+npm notice run 'vitest' --run tests/web/composer-channel-status.test.ts
+
+ RUN  v2.1.9 /Users/fuyao/projects/sansheng
+
+ ❯ tests/web/composer-channel-status.test.ts (11 tests | 4 failed) 7ms
+   × bug A · 只有内部角色在跑 ⇒ 输入框可用 > **正样本**:只有 wk 的轮在飞 → `status !== "streaming"`(输入框可用) 4ms
+     → expected 'streaming' to be 'internal' // Object.is equality
+   × bug A · 只有内部角色在跑 ⇒ 输入框可用 > **正样本**:pm 与 qa 在跑同样是 internal(不是只有 wk 特殊) 0ms
+     → expected 'streaming' to be 'internal' // Object.is equality
+   × bug A · 只有内部角色在跑 ⇒ 输入框可用 > **负样本**:项目里成员表之外的 agent → fail-closed 成 internal,不禁用(A3 的两跳原样) 0ms
+     → expected 'streaming' to be 'internal' // Object.is equality
+   × bug A · 接待会话与跨上下文(projectId === null 不是通配) > **负样本**:`tool_start` 建出来的内部轮同样不锁输入框(第二个建轮点) 0ms
+     → expected 'streaming' to be 'internal' // Object.is equality
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 4 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  tests/web/composer-channel-status.test.ts > bug A · 只有内部角色在跑 ⇒ 输入框可用 > **正样本**:只有 wk 的轮在飞 → `status !== "streaming"`(输入框可用)
+AssertionError: expected 'streaming' to be 'internal' // Object.is equality
+
+Expected: "internal"
+Received: "streaming"
+
+ ❯ tests/web/composer-channel-status.test.ts:126:25
+    124| 
+    125|     // 判据:内部通道不是甲方通道
+    126|     expect(surface(PA)).toBe("internal");
+       |                         ^
+    127|     expect(surface(PA)).not.toBe("streaming");
+    128|     expect(clientBusy(PA)).toBe(false);
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/4]⎯
+
+ FAIL  tests/web/composer-channel-status.test.ts > bug A · 只有内部角色在跑 ⇒ 输入框可用 > **正样本**:pm 与 qa 在跑同样是 internal(不是只有 wk 特殊)
+AssertionError: expected 'streaming' to be 'internal' // Object.is equality
+
+Expected: "internal"
+Received: "streaming"
+
+ ❯ tests/web/composer-channel-status.test.ts:135:25
+    133|     s.applyEvent({ type: "message_start", projectId: PA, messageId: "m…
+    134|     s.applyEvent({ type: "message_start", projectId: PA, messageId: "m…
+    135|     expect(surface(PA)).toBe("internal");
+       |                         ^
+    136|     expect(clientBusy(PA)).toBe(false);
+    137|   });
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/4]⎯
+
+ FAIL  tests/web/composer-channel-status.test.ts > bug A · 只有内部角色在跑 ⇒ 输入框可用 > **负样本**:项目里成员表之外的 agent → fail-closed 成 internal,不禁用(A3 的两跳原样)
+AssertionError: expected 'streaming' to be 'internal' // Object.is equality
+
+Expected: "internal"
+Received: "streaming"
+
+ ❯ tests/web/composer-channel-status.test.ts:173:25
+    171|     const s = useChatStore.getState();
+    172|     s.applyEvent({ type: "message_start", projectId: PA, messageId: "m…
+    173|     expect(surface(PA)).toBe("internal");
+       |                         ^
+    174|     expect(clientBusy(PA)).toBe(false);
+    175|   });
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[3/4]⎯
+
+ FAIL  tests/web/composer-channel-status.test.ts > bug A · 接待会话与跨上下文(projectId === null 不是通配) > **负样本**:`tool_start` 建出来的内部轮同样不锁输入框(第二个建轮点)
+AssertionError: expected 'streaming' to be 'internal' // Object.is equality
+
+Expected: "internal"
+Received: "streaming"
+
+ ❯ tests/web/composer-channel-status.test.ts:208:25
+    206|     });
+    207|     expect(clientBusy(PA)).toBe(false);
+    208|     expect(surface(PA)).toBe("internal");
+       |                         ^
+    209|   });
+    210| });
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[4/4]⎯
+
+ Test Files  1 failed (1)
+      Tests  4 failed | 7 passed (11)
+   Start at  09:34:35
+   Duration  304ms (transform 65ms, setup 7ms, collect 106ms, tests 7ms, environment 0ms, prepare 24ms)
+

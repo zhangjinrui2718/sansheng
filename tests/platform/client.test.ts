@@ -19,6 +19,7 @@ import {
 } from "../../src/platform/tools/client.js";
 import { createLoggingClientChannel, type ClientChannel, type ClientQuestion } from "../../src/platform/client/port.js";
 import { PlatformHub } from "../../src/platform/transport/hub.js";
+import { TODO_KINDS } from "../../src/platform/runtime/dispatcher.js";
 import { listSessions, listSessionMessages } from "../../src/platform/storage/repo/sessions.js";
 import type { ServerEvent } from "@shared/types/platform.js";
 import type { WebSocket } from "ws";
@@ -329,13 +330,21 @@ describe("A1 · hub 的两个「建轮」事件带说话人,播报落库也用�
     return { hub, events };
   }
 
-  it("emitMessageStart 把 agentId 原样放进事件(null = 甲方)", () => {
+  it("emitMessageStart 把 agentId 原样放进事件(null = 甲方),并带上 trigger + source:\"turn\"", () => {
     const { hub, events } = hubCapturing();
-    hub.emitMessageStart("p1", "m1", "assistant", ids.pm);
-    hub.emitMessageStart("p1", "m2", "user", null);
+    hub.emitMessageStart("p1", "m1", "assistant", ids.pm, { kind: "todo", todoKind: "execute_work" });
+    hub.emitMessageStart("p1", "m2", "user", null, { kind: "user" });
     expect(events).toEqual([
-      { type: "message_start", projectId: "p1", messageId: "m1", role: "assistant", agentId: ids.pm },
-      { type: "message_start", projectId: "p1", messageId: "m2", role: "user", agentId: null },
+      {
+        type: "message_start", source: "turn", projectId: "p1", messageId: "m1",
+        role: "assistant", agentId: ids.pm,
+        trigger: { kind: "todo", todoKind: "execute_work" },
+      },
+      {
+        type: "message_start", source: "turn", projectId: "p1", messageId: "m2",
+        role: "user", agentId: null,
+        trigger: { kind: "user" },
+      },
     ]);
   });
 
@@ -365,5 +374,86 @@ describe("A1 · hub 的两个「建轮」事件带说话人,播报落库也用�
     expect(start.type === "message_start" ? start.messageId : null).toBe(
       events[1]!.type === "delta" ? events[1]!.messageId : null,
     );
+  });
+
+  // ── W1-①:契约加 `trigger` + 播报封套打标记(设计 1 §2.10 的通道分离)──
+  //
+  // 判据塌缩成两半(用户的裁决):
+  //   回合**正文**显不显示 ← `trigger.kind`("user" 显示 / "todo" 不显示)
+  //   **播报**显不显示      ← **无条件显示**(它独立成消息,不受 trigger 影响)
+  // 所以「进对话页」= 用户消息 ∨ `trigger.kind === "user"` 的回合正文 ∨ 播报。
+  //
+  // ⚠️ 这条判据的**真正读者在前端**,而 `web/**` 不在本次可碰清单里 ——
+  // 所以这里把它写成可执行版本,先把「契约给得出这个判断」钉住(判定本身
+  // 由前端接)。另有一条**结构性**保证不需要前端配合:`BroadcastMessageStart`
+  // 类型上**没有** `trigger`(编译期断言在 `shared/types/platform.ts`),
+  // 因此「顺手用 trigger 判播报」的代码在那一支上编译不过。
+
+  /** 契约判据的可执行版本(与将来前端那份逐字同构) */
+  function entersClientChannel(ev: ServerEvent): boolean {
+    if (ev.type !== "message_start") return false;
+    // 播报:无条件显示(它是独立消息,不属于任何回合)
+    if (ev.source === "broadcast") return true;
+    // 用户消息回显(agentId === null = 甲方)或用户触发的回合正文
+    return ev.agentId === null || ev.trigger.kind === "user";
+  }
+
+  it("`todoKind` 原样透传:每个 TodoKind 都收得下(闭合集,不吞不改)", () => {
+    const { hub, events } = hubCapturing();
+    TODO_KINDS.forEach((k, i) => {
+      hub.emitMessageStart("p1", `m${i}`, "assistant", ids.pm, { kind: "todo", todoKind: k });
+    });
+    expect(TODO_KINDS.length).toBeGreaterThan(0); // 正样本:集合非空,否则下面恒真
+    expect(
+      events.map((e) => (e.type === "message_start" && e.source === "turn" ? e.trigger : null)),
+    ).toEqual(TODO_KINDS.map((k) => ({ kind: "todo", todoKind: k })));
+  });
+
+  it("**正交**:「工件触发的汇报」那一轮的正文不进对话页,而它同轮的播报照常进", async () => {
+    const { hub, events } = hubCapturing();
+    // ① 排空器按待办叫醒业务经理 —— 这一轮的**正文**不是对甲方说的话
+    hub.emitMessageStart("p1", "m-report", "assistant", ids.bm, {
+      kind: "todo", todoKind: "report_downstream",
+    });
+    // ② 同一轮里它调 `tell_client` 播报 —— 这是**另一条封套**
+    await hub.clientChannel.tell({ projectId: "p1", message: "下游有结果了", agentId: ids.bm });
+
+    const starts = events.filter(
+      (e): e is Extract<ServerEvent, { type: "message_start" }> => e.type === "message_start",
+    );
+    expect(starts.length).toBe(2);
+
+    const [body, broadcast] = starts as [
+      Extract<ServerEvent, { type: "message_start" }>,
+      Extract<ServerEvent, { type: "message_start" }>,
+    ];
+    // 两个信号各管一半:同一个人(agentId 相同)、同一轮时间里,判定却相反
+    expect(body!.agentId).toBe(ids.bm);
+    expect(broadcast!.agentId).toBe(ids.bm);
+    expect([body!.source, broadcast!.source]).toEqual(["turn", "broadcast"]);
+    expect(entersClientChannel(body!)).toBe(false); // 正文被 trigger 判掉
+    expect(entersClientChannel(broadcast!)).toBe(true); // 播报无条件进
+
+    // **结构性正交**:播报封套上**根本没有** `trigger` 这个键 ——
+    // 不是「值为 undefined」,是键不存在(JSON 里也搜不到)。
+    expect("trigger" in broadcast!).toBe(false);
+    expect(Object.keys(broadcast!).sort()).toEqual(
+      ["agentId", "messageId", "projectId", "role", "source", "type"],
+    );
+    // 反证:body 那条**有** trigger,所以「用 trigger 判显示」的实现会把播报判掉
+    expect("trigger" in body!).toBe(true);
+  });
+
+  it("`source` 只有两种取值:回合驱动流程 / 播报", async () => {
+    const { hub, events } = hubCapturing();
+    hub.emitMessageStart("p1", "m1", "user", null, { kind: "user" });
+    await hub.clientChannel.tell({ projectId: "p1", message: "播报", agentId: ids.bm });
+    const sources = events
+      .filter((e) => e.type === "message_start")
+      .map((e) => (e.type === "message_start" ? e.source : null));
+    expect(sources).toEqual(["turn", "broadcast"]);
+    expect(sources.every((s) => s === "turn" || s === "broadcast")).toBe(true);
+    // 正负样本自检:判据本身不能恒真 —— 换一个不在集合里的值必须为 false
+    expect(["turn", "broadcast"].includes("system")).toBe(false);
   });
 });

@@ -1,0 +1,12 @@
+npm notice run sansheng@0.1.0 npx
+npm notice run 'vitest' --run tests/web/composer-channel-status.test.ts
+
+ RUN  v2.1.9 /Users/fuyao/projects/sansheng
+
+ ✓ tests/web/composer-channel-status.test.ts (11 tests) 4ms
+
+ Test Files  1 passed (1)
+      Tests  11 passed (11)
+   Start at  09:33:31
+   Duration  316ms (transform 67ms, setup 7ms, collect 107ms, tests 4ms, environment 0ms, prepare 25ms)
+

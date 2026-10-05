@@ -558,6 +558,131 @@ export interface WsToolInfo {
   durationMs?: number;
 }
 
+// ── 一个回合**为什么存在**(`trigger`)与这个封套**是谁发的**(`source`)─────
+//
+// 「用户要的不只是页面上那条由用户触发的通道」这件事(2026-10-06)在契约上
+// 落成两个**互相独立**的维度,加上已有的 `agentId`,一共三个:
+//
+//   | 维度 | 答的问题 | 取值 |
+//   |---|---|---|
+//   | `agentId`(已有,§2.10.2) | **谁**在说话 | 角色 id / `null`(= 甲方) |
+//   | `trigger`(本节)          | 这一轮**为什么**存在 | 用户发起 / 某条待办发起 |
+//   | `source`(本节)           | 这个封套**是谁发的** | 回合驱动流程 / 播报 |
+//
+// **为什么 `trigger` 不能代替 `agentId`,也不能被 `agentId` 代替**:排空器叫醒
+// 业务经理时说话人仍然是业务经理(`agentId` 不变),但那一轮**不是对甲方说的话**
+// —— 它是 `report_downstream` / `answer_ask` 这类待办驱动的正文。
+// **为什么 `source` 不能并进 `trigger`**:播报是 `tell_client` **无条件**投递的
+// 一条独立消息,它不属于任何一个回合;把「显示与否」压在 `trigger` 这一维上,
+// 「工件触发的汇报」那一轮里的播报会被连坐判掉(见 `BroadcastMessageStart`)。
+
+/**
+ * **待办类**触发的闭合集。
+ *
+ * ⚠️ **这是 `src/platform/runtime/dispatcher.ts` 的 `TodoKind`(`TODO_KINDS`)的
+ * 逐字副本,不是 import。** 理由是一条分层纪律:`shared/` 是**跨端契约面**,
+ * web 的 `tsconfig.web.json` 只 include `web/src` 与 `shared/` —— 连 **type-only**
+ * import 一条 `src/platform/runtime/dispatcher.js` 都会把 runtime(及其
+ * `better-sqlite3` 依赖)拖进 web 的类型程序。契约面**不得**反向依赖 `src/`。
+ *
+ * 副本的代价是「可能漂」,所以它**不靠人同步**:`src/platform/transport/hub.ts`
+ * 有一对**双向互相可赋值**的编译期对账断言(`_TodoKindParity`)——
+ * `TODO_KINDS` 增删一个取值时 `tsc -p tsconfig.server.json` 会当场报错。
+ *
+ * ⚠️ 另一个选项是 `todoKind: string`:那是把闭合集换成「什么都收」,
+ * 而漏填 / 拼错的表现会退化成「这条线被判错」而**静默**(与可选字段同一条纪律)。
+ */
+export type TriggerTodoKind =
+  | "answer_ask"
+  | "attend_meeting"
+  | "review_change"
+  | "fix_work_assignment"
+  | "resolve_blocked_work"
+  | "decompose_project"
+  | "execute_work"
+  | "review_work"
+  | "integrate"
+  | "handover"
+  | "report_downstream";
+
+/**
+ * 这一轮**为什么存在**。判据只有两半(设计 1 §2.10 的通道分离):
+ *
+ *   - `user`  —— 甲方亲口发起的那一轮(以及在对话里回显他自己那句话的封套)。
+ *     **这一轮的正文对甲方可见。**
+ *   - `todo`  —— 排空器按 `collectTodos` 的待办叫醒的回合(`todoKind` 说清是哪条,
+ *     取值域是**闭合集**)。**这一轮的正文不是对甲方说的话** —— 它是组织内部
+ *     在动,甲方要看的是成员页里那份「他产生了什么对话」。
+ *
+ * ⚠️ **它不表达「播报显不显示」** —— 那是 `source` 的事(见下)。
+ */
+export type TurnTrigger =
+  | { kind: "user" }
+  | { kind: "todo"; todoKind: TriggerTodoKind };
+
+/**
+ * 一个**回合封套**的建轮事件(`source: "turn"`)。
+ *
+ * 用户消息的回显与某条助手正文都走它 —— 判据是「**它由回合驱动流程发出**」,
+ * 与 role / agentId 无关(那两维说的是「谁在说话」)。
+ *
+ * ⚠️ `trigger` **必填,不是可选** —— 与 `agentId` 同一条纪律(§2.10.2):
+ * 可选 = 漏填也编译得过,而漏填的表现是「工件触发的回合正文」被当成「甲方
+ * 触发的」照样进对话页(**静默判错**)。必填之后每个构造点都必须显式说清这一轮
+ * 为什么存在,TS 会把它们全部点出来。
+ *
+ * ⚠️ `role: "user"` 的那条**也带** `trigger: { kind: "user" }`,不是冗余:
+ * 「谁在说话」与「为什么有这一轮」是两个维度(见本文件 `TurnTrigger` 上方那张
+ * 表)。若按 role 把它拆成「assistant 必填 / user 免填」,契约会按 role 分成两半,
+ * 而「漏填」在那半边重新变成可能 —— 那正是这条纪律要关掉的门。
+ *
+ * 形状由下面两条编译期断言守着(`_TriggerMustBeRequired` /
+ * `_MessageStartHasExactlyTwoSources`)。
+ */
+export interface TurnMessageStart {
+  type: "message_start";
+  projectId: string | null;
+  messageId: string;
+  role: "user" | "assistant";
+  /** 谁在说话。**`null` = 甲方**(与 `SessionMessageView.agentId` 同义) */
+  agentId: string | null;
+  /** 这个封套是**回合驱动流程**发的(用户消息回显 + 助手正文) */
+  source: "turn";
+  /** 这一轮为什么存在。**必填** —— 见本接口的说明 */
+  trigger: TurnTrigger;
+}
+
+/**
+ * 一个**播报封套**的建轮事件(`source: "broadcast"`)。
+ *
+ * **只有一处发它**:`src/platform/transport/hub.ts` 的 `clientChannel.tell`
+ * (即 `tell_client` 工具投递给甲方的那条播报)。它与普通回合的三个信封
+ * (`message_start` / `delta` / `message_end`)**长得一模一样**,这里是它们唯一的
+ * 可分判之处。
+ *
+ * ⚠️ **它没有 `trigger`,这是结构性的,不是遗漏。** 播报是**无条件**投递给甲方的
+ * 一条**独立消息**(它自己落库、有自己的 `messageId`,见 `hub.ts` 文件头),不属于
+ * 任何一个回合。所以:
+ *   - 「工件触发的汇报」那一轮里,业务经理的**正文**带
+ *     `trigger.todoKind = "report_downstream"`(该被收进内部视图),
+ *     而它在同一轮里做的**播报**是**另一条封套** —— 这条无条件显示。
+ *   - 显示判据因此只能落在 `source` 上;`trigger` 那一维**根本不参与**播报的判定,
+ *     这正是「正交」在类型上的表达:**播报封套上读不到任何 `trigger` 信息**,
+ *     想「顺手用 trigger 判一下」的代码在这一支上**编译不过**。
+ *
+ * ⚠️ 把 `trigger` 抄到这一支上(哪怕只是为了「对称」)会让上面那条推理重新变得
+ * 可写错:`_BroadcastMustNotCarryTrigger` 是一条编译期断言,加了就红。
+ */
+export interface BroadcastMessageStart {
+  type: "message_start";
+  projectId: string | null;
+  messageId: string;
+  role: "user" | "assistant";
+  agentId: string | null;
+  /** 这个封套是**播报**(`tell_client`),不是任何回合的正文 */
+  source: "broadcast";
+}
+
 /**
  * 服务端 → 客户端。
  *
@@ -589,18 +714,26 @@ export interface WsToolInfo {
  * 全部点出来。为什么不加 `speakerRole` / `channel`、以及 §2.10.3 那条
  * 「回合中途播报吞字」的已知缺陷(与本字段无关,靠它救不了),
  * 见 `docs/DESIGN-PLATFORM.md` §2.10.2 / §2.10.3。
+ *
+ * ── `message_start` 上的**另外两维**(2026-10-06 新增)─────────────────
+ *
+ * `message_start` 因此有三个互相独立的维度:`agentId`(谁在说)、`trigger`
+ * (这一轮为什么存在)、`source`(这个封套是谁发的)。两条纪律与 `agentId` 同源:
+ *
+ *   ① **`trigger` 必填**(只在回合封套上)—— `todoKind` 是**闭合集**
+ *      (`TriggerTodoKind`,与 `runtime/dispatcher.ts` 的 `TodoKind` 有编译期对账)。
+ *   ② **播报封套(`source: "broadcast"`)不带 `trigger`** —— 播报无条件显示,
+ *      它不能被任何「回合级」判据连坐。
+ *
+ * 三条编译期断言把这两条钉在本文件末尾(`_TriggerMustBeRequired` /
+ * `_BroadcastMustNotCarryTrigger` / `_MessageStartHasExactlyTwoSources`):
+ * 破坏契约的那一次 `tsc` 会红,而不是等到界面上少了一条线才被发现。
  */
 export type ServerEvent =
   | { type: "ready"; modelId: string | null; provider: string | null; cwd: string }
   | { type: "pong"; ts: number }
-  | {
-      type: "message_start";
-      projectId: string | null;
-      messageId: string;
-      role: "user" | "assistant";
-      /** 谁在说话。**`null` = 甲方**(与 `SessionMessageView.agentId` 同义) */
-      agentId: string | null;
-    }
+  | TurnMessageStart
+  | BroadcastMessageStart
   | { type: "delta"; projectId: string | null; messageId: string; text: string }
   /**
    * 内部推理。**与 delta 是两条流,永不混流** ——
@@ -715,6 +848,46 @@ export type ServerEvent =
    * 缺省 = 与任何上下文无关(如 JSON 解析失败)。
    */
   | { type: "error"; projectId?: string | null; error: { code: string; message: string } };
+
+// ── 契约纪律的**编译期**断言(2026-10-06)────────────────────────────
+//
+// 「必填」与「正交」这两条不能只写在注释里 —— 注释不会红。这里把它们写成
+// 类型层面的断言:违反时 `tsc -p tsconfig.server.json` 与
+// `tsc -p tsconfig.web.json` **都会在本文件报错**(两份 tsconfig 的 include
+// 都含 `shared/**`)。纯类型,不产生任何运行时代码。
+//
+// 负样本(已实跑,原文见报告):
+//   · 把 `TurnMessageStart.trigger` 改成 `trigger?: TurnTrigger`
+//     ⇒ `Type 'false' does not satisfy the constraint 'true'.`
+//   · 给 `BroadcastMessageStart` 加回 `trigger`
+//     ⇒ 同样报错。
+// 改回来 ⇒ 两条 typecheck 都是 0 error。
+
+/** `T` 必须**恰好**是 `true`;算出来是 `false` 时**在断言处**编译失败。 */
+type AssertTrue<T extends true> = T;
+
+/** ① `trigger` **必填**(不是可选)—— 回合封套漏填必须编译不过。 */
+type _TriggerMustBeRequired = AssertTrue<
+  undefined extends TurnMessageStart["trigger"] ? false : true
+>;
+
+/** ② 播报封套**不得**带 `trigger` —— 播报的显示判据与 `trigger` 那一维正交。 */
+type _BroadcastMustNotCarryTrigger = AssertTrue<
+  "trigger" extends keyof BroadcastMessageStart ? false : true
+>;
+
+/**
+ * ③ `message_start` 的 `source` **只有两种**。
+ *
+ * 加第三种(例如将来某条「系统提示流」)时这一行会红 —— 那是刻意留的门:
+ * 每一处「显示与否」的判据都必须显式表态,不许有一条新封套**静默地**
+ * 落进「既不是回合、也不是播报」的缝隙里。
+ */
+type _MessageStartHasExactlyTwoSources = AssertTrue<
+  Extract<ServerEvent, { type: "message_start" }>["source"] extends "turn" | "broadcast"
+    ? true
+    : false
+>;
 
 /**
  * 事件属于哪个上下文。返回 `null` = 不属于任何项目

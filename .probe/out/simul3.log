@@ -1,0 +1,518 @@
+
+════════════════════════════════════════════════════════════════════════
+  R1 探针 · mode=simul · N=3 · thinking=off
+════════════════════════════════════════════════════════════════════════
+  数据目录(只读): /Users/fuyao/.sansheng
+  provider:        minimax-cn / MiniMax-M3
+  明文 key:        sk-c…OYzo (len=125)
+  已注入 env:      MINIMAX_CN_API_KEY
+  model.api:       anthropic-messages   baseUrl=https://api.minimaxi.com/anthropic  reasoning=true
+  临时 cwd:        /var/folders/rm/kg3j0vq55rzc0pm_097z4gq00000gn/T/r1-probe-root-XdYiFf/cwd
+  临时 agentDir:   /var/folders/rm/kg3j0vq55rzc0pm_097z4gq00000gn/T/r1-probe-root-XdYiFf/agent   (真实 ~/.sansheng 全程只读)
+
+════════════════════════════════════════════════════════════════════════
+  第 1/3 轮 · mode=simul · 三个 prompt() 在同一 tick 同时发出
+════════════════════════════════════════════════════════════════════════
+
+════════════════════════════════════════════════════════════════════════
+  时间线 / 事件归属 / 工具结果
+════════════════════════════════════════════════════════════════════════
+  总墙钟: 3700ms (3.7s)
+  S0  prompt发出     18  agent_start     19  prompt返回   3718  settled   3718  本回合耗时 3700ms
+       事件数 28  事件类型 agent_start×1 turn_start×2 message_start×5 message_end×5 message_update×7 tool_execution_start×1 tool_execution_update×2 tool_execution_end×1 turn_end×2 agent_end×1 agent_settled×1
+       里程碑: agent_start@    19  message_start@    19  message_start@    19  message_start@  2504  tool_execution_start@  2826  tool_execution_end@  2829  message_start@  2829  message_start@  3478  agent_end@  3718  agent_settled@  3718
+       正文: "MARKER-A"
+       推理: 0 字符
+       ▶ start bash id=call_01a109a3bee471689316ef64 args=echo TOOL-A
+       ◀ end   bash id=call_01a109a3bee471689316ef64 isError=false out="TOOL-A"
+  S1  prompt发出     18  agent_start     19  prompt返回   2353  settled   2352  本回合耗时 2335ms
+       事件数 28  事件类型 agent_start×1 turn_start×2 message_start×5 message_end×5 message_update×7 tool_execution_start×1 tool_execution_update×2 tool_execution_end×1 turn_end×2 agent_end×1 agent_settled×1
+       里程碑: agent_start@    19  message_start@    19  message_start@    19  message_start@   849  tool_execution_start@  1342  tool_execution_end@  1345  message_start@  1345  message_start@  2159  agent_end@  2352  agent_settled@  2352
+       正文: "MARKER-B"
+       推理: 0 字符
+       ▶ start bash id=call_01a109a3b9367022bd1a8c53 args=echo TOOL-B
+       ◀ end   bash id=call_01a109a3b9367022bd1a8c53 isError=false out="TOOL-B"
+  S2  prompt发出     18  agent_start     19  prompt返回   2676  settled   2676  本回合耗时 2658ms
+       事件数 28  事件类型 agent_start×1 turn_start×2 message_start×5 message_end×5 message_update×7 tool_execution_start×1 tool_execution_update×2 tool_execution_end×1 turn_end×2 agent_end×1 agent_settled×1
+       里程碑: agent_start@    19  message_start@    19  message_start@    19  message_start@   777  tool_execution_start@  1210  tool_execution_end@  1214  message_start@  1214  message_start@  2219  agent_end@  2676  agent_settled@  2676
+       正文: "MARKER-C"
+       推理: 0 字符
+       ▶ start bash id=call_01a109a3b87b71d68dbfb1d2 args=echo TOOL-C
+       ◀ end   bash id=call_01a109a3b87b71d68dbfb1d2 isError=false out="TOOL-C"
+
+  交错度: 全局事件 84 个 · 活跃会话切换 14 次 · 12 个 200ms 桶(其中 1 个桶里 3 个会话同时在动,峰值并发 3) · 三段时间重叠 2335ms
+
+  ── 每个事件类型上「有没有 usage」 ──
+   有 usage  message_start :: ev.message.usage  ×6  input=0 output=0 cacheRead=0 cacheWrite=0 reasoning=undefined totalTokens=0 cost.total=0
+   有 usage  message_update :: ev.message.usage  ×21  input=0 output=0 cacheRead=0 cacheWrite=0 reasoning=undefined totalTokens=0 cost.total=0
+   有 usage  message_update :: ev.assistantMessageEvent.partial.usage  ×21  input=0 output=0 cacheRead=0 cacheWrite=0 reasoning=undefined totalTokens=0 cost.total=0
+   有 usage  message_end :: ev.message.usage  ×6  input=49 output=4 cacheRead=983 cacheWrite=0 reasoning=undefined totalTokens=1036 cost.total=0.00007848
+   有 usage  turn_end :: ev.message.usage  ×6  input=49 output=4 cacheRead=983 cacheWrite=0 reasoning=undefined totalTokens=1036 cost.total=0.00007848
+   负样本 · **完全**没有 usage 的事件类型: agent_start, turn_start, tool_execution_start, tool_execution_update, tool_execution_end, agent_end, agent_settled
+   混合 · 同一个类型上有的实例有、有的没有: message_start, message_end
+   ⇒ 「usage 挂在哪个事件上」必须答成 (事件类型, where) 二元组 —— 只看类型会读错。
+
+  ── 负样本 · 同一个 `message_end` 类型上,哪些实例**没有** usage ──
+   system | usage=false  ×3
+   user | usage=false  ×3
+   assistant content=[toolCall] stop=toolUse model=MiniMax-M3 | usage=true  ×3
+   toolResult bash isError=false | usage=false  ×3
+   assistant content=[text] stop=stop model=MiniMax-M3 | usage=true  ×3
+
+  ── 逐 message_end 的实测值(快照,不是活引用)──
+   S0: 2 条 message_end 带 usage
+      assistant content=[toolCall] stop=toolUse model=MiniMax-M3     input=855 output=29 cacheRead=128 cacheWrite=0 reasoning=undefined totalTokens=1012 cost.total=0.00029897999999999996
+      assistant content=[text] stop=stop model=MiniMax-M3            input=49 output=4 cacheRead=983 cacheWrite=0 reasoning=undefined totalTokens=1036 cost.total=0.00007848
+   S1: 2 条 message_end 带 usage
+      assistant content=[toolCall] stop=toolUse model=MiniMax-M3     input=855 output=29 cacheRead=128 cacheWrite=0 reasoning=undefined totalTokens=1012 cost.total=0.00029897999999999996
+      assistant content=[text] stop=stop model=MiniMax-M3            input=49 output=4 cacheRead=983 cacheWrite=0 reasoning=undefined totalTokens=1036 cost.total=0.00007848
+   S2: 2 条 message_end 带 usage
+      assistant content=[toolCall] stop=toolUse model=MiniMax-M3     input=855 output=29 cacheRead=128 cacheWrite=0 reasoning=undefined totalTokens=1012 cost.total=0.00029897999999999996
+      assistant content=[text] stop=stop model=MiniMax-M3            input=49 output=4 cacheRead=983 cacheWrite=0 reasoning=undefined totalTokens=1036 cost.total=0.00007848
+
+════════════════════════════════════════════════════════════════════════
+  【判定组】门禁断言(串扰)—— mode=simul 第 1 轮
+════════════════════════════════════════════════════════════════════════
+   ✓ [simul r1] G S0 原始事件流(整段 JSON 21852 字节)不含别人的标记
+        干净
+   ✓ [simul r1] G S0 原始事件流不含别人的 token
+        干净
+   ✓ [simul r1] G S0 原始事件流不含别人的 sessionId
+        干净
+   ✓ [simul r1] G S0 正文不含别人的标记
+        干净
+   ✓ [simul r1] G S0 工具参数不含别人的 token
+        干净
+   ✓ [simul r1] G S0 工具结果不含别人的 token
+        干净
+   ✓ [simul r1] G S0 自己的 transcript 不含别人的标记
+        干净
+   ✓ [simul r1] G S0 收到过事件(非空)
+        28 个
+   ✓ [simul r1] G S1 原始事件流(整段 JSON 21852 字节)不含别人的标记
+        干净
+   ✓ [simul r1] G S1 原始事件流不含别人的 token
+        干净
+   ✓ [simul r1] G S1 原始事件流不含别人的 sessionId
+        干净
+   ✓ [simul r1] G S1 正文不含别人的标记
+        干净
+   ✓ [simul r1] G S1 工具参数不含别人的 token
+        干净
+   ✓ [simul r1] G S1 工具结果不含别人的 token
+        干净
+   ✓ [simul r1] G S1 自己的 transcript 不含别人的标记
+        干净
+   ✓ [simul r1] G S1 收到过事件(非空)
+        28 个
+   ✓ [simul r1] G S2 原始事件流(整段 JSON 21852 字节)不含别人的标记
+        干净
+   ✓ [simul r1] G S2 原始事件流不含别人的 token
+        干净
+   ✓ [simul r1] G S2 原始事件流不含别人的 sessionId
+        干净
+   ✓ [simul r1] G S2 正文不含别人的标记
+        干净
+   ✓ [simul r1] G S2 工具参数不含别人的 token
+        干净
+   ✓ [simul r1] G S2 工具结果不含别人的 token
+        干净
+   ✓ [simul r1] G S2 自己的 transcript 不含别人的标记
+        干净
+   ✓ [simul r1] G S2 收到过事件(非空)
+        28 个
+   ✓ [simul r1] G toolCallId 跨会话不重复
+        3 个 id 互不相同
+
+  → 门禁 25 条**全绿**:没有任何一个会话的通道里出现过别人的东西
+
+════════════════════════════════════════════════════════════════════════
+  【观测组】模型遵从性(不参与判定)—— mode=simul 第 1 轮
+════════════════════════════════════════════════════════════════════════
+   ✓ [simul r1] C S0 正文出现自己的标记 MARKER-A
+        MARKER-A
+   ✓ [simul r1] C S0 真的调了工具(1 次)
+        bash(echo TOOL-A)
+   ✓ [simul r1] C S0 工具参数指向自己 TOOL-A
+        echo TOOL-A
+   ✓ [simul r1] C S0 工具结果回到自己 TOOL-A
+        TOOL-A
+   ✓ [simul r1] C S0 自己的 transcript 含自己的标记
+        481 字节
+   ✓ [simul r1] C S0 回合有终点
+        settled=  3718 promptResolved=  3718
+   ✓ [simul r1] C S1 正文出现自己的标记 MARKER-B
+        MARKER-B
+   ✓ [simul r1] C S1 真的调了工具(1 次)
+        bash(echo TOOL-B)
+   ✓ [simul r1] C S1 工具参数指向自己 TOOL-B
+        echo TOOL-B
+   ✓ [simul r1] C S1 工具结果回到自己 TOOL-B
+        TOOL-B
+   ✓ [simul r1] C S1 自己的 transcript 含自己的标记
+        481 字节
+   ✓ [simul r1] C S1 回合有终点
+        settled=  2352 promptResolved=  2353
+   ✓ [simul r1] C S2 正文出现自己的标记 MARKER-C
+        MARKER-C
+   ✓ [simul r1] C S2 真的调了工具(1 次)
+        bash(echo TOOL-C)
+   ✓ [simul r1] C S2 工具参数指向自己 TOOL-C
+        echo TOOL-C
+   ✓ [simul r1] C S2 工具结果回到自己 TOOL-C
+        TOOL-C
+   ✓ [simul r1] C S2 自己的 transcript 含自己的标记
+        481 字节
+   ✓ [simul r1] C S2 回合有终点
+        settled=  2676 promptResolved=  2676
+
+  → 遵从性 18 条全绿
+
+  软检查:
+   ✓ [simul r1] W S0 推理流不含别人的标记
+        干净
+   ✓ [simul r1] W S1 推理流不含别人的标记
+        干净
+   ✓ [simul r1] W S2 推理流不含别人的标记
+        干净
+
+════════════════════════════════════════════════════════════════════════
+  第 2/3 轮 · mode=simul · 三个 prompt() 在同一 tick 同时发出
+════════════════════════════════════════════════════════════════════════
+
+════════════════════════════════════════════════════════════════════════
+  时间线 / 事件归属 / 工具结果
+════════════════════════════════════════════════════════════════════════
+  总墙钟: 3198ms (3.2s)
+  S0  prompt发出   3727  agent_start   3727  prompt返回   5542  settled   5542  本回合耗时 1815ms
+       事件数 28  事件类型 agent_start×1 turn_start×2 message_start×5 message_end×5 message_update×7 tool_execution_start×1 tool_execution_update×2 tool_execution_end×1 turn_end×2 agent_end×1 agent_settled×1
+       里程碑: agent_start@  3727  message_start@  3727  message_start@  3727  message_start@  4385  tool_execution_start@  4721  tool_execution_end@  4724  message_start@  4724  message_start@  5348  agent_end@  5542  agent_settled@  5542
+       正文: "MARKER-A"
+       推理: 0 字符
+       ▶ start bash id=call_01a109a3c63b73a995d59e4f args=echo TOOL-A
+       ◀ end   bash id=call_01a109a3c63b73a995d59e4f isError=false out="TOOL-A"
+  S1  prompt发出   3727  agent_start   3727  prompt返回   5502  settled   5502  本回合耗时 1775ms
+       事件数 28  事件类型 agent_start×1 turn_start×2 message_start×5 message_end×5 message_update×7 tool_execution_start×1 tool_execution_update×2 tool_execution_end×1 turn_end×2 agent_end×1 agent_settled×1
+       里程碑: agent_start@  3727  message_start@  3727  message_start@  3727  message_start@  4284  tool_execution_start@  4600  tool_execution_end@  4602  message_start@  4602  message_start@  5321  agent_end@  5502  agent_settled@  5502
+       正文: "MARKER-B"
+       推理: 0 字符
+       ▶ start bash id=call_01a109a3c5c67776bef75e56 args=echo TOOL-B
+       ◀ end   bash id=call_01a109a3c5c67776bef75e56 isError=false out="TOOL-B"
+  S2  prompt发出   3727  agent_start   3727  prompt返回   6925  settled   6925  本回合耗时 3198ms
+       事件数 28  事件类型 agent_start×1 turn_start×2 message_start×5 message_end×5 message_update×7 tool_execution_start×1 tool_execution_update×2 tool_execution_end×1 turn_end×2 agent_end×1 agent_settled×1
+       里程碑: agent_start@  3727  message_start@  3727  message_start@  3727  message_start@  5308  tool_execution_start@  5623  tool_execution_end@  5625  message_start@  5625  message_start@  6709  agent_end@  6925  agent_settled@  6925
+       正文: "MARKER-C"
+       推理: 0 字符
+       ▶ start bash id=call_01a109a3c9b57316919b9ea9 args=echo TOOL-C
+       ◀ end   bash id=call_01a109a3c9b57316919b9ea9 isError=false out="TOOL-C"
+
+  交错度: 全局事件 84 个 · 活跃会话切换 15 次 · 9 个 200ms 桶(其中 3 个桶里 3 个会话同时在动,峰值并发 3) · 三段时间重叠 1775ms
+
+  ── 每个事件类型上「有没有 usage」 ──
+   有 usage  message_start :: ev.message.usage  ×6  input=0 output=0 cacheRead=0 cacheWrite=0 reasoning=undefined totalTokens=0 cost.total=0
+   有 usage  message_update :: ev.message.usage  ×21  input=1 output=4 cacheRead=1031 cacheWrite=0 reasoning=undefined totalTokens=1036 cost.total=0.00006696
+   有 usage  message_update :: ev.assistantMessageEvent.partial.usage  ×21  input=1 output=4 cacheRead=1031 cacheWrite=0 reasoning=undefined totalTokens=1036 cost.total=0.00006696
+   有 usage  message_end :: ev.message.usage  ×6  input=1 output=4 cacheRead=1031 cacheWrite=0 reasoning=undefined totalTokens=1036 cost.total=0.00006696
+   有 usage  turn_end :: ev.message.usage  ×6  input=1 output=4 cacheRead=1031 cacheWrite=0 reasoning=undefined totalTokens=1036 cost.total=0.00006696
+   负样本 · **完全**没有 usage 的事件类型: agent_start, turn_start, tool_execution_start, tool_execution_update, tool_execution_end, agent_end, agent_settled
+   混合 · 同一个类型上有的实例有、有的没有: message_start, message_end
+   ⇒ 「usage 挂在哪个事件上」必须答成 (事件类型, where) 二元组 —— 只看类型会读错。
+
+  ── 负样本 · 同一个 `message_end` 类型上,哪些实例**没有** usage ──
+   system | usage=false  ×3
+   user | usage=false  ×3
+   assistant content=[toolCall] stop=toolUse model=MiniMax-M3 | usage=true  ×3
+   toolResult bash isError=false | usage=false  ×3
+   assistant content=[text] stop=stop model=MiniMax-M3 | usage=true  ×3
+
+  ── 逐 message_end 的实测值(快照,不是活引用)──
+   S0: 2 条 message_end 带 usage
+      assistant content=[toolCall] stop=toolUse model=MiniMax-M3     input=1 output=29 cacheRead=982 cacheWrite=0 reasoning=undefined totalTokens=1012 cost.total=0.00009402
+      assistant content=[text] stop=stop model=MiniMax-M3            input=1 output=4 cacheRead=1031 cacheWrite=0 reasoning=undefined totalTokens=1036 cost.total=0.00006696
+   S1: 2 条 message_end 带 usage
+      assistant content=[toolCall] stop=toolUse model=MiniMax-M3     input=1 output=29 cacheRead=982 cacheWrite=0 reasoning=undefined totalTokens=1012 cost.total=0.00009402
+      assistant content=[text] stop=stop model=MiniMax-M3            input=1 output=4 cacheRead=1031 cacheWrite=0 reasoning=undefined totalTokens=1036 cost.total=0.00006696
+   S2: 2 条 message_end 带 usage
+      assistant content=[toolCall] stop=toolUse model=MiniMax-M3     input=1 output=29 cacheRead=982 cacheWrite=0 reasoning=undefined totalTokens=1012 cost.total=0.00009402
+      assistant content=[text] stop=stop model=MiniMax-M3            input=1 output=4 cacheRead=1031 cacheWrite=0 reasoning=undefined totalTokens=1036 cost.total=0.00006696
+
+════════════════════════════════════════════════════════════════════════
+  【判定组】门禁断言(串扰)—— mode=simul 第 2 轮
+════════════════════════════════════════════════════════════════════════
+   ✓ [simul r2] G S0 原始事件流(整段 JSON 21837 字节)不含别人的标记
+        干净
+   ✓ [simul r2] G S0 原始事件流不含别人的 token
+        干净
+   ✓ [simul r2] G S0 原始事件流不含别人的 sessionId
+        干净
+   ✓ [simul r2] G S0 正文不含别人的标记
+        干净
+   ✓ [simul r2] G S0 工具参数不含别人的 token
+        干净
+   ✓ [simul r2] G S0 工具结果不含别人的 token
+        干净
+   ✓ [simul r2] G S0 自己的 transcript 不含别人的标记
+        干净
+   ✓ [simul r2] G S0 收到过事件(非空)
+        28 个
+   ✓ [simul r2] G S1 原始事件流(整段 JSON 21777 字节)不含别人的标记
+        干净
+   ✓ [simul r2] G S1 原始事件流不含别人的 token
+        干净
+   ✓ [simul r2] G S1 原始事件流不含别人的 sessionId
+        干净
+   ✓ [simul r2] G S1 正文不含别人的标记
+        干净
+   ✓ [simul r2] G S1 工具参数不含别人的 token
+        干净
+   ✓ [simul r2] G S1 工具结果不含别人的 token
+        干净
+   ✓ [simul r2] G S1 自己的 transcript 不含别人的标记
+        干净
+   ✓ [simul r2] G S1 收到过事件(非空)
+        28 个
+   ✓ [simul r2] G S2 原始事件流(整段 JSON 21807 字节)不含别人的标记
+        干净
+   ✓ [simul r2] G S2 原始事件流不含别人的 token
+        干净
+   ✓ [simul r2] G S2 原始事件流不含别人的 sessionId
+        干净
+   ✓ [simul r2] G S2 正文不含别人的标记
+        干净
+   ✓ [simul r2] G S2 工具参数不含别人的 token
+        干净
+   ✓ [simul r2] G S2 工具结果不含别人的 token
+        干净
+   ✓ [simul r2] G S2 自己的 transcript 不含别人的标记
+        干净
+   ✓ [simul r2] G S2 收到过事件(非空)
+        28 个
+   ✓ [simul r2] G toolCallId 跨会话不重复
+        3 个 id 互不相同
+
+  → 门禁 25 条**全绿**:没有任何一个会话的通道里出现过别人的东西
+
+════════════════════════════════════════════════════════════════════════
+  【观测组】模型遵从性(不参与判定)—— mode=simul 第 2 轮
+════════════════════════════════════════════════════════════════════════
+   ✓ [simul r2] C S0 正文出现自己的标记 MARKER-A
+        MARKER-A
+   ✓ [simul r2] C S0 真的调了工具(1 次)
+        bash(echo TOOL-A)
+   ✓ [simul r2] C S0 工具参数指向自己 TOOL-A
+        echo TOOL-A
+   ✓ [simul r2] C S0 工具结果回到自己 TOOL-A
+        TOOL-A
+   ✓ [simul r2] C S0 自己的 transcript 含自己的标记
+        481 字节
+   ✓ [simul r2] C S0 回合有终点
+        settled=  5542 promptResolved=  5542
+   ✓ [simul r2] C S1 正文出现自己的标记 MARKER-B
+        MARKER-B
+   ✓ [simul r2] C S1 真的调了工具(1 次)
+        bash(echo TOOL-B)
+   ✓ [simul r2] C S1 工具参数指向自己 TOOL-B
+        echo TOOL-B
+   ✓ [simul r2] C S1 工具结果回到自己 TOOL-B
+        TOOL-B
+   ✓ [simul r2] C S1 自己的 transcript 含自己的标记
+        481 字节
+   ✓ [simul r2] C S1 回合有终点
+        settled=  5502 promptResolved=  5502
+   ✓ [simul r2] C S2 正文出现自己的标记 MARKER-C
+        MARKER-C
+   ✓ [simul r2] C S2 真的调了工具(1 次)
+        bash(echo TOOL-C)
+   ✓ [simul r2] C S2 工具参数指向自己 TOOL-C
+        echo TOOL-C
+   ✓ [simul r2] C S2 工具结果回到自己 TOOL-C
+        TOOL-C
+   ✓ [simul r2] C S2 自己的 transcript 含自己的标记
+        481 字节
+   ✓ [simul r2] C S2 回合有终点
+        settled=  6925 promptResolved=  6925
+
+  → 遵从性 18 条全绿
+
+  软检查:
+   ✓ [simul r2] W S0 推理流不含别人的标记
+        干净
+   ✓ [simul r2] W S1 推理流不含别人的标记
+        干净
+   ✓ [simul r2] W S2 推理流不含别人的标记
+        干净
+
+════════════════════════════════════════════════════════════════════════
+  第 3/3 轮 · mode=simul · 三个 prompt() 在同一 tick 同时发出
+════════════════════════════════════════════════════════════════════════
+
+════════════════════════════════════════════════════════════════════════
+  时间线 / 事件归属 / 工具结果
+════════════════════════════════════════════════════════════════════════
+  总墙钟: 2664ms (2.7s)
+  S0  prompt发出   6939  agent_start   6939  prompt返回   9352  settled   9352  本回合耗时 2413ms
+       事件数 36  事件类型 agent_start×1 turn_start×2 message_start×5 message_end×5 message_update×15 tool_execution_start×1 tool_execution_update×2 tool_execution_end×1 turn_end×2 agent_end×1 agent_settled×1
+       里程碑: agent_start@  6939  message_start@  6939  message_start@  6939  message_start@  7692  tool_execution_start@  8209  tool_execution_end@  8212  message_start@  8212  message_start@  9036  agent_end@  9352  agent_settled@  9352
+       正文: "MARKER-A"
+       推理: 0 字符
+       ▶ start bash id=chatcmpl-tool-b15e935f42c17b27 args=echo TOOL-A
+       ◀ end   bash id=chatcmpl-tool-b15e935f42c17b27 isError=false out="TOOL-A"
+  S1  prompt发出   6939  agent_start   6939  prompt返回   9603  settled   9603  本回合耗时 2664ms
+       事件数 28  事件类型 agent_start×1 turn_start×2 message_start×5 message_end×5 message_update×7 tool_execution_start×1 tool_execution_update×2 tool_execution_end×1 turn_end×2 agent_end×1 agent_settled×1
+       里程碑: agent_start@  6939  message_start@  6939  message_start@  6939  message_start@  8593  tool_execution_start@  8857  tool_execution_end@  8859  message_start@  8859  message_start@  9438  agent_end@  9602  agent_settled@  9603
+       正文: "MARKER-B"
+       推理: 0 字符
+       ▶ start bash id=call_01a109a3d67b70dcb77f0771 args=echo TOOL-B
+       ◀ end   bash id=call_01a109a3d67b70dcb77f0771 isError=false out="TOOL-B"
+  S2  prompt发出   6939  agent_start   6939  prompt返回   8935  settled   8935  本回合耗时 1996ms
+       事件数 28  事件类型 agent_start×1 turn_start×2 message_start×5 message_end×5 message_update×7 tool_execution_start×1 tool_execution_update×2 tool_execution_end×1 turn_end×2 agent_end×1 agent_settled×1
+       里程碑: agent_start@  6939  message_start@  6939  message_start@  6939  message_start@  7645  tool_execution_start@  8031  tool_execution_end@  8035  message_start@  8035  message_start@  8769  agent_end@  8935  agent_settled@  8935
+       正文: "MARKER-C"
+       推理: 0 字符
+       ▶ start bash id=call_01a109a3d33b76498f5a8831 args=echo TOOL-C
+       ◀ end   bash id=call_01a109a3d33b76498f5a8831 isError=false out="TOOL-C"
+
+  交错度: 全局事件 92 个 · 活跃会话切换 13 次 · 12 个 200ms 桶(其中 1 个桶里 3 个会话同时在动,峰值并发 3) · 三段时间重叠 1996ms
+
+  ── 每个事件类型上「有没有 usage」 ──
+   有 usage  message_start :: ev.message.usage  ×6  input=0 output=0 cacheRead=0 cacheWrite=0 reasoning=undefined totalTokens=0 cost.total=0
+   有 usage  message_update :: ev.message.usage  ×29  input=0 output=0 cacheRead=0 cacheWrite=0 reasoning=undefined totalTokens=0 cost.total=0
+   有 usage  message_update :: ev.assistantMessageEvent.partial.usage  ×29  input=0 output=0 cacheRead=0 cacheWrite=0 reasoning=undefined totalTokens=0 cost.total=0
+   有 usage  message_end :: ev.message.usage  ×6  input=1 output=4 cacheRead=1031 cacheWrite=0 reasoning=undefined totalTokens=1036 cost.total=0.00006696
+   有 usage  turn_end :: ev.message.usage  ×6  input=1 output=4 cacheRead=1031 cacheWrite=0 reasoning=undefined totalTokens=1036 cost.total=0.00006696
+   负样本 · **完全**没有 usage 的事件类型: agent_start, turn_start, tool_execution_start, tool_execution_update, tool_execution_end, agent_end, agent_settled
+   混合 · 同一个类型上有的实例有、有的没有: message_start, message_end
+   ⇒ 「usage 挂在哪个事件上」必须答成 (事件类型, where) 二元组 —— 只看类型会读错。
+
+  ── 负样本 · 同一个 `message_end` 类型上,哪些实例**没有** usage ──
+   system | usage=false  ×3
+   user | usage=false  ×3
+   assistant content=[toolCall] stop=toolUse model=MiniMax-M3 | usage=true  ×3
+   toolResult bash isError=false | usage=false  ×3
+   assistant content=[text] stop=stop model=MiniMax-M3 | usage=true  ×3
+
+  ── 逐 message_end 的实测值(快照,不是活引用)──
+   S0: 2 条 message_end 带 usage
+      assistant content=[toolCall] stop=toolUse model=MiniMax-M3     input=471 output=29 cacheRead=512 cacheWrite=0 reasoning=undefined totalTokens=1012 cost.total=0.00020682
+      assistant content=[text] stop=stop model=MiniMax-M3            input=520 output=4 cacheRead=512 cacheWrite=0 reasoning=undefined totalTokens=1036 cost.total=0.00019152
+   S1: 2 条 message_end 带 usage
+      assistant content=[toolCall] stop=toolUse model=MiniMax-M3     input=1 output=29 cacheRead=982 cacheWrite=0 reasoning=undefined totalTokens=1012 cost.total=0.00009402
+      assistant content=[text] stop=stop model=MiniMax-M3            input=1 output=4 cacheRead=1031 cacheWrite=0 reasoning=undefined totalTokens=1036 cost.total=0.00006696
+   S2: 2 条 message_end 带 usage
+      assistant content=[toolCall] stop=toolUse model=MiniMax-M3     input=1 output=29 cacheRead=982 cacheWrite=0 reasoning=undefined totalTokens=1012 cost.total=0.00009402
+      assistant content=[text] stop=stop model=MiniMax-M3            input=1 output=4 cacheRead=1031 cacheWrite=0 reasoning=undefined totalTokens=1036 cost.total=0.00006696
+
+════════════════════════════════════════════════════════════════════════
+  【判定组】门禁断言(串扰)—— mode=simul 第 3 轮
+════════════════════════════════════════════════════════════════════════
+   ✓ [simul r3] G S0 原始事件流(整段 JSON 30742 字节)不含别人的标记
+        干净
+   ✓ [simul r3] G S0 原始事件流不含别人的 token
+        干净
+   ✓ [simul r3] G S0 原始事件流不含别人的 sessionId
+        干净
+   ✓ [simul r3] G S0 正文不含别人的标记
+        干净
+   ✓ [simul r3] G S0 工具参数不含别人的 token
+        干净
+   ✓ [simul r3] G S0 工具结果不含别人的 token
+        干净
+   ✓ [simul r3] G S0 自己的 transcript 不含别人的标记
+        干净
+   ✓ [simul r3] G S0 收到过事件(非空)
+        36 个
+   ✓ [simul r3] G S1 原始事件流(整段 JSON 21925 字节)不含别人的标记
+        干净
+   ✓ [simul r3] G S1 原始事件流不含别人的 token
+        干净
+   ✓ [simul r3] G S1 原始事件流不含别人的 sessionId
+        干净
+   ✓ [simul r3] G S1 正文不含别人的标记
+        干净
+   ✓ [simul r3] G S1 工具参数不含别人的 token
+        干净
+   ✓ [simul r3] G S1 工具结果不含别人的 token
+        干净
+   ✓ [simul r3] G S1 自己的 transcript 不含别人的标记
+        干净
+   ✓ [simul r3] G S1 收到过事件(非空)
+        28 个
+   ✓ [simul r3] G S2 原始事件流(整段 JSON 21793 字节)不含别人的标记
+        干净
+   ✓ [simul r3] G S2 原始事件流不含别人的 token
+        干净
+   ✓ [simul r3] G S2 原始事件流不含别人的 sessionId
+        干净
+   ✓ [simul r3] G S2 正文不含别人的标记
+        干净
+   ✓ [simul r3] G S2 工具参数不含别人的 token
+        干净
+   ✓ [simul r3] G S2 工具结果不含别人的 token
+        干净
+   ✓ [simul r3] G S2 自己的 transcript 不含别人的标记
+        干净
+   ✓ [simul r3] G S2 收到过事件(非空)
+        28 个
+   ✓ [simul r3] G toolCallId 跨会话不重复
+        3 个 id 互不相同
+
+  → 门禁 25 条**全绿**:没有任何一个会话的通道里出现过别人的东西
+
+════════════════════════════════════════════════════════════════════════
+  【观测组】模型遵从性(不参与判定)—— mode=simul 第 3 轮
+════════════════════════════════════════════════════════════════════════
+   ✓ [simul r3] C S0 正文出现自己的标记 MARKER-A
+        MARKER-A
+   ✓ [simul r3] C S0 真的调了工具(1 次)
+        bash(echo TOOL-A)
+   ✓ [simul r3] C S0 工具参数指向自己 TOOL-A
+        echo TOOL-A
+   ✓ [simul r3] C S0 工具结果回到自己 TOOL-A
+        TOOL-A
+   ✓ [simul r3] C S0 自己的 transcript 含自己的标记
+        482 字节
+   ✓ [simul r3] C S0 回合有终点
+        settled=  9352 promptResolved=  9352
+   ✓ [simul r3] C S1 正文出现自己的标记 MARKER-B
+        MARKER-B
+   ✓ [simul r3] C S1 真的调了工具(1 次)
+        bash(echo TOOL-B)
+   ✓ [simul r3] C S1 工具参数指向自己 TOOL-B
+        echo TOOL-B
+   ✓ [simul r3] C S1 工具结果回到自己 TOOL-B
+        TOOL-B
+   ✓ [simul r3] C S1 自己的 transcript 含自己的标记
+        481 字节
+   ✓ [simul r3] C S1 回合有终点
+        settled=  9603 promptResolved=  9603
+   ✓ [simul r3] C S2 正文出现自己的标记 MARKER-C
+        MARKER-C
+   ✓ [simul r3] C S2 真的调了工具(1 次)
+        bash(echo TOOL-C)
+   ✓ [simul r3] C S2 工具参数指向自己 TOOL-C
+        echo TOOL-C
+   ✓ [simul r3] C S2 工具结果回到自己 TOOL-C
+        TOOL-C
+   ✓ [simul r3] C S2 自己的 transcript 含自己的标记
+        481 字节
+   ✓ [simul r3] C S2 回合有终点
+        settled=  8935 promptResolved=  8935
+
+  → 遵从性 18 条全绿
+
+  软检查:
+   ✓ [simul r3] W S0 推理流不含别人的标记
+        干净
+   ✓ [simul r3] W S1 推理流不含别人的标记
+        干净
+   ✓ [simul r3] W S2 推理流不含别人的标记
+        干净
+
+════════════════════════════════════════════════════════════════════════
+  mode=simul · 3 轮汇总
+════════════════════════════════════════════════════════════════════════
+  第 1 轮: 门禁 全绿 · 遵从性 全绿 · 活跃会话切换 14 次 · 峰值并发 3 · 桶内 3 路并发 1/12
+  第 2 轮: 门禁 全绿 · 遵从性 全绿 · 活跃会话切换 15 次 · 峰值并发 3 · 桶内 3 路并发 3/9
+  第 3 轮: 门禁 全绿 · 遵从性 全绿 · 活跃会话切换 13 次 · 峰值并发 3 · 桶内 3 路并发 1/12
+
+  (临时目录已清理: /var/folders/rm/kg3j0vq55rzc0pm_097z4gq00000gn/T/r1-probe-root-XdYiFf)

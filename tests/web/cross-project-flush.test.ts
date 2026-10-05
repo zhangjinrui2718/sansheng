@@ -75,11 +75,11 @@ describe("bug② · 交错的两个项目:同一条 WS 上的 agent_end 不许�
     const s = () => useChatStore.getState();
 
     // ── A:用户正坐着的项目,一轮正在流 ──
-    s().applyEvent({ type: "message_start", projectId: PA, messageId: "a1", role: "assistant", agentId: BM });
+    s().applyEvent({ type: "message_start", projectId: PA, messageId: "a1", role: "assistant", agentId: BM , source: "turn", trigger: { kind: "user" }});
     s().applyEvent({ type: "delta", projectId: PA, messageId: "a1", text: "前半" });
 
     // ── B:排空器在后台跑出来的一个回合 ──
-    s().applyEvent({ type: "message_start", projectId: PB, messageId: "b1", role: "assistant", agentId: PM });
+    s().applyEvent({ type: "message_start", projectId: PB, messageId: "b1", role: "assistant", agentId: PM , source: "turn", trigger: { kind: "todo", todoKind: "decompose_project" }});
     s().applyEvent({ type: "delta", projectId: PB, messageId: "b1", text: "B 的产出" });
     s().applyEvent({ type: "agent_end", projectId: PB, ts: 1 });
 
@@ -99,10 +99,10 @@ describe("bug② · 交错的两个项目:同一条 WS 上的 agent_end 不许�
 
   it("**正样本**:B 的 agent_end 不许把「A 还在推演」的状态改成 idle(那会让发送键提前解锁)", () => {
     const s = () => useChatStore.getState();
-    s().applyEvent({ type: "message_start", projectId: PA, messageId: "a1", role: "assistant", agentId: BM });
+    s().applyEvent({ type: "message_start", projectId: PA, messageId: "a1", role: "assistant", agentId: BM , source: "turn", trigger: { kind: "user" }});
     expect(s().status).toBe("streaming");
 
-    s().applyEvent({ type: "message_start", projectId: PB, messageId: "b1", role: "assistant", agentId: PM });
+    s().applyEvent({ type: "message_start", projectId: PB, messageId: "b1", role: "assistant", agentId: PM , source: "turn", trigger: { kind: "todo", todoKind: "decompose_project" }});
     s().applyEvent({ type: "agent_end", projectId: PB, ts: 1 });
 
     // 修复前:idle —— 而 `ChatSurface.tsx` 的发送按钮正是 `status === "streaming"`
@@ -122,7 +122,7 @@ describe("bug② · 交错的两个项目:同一条 WS 上的 agent_end 不许�
       tool: { id: "t1", name: "decompose_project" },
     });
     // A 的 agent_end 不许碰它:A 在 B 之后收口
-    s().applyEvent({ type: "message_start", projectId: PA, messageId: "a1", role: "assistant", agentId: BM });
+    s().applyEvent({ type: "message_start", projectId: PA, messageId: "a1", role: "assistant", agentId: BM , source: "turn", trigger: { kind: "user" }});
     s().applyEvent({ type: "agent_end", projectId: PA, ts: 1 });
     expect(s().inFlight["b-tool"]).toBeDefined();
 
@@ -135,8 +135,8 @@ describe("bug② · 交错的两个项目:同一条 WS 上的 agent_end 不许�
   it("**负样本/边界**:接待会话(`projectId: null`)是一个真上下文,不是「通配」", () => {
     const s = () => useChatStore.getState();
     // 接待会话正在流(null)+ 项目 A 正在流(PA)同时存在
-    s().applyEvent({ type: "message_start", projectId: PA, messageId: "a1", role: "assistant", agentId: BM });
-    s().applyEvent({ type: "message_start", projectId: null, messageId: "i1", role: "assistant", agentId: BM });
+    s().applyEvent({ type: "message_start", projectId: PA, messageId: "a1", role: "assistant", agentId: BM , source: "turn", trigger: { kind: "user" }});
+    s().applyEvent({ type: "message_start", projectId: null, messageId: "i1", role: "assistant", agentId: BM , source: "turn", trigger: { kind: "user" }});
     s().applyEvent({ type: "agent_end", projectId: null, ts: 1 });
 
     // 接待的 agent_end 只收接待那一条
@@ -152,8 +152,8 @@ describe("bug② · 交错的两个项目:同一条 WS 上的 agent_end 不许�
 
   it("**负样本**:同一个项目里两条消息照旧一起 flush(修复不许伤单项目路径)", () => {
     const s = () => useChatStore.getState();
-    s().applyEvent({ type: "message_start", projectId: PA, messageId: "a1", role: "assistant", agentId: BM });
-    s().applyEvent({ type: "message_start", projectId: PA, messageId: "a2", role: "assistant", agentId: BM });
+    s().applyEvent({ type: "message_start", projectId: PA, messageId: "a1", role: "assistant", agentId: BM , source: "turn", trigger: { kind: "user" }});
+    s().applyEvent({ type: "message_start", projectId: PA, messageId: "a2", role: "assistant", agentId: BM , source: "turn", trigger: { kind: "user" }});
     s().applyEvent({ type: "delta", projectId: PA, messageId: "a1", text: "AAA" });
     s().applyEvent({ type: "delta", projectId: PA, messageId: "a2", text: "BBB" });
     s().applyEvent({ type: "agent_end", projectId: PA, ts: 1 });
@@ -168,8 +168,8 @@ describe("bug② · 交错的两个项目:同一条 WS 上的 agent_end 不许�
 
   it("**负样本**:别的项目的 agent_end 不许把 A 的 `currentTurn` 兼容指针打空", () => {
     const s = () => useChatStore.getState();
-    s().applyEvent({ type: "message_start", projectId: PA, messageId: "a1", role: "assistant", agentId: BM });
-    s().applyEvent({ type: "message_start", projectId: PB, messageId: "b1", role: "assistant", agentId: PM });
+    s().applyEvent({ type: "message_start", projectId: PA, messageId: "a1", role: "assistant", agentId: BM , source: "turn", trigger: { kind: "user" }});
+    s().applyEvent({ type: "message_start", projectId: PB, messageId: "b1", role: "assistant", agentId: PM , source: "turn", trigger: { kind: "todo", todoKind: "decompose_project" }});
     // 指针此刻在 B 上(最后写入的是 B)——
     s().applyEvent({ type: "agent_end", projectId: PB, ts: 1 });
     // B 收口后指针必须落回**还活着的那一轮**,不能是 null / 也不能指向已收口的 b1

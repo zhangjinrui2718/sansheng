@@ -52,10 +52,10 @@ function shape(turns: ReadonlyArray<{ id: string; agentId: string | null; blocks
 describe("A2 · §2.10.3 那段序列必须产出两轮", () => {
   it("msgA 的正文 + msgB 的播报各自独立,不再是合并的一条", () => {
     const s = useChatStore.getState();
-    s.applyEvent({ type: "message_start", projectId: P, messageId: "msgA", role: "assistant", agentId: BM });
+    s.applyEvent({ type: "message_start", projectId: P, messageId: "msgA", role: "assistant", agentId: BM , source: "turn", trigger: { kind: "user" }});
     s.applyEvent({ type: "delta", projectId: P, messageId: "msgA", text: "AAA" });
     // 回合中途的播报:一整套独立信封
-    s.applyEvent({ type: "message_start", projectId: P, messageId: "msgB", role: "assistant", agentId: BM });
+    s.applyEvent({ type: "message_start", projectId: P, messageId: "msgB", role: "assistant", agentId: BM , source: "broadcast"});
     s.applyEvent({ type: "delta", projectId: P, messageId: "msgB", text: "播报" });
     s.applyEvent({ type: "message_end", projectId: P, messageId: "msgB" });
     // 播报之后,msgA 的正文继续流
@@ -70,9 +70,9 @@ describe("A2 · §2.10.3 那段序列必须产出两轮", () => {
 
   it("流式期间两轮**同时**在轮表里(数据层不丢字;屏幕上同时看到两轮 = A3)", () => {
     const s = useChatStore.getState();
-    s.applyEvent({ type: "message_start", projectId: P, messageId: "msgA", role: "assistant", agentId: BM });
+    s.applyEvent({ type: "message_start", projectId: P, messageId: "msgA", role: "assistant", agentId: BM , source: "turn", trigger: { kind: "user" }});
     s.applyEvent({ type: "delta", projectId: P, messageId: "msgA", text: "AAA" });
-    s.applyEvent({ type: "message_start", projectId: P, messageId: "msgB", role: "assistant", agentId: BM });
+    s.applyEvent({ type: "message_start", projectId: P, messageId: "msgB", role: "assistant", agentId: BM , source: "broadcast"});
     s.applyEvent({ type: "delta", projectId: P, messageId: "msgB", text: "播报" });
 
     expect(shape(inFlightTurns(useChatStore.getState()))).toEqual([
@@ -87,7 +87,7 @@ describe("A2 · §2.10.3 那段序列必须产出两轮", () => {
 describe("A2 · 同一 messageId 连续追加 / 不同 messageId 交错互不污染", () => {
   it("同一 messageId 的 delta 连续追加到同一轮", () => {
     const s = useChatStore.getState();
-    s.applyEvent({ type: "message_start", projectId: P, messageId: "m1", role: "assistant", agentId: BM });
+    s.applyEvent({ type: "message_start", projectId: P, messageId: "m1", role: "assistant", agentId: BM , source: "turn", trigger: { kind: "user" }});
     s.applyEvent({ type: "delta", projectId: P, messageId: "m1", text: "一" });
     s.applyEvent({ type: "delta", projectId: P, messageId: "m1", text: "二" });
     s.applyEvent({ type: "delta", projectId: P, messageId: "m1", text: "三" });
@@ -99,8 +99,8 @@ describe("A2 · 同一 messageId 连续追加 / 不同 messageId 交错互不污
 
   it("两条消息交错到达:各自只进自己那一轮", () => {
     const s = useChatStore.getState();
-    s.applyEvent({ type: "message_start", projectId: P, messageId: "m1", role: "assistant", agentId: BM });
-    s.applyEvent({ type: "message_start", projectId: P, messageId: "m2", role: "assistant", agentId: PM });
+    s.applyEvent({ type: "message_start", projectId: P, messageId: "m1", role: "assistant", agentId: BM , source: "turn", trigger: { kind: "user" }});
+    s.applyEvent({ type: "message_start", projectId: P, messageId: "m2", role: "assistant", agentId: PM , source: "turn", trigger: { kind: "todo", todoKind: "execute_work" }});
     s.applyEvent({ type: "delta", projectId: P, messageId: "m1", text: "1" });
     s.applyEvent({ type: "delta", projectId: P, messageId: "m2", text: "2" });
     s.applyEvent({ type: "delta", projectId: P, messageId: "m1", text: "3" });
@@ -118,7 +118,7 @@ describe("A2 · 同一 messageId 连续追加 / 不同 messageId 交错互不污
 
   it("思考流与正文流交错时也各自分轮(7-I:两条流永不混流)", () => {
     const s = useChatStore.getState();
-    s.applyEvent({ type: "message_start", projectId: P, messageId: "m1", role: "assistant", agentId: BM });
+    s.applyEvent({ type: "message_start", projectId: P, messageId: "m1", role: "assistant", agentId: BM , source: "turn", trigger: { kind: "user" }});
     s.applyEvent({ type: "thinking_delta", projectId: P, messageId: "m1", text: "想1" });
     s.applyEvent({ type: "delta", projectId: P, messageId: "m1", text: "说1" });
     s.applyEvent({ type: "thinking_delta", projectId: P, messageId: "m1", text: "想2" });
@@ -136,8 +136,8 @@ describe("A2 · 同一 messageId 连续追加 / 不同 messageId 交错互不污
 describe("A2 · message_end 只收口它自己那一轮", () => {
   it("收口 m2 时 m1 仍在流,且 m1 的迟到 delta 只进 m1", () => {
     const s = useChatStore.getState();
-    s.applyEvent({ type: "message_start", projectId: P, messageId: "m1", role: "assistant", agentId: BM });
-    s.applyEvent({ type: "message_start", projectId: P, messageId: "m2", role: "assistant", agentId: BM });
+    s.applyEvent({ type: "message_start", projectId: P, messageId: "m1", role: "assistant", agentId: BM , source: "turn", trigger: { kind: "user" }});
+    s.applyEvent({ type: "message_start", projectId: P, messageId: "m2", role: "assistant", agentId: BM , source: "broadcast"});
     s.applyEvent({ type: "delta", projectId: P, messageId: "m2", text: "播报" });
     s.applyEvent({ type: "message_end", projectId: P, messageId: "m2" });
 
@@ -177,7 +177,7 @@ describe("A2 · message_end 只收口它自己那一轮", () => {
 describe("A2 · agentId 存进轮里(A3 用它过滤与标注,A2 不做过滤)", () => {
   it("两个能建轮的事件都带上作者;agent_end flush 之后仍在", () => {
     const s = useChatStore.getState();
-    s.applyEvent({ type: "message_start", projectId: P, messageId: "m-bm", role: "assistant", agentId: BM });
+    s.applyEvent({ type: "message_start", projectId: P, messageId: "m-bm", role: "assistant", agentId: BM , source: "turn", trigger: { kind: "user" }});
     s.applyEvent({ type: "delta", projectId: P, messageId: "m-bm", text: "我来收敛" });
     // tool_start 自己也能建轮 —— 它是 agentId 的另一个构造点(§2.10.2)
     s.applyEvent({
@@ -197,7 +197,7 @@ describe("A2 · agentId 存进轮里(A3 用它过滤与标注,A2 不做过滤)",
 
   it("tool_start **不改写**已有轮的作者(身份在建轮那一刻就定了)", () => {
     const s = useChatStore.getState();
-    s.applyEvent({ type: "message_start", projectId: P, messageId: "m1", role: "assistant", agentId: BM });
+    s.applyEvent({ type: "message_start", projectId: P, messageId: "m1", role: "assistant", agentId: BM , source: "turn", trigger: { kind: "user" }});
     s.applyEvent({
       type: "tool_start",
       projectId: P,
@@ -212,13 +212,13 @@ describe("A2 · agentId 存进轮里(A3 用它过滤与标注,A2 不做过滤)",
 
   it("tool_end 只改它自己那个 messageId 的工具卡", () => {
     const s = useChatStore.getState();
-    s.applyEvent({ type: "message_start", projectId: P, messageId: "m1", role: "assistant", agentId: BM });
+    s.applyEvent({ type: "message_start", projectId: P, messageId: "m1", role: "assistant", agentId: BM , source: "turn", trigger: { kind: "user" }});
     s.applyEvent({
       type: "tool_start", projectId: P, messageId: "m1", agentId: BM,
       tool: { id: "t1", name: "board_write" },
     });
     s.applyEvent({
-      type: "message_start", projectId: P, messageId: "m2", role: "assistant", agentId: PM,
+      type: "message_start", projectId: P, messageId: "m2", role: "assistant", agentId: PM, source: "turn", trigger: { kind: "todo", todoKind: "execute_work" },
     });
     s.applyEvent({
       type: "tool_start", projectId: P, messageId: "m2", agentId: PM,

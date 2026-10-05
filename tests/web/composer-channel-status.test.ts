@@ -20,8 +20,11 @@
  *     内部角色在跑 ⟹ 显示「内部推进中」+ 保留中断按钮,**输入框可用**
  *
  * 判据落在 `lib/data.ts` 的 `channelActivityOf` / `surfaceStatusOf`,复用 A3 已有的
- * `channelOf`(两跳:`agentId → 成员 role → clientFacing`)。**接待会话没有成员表**
- * 时沿用 A3 已定的那条「未知 agent 按 client」,不在这里另立规则。
+ * `channelOf`。**W2-④(2026-10-06)把 `channelOf` 的主判据从「角色是不是
+ * `clientFacing`」换成了「这一轮为什么存在 / 这个封套是谁发的」**(甲方消息 /
+ * `source:"broadcast"` 的播报 / `trigger.kind === "user"` 的回合正文),所以本文件
+ * 的夹具都补上了 `source` / `trigger`,**判据本身一个字没改** —— 输入框与显示
+ * 仍然是同一条 `channelOf`。
  *
  * ── 正负样本(本项目纪律:必须命中的 + 必须不命中的,两个都对上才算判据没坏)──
  *
@@ -76,14 +79,26 @@ function ctx(over?: Partial<{ members: MemberView[]; intake: boolean }>): Channe
   });
 }
 
-/** 手搓的轮(`Turn` 的必填字段一个都不能少;`tests/` 不在 tsconfig 的 include 里)。 */
+/**
+ * 手搓的轮(`Turn` 的必填字段一个都不能少;`tests/` 不在 tsconfig 的 include 里)。
+ *
+ * ⚠️ **W2-④ 起 `origin` 也是必填**(`TurnOrigin`)。这里默认给
+ * `{source:"turn", trigger:{kind:"user"}}` —— 它代表「**用户触发**的那一轮」,
+ * 是甲方通道那三支里最常被手搓的一种(另一支 `broadcast` 由 `source` 单独给,
+ * 第三支 `unknown` 只该由 REST 回填 / `tool_start` 产生)。
+ */
 function turn(
   id: string,
   role: Turn["role"],
   agentId: string | null,
   projectId: string | null,
 ): Turn {
-  return { id, projectId, role, agentId, blocks: [{ kind: "text", text: "x" }], startedAt: 0 };
+  return {
+    id, projectId, role, agentId,
+    blocks: [{ kind: "text", text: "x" }],
+    startedAt: 0,
+    origin: { source: "turn", trigger: { kind: "user" } },
+  };
 }
 
 /** 现在在飞的轮(渲染层拿到的就是这一个列表)。 */
@@ -115,7 +130,7 @@ beforeEach(() => {
 describe("bug A · 只有内部角色在跑 ⇒ 输入框可用", () => {
   it("**正样本**:只有 wk 的轮在飞 → `status !== \"streaming\"`(输入框可用)", () => {
     const s = useChatStore.getState();
-    s.applyEvent({ type: "message_start", projectId: PA, messageId: "m-wk", role: "assistant", agentId: "wk" });
+    s.applyEvent({ type: "message_start", projectId: PA, messageId: "m-wk", role: "assistant", agentId: "wk" , source: "turn", trigger: { kind: "todo", todoKind: "execute_work" }});
     s.applyEvent({ type: "delta", projectId: PA, messageId: "m-wk", text: "第 1 项做完了" });
 
     // ⚠️ 成因还在(这一位是「有人在跑」的真话)—— 但它不再是输入框的判据。
@@ -130,15 +145,15 @@ describe("bug A · 只有内部角色在跑 ⇒ 输入框可用", () => {
 
   it("**正样本**:pm 与 qa 在跑同样是 internal(不是只有 wk 特殊)", () => {
     const s = useChatStore.getState();
-    s.applyEvent({ type: "message_start", projectId: PA, messageId: "m-pm", role: "assistant", agentId: "pm" });
-    s.applyEvent({ type: "message_start", projectId: PA, messageId: "m-qa", role: "assistant", agentId: "qa" });
+    s.applyEvent({ type: "message_start", projectId: PA, messageId: "m-pm", role: "assistant", agentId: "pm" , source: "turn", trigger: { kind: "todo", todoKind: "decompose_project" }});
+    s.applyEvent({ type: "message_start", projectId: PA, messageId: "m-qa", role: "assistant", agentId: "qa" , source: "turn", trigger: { kind: "todo", todoKind: "review_work" }});
     expect(surface(PA)).toBe("internal");
     expect(clientBusy(PA)).toBe(false);
   });
 
   it("**正样本**:bm 的轮在飞 → `status === \"streaming\"`(输入框禁用)", () => {
     const s = useChatStore.getState();
-    s.applyEvent({ type: "message_start", projectId: PA, messageId: "m-bm", role: "assistant", agentId: "bm" });
+    s.applyEvent({ type: "message_start", projectId: PA, messageId: "m-bm", role: "assistant", agentId: "bm" , source: "turn", trigger: { kind: "user" }});
     expect(surface(PA)).toBe("streaming");
     expect(clientBusy(PA)).toBe(true);
 
@@ -150,8 +165,8 @@ describe("bug A · 只有内部角色在跑 ⇒ 输入框可用", () => {
 
   it("**负样本**:一个内部轮 + 一个 client 轮同时在飞 → **仍然禁用**", () => {
     const s = useChatStore.getState();
-    s.applyEvent({ type: "message_start", projectId: PA, messageId: "m-wk", role: "assistant", agentId: "wk" });
-    s.applyEvent({ type: "message_start", projectId: PA, messageId: "m-bm", role: "assistant", agentId: "bm" });
+    s.applyEvent({ type: "message_start", projectId: PA, messageId: "m-wk", role: "assistant", agentId: "wk" , source: "turn", trigger: { kind: "todo", todoKind: "execute_work" }});
+    s.applyEvent({ type: "message_start", projectId: PA, messageId: "m-bm", role: "assistant", agentId: "bm" , source: "turn", trigger: { kind: "user" }});
 
     // 「只要有内部轮就放行」的实现会在这里返回 false —— 那是错的:业务经理正在回你。
     expect(clientBusy(PA), "client 在飞就是禁用,内部轮不改变这一条").toBe(true);
@@ -167,21 +182,30 @@ describe("bug A · 只有内部角色在跑 ⇒ 输入框可用", () => {
     expect(surfaceStatusOf("streaming", act)).toBe("idle");
   });
 
-  it("**负样本**:项目里成员表之外的 agent → fail-closed 成 internal,不禁用(A3 的两跳原样)", () => {
+  it("**负样本**:封套没到的轮(origin=unknown)里,成员表之外的 agent → fail-closed,不禁用", () => {
     const s = useChatStore.getState();
-    s.applyEvent({ type: "message_start", projectId: PA, messageId: "m-ghost", role: "assistant", agentId: "ag_ghost" });
+    // ⚠️ **W2-④ 起这条 fail-closed 只对 `origin === unknown` 的轮生效**
+    // (`channelOf` 的第五支)—— 封套带着 `trigger` 的轮按 trigger 判,与成员表无关。
+    // `unknown` 有两个来源:① REST 回填(`messageToTurn`),② `tool_start` 抢先建轮。
+    // 这里走 ②,因为它能直测 store(① 的样本在 channel-filter.test.ts)。
+    s.applyEvent({
+      type: "tool_start", projectId: PA, messageId: "m-ghost", agentId: "ag_ghost",
+      tool: { id: "t1", name: "board_write" },
+    });
     expect(surface(PA)).toBe("internal");
     expect(clientBusy(PA)).toBe(false);
   });
 });
 
 describe("bug A · 接待会话与跨上下文(projectId === null 不是通配)", () => {
-  it("**接待会话**:没有成员表时沿用 A3 的「未知 agent 按 client」⇒ 仍然禁用", () => {
+  it("**接待会话**:没有成员表也不影响判据(那一轮是用户触发的)⇒ 仍然禁用", () => {
     useChatStore.setState({ projectId: null, intakeActive: true, inFlight: {}, inFlightOrder: [], status: "idle" });
     const s = useChatStore.getState();
-    s.applyEvent({ type: "message_start", projectId: null, messageId: "m-i", role: "assistant", agentId: "bm" });
+    s.applyEvent({ type: "message_start", projectId: null, messageId: "m-i", role: "assistant", agentId: "bm" , source: "turn", trigger: { kind: "user" }});
 
-    // 上下文键是 null(接待会话),成员表为空 —— 判据只能来自 A3 那条已定的规则。
+    // ⚠️ **W2-④**:这一条以前靠「接待会话没有成员表 ⇒ 未知 agent 按 client」那条
+    // 回退规则才成立;现在它先由 `trigger.kind === "user"` 那一支判掉,**与成员表
+    // 无关**。回退规则(unknown 轮 + 接待会话)另有样本,见 channel-filter.test.ts。
     expect(surface(null, ctx({ members: [], intake: true }))).toBe("streaming");
     expect(clientBusy(null, ctx({ members: [], intake: true }))).toBe(true);
   });
@@ -189,8 +213,8 @@ describe("bug A · 接待会话与跨上下文(projectId === null 不是通配)"
   it("**负样本**:别的项目里在飞的轮不许锁住这里的输入框(服务端的忙闩也是按项目的)", () => {
     const s = useChatStore.getState();
     // 用户坐在 PA;排空器在 PB 里叫醒了业务经理(汇报待办)
-    s.applyEvent({ type: "message_start", projectId: PB, messageId: "b-bm", role: "assistant", agentId: "bm" });
-    s.applyEvent({ type: "message_start", projectId: PB, messageId: "b-wk", role: "assistant", agentId: "wk" });
+    s.applyEvent({ type: "message_start", projectId: PB, messageId: "b-bm", role: "assistant", agentId: "bm" , source: "turn", trigger: { kind: "user" }});
+    s.applyEvent({ type: "message_start", projectId: PB, messageId: "b-wk", role: "assistant", agentId: "wk" , source: "turn", trigger: { kind: "todo", todoKind: "execute_work" }});
 
     expect(clientBusy(PA)).toBe(false);
     expect(surface(PA)).toBe("idle");

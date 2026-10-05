@@ -26,6 +26,7 @@ import {
   type ProjectSummary,
   type ServerEvent,
   type SessionMessageView,
+  type TurnTrigger,
   type WsToolInfo,
 } from "@shared/types/platform";
 import * as api from "../lib/api";
@@ -43,6 +44,39 @@ export type Block =
   | { kind: "thinking"; text: string }
   | { kind: "text"; text: string }
   | { kind: "tool"; tool: WsToolInfo };
+
+/**
+ * **这一轮是从哪个封套建出来的**(设计 1 §2.10 的通道分离,W2-④)。
+ *
+ * 两个维度合成一个字段,**不是两个平铺字段**:
+ *
+ *   - `source: "turn"` —— 回合封套(`shared/types/platform.ts` 的
+ *     `TurnMessageStart`)。它**必须**带 `trigger`(这一轮为什么存在)。
+ *   - `source: "broadcast"` —— 播报封套(`BroadcastMessageStart`,`tell_client`
+ *     投递给甲方的那条独立消息)。它**没有** `trigger`,而且是结构性的:
+ *     播报无条件显示,不能被任何「回合级」判据连坐。
+ *   - `source: "unknown"` —— **仅有前端才有的第三种**:封套没到。两个来源:
+ *     ① REST 回填(`messageToTurn` —— `SessionMessageView` 上没有这两维);
+ *     ② `tool_start` 抢先建轮(`message_start` 还没到)。
+ *
+ * ── 为什么把 `trigger` 嵌进 `source` 而不是平铺两个字段 ──────────────
+ *
+ * 与契约同一条纪律:`{ source: "broadcast"; trigger: … }` 这种组合在**线上**
+ * 根本不可能存在(`_BroadcastMustNotCarryTrigger` 是契约里的编译期断言)。
+ * 平铺两个可空字段就等于把那个不可能的态重新变得可写 —— 而它一旦被写出来,
+ * 「播报的显示判据」就又能被 `trigger` 顺手判错一次。这里让它**编译不过**。
+ *
+ * ── 为什么 `"unknown"` 是一个**显式取值**,而不是 `null` ─────────────
+ *
+ * 它是「判据缺失」,不是「内部」。折成 `null` 之后 `channelOf` 里一个
+ * `??` 或一次 `if (!origin)` 就会把「没有判据」静默当成某一侧 —— 而两条通道
+ * 各错一次都要出人命(见 `channelOf` 的说明)。第三个取值强制每一个读者
+ * 显式表态。
+ */
+export type TurnOrigin =
+  | { source: "turn"; trigger: TurnTrigger }
+  | { source: "broadcast" }
+  | { source: "unknown" };
 
 export interface Turn {
   /** = 后端那条消息的 `messageId`(轮表的键,见 `ChatState.inFlight`)。 */
@@ -72,8 +106,21 @@ export interface Turn {
    * 而 **A3 已经落地**:`web/src/lib/data.ts` 的 `channelOf` 用它做两跳判定
    * (`agentId → 成员 role → clientFacing`),`MessageList` 据此把轮分到
    * 甲方通道 / 内部通道并显示被滤掉的条数。
+   *
+   * ⚠️ **W2-④ 起它不再是主判据** —— `channelOf` 现在先看 `origin`(这一轮
+   * 为什么存在 / 这个封套是谁发的),`agentId` 只用来答「是不是甲方自己说的」;
+   * 角色的 `clientFacing` 两跳退化成 `origin === unknown` 时的回退(见 `origin`)。
    */
   agentId: string | null;
+  /**
+   * 这一轮是从哪个封套建出来的(见 `TurnOrigin`)。**建轮那一刻定盘** ——
+   * `delta` / `message_end` 不带这两维(与 `agentId` 同一条纪律,设计 1 §2.10.2)。
+   *
+   * 判据是**「为什么有这一轮」与「这个封套是谁发的」两个正交维度**,不是「谁在
+   * 说话」:`worker` 被工件叫醒的那一轮、业务经理被 `report_downstream` 叫醒的
+   * 那一轮,说话人没变(`agentId` 照旧),但**正文不是对甲方说的话**。
+   */
+  origin: TurnOrigin;
 }
 
 export type ChatStatus = "idle" | "streaming" | "error" | "connecting";
@@ -255,6 +302,7 @@ const newTurn = (
   role: Role,
   agentId: string | null,
   projectId: string | null,
+  origin: TurnOrigin,
 ): Turn => ({
   id,
   projectId,
@@ -263,7 +311,57 @@ const newTurn = (
   startedAt: Date.now(),
   isStreaming: false,
   agentId,
+  origin,
 });
+
+/**
+ * `message_start` 上的**两维一次读完**,并在这里把「封套没到」与「封套说自己是
+ * 播报」分开(设计 1 §2.10 的 W2-④)。
+ *
+ * 写成函数(而不是散在 `applyEvent` 里一个三元)是为了给**漏填**一个响亮的现场。
+ * 契约上这两维是必填,`tsc` 会把 `src/` 的每个构造点都点出来 —— 但 `tests/**`
+ * **完全不参与 typecheck**(两条 tsconfig 的 include / exclude,见 AGENTS.md),
+ * 于是一个手搓的夹具漏填 `trigger` 时:
+ *
+ *   - 旧形状:`channelOf` 读 `origin.trigger.kind` ⇒ 一句 `Cannot read properties
+ *     of undefined` —— 现场里看不出是哪条契约字段漏了(与 7-D/7-M「不要惩罚不
+ *     携带错误信息的偏差」相反);
+ *   - 更糟的形状:静默降级成 `unknown` ⇒ 那一轮**悄悄走回退判据**,测试照样绿。
+ *
+ * 所以这里**抛**(fail loud):本项目对「不可能发生、而猜错会静默判错」的处理
+ * 就是抛(`views.ts` 的 `usageAgentOrThrow`、`organize` 的 `channel.ask` 同款)。
+ * 真实运行路径上它不可能触发:四个发射点都在 `src/` 里,受 `tsc` 约束。
+ */
+/**
+ * `TurnTrigger` 的 module-level 类型守卫(与 `ToolCallCard` 的 `hasContentArray`
+ * 同款约定:不用断言糊过去)。
+ *
+ * 只验**参与判定的那一维** `kind`:`todoKind` 是闭合集,但它既不参与通道判定、
+ * 也不被前端读取 —— 在这里再抄一份闭合集就是第三处真相(AGENTS.md「派生值上到
+ * 线上就是第二处真相」)。
+ */
+function isTurnTrigger(value: unknown): value is TurnTrigger {
+  if (typeof value !== "object" || value === null) return false;
+  const kind = (value as { kind?: unknown }).kind;
+  return kind === "user" || kind === "todo";
+}
+
+function originOfMessageStart(e: { source?: unknown; trigger?: unknown }): TurnOrigin {
+  const source = e.source;
+  if (source === "broadcast") {
+    // 播报封套**不带** `trigger`(契约里的编译期断言 `_BroadcastMustNotCarryTrigger`)。
+    // 带了也不影响判定 —— 播报无条件显示 —— 所以这里不把它当错误。
+    return { source: "broadcast" };
+  }
+  if (source !== "turn" || !isTurnTrigger(e.trigger)) {
+    throw new Error(
+      "message_start 缺 source / trigger:契约里这两维是必填(shared/types/platform.ts 的 " +
+        "TurnMessageStart / BroadcastMessageStart)。夹具漏填或版本错配 —— 静默降级会让" +
+        "这条线按回退判据悄悄上屏,所以这里不降级。",
+    );
+  }
+  return { source: "turn", trigger: e.trigger };
+}
 
 /**
  * 轮表的**唯一写口**:写进 / 更新一条进行中的轮,并同步 `currentTurn` 兼容指针。
@@ -316,6 +414,13 @@ export function inFlightTurns(
  * `agentId` 照抄(`SessionMessageView.agentId`,null = 甲方)—— §2.10.1 记的
  * 「拿到又丢掉」在这里收口;**用它做什么是 A3**。
  *
+ * ⚠️ **`origin` 只能是 `{ source: "unknown" }`(W2-④)。** `SessionMessageView`
+ * 上既没有 `source` 也没有 `trigger`(那是 WS 封套上的两维,库里没落)⇒ 刷新这条
+ * 路径**拿不到「这一轮为什么存在」**。不许在这里猜一个 `{source:"turn", trigger:
+ * {kind:"user"}}`:那会让工件触发的业务经理回合在刷新后**照样**进甲方时间线,
+ * 而界面上完全看不出来 —— 猜错的方向必须留给 `channelOf` 显式回退(它会把
+ * 这条缺口写在注释里,并有一条测试钉着)。
+ *
  * `projectId` 由调用方给:回填那条路径自己知道拉的是谁的对话
  * (`selectProject(id)` 给 `id`,`loadIntakeMessages()` 给 `null`)——
  * **不从 `Turn` 之外的地方猜**。
@@ -343,6 +448,7 @@ function messageToTurn(m: SessionMessageView, projectId: string | null): Turn {
     endedAt: m.createdAt,
     isStreaming: false,
     agentId: m.agentId,
+    origin: { source: "unknown" },
   };
 }
 
@@ -459,11 +565,15 @@ export const useChatStore = create<ChatState>((set, get) => ({
     if (projectId === null && !intakeActive) return;
     // 这一轮属于**当前上下文**(接待会话 = null)—— 乐观上屏这一轮不进
     // `inFlight`,所以 `projectId` 在这里只做「这条轮属于哪段对话」的如实标注。
+    //
+    // `origin` 是 **`trigger.kind === "user"` 的正样本**:这是甲方亲口发起的那一轮,
+    // 它当然进甲方通道(与 server 回显那条 `message_start(user)` 同源)。
     const t = newTurn(
       `u_${Date.now().toString(36)}`,
       "user",
       null,
       intakeActive ? null : projectId,
+      { source: "turn", trigger: { kind: "user" } },
     );
     set((s) => ({ turns: [...s.turns, { ...t, blocks: [{ kind: "text", text }] }] }));
     // 接待会话发送 `projectId: null` —— 契约里这就是「第一个项目之前」那条会话
@@ -532,9 +642,16 @@ export const useChatStore = create<ChatState>((set, get) => ({
         // 建轮的唯一入口之一(另一个是 tool_start)。`agentId` 在这里落进轮里,
         // 之后就由 `messageId` 认领 —— `delta` 系列事件不带 agentId(§2.10.2)。
         // `projectId` 同样只在这里落一次:认领靠 `messageId`,而**收口要靠它**。
+        //
+        // ⚠️ **W2-④:这里同时落 `origin`(两维一起)** —— 建轮那一刻定盘,与
+        // `agentId` / `projectId` 同一个位置。`delta` / `message_end` 不带这两维,
+        // 所以之后再没有第二次机会。**必须先过 `originOfMessageStart`**:
+        // 一个漏填的夹具在这里**抛**(不是静默降级),否则 `channelOf` 会读到一个
+        // 没有 `trigger` 的 `origin` —— 那正是 W1-① 警告的那个 TypeError。
+        const origin = originOfMessageStart(e);
         set((s) => ({
           ...withTurn(s, {
-            ...newTurn(e.messageId, "assistant", e.agentId, e.projectId),
+            ...newTurn(e.messageId, "assistant", e.agentId, e.projectId, origin),
             isStreaming: true,
           }),
           status: "streaming",
@@ -586,9 +703,16 @@ export const useChatStore = create<ChatState>((set, get) => ({
         // 身份在建轮那一刻就定了,`tool_start` 不该改写消息的作者。
         // **上下文同理**(`projectId` 跟着已有轮走)—— 否则一个只由 tool_start
         // 建出来的轮会在 `agent_end` 时被当成「别人家的」而漏收口。
+        //
+        // ⚠️ **`origin` 同理:跟着已有轮走。** 由 `tool_start` **从头**建出来的轮
+        // 只能拿到 `{source:"unknown"}` —— 这个封套上根本没有那两维(契约有意为之:
+        // 它们是**建轮**那一刻定的,不是每个事件都抄一遍)。真实路径上它不出现
+        // (`serve.ts` 的 `emitMessageStart` 总在 `runTurn` 之前),只可能是
+        // 「中途接上来的连接」或测试里的孤轮 —— 那时按 `channelOf` 的回退判据处置,
+        // 而不是在这里猜一个 `trigger`。
         const t =
           get().inFlight[e.messageId] ??
-          newTurn(e.messageId, "assistant", e.agentId, e.projectId);
+          newTurn(e.messageId, "assistant", e.agentId, e.projectId, { source: "unknown" });
         set((s) => ({
           ...withTurn(s, { ...t, blocks: [...t.blocks, { kind: "tool", tool: e.tool }] }),
         }));

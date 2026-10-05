@@ -41,8 +41,27 @@ import { getAgent, listAgents } from "../storage/repo/agents.js";
 import { ROLE_SPECS } from "../identity/role.js";
 import type { TurnUsageRow } from "../storage/repo/usage.js";
 import type {
-  ClientCommand, ClientQuestionView, ServerEvent, WsToolInfo,
+  ClientCommand, ClientQuestionView, ServerEvent, TriggerTodoKind, TurnTrigger, WsToolInfo,
 } from "@shared/types/platform.js";
+import type { TodoKind } from "../runtime/dispatcher.js";
+
+// ── 契约副本的**编译期对账** ────────────────────────────────────
+//
+// `shared/types/platform.ts` 的 `TriggerTodoKind` 是 `runtime/dispatcher.ts` 的
+// `TodoKind` 的**逐字副本**,不是 import:契约面(`shared/`)不得反向依赖 `src/`
+// —— 连 type-only 都会把 runtime(及其 `better-sqlite3`)拖进 web 的类型程序
+// (`tsconfig.web.json` 只 include `web/src` 与 `shared/`)。
+//
+// 副本会漂,所以这里放一对**双向互相可赋值**的断言。它**只可能落在 server 侧**
+// (契约面自己看不见 `TodoKind`),而落在 transport 是因为这里正是「runtime 的
+// 待办种类 → 契约的 `trigger.todoKind`」那个接缝。
+//
+// 负样本(已实跑):从契约的 `TriggerTodoKind` 里删掉 `"handover"`
+// ⇒ `Type 'false' does not satisfy the constraint 'true'.`;加回来 ⇒ 0 error。
+type AssertTrue<T extends true> = T;
+type MutuallyAssignable<A extends string, B extends string> =
+  [A] extends [B] ? ([B] extends [A] ? true : false) : false;
+type _TodoKindParity = AssertTrue<MutuallyAssignable<TodoKind, TriggerTodoKind>>;
 
 export interface HubDeps {
   readonly db: Database.Database;
@@ -295,14 +314,52 @@ export class PlatformHub {
    *
    * `agentId === null` = **甲方**(用户在说话),与 `session_messages.agent_id`
    * 同义。**不给默认值**是刻意的:默认值会让漏传的调用点编译通过。
+   *
+   * ── 为什么还要 `trigger`(2026-10-06 新增,**必填**)──────────────
+   *
+   * `agentId` 只答「谁在说话」,答不了「这一轮为什么存在」:排空器叫醒业务经理
+   * 时说话人还是业务经理,但那一轮(`report_downstream` / `answer_ask` …)的
+   * **正文不是对甲方说的话**。所以封套上必须显式带上这一轮是**谁触发的**
+   * —— 与 `agentId` 同一条纪律:**不给默认值**,漏传的调用点编译不过。
+   *
+   * 由此发出的封套 `source` 恒为 `"turn"`(回合驱动流程)。**播报不是回合**,
+   * 它走下面的 `emitBroadcastStart` —— 两者的区别是这一层唯一能判「该不该进
+   * 对话页」的信息,所以不许在别处「顺手用 trigger 判一下」(播报封套上根本没有
+   * `trigger`,那一支编译不过)。
    */
   emitMessageStart(
     projectId: string | null,
     messageId: string,
     role: "user" | "assistant",
     agentId: string | null,
+    trigger: TurnTrigger,
   ): void {
-    this.broadcast({ type: "message_start", projectId, messageId, role, agentId });
+    this.broadcast({
+      type: "message_start", source: "turn", projectId, messageId, role, agentId, trigger,
+    });
+  }
+
+  /**
+   * **播报封套**的建轮事件 —— 只有 `clientChannel.tell` 用,所以是 private。
+   *
+   * 与 `emitMessageStart` 的差别只有一处,而且是**结构性**的:它不带 `trigger`
+   * (类型上就不允许带,见 `BroadcastMessageStart`)。
+   *
+   * ── 为什么播报**不能**复用回合封套 ──────────────────────────────
+   *
+   * `tell_client` 是**无条件**投递给甲方的播报(它自己落库、有自己的 `messageId`),
+   * 不属于任何一个回合 —— 「工件触发的汇报」那一轮里,正文该被收进内部视图,
+   * 而同轮的播报该照常显示。若两者共用同一个形状,「显示与否」就只能靠
+   * 回合级的 `trigger` 去猜 ⇒ 那条播报会被**连坐判掉**,而界面上少一条线是
+   * 看不出来的。
+   */
+  private emitBroadcastStart(
+    projectId: string | null,
+    messageId: string,
+    role: "user" | "assistant",
+    agentId: string | null,
+  ): void {
+    this.broadcast({ type: "message_start", source: "broadcast", projectId, messageId, role, agentId });
   }
   emitDelta(projectId: string | null, messageId: string, text: string): void {
     this.broadcast({ type: "delta", projectId, messageId, text });
@@ -318,11 +375,17 @@ export class PlatformHub {
    * `cacheRead`;在此之前前端只累加 input+output ⇒ **缓存命中那部分完全不计**,
    * 而它恰恰是省钱的那一块)。
    *
-   * ⚠️ **今天没有任何调用点传 `usage`** —— `grep -rn 'emitMessageEnd' src/` 的
-   * 五个调用点(本文件 :299 与 `host/serve.ts` 的四处)全是两个实参。也就是说
-   * 前端那条「本轮 in/out」的显示**上游是空的**。本批次新增的实时通道是
+   * ⚠️ **今天没有任何调用点传 `usage`** —— `grep -rn 'emitMessageEnd(' src/` 的
+   * **六个**调用点(本文件 `tell` 那条 + `host/serve.ts` 的五处:用户回显、
+   * 两条助手收尾、执行那条路的两个收尾)全是**两个实参**。也就是说前端那条
+   * 「本轮 in/out」的显示**上游是空的**(2026-10-06 逐点复核;旧注释写「五个、
+   * `serve.ts` 四处」,与代码不符)。本批次新增的实时通道是
    * `emitUsageRecorded`(回合级、带 `projectId`、由 `runTurn` 的
    * `onUsageRecorded` 驱动);这个 per-message 的字段保留原样,等宿主接线。
+   *
+   * ⚠️ 接线之前先看读者:`web/src/stores/chat.ts` 的 `currentUsage` 只累加
+   * `input + output`(同一处的 `cacheRead` **没有读者**)—— 只把写侧接上,
+   * 缓存命中的那部分仍然不会显示(契约 2026-10-05 扩它就是为了这个)。
    */
   emitMessageEnd(
     projectId: string | null,
@@ -438,7 +501,9 @@ export class PlatformHub {
           createdAt: at,
         });
         const messageId = this.deps.newId("msg");
-        this.emitMessageStart(projectId, messageId, "assistant", agentId);
+        // **播报封套**(`source: "broadcast"`),不是回合封套 —— 它不带 `trigger`:
+        // 播报与「这一轮为什么存在」正交,它无条件显示。见 `emitBroadcastStart`。
+        this.emitBroadcastStart(projectId, messageId, "assistant", agentId);
         this.emitDelta(projectId, messageId, message);
         this.emitMessageEnd(projectId, messageId);
       },

@@ -20,8 +20,12 @@
  *     把它一直置成 `streaming`,而它们的发言在对话页**看不见**(A3 滤掉了),
  *     于是用户看到的是一个「推演中」且**永远发不出话**的输入框。
  *     现在运行态按**通道**派生(`lib/data.ts` 的 `channelActivityOf` /
- *     `surfaceStatusOf`):只有**甲方通道**(业务经理正在回你)才禁用输入框;
- *     内部角色在跑只显示「内部推进中」+ 保留中断按钮。
+ *     `surfaceStatusOf`):只有**甲方通道**(你发起的那一轮 / 播报)才禁用输入框;
+ *     内部在跑只显示「内部推进中」+ 保留中断按钮。
+ *  6. **W2-④(2026-10-06):判据的成分跟着 `channelOf` 变了,组件本身没换**。
+ *     「甲方通道」不再是「面向甲方的角色」,而是「由用户触发在页面上展示的那条
+ *     通道」——输入框禁用与屏幕上显示的东西因此仍然是**同一个判据**
+ *     (`channelOf`),这正是 bug A 那次修好的一半,不许在这里另立一份。
  */
 import { useMemo, useState } from "react";
 import { inFlightTurns, useChatStore } from "@/stores/chat";
@@ -71,6 +75,12 @@ export function ChatSurface() {
   // 「谁面向甲方」的两跳输入,与 `MessageList` **同两个来源**(成员表 + 角色能力面)
   // —— 判据是同一条 `channelOf`,不是这里另立一份。代价是一次重复的成员表请求
   // (两个组件各读一次 `/api/projects/:id/members`);`/api/harness` 有模块级缓存。
+  //
+  // ⚠️ **W2-④ 起它们的地位降级了**:`channelOf` 的主判据换成了
+  // `Turn.origin`(这一轮为什么存在 / 这个封套是谁发的),
+  // 角色两跳只在 `origin === {source:"unknown"}`(REST 回填出来的历史轮)时
+  // 才被读到。**这里仍要传 `ctx`** —— 否则刷新一次,整段历史按 fail-closed
+  // 全被滤掉,输入框的判据会与屏幕上的内容对不上(见 `lib/data.ts` 的说明)。
   const members = useProjectMembers(projectId);
   const harness = useHarnessRoles();
   const ctx = useMemo(
@@ -89,8 +99,14 @@ export function ChatSurface() {
   );
   const surface = surfaceStatusOf(status, activity);
   /**
-   * **输入框唯一由「有人在跑」推出的禁用理由**:甲方通道(业务经理)正在回你。
-   * 内部角色在跑**不**进这个判据 —— 那正是 bug A 的现场。
+   * **输入框唯一由「有人在跑」推出的禁用理由**:甲方通道在跑 —— 甲方自己那句
+   * (乐观上屏那条不在 `inFlight` 里)、`tell_client` 的播报、或**用户触发**的
+   * 那一轮正文。内部角色在跑**不**进这个判据 —— 那正是 bug A 的现场。
+   *
+   * ⚠️ **W2-④ 起判据的成分跟着 `channelOf` 变了**(同一个判据,不是第二处真相):
+   * 「业务经理被工件叫醒的那一轮」以前算甲方通道(它按角色 `clientFacing` 判),
+   * 现在算内部 —— 因为那一轮**在屏幕上也不显示**。显示与禁用必须是同一个答案,
+   * 否则会出现「页面上一条甲方消息都没有,而输入框说甲方正在说话」。
    */
   const clientBusy = activity.client.length > 0;
   /** 本上下文里有在飞的轮(内部也算)—— 中断按钮的可见性。 */
@@ -199,7 +215,7 @@ export function SurfaceStatusIndicator({ status }: { status: SurfaceStatus }) {
         : "sansheng-text-mute";
   const title =
     status === "streaming"
-      ? "业务经理正在回你(甲方通道在跑)—— 输入框先歇一会儿"
+      ? "甲方通道在跑(你发起的那一轮,或对你说的一条播报)—— 输入框先歇一会儿"
       : status === "internal"
         ? // ⚠️ 这里**不许**只写「你可以照常跟业务经理说话」:那一句在当前服务端是**空头承诺** ——
           // `hub.ts` 的「项目忙」闩由 `serve.ts` 的 `drainOne` 在**整次级联**期间持有,

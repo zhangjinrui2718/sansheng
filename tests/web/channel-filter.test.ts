@@ -8,8 +8,14 @@
  *      有两个作者:`kind='user'`(甲方)与 `kind='system'`(平台通知,
  *      `host/serve.ts` 的 `announceDrain`)。只看 `agentId` 会把平台通知当成甲方说的话
  *      (A1 在真机上实测到的坑)。
- *   2. **两跳判据**:`agentId → MemberView.role → HarnessView.clientFacing`。
- *      pm / wk / qa 的角色 `clientFacing = false` ⇒ 不在对话页。
+ *   2. **通道判据**:W2-④ 起主判据是「**这一轮为什么存在 / 这个封套是谁发的**」
+ *      (`Turn.origin`),不是角色的 `clientFacing`:
+ *        甲方消息(`agentId === null`)∪ `source:"broadcast"` 的播报
+ *        ∪ `trigger.kind === "user"` 的回合正文 ⇒ 进;其余一律不进。
+ *      ⚠️ **两跳(`agentId → role → clientFacing`)没有消失,它降级成了
+ *      `origin === unknown` 那一支的回退** —— 而 `unknown` 今天等于
+ *      **「刷新之后从 REST 回填回来的全部历史」**(`messageToTurn`),所以这条
+ *      回退是**线上主路径的一半**,下面有专门的样本。
  *   3. **滤掉的条数必须显示出来**(§2.10.4:看不到就等于平台替甲方删了证据)。
  *
  * ── 为什么直测纯函数 + 一个纯组件 ──────────────────────────────────
@@ -22,7 +28,7 @@
 import { describe, expect, it } from "vitest";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import type { MemberView, ProjectRole } from "@shared/types/platform";
+import type { MemberView, ProjectRole, TriggerTodoKind } from "@shared/types/platform";
 import {
   channelContextOf,
   partitionTurns,
@@ -38,15 +44,36 @@ import type { Turn } from "@/stores/chat";
  * 里,所以漏填不会被 tsc 抓住 —— 这条注释是替补的守卫:`projectId` 漏成
  * `undefined` 时,这一轮在任何 `agent_end` 下都收不了口(`undefined !== null`,
  * 而 `delta` 只认 `messageId`)。所以这里如实给一个项目 id。
+ *
+ * ⚠️ **W2-④ 起 `origin` 也是必填**(`TurnOrigin`)。默认给
+ * `{source:"turn", trigger:{kind:"user"}}`(「用户触发的那一轮」)—— 它是甲方
+ * 通道三支里最常被手搓的;需要**内部轮**或 **unknown 轮**的样本显式传第二参,
+ * 否则这条文件会退化成「一律按 user 判」,把新判据测没了。
  */
 function turn(
   id: string,
   role: Turn["role"],
   agentId: string | null,
   text: string,
+  origin: Turn["origin"] = { source: "turn", trigger: { kind: "user" } },
 ): Turn {
-  return { id, projectId: "p-test", role, agentId, blocks: [{ kind: "text", text }], startedAt: 0 };
+  return {
+    id, projectId: "p-test", role, agentId,
+    blocks: [{ kind: "text", text }],
+    startedAt: 0,
+    origin,
+  };
 }
+
+/** 排空器按**待办**叫醒的一轮(`trigger.kind === "todo"`)—— 不进甲方通道。 */
+function todoOrigin(todoKind: TriggerTodoKind): Turn["origin"] {
+  // 取值域是闭合集(`TriggerTodoKind`,与 `runtime/dispatcher.ts` 的 `TodoKind`
+  // 有编译期对账)—— 这里照抄契约的联合类型,不自己编一个字符串表。
+  return { source: "turn", trigger: { kind: "todo", todoKind } };
+}
+
+/** 封套**没到**的一轮(只有 REST 回填 / `tool_start` 抢先建轮会产生)。 */
+const UNKNOWN: Turn["origin"] = { source: "unknown" };
 
 /** 真机库的四个 agent(见 `runtime/org.ts` 的 ORG)。 */
 const MEMBERS: MemberView[] = [
@@ -81,18 +108,35 @@ describe("A3 · 对话页的通道判据", () => {
     expect(hidden).toBe(0);
   });
 
-  it("业务经理说的留下(两跳:bm → business_manager → clientFacing)", () => {
+  it('**用户触发**的那一轮留下(判据是 `trigger.kind === "user"`,不是角色)', () => {
     const { timeline, hidden } = partitionTurns([turn("m1", "assistant", "bm", "好的")], ctx());
     expect(timeline.map((x) => x.turn.id)).toEqual(["m1"]);
     expect(hidden).toBe(0);
   });
 
-  it("其他三个角色全部滤掉,且**条数**如实报出", () => {
+  // ── W2-④ 的**核心转向**:同一个作者(bm),换成待办触发 ⇒ 不进 ──────────
+  it("⚠️ **同一个业务经理**,被工件 / 待办叫醒的那一轮**不进**甲方通道", () => {
+    const todo = turn("m-todo", "assistant", "bm", "下游有结果,我记一下", todoOrigin("report_downstream"));
+    const { timeline, hidden } = partitionTurns([todo], ctx());
+    expect(timeline, "作者是 clientFacing 也不再是判据").toEqual([]);
+    expect(hidden).toBe(1);
+  });
+
+  it("播报封套(`source:\"broadcast\"`)**无条件**进 —— 即使它是工件触发那轮里发生的事", () => {
+    // 同一条时间线上:工件触发的业务经理回合(不进)+ 它同轮的播报(进)
+    const todo = turn("m-todo", "assistant", "bm", "内部交代", todoOrigin("report_downstream"));
+    const broadcast: Turn = { ...turn("m-bc", "assistant", "bm", "对甲方说的话"), origin: { source: "broadcast" } };
+    const { timeline, hidden } = partitionTurns([todo, broadcast], ctx());
+    expect(timeline.map((x) => x.turn.id)).toEqual(["m-bc"]);
+    expect(hidden).toBe(1);
+  });
+
+  it("其他三个角色(待办触发的回合)全部滤掉,且**条数**如实报出", () => {
     const turns = [
       turn("m1", "assistant", "bm", "好的"),
-      turn("m2", "assistant", "pm", "我拆成 3 个工作项"),
-      turn("m3", "assistant", "wk", "第 1 项做完了"),
-      turn("m4", "assistant", "qa", "审过了"),
+      turn("m2", "assistant", "pm", "我拆成 3 个工作项", todoOrigin("decompose_project")),
+      turn("m3", "assistant", "wk", "第 1 项做完了", todoOrigin("execute_work")),
+      turn("m4", "assistant", "qa", "审过了", todoOrigin("review_work")),
     ];
     const { timeline, hidden } = partitionTurns(turns, ctx());
     expect(timeline.map((x) => x.turn.id)).toEqual(["m1"]);
@@ -112,17 +156,40 @@ describe("A3 · 对话页的通道判据", () => {
     expect(sysOnly.hidden, "系统通知不该被当成内部角色而计入 hidden").toBe(0);
   });
 
-  it("接待会话(没有项目 ⇒ 没有成员表)不误伤业务经理", () => {
-    // 接待会话里成员表是空的 —— 那时**拿不到判据**,不该假装拿得到
-    const r = partitionTurns([turn("m1", "assistant", "bm", "我们来对齐诉求")], ctx({ members: [], intake: true }));
+  it("接待会话(没有项目 ⇒ 没有成员表)不误伤业务经理(走 unknown 回退那一支)", () => {
+    // 接待会话里成员表是空的 —— 那时**拿不到两跳判据**,不该假装拿得到。
+    // 这里显式用 UNKNOWN:带 trigger 的轮在接待会话里由第 2/4 支判,与成员表无关。
+    const r = partitionTurns(
+      [turn("m1", "assistant", "bm", "我们来对齐诉求", UNKNOWN)],
+      ctx({ members: [], intake: true }),
+    );
     expect(r.timeline.map((x) => x.turn.id)).toEqual(["m1"]);
     expect(r.hidden).toBe(0);
   });
 
-  it("项目里出现成员表之外的 agent → fail-closed(滤掉并计数),不塞进甲方通道", () => {
-    const r = partitionTurns([turn("m9", "assistant", "ag_ghost", "我是谁")], ctx());
+  // ── W2-④:unknown 那一支的回退(它今天是「刷新后的全部历史」)─────────
+  it("**unknown 轮**:成员表之外的 agent → fail-closed(滤掉并计数),不塞进甲方通道", () => {
+    const r = partitionTurns([turn("m9", "assistant", "ag_ghost", "我是谁", UNKNOWN)], ctx());
     expect(r.timeline).toEqual([]);
     expect(r.hidden).toBe(1);
+  });
+
+  it("**unknown 轮**:成员表里认得的业务经理 → 仍按两跳回退进甲方通道(刷新后对话不该消失)", () => {
+    // 这是「刷新一次与业务经理的整段对话就没了」那条缺口的回归守卫:
+    // REST 回填出来的轮**永远**是 unknown(`SessionMessageView` 上没有
+    // source / trigger),所以这一支必须把 bm 放行。
+    const r = partitionTurns([turn("m-hist", "assistant", "bm", "刷新后仍在", UNKNOWN)], ctx());
+    expect(r.timeline.map((x) => x.turn.id)).toEqual(["m-hist"]);
+    expect(r.hidden).toBe(0);
+  });
+
+  it("**unknown 轮**:接待会话没有成员表 ⇒ 按 A3 的原规则放行", () => {
+    const r = partitionTurns(
+      [turn("m-intake", "assistant", "bm", "我们来对齐诉求", UNKNOWN)],
+      ctx({ members: [], intake: true }),
+    );
+    expect(r.timeline.map((x) => x.turn.id)).toEqual(["m-intake"]);
+    expect(r.hidden).toBe(0);
   });
 });
 
@@ -131,8 +198,8 @@ describe("A3 · 渲染:只有甲方与业务经理,系统通知走独立带", ()
     const all = [
       turn("u1", "user", null, "把登录做出来"),
       turn("m1", "assistant", "bm", "好的,我给你拆一下"),
-      turn("m2", "assistant", "pm", "PM内部拆解内容"),
-      turn("m3", "assistant", "qa", "QA内部结论"),
+      turn("m2", "assistant", "pm", "PM内部拆解内容", todoOrigin("decompose_project")),
+      turn("m3", "assistant", "qa", "QA内部结论", todoOrigin("review_work")),
     ];
     const part = partitionTurns(all, ctx());
     const html = renderToStaticMarkup(
@@ -166,7 +233,8 @@ describe("A3 · 渲染:只有甲方与业务经理,系统通知走独立带", ()
   it("流式期间**两轮同时上屏**(A2 的接口被渲染层真的用上了)", () => {
     const streaming = [
       turn("msgA", "assistant", "bm", "AAA"),
-      turn("msgB", "assistant", "bm", "播报"),
+      // 真实形状:msgB 就是 `tell_client` 的播报 ⇒ `source: "broadcast"`
+      { ...turn("msgB", "assistant", "bm", "播报"), origin: { source: "broadcast" } },
     ];
     const part = partitionTurns(streaming, ctx());
     const html = renderToStaticMarkup(
