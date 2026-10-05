@@ -49,6 +49,7 @@ import type {
   ProjectDetail,
   ProjectStatus,
   ProjectSummary,
+  ProjectUsageResponse,
   WorkView,
 } from "@shared/types/platform";
 import type { ProviderInfo, SettingsPublic } from "@shared/types/settings";
@@ -276,6 +277,51 @@ export function listProjectAsks(projectId: string): Promise<{ asks: AskView[] }>
 /** 本项目的变更记录(提议 → 评审 → 接受/实施)。 */
 export function listProjectChanges(projectId: string): Promise<{ changes: ChangeView[] }> {
   return request<{ changes: ChangeView[] }>(`/projects/${encodeURIComponent(projectId)}/changes`);
+}
+
+/**
+ * **本项目的 token 用量**(「这个项目花了多少」)。
+ *
+ * ── 为什么把 `days` / `limit` 交给调用方,而不是在这里定死 ──────────
+ *
+ * 窗口是**答什么问题的前提**:「今日」要 `days=1`、「最近 7 天」要 `days=7`、
+ * 「总共多少」要看 `allTime`(它不受窗口影响)。本文件只做参数拼接,
+ * **不替调用方选窗口** —— 一个写死 7 天的封装会让「总共」在窗口外静默变小,
+ * 而那个数字看起来完全正常。
+ *
+ * 后端边界(契约里写着):`days` 默认 7、上限 365,**坏值取默认**;
+ * `limit` 只截 `byDay`(截断时 `byDayTruncated: true`),**绝不截合计**。
+ *
+ * ⚠️ **只有 token,没有金额** —— 契约里没有 `cost`(用户已定:不显示金额)。
+ */
+export function getProjectUsage(
+  projectId: string,
+  opts?: { days?: number; limit?: number },
+): Promise<ProjectUsageResponse> {
+  return request<ProjectUsageResponse>(
+    `/projects/${encodeURIComponent(projectId)}/usage${usageQuery(opts)}`,
+  );
+}
+
+/**
+ * **接待会话**的用量(第一个项目之前那一段)。
+ *
+ * 与 `getProjectUsage` 是同一个后端读函数,只是没有 projectId 可传 ——
+ * 那条会话里花掉的 token 是真的(它是产品里第一个花钱的回合),
+ * 不能因为「还没有项目」就查不到。没有接待会话时后端返回全零视图,不是 404。
+ */
+export function getIntakeUsage(
+  opts?: { days?: number; limit?: number },
+): Promise<ProjectUsageResponse> {
+  return request<ProjectUsageResponse>(`/intake/usage${usageQuery(opts)}`);
+}
+
+/** 两条用量端点共用的查询串。`undefined` 一律不发(让后端用它的默认值)。 */
+function usageQuery(opts?: { days?: number; limit?: number }): string {
+  const params = new URLSearchParams();
+  if (opts?.days !== undefined) params.set("days", String(opts.days));
+  if (opts?.limit !== undefined) params.set("limit", String(opts.limit));
+  return params.size > 0 ? `?${params.toString()}` : "";
 }
 
 /**
