@@ -12,7 +12,7 @@
 ```
 W3-① `516ae93` fix(origin): 闭合刷新缺口 —— 封套落库(migration 019)+ 前端判据同形
 W3-②③ 本次提交:文档欠账 + 端到端(证据在 .probe/w3-e2e-*)
-1194 passed / 56 files · 两条 typecheck 0 · npm run build 绿 · check:design E1–E14 绿 · as any 0
+1206 passed / 57 files · 两条 typecheck 0 · npm run build 绿 · check:design E1–E14 绿 · as any 0
 全部已推送到 origin/master(上一轮那 15 个提交也已推送 —— GitHub 443 当时不通,后来通了)
 ```
 
@@ -137,6 +137,42 @@ SqliteError: FOREIGN KEY constraint failed  at resetPlatformData (reset.js:62)
 另外「需要重启 server 才能重新初始化」也不对(代码自己的说法是
 「组织未就绪 —— 第一次收到消息或建项目时会自动播种」),一并改掉。
 新文案已进 `dist/web` 的 bundle(构建后 grep 过)。
+
+## 追加 · Harness 页改成**按角色分栏**(可读性;用户点名)
+
+用户原话:「harness 这个页面的可读性太差了,能否按照不同的角色进行展示」。
+
+现状(改前)**已经**是「一个角色一个 Section」,但四个角色**同时铺开**:
+每个 5 行 KV + 每个提示词单元一个**展开的** textarea ⇒ 一屏十几段长正文;
+而共用单元(`collaboration.ask` 被 3 个角色声明、`collaboration.convene` 被 2 个)
+会**重复出现多次**,看起来像几份不同的文件。
+
+改成(只改**摆放**,契约与写面四条规矩一条没动 `web/src/routes/Harness.tsx`):
+
+| | 改前 | 改后 |
+|---|---|---|
+| 角色 | 四个 Section 同时铺开 | **一行角色页签**,一次看一个;有问题的角色带数字角标(缺单元+集合文件坏+越权被拒+未知工具名) |
+| 面板顺序 | KV → 告警 → 单元 | **摘要行 → 告警 → 单元 → 折叠的常量**(先答「这角色正常吗」,再给可改的东西) |
+| 单元 | 每个都摊开 textarea | 摘要行常显(状态/id/字符数/备份)+ **编辑区默认折叠** |
+| 共用单元 | 各显示一份,像三个文件 | 标「**共用于 N 个角色**」并把名字列在 tooltip 里 |
+| `ceiling`/`writeKinds`/工具面 | 占首屏 5 行 KV | 折进「工具面与代码内常量(改不了)」 |
+
+**跑真实数据时当场抓到我自己写的一处错**:摘要行原本写「工具 26/22」——
+而 `tools` 是**工具名**、`ceiling` 是**能力**条目(一条能力展开成多个工具,
+`blackboard.read` → `board_list` + `board_read`)⇒ 26 > 22 是正常的,
+写成比值会被读成「26 用掉了 22 里的 26」。已改成「能力 22 项 · 实得工具 26 个」,
+并让测试夹具**刻意**取 `tools(3) ≠ ceiling(2)` 来钉住这一点。
+
+判据在 `tests/web/harness-by-role.test.ts`(12 条,纯 props 渲染,不起服务):
+① 一次只渲染一个角色(注入「退回旧摆放」的突变 ⇒ 红)
+② 编辑器默认折叠(`<details>` 不带 `open`;**自带正样本**:`defaultOpen` 时必须渲染出 `open`;
+   把编辑器改成默认展开 ⇒ 红)
+③ 共用单元标注(**负样本**:独有单元不许标注)
+④ 四类告警都可见 + 页签角标 = 四类之和(干净角色无角标)
+
+静态预览(用**你 `~/.sansheng` 的真实数据**渲染,没起服务):
+`.probe/harness-by-role-preview.html` —— 4 个页签 · 5 个折叠块**0 个展开** ·
+4 个单元行 · 摘要行 `能力 22 项 · 实得工具 26 个`。
 
 ## ⚠️ 还没做的(如实标注,不是遗漏)
 

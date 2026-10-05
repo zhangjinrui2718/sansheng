@@ -11,6 +11,25 @@
  *   POST /api/harness/units/:unitId/reset    { confirm:"reset" }→ { ok, content }
  *   GET  /api/harness/units/:unitId/backups                     → { backups: [{file,path}] }
  *
+ * ── 2026-10-05:按角色分栏(可读性)────────────────────────────────
+ *
+ * 上一版**已经是**「一个角色一个 Section」,但四个角色**同时铺开**:每个角色 5 行
+ * KV + 每个单元一个展开的 textarea ⇒ 一屏里十几段长正文;而且共用单元
+ * (`collaboration.ask` 被 3 个角色声明、`collaboration.convene` 被 2 个)会
+ * **重复出现 3 次**,看起来像三份不同的文件。
+ *
+ * 这一版的组织方式(判据是「一次只回答一个问题」):
+ *
+ *   ① **一行角色页签** —— 一次只看一个角色;有问题的角色在页签上带一个数字角标
+ *      (缺单元 / 集合文件坏 / 越权被拒 / 未知工具名 —— 四类合起来数);
+ *   ② 该角色一块面板,顺序是**「先看我能不能用 → 再看我能改什么 → 最后才是代码内常量」**:
+ *      摘要行 → 告警 → 提示词单元(**默认折叠**)→ 折叠起来的工具面与常量;
+ *   ③ 共用单元标注「共用于 N 个角色」并把名字列出来 —— 改这一处会影响那几个角色。
+ *
+ * 判据不变(`HarnessView` 的契约、写面四条规矩都不动);变的只是**摆放**。
+ * 纯展示组件(`HarnessRoleTabs` / `HarnessRolePane` / `sharedUnitOwners`)导出给测试,
+ * 与 `ConversationStream` / `TurnView` 同一处置。
+ *
  * ── 三条不许绕过的规矩(后端定的,前端照做)──────────────────────
  *
  *  1. **保存后用响应里的 `content` 当新状态。** 后端返回的是**回读**到的正文,
@@ -36,7 +55,9 @@
  *   - **`blockedByCeiling` 非空必须显示** —— 越权条目对用户可见是纪律。
  */
 import { useCallback, useEffect, useState } from "react";
-import type { HarnessView, PromptUnitView } from "@shared/types/platform";
+import type {
+  HarnessView, ProjectRole, PromptUnitView, RoleHarnessView,
+} from "@shared/types/platform";
 import {
   Clamp,
   Disclosure,
@@ -76,10 +97,307 @@ function failureOf(e: unknown): OpState {
   return { kind: "failed", message };
 }
 
+/**
+ * 每个单元被**哪些角色**声明(显示名)。
+ *
+ * 为什么要它:同一个文件被多个角色声明是**正常**的(`ROLE_SPECS[].promptUnits`
+ * 里 `collaboration.ask` 3 处、`collaboration.convene` 2 处),但页面上它会在
+ * 每个角色的面板里各出现一次、长得跟「三份不同的文件」一样。标注出来之后:
+ * 「我改的是那个共用文件,会影响这几个角色」是**看得见**的。
+ */
+export function sharedUnitOwners(
+  roles: readonly RoleHarnessView[],
+): Map<string, string[]> {
+  const owners = new Map<string, string[]>();
+  for (const r of roles) {
+    for (const u of r.promptUnits) {
+      const cur = owners.get(u.id);
+      if (cur === undefined) owners.set(u.id, [r.displayName]);
+      else if (!cur.includes(r.displayName)) cur.push(r.displayName);
+    }
+  }
+  return owners;
+}
+
+/** 一个角色身上**需要注意**的处数(页签角标)。四类互不重叠,直接相加。 */
+export function roleIssueCount(role: RoleHarnessView): number {
+  return (
+    role.promptUnits.filter((u) => !u.loaded).length +
+    (role.toolSet.state === "invalid" ? 1 : 0) +
+    role.blockedByCeiling.length +
+    role.unknownTools.length
+  );
+}
+
+/**
+ * 角色页签。**一次只看一个角色** —— 四个角色同时铺开时,长正文会把彼此的
+ * 结构淹掉(这一版要修的就是那个)。
+ */
+export function HarnessRoleTabs({
+  roles,
+  active,
+  onSelect,
+}: {
+  roles: readonly RoleHarnessView[];
+  active: ProjectRole | null;
+  onSelect: (role: ProjectRole) => void;
+}) {
+  return (
+    <div className="flex items-center gap-1.5 flex-wrap" role="tablist" aria-label="按角色查看">
+      {roles.map((r) => {
+        const isActive = r.role === active;
+        const issues = roleIssueCount(r);
+        return (
+          <button
+            key={r.role}
+            type="button"
+            role="tab"
+            aria-selected={isActive}
+            className="sansheng-button flex items-center"
+            onClick={() => onSelect(r.role)}
+            title={
+              `role = ${r.role}\n` +
+              `提示词单元 ${r.promptUnits.filter((u) => u.loaded).length}/${r.promptUnits.length} 已加载 · ` +
+              `能力 ${r.ceiling.length} 项 · 实得工具 ${r.tools.length} 个 · ` +
+              `集合文件 ${r.toolSet.state}` +
+              (issues > 0 ? `\n⚠️ ${issues} 处需要注意(页签上的数字)` : "")
+            }
+            style={{
+              padding: "6px 10px",
+              gap: 6,
+              background: isActive ? "var(--ink-2)" : "transparent",
+              color: isActive ? "var(--bone)" : "var(--bone-dim)",
+              borderColor: isActive ? "var(--ink-4)" : "transparent",
+            }}
+          >
+            <span style={{ fontSize: 12 }}>{r.displayName}</span>
+            {r.clientFacing && (
+              <Pill tone="jade" title="只有它直接对甲方说话(clientFacing)">
+                甲方
+              </Pill>
+            )}
+            {issues > 0 && (
+              <Pill
+                tone="cinnabar"
+                title="需要注意的处数:缺单元 / 集合文件坏 / 越权被拒 / 未知工具名"
+              >
+                {issues}
+              </Pill>
+            )}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+/**
+ * 一个角色的面板。顺序刻意是**「我能不能用 → 我能改什么 → 代码内常量」**:
+ *
+ *   1. 摘要行 —— 单元 x/y、工具 n/m、集合文件状态(三个数就够判断「这角色正常吗」);
+ *   2. 告警 —— 集合文件无效 / 缺单元 / 越权被拒 / 未知工具名(红的在前);
+ *   3. 提示词单元 —— **默认折叠**(点开才出现 textarea,所以一屏里不会有十几段长正文);
+ *   4. 工具面与代码内常量 —— 折起来:它们是**改不了**的东西,不该占首屏。
+ */
+export function HarnessRolePane({
+  role,
+  owners,
+  drafts,
+  backups,
+  onDraftChange,
+  onApplied,
+}: {
+  role: RoleHarnessView;
+  /** unit id → 声明它的角色显示名(`sharedUnitOwners`) */
+  owners: ReadonlyMap<string, string[]>;
+  drafts: Readonly<Record<string, string>>;
+  backups: Readonly<Record<string, number>>;
+  onDraftChange: (unitId: string, next: string) => void;
+  /** 保存 / 恢复成功 —— 参数是后端**回读**到的正文 */
+  onApplied: (unitId: string, content: string) => void;
+}) {
+  const loaded = role.promptUnits.filter((u) => u.loaded).length;
+  const missing = role.promptUnits.filter((u) => !u.loaded);
+  const toolSetLabel =
+    role.toolSet.state === "ok"
+      ? `生效中 · 收掉 ${role.toolSet.removedByToolSet.length} 个`
+      : role.toolSet.state === "absent"
+        ? "无文件 · 按 ceiling 全集(出厂行为)"
+        : "文件无效 · 已退化成 ceiling 全集";
+
+  return (
+    <Section
+      title={role.displayName}
+      count={role.promptUnits.length}
+      hintTitle={`role = ${role.role}`}
+      aside={
+        <div className="flex items-center gap-1.5">
+          {role.clientFacing && <Pill tone="jade">甲方接口</Pill>}
+          <span className="ss-meta font-mono">{role.role}</span>
+        </div>
+      }
+    >
+      <article className="sansheng-card p-3 flex flex-col gap-3">
+        {/* ① 摘要行:三个数就能判断这个角色是否正常 */}
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
+          <span className="ss-meta" title="角色声明了这个单元、且盘上有文件">
+            提示词单元{" "}
+            <span style={{ color: missing.length > 0 ? "var(--cinnabar)" : "var(--jade)" }}>
+              {loaded}/{role.promptUnits.length}
+            </span>{" "}
+            已加载
+          </span>
+          {/* ⚠️ 这两个数**不是分数关系**:ceiling 是**能力**条目、tools 是**工具名**,
+              而一条能力可以展开成多个工具(`blackboard.read` → `board_list` +
+              `board_read`)⇒ 真机上「工具 26 / 能力 22」是正常的。写成 `26/22`
+              会被读成「26 用掉了 22 里的 26」(渲染真实数据时当场看出来的一处错)。 */}
+          <span
+            className="ss-meta"
+            title="能力 = ceiling 的条目数(代码内常量);实得工具 = 工具名个数 —— 一条能力可展开成多个工具,所以工具数常大于能力数,两者不是分数关系"
+          >
+            能力 <span style={{ color: "var(--bone-dim)" }}>{role.ceiling.length}</span> 项 · 实得工具{" "}
+            <span style={{ color: "var(--bone)" }}>{role.tools.length}</span> 个
+          </span>
+          <span className="ss-meta" title={role.toolSet.path}>
+            集合文件{" "}
+            <span
+              style={{
+                color:
+                  role.toolSet.state === "ok"
+                    ? "var(--jade)"
+                    : role.toolSet.state === "invalid"
+                      ? "var(--cinnabar)"
+                      : "var(--bone-dim)",
+              }}
+            >
+              {toolSetLabel}
+            </span>
+          </span>
+          {role.writeKinds.length > 0 && (
+            <span className="ss-meta" title="writeKinds:这个角色能往库里写哪几类记录(代码内常量)">
+              可写 {role.writeKinds.length} 类
+            </span>
+          )}
+        </div>
+
+        {/* ② 告警:红的在前。四类都不会静默 —— 这是纪律,不是装饰。 */}
+        {missing.length > 0 && (
+          <Flag tone="cinnabar">
+            <span className="ss-meta">
+              有 {missing.length} 个单元声明了但盘上没有文件 —— 这几条职责从没告诉过 agent:
+            </span>
+            <span className="ss-body">{missing.map((u) => u.id).join(" · ")}</span>
+          </Flag>
+        )}
+
+        {role.toolSet.state === "invalid" && (
+          <Flag tone="cinnabar">
+            <span className="ss-meta">集合文件无效,当前没有生效(权限按 ceiling 全集):</span>
+            <span className="ss-body">{role.toolSet.problem}</span>
+            <span className="ss-meta font-mono">{role.toolSet.path}</span>
+          </Flag>
+        )}
+
+        {role.blockedByCeiling.length > 0 && (
+          <Flag tone="cinnabar">
+            <span className="ss-meta">超出架构上界(集合文件写了但被 ceiling 拒绝):</span>
+            <span className="ss-body">{role.blockedByCeiling.join(" · ")}</span>
+          </Flag>
+        )}
+
+        {role.unknownTools.length > 0 && (
+          <Flag tone="cinnabar">
+            <span className="ss-meta">集合文件里有不存在的工具名(已丢弃):</span>
+            <span className="ss-body">{role.unknownTools.join(" · ")}</span>
+          </Flag>
+        )}
+
+        {role.toolSet.removedByToolSet.length > 0 && (
+          <Flag tone="mute">
+            <span className="ss-meta">被集合文件收掉(ceiling 给了、文件没要):</span>
+            <span className="ss-body">{role.toolSet.removedByToolSet.join(" · ")}</span>
+          </Flag>
+        )}
+
+        {/* ③ 提示词单元:这一块才是用户在找的东西,所以它排在常量前面 */}
+        <div className="flex flex-col">
+          <div className="ss-section" style={{ fontSize: 12 }}>
+            提示词单元 · 可编辑
+          </div>
+          {role.promptUnits.length === 0 ? (
+            <div className="ss-note">这个角色没有声明任何提示词单元。</div>
+          ) : (
+            role.promptUnits.map((u) => (
+              <PromptUnitEditor
+                key={u.id}
+                unit={u}
+                value={drafts[u.id] ?? u.content}
+                backups={backups[u.id]}
+                sharedWith={owners.get(u.id) ?? []}
+                onChange={(v) => onDraftChange(u.id, v)}
+                onApplied={(content) => onApplied(u.id, content)}
+              />
+            ))
+          )}
+        </div>
+
+        {/* ④ 改不了的东西折起来 —— 它们重要,但不该占首屏 */}
+        <Disclosure summary={`工具面与代码内常量(改不了)· 能力 ${role.ceiling.length} 项`}>
+          <div className="flex flex-col">
+            <KV
+              label="能力"
+              value={`${role.ceiling.length} 项 · 代码内常量,改不了`}
+              title="ceiling 来自 ROLE_SPECS,是架构上界;集合文件与界面都突破不了它。要改得走代码评审。"
+            />
+            <KV
+              label="可写"
+              value={`${role.writeKinds.join(" · ") || "不可写"} · 代码内常量,改不了`}
+              title="writeKinds 同样来自 ROLE_SPECS(代码内常量),不是可编辑文件 —— 本页只提供提示词单元的编辑。"
+            />
+            <KV
+              label="边界拒"
+              value={role.boundaryDeny.length > 0 ? role.boundaryDeny.join(" · ") : "—"}
+              title="明示这个角色拿不到哪些工具。同样是代码内常量,本页改不了。"
+            />
+            <KV
+              label="实得工具"
+              value={
+                role.tools.length > 0
+                  ? role.tools.join(" · ")
+                  : "无(集合文件把工具面收空了,或还没有种子角色)"
+              }
+              title="已过三重门控:ROLE_SPECS[].ceiling(代码内常量)∧ 集合文件 harness/tools/{role}.json ∧ 执行点。"
+            />
+            <KV
+              label="集合文件"
+              value={toolSetLabel}
+              title={
+                `${role.toolSet.path}\n\nstate = ${role.toolSet.state}` +
+                "\n只有 ok 会真的收窄工具面;absent / invalid 都按 ceiling 全集求解。" +
+                (role.toolSet.allow.length > 0 ? `\n\n文件里的 allow:${role.toolSet.allow.join(" · ")}` : "") +
+                (role.toolSet.deny.length > 0 ? `\n文件里的 deny:${role.toolSet.deny.join(" · ")}` : "")
+              }
+            />
+            <div className="flex flex-wrap gap-1" style={{ marginTop: 6 }}>
+              {role.ceiling.map((c) => (
+                <span key={c} className="ss-pill" data-tone="bone">
+                  {c}
+                </span>
+              ))}
+            </div>
+          </div>
+        </Disclosure>
+      </article>
+    </Section>
+  );
+}
+
 export function HarnessPage() {
   const [view, setView] = useState<HarnessView | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  /** 当前选中的角色。`null` = 还没选(取第一个角色)。 */
+  const [activeRole, setActiveRole] = useState<ProjectRole | null>(null);
   /**
    * 编辑中的正文,**按 unit id 存**。
    *
@@ -149,6 +467,11 @@ export function HarnessPage() {
     view?.roles.flatMap((r) =>
       r.promptUnits.filter((u) => !u.loaded).map((u) => ({ role: r.displayName, unit: u })),
     ) ?? [];
+  const owners = view === null ? new Map<string, string[]>() : sharedUnitOwners(view.roles);
+  const selected =
+    view === null || view.roles.length === 0
+      ? null
+      : (view.roles.find((r) => r.role === activeRole) ?? view.roles[0] ?? null);
 
   return (
     <div className="ss-page">
@@ -187,7 +510,7 @@ export function HarnessPage() {
           {" —— "}
           文件名必须是 <code>{"{role}"}.json</code>(即 business_manager / project_manager /
           worker / quality_reviewer),写错了不会被读取;改完不需要重启服务,
-          每个新会话现读一次。上面每张卡里的「集合文件」一行就是它是否生效的实地。
+          每个新会话现读一次。选中角色下面的摘要行就是它是否生效的实地。
         </span>
       </Flag>
 
@@ -209,6 +532,8 @@ export function HarnessPage() {
         <EmptyState>加载中…</EmptyState>
       ) : view === null ? (
         <EmptyState>读不到 Harness 视图。</EmptyState>
+      ) : view.roles.length === 0 ? (
+        <EmptyState>这个视图里没有角色。</EmptyState>
       ) : (
         <>
           {missing.length > 0 && (
@@ -220,130 +545,26 @@ export function HarnessPage() {
             </Flag>
           )}
 
-          <div className="grid gap-3">
-            {view.roles.map((r) => (
-              <Section
-                key={r.role}
-                title={r.displayName}
-                count={r.promptUnits.length}
-                hint={r.clientFacing ? "甲方接口" : undefined}
-                hintTitle={`role = ${r.role}`}
-                aside={
-                  <div className="flex items-center gap-1.5">
-                    {r.clientFacing && <Pill tone="jade">甲方接口</Pill>}
-                    <span className="ss-meta font-mono">{r.role}</span>
-                  </div>
-                }
-              >
-                <article className="sansheng-card p-3 flex flex-col gap-2">
-                  <div className="flex flex-col">
-                    <KV
-                      label="能力"
-                      value={`${r.ceiling.length} 项 · 代码内常量,改不了`}
-                      title="ceiling 来自 ROLE_SPECS,是架构上界;集合文件与界面都突破不了它。要改得走代码评审。"
-                    />
-                    <KV
-                      label="可写"
-                      value={`${r.writeKinds.join(" · ") || "不可写"} · 代码内常量,改不了`}
-                      title="writeKinds 同样来自 ROLE_SPECS(代码内常量),不是可编辑文件 —— 本页只提供提示词单元的编辑。"
-                    />
-                    <KV
-                      label="边界拒"
-                      value={r.boundaryDeny.length > 0 ? r.boundaryDeny.join(" · ") : "—"}
-                      title="明示这个角色拿不到哪些工具。同样是代码内常量,本页改不了。"
-                    />
-                    <KV
-                      label="实得工具"
-                      value={
-                        r.tools.length > 0
-                          ? r.tools.join(" · ")
-                          : "无(集合文件把工具面收空了,或还没有种子角色)"
-                      }
-                      title="已过三重门控:ROLE_SPECS[].ceiling(代码内常量)∧ 集合文件 harness/tools/{role}.json ∧ 执行点。"
-                    />
-                    <KV
-                      label="集合文件"
-                      value={
-                        r.toolSet.state === "ok"
-                          ? `生效中 · 收掉 ${r.toolSet.removedByToolSet.length} 个工具`
-                          : r.toolSet.state === "absent"
-                            ? "没有这个文件 · 按 ceiling 全集(出厂行为)"
-                            : "文件无效 · 已退化成 ceiling 全集"
-                      }
-                      title={
-                        `${r.toolSet.path}\n\nstate = ${r.toolSet.state}` +
-                        "\n只有 ok 会真的收窄工具面;absent / invalid 都按 ceiling 全集求解。"
-                      }
-                    />
-                  </div>
+          {/* ── 按角色分栏:一次只看一个角色 ─────────────────────────────
+              以前四个角色同时铺开:每个 5 行 KV + 每个单元一个展开的 textarea
+              ⇒ 一屏十几段长正文;共用单元还会重复出现多次。现在是一行页签
+              (有问题的角色带数字角标)+ 该角色一块面板。 */}
+          <HarnessRoleTabs
+            roles={view.roles}
+            active={selected?.role ?? null}
+            onSelect={setActiveRole}
+          />
 
-                  {/* 集合文件坏了必须响亮:此时权限**回落到 ceiling 全集**(方向上是放宽)。
-                      「坏了」与「生效了」在界面上长得一样,是最危险的形态。 */}
-                  {r.toolSet.state === "invalid" && (
-                    <Flag tone="cinnabar">
-                      <span className="ss-meta">集合文件无效,当前没有生效(权限按 ceiling 全集):</span>
-                      <span className="ss-body">{r.toolSet.problem}</span>
-                      <span className="ss-meta font-mono">{r.toolSet.path}</span>
-                    </Flag>
-                  )}
-
-                  {/* 集合文件**生效的证据**:ceiling 本来会给、文件没要的那些工具。 */}
-                  {r.toolSet.removedByToolSet.length > 0 && (
-                    <Flag tone="mute">
-                      <span className="ss-meta">被集合文件收掉(ceiling 给了、文件没要):</span>
-                      <span className="ss-body">{r.toolSet.removedByToolSet.join(" · ")}</span>
-                    </Flag>
-                  )}
-
-                  {/* 越权条目必须对用户可见 —— 架构裁决不能被静默吞掉。 */}
-                  {r.blockedByCeiling.length > 0 && (
-                    <Flag tone="cinnabar">
-                      <span className="ss-meta">超出架构上界(集合文件写了但被 ceiling 拒绝):</span>
-                      <span className="ss-body">{r.blockedByCeiling.join(" · ")}</span>
-                    </Flag>
-                  )}
-
-                  {/* 拼错工具名不静默生效(见 solveToolset 的 unknownTools)。 */}
-                  {r.unknownTools.length > 0 && (
-                    <Flag tone="cinnabar">
-                      <span className="ss-meta">集合文件里有不存在的工具名(已丢弃):</span>
-                      <span className="ss-body">{r.unknownTools.join(" · ")}</span>
-                    </Flag>
-                  )}
-
-                  <Disclosure summary={`能力清单(${r.ceiling.length})· 代码内常量,改不了`}>
-                    <div className="flex flex-wrap gap-1">
-                      {r.ceiling.map((c) => (
-                        <span key={c} className="ss-pill" data-tone="bone">
-                          {c}
-                        </span>
-                      ))}
-                    </div>
-                  </Disclosure>
-
-                  <div className="flex flex-col">
-                    <div className="ss-section" style={{ fontSize: 12 }}>
-                      提示词单元
-                    </div>
-                    {r.promptUnits.length === 0 ? (
-                      <div className="ss-note">这个角色没有声明任何提示词单元。</div>
-                    ) : (
-                      r.promptUnits.map((u) => (
-                        <PromptUnitEditor
-                          key={u.id}
-                          unit={u}
-                          value={drafts[u.id] ?? u.content}
-                          backups={backups[u.id]}
-                          onChange={(v) => setDrafts((d) => ({ ...d, [u.id]: v }))}
-                          onApplied={(content) => applyContent(u.id, content)}
-                        />
-                      ))
-                    )}
-                  </div>
-                </article>
-              </Section>
-            ))}
-          </div>
+          {selected !== null && (
+            <HarnessRolePane
+              role={selected}
+              owners={owners}
+              drafts={drafts}
+              backups={backups}
+              onDraftChange={(unitId, next) => setDrafts((d) => ({ ...d, [unitId]: next }))}
+              onApplied={applyContent}
+            />
+          )}
         </>
       )}
     </div>
@@ -354,6 +575,7 @@ function PromptUnitEditor({
   unit,
   value,
   backups,
+  sharedWith,
   onChange,
   onApplied,
 }: {
@@ -362,6 +584,8 @@ function PromptUnitEditor({
   value: string;
   /** 备份份数;undefined = 还没查到,-1 = 查不到 */
   backups: number | undefined;
+  /** 声明了这个单元的**全部**角色显示名(多于一个 = 共用同一个文件) */
+  sharedWith: readonly string[];
   onChange: (next: string) => void;
   /** 保存 / 恢复成功 —— 参数是后端**回读**到的正文 */
   onApplied: (content: string) => void;
@@ -404,7 +628,8 @@ function PromptUnitEditor({
   }
 
   return (
-    <div className="py-1" style={{ borderTop: "1px solid var(--ink-3)" }}>
+    <div className="py-1.5" style={{ borderTop: "1px solid var(--ink-3)" }}>
+      {/* ── 摘要行:默认只显示这一行(以前每个单元都摊开一个 textarea)── */}
       <div className="flex items-center gap-2 flex-wrap">
         {/* loaded=false 是本页最重要的一个信号:红色,不是灰色。 */}
         {unit.loaded ? (
@@ -417,6 +642,15 @@ function PromptUnitEditor({
         <span className="ss-body" style={{ color: "var(--bone-dim)" }}>
           {unit.id}
         </span>
+        {/* 共用文件:改了会影响这几个角色 —— 写在用户看得见的地方 */}
+        {sharedWith.length > 1 && (
+          <Pill
+            tone="cyan"
+            title={`这是**同一个文件**,被 ${sharedWith.length} 个角色声明:${sharedWith.join(" · ")}。改它会影响这几个角色。`}
+          >
+            共用于 {sharedWith.length} 个角色
+          </Pill>
+        )}
         {edited && <Pill tone="amber" title="编辑框里的内容和盘上的不一致">未保存</Pill>}
         <span className="ss-meta ml-auto" title="盘上正文的字符数(GET /api/harness 报的)">
           {unit.chars} 字符
@@ -428,9 +662,6 @@ function PromptUnitEditor({
           备份 {backups === undefined ? "…" : backups < 0 ? "—" : backups}
         </span>
       </div>
-      <div className="ss-meta font-mono truncate" title={unit.path}>
-        {unit.path}
-      </div>
 
       {unit.content.length > 0 && (
         <Clamp lines={2} style={{ marginTop: 2 }}>
@@ -438,8 +669,15 @@ function PromptUnitEditor({
         </Clamp>
       )}
 
-      <Disclosure summary={unit.loaded ? `编辑正文(${unit.chars} 字符)` : "编写正文(盘上还没有这个文件)"}>
+      {/* 编辑区**默认折叠** —— 这是这一版可读性的关键:一屏里不再有十几段长正文。
+          展开后仍是完整的老行为(回读值当状态、两段式确认、失败原样显示)。 */}
+      <Disclosure
+        summary={unit.loaded ? `编辑正文(${unit.chars} 字符)` : "编写正文(盘上还没有这个文件)"}
+      >
         <div className="flex flex-col gap-1.5">
+          <div className="ss-meta font-mono truncate" title={unit.path}>
+            {unit.path}
+          </div>
           <textarea
             value={value}
             rows={12}
