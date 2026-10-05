@@ -49,7 +49,9 @@ import {
 import {
   aggregateProjectUsage, normalizeUsageDayLimit, normalizeUsageDays,
 } from "../storage/repo/usage.js";
-import { isSessionMessageKind } from "../storage/repo/sessions.js";
+import {
+  isSessionMessageKind, isSessionMessageSource, isSessionMessageTriggerKind,
+} from "../storage/repo/sessions.js";
 import type { SessionMessageKind, SessionMessageRow } from "../storage/repo/sessions.js";
 import type {
   HarnessView, MemberConversationView, MemberConversationsResponse,
@@ -662,7 +664,13 @@ export function memberConversations(
 
   const msgStmt = db.prepare(
     // `IS ?` 而不是 `= ?`:接待/系统那条 agent_id 为 NULL,`= NULL` 永远查不出来
-    `SELECT m.id, m.session_id, m.agent_id, m.kind, m.content, m.created_at
+    //
+    // ⚠️ 两列封套(`origin_source` / `trigger_kind`,migration 019)**必须显式
+    // 列出**:这条 SQL 不是 `SELECT *` —— 漏了它们,成员页拿到的那一页消息就
+    // 全是 `unknown`,而这与「存量行」在类型上长得一模一样(见
+    // `views.ts` 的 `messageOriginOf`)。
+    `SELECT m.id, m.session_id, m.agent_id, m.kind, m.content, m.created_at,
+            m.origin_source, m.trigger_kind
        FROM session_messages m
        JOIN project_sessions s ON s.id = m.session_id
       WHERE s.project_id = ? AND m.agent_id IS ?
@@ -693,14 +701,30 @@ export function memberConversations(
     const rows = msgStmt.all(projectId, agentId, limit) as Array<{
       id: string; session_id: string; agent_id: string | null;
       kind: string; content: string; created_at: number;
+      origin_source: string | null; trigger_kind: string | null;
     }>;
     const messages: SessionMessageView[] = rows.map((r) => {
       if (!isSessionMessageKind(r.kind)) {
         throw new Error(`session_messages 表里出现未定义 kind「${r.kind}」(id=${r.id})`);
       }
+      // 封套闭集的校验与映射**只有一处**(`repo/sessions.ts` 的
+      // `listSessionMessages` + `views.ts` 的 `messageOriginOf`)—— 这里复用同
+      // 两个守卫,不复制闭集、也不用断言糊过去。
+      if (r.origin_source !== null && !isSessionMessageSource(r.origin_source)) {
+        throw new Error(
+          `session_messages 表里出现未定义 origin_source「${r.origin_source}」(id=${r.id})`,
+        );
+      }
+      if (r.trigger_kind !== null && !isSessionMessageTriggerKind(r.trigger_kind)) {
+        throw new Error(
+          `session_messages 表里出现未定义 trigger_kind「${r.trigger_kind}」(id=${r.id})`,
+        );
+      }
       const row: SessionMessageRow = {
         id: r.id, sessionId: r.session_id, agentId: r.agent_id,
         kind: r.kind, content: r.content, createdAt: r.created_at,
+        originSource: r.origin_source,
+        triggerKind: r.trigger_kind,
       };
       return toMessageView(row, nameOfGroup, projectId);
     });

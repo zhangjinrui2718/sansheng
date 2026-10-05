@@ -254,8 +254,12 @@ describe("A2 · REST 回填也把 agentId 带进轮里", () => {
       "/projects/p-rest/messages": {
         projectId: "p-rest",
         messages: [
-          { id: "m1", projectId: "p-rest", agentId: "ag_wk", agentName: "wk", kind: "assistant", content: "我来做", createdAt: 1 },
-          { id: "m2", projectId: "p-rest", agentId: null, agentName: null, kind: "user", content: "好", createdAt: 2 },
+          // ⚠️ `origin` 是 `SessionMessageView` 的**必填**字段(W3-①,migration 019):
+          // REST 回填现在照抄库里的封套。漏了它 `channelOf` 会抛一个看不出是哪条
+          // 字段漏了的 TypeError(`tests/` 不受 tsc 约束)—— 由
+          // `fixture-envelope-fields.test.ts` 的规则 3 扫着。
+          { id: "m1", projectId: "p-rest", agentId: "ag_wk", agentName: "wk", kind: "assistant", content: "我来做", createdAt: 1, origin: { source: "turn", trigger: { kind: "todo" } } },
+          { id: "m2", projectId: "p-rest", agentId: null, agentName: null, kind: "user", content: "好", createdAt: 2, origin: { source: "turn", trigger: { kind: "user" } } },
         ],
       },
     };

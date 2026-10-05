@@ -119,16 +119,21 @@ describe("C4 · `ensureSession` 按 `(project_id, channel)` 取,不再挑「最�
     appendSessionMessage(db, {
       id: "m_worker", sessionId: workerSession, agentId: "wk", kind: "assistant",
       content: "worker 的产出", createdAt: T0 + 2000,
+      // 执行那条路今天全是 `todo` 触发的(封套与本来测的通道归属无关,
+      // 但照实写 —— 见 `appendSessionMessage` 的必填实参说明)
+      originSource: "turn", triggerKind: "todo",
     });
     // 系统通知那条也是 `internal`(announceDrain)
     appendSessionMessage(db, {
       id: "m_sys", sessionId: mainSessionId(), agentId: null, kind: "system",
       content: "⚠️ 组织停止推进", createdAt: T0 + 2001,
+      originSource: null, triggerKind: null, // 平台通知不属于任何封套
     });
     // 双通道各写一条(甲方说的话 / 业务经理的播报走 `client`)
     appendSessionMessage(db, {
       id: "m_user", sessionId: clientSessionId(), agentId: null, kind: "user",
       content: "这份交付里第三条路线的依据是什么?", createdAt: T0 + 2002,
+      originSource: "turn", triggerKind: "user", // 甲方亲口说的那一轮
     });
 
     expect(

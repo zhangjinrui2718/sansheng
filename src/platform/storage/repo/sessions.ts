@@ -8,6 +8,7 @@
  * 所以 `artifacts.conversation_id` **刻意不加外键**:工件必须比对话活得久。
  */
 import type Database from "better-sqlite3";
+import type { TurnTriggerKind } from "@shared/types/platform.js";
 
 export type SessionMessageKind = "user" | "assistant" | "thinking" | "tool" | "system";
 
@@ -44,6 +45,61 @@ export function isSessionChannel(v: unknown): v is SessionChannel {
   return typeof v === "string" && (SESSION_CHANNELS as readonly string[]).includes(v);
 }
 
+// ── 会话消息的**封套**(migration 019)────────────────────────────
+//
+// 这两维此前只活在 WS 封套上、**一条都没落库**,于是刷新之后前端拿不到判据
+// (`SessionMessageView` 上没有它们)⇒ 只能回退到按角色的两跳判据 ⇒ 业务经理被
+// 工件/待办叫醒的那一轮**在刷新后又出现在对话页上**。019 把封套落进
+// `session_messages.origin_source` / `trigger_kind`,这个类型就是那两列的读侧形状。
+//
+// 与 WS 契约逐个对齐(**不要在这里新造取值域**):
+//   · `SessionMessageSource`  = `TurnMessageStart.source` | `BroadcastMessageStart.source`
+//     (契约里那条 `_MessageStartHasExactlyTwoSources` 断言只有这两个);
+//   · `SessionMessageTriggerKind` = `TurnTrigger["kind"]`(`TurnTriggerKind`,shared)。
+//
+// ⚠️ **它落的是封套的输入,不是「算好的通道」。** 落通道等于把某个版本的显示判据
+// 冻进数据 —— 而那条判据已经改过两次(按角色 → 按触发源),再改一次就得整体重算
+// 存量行,而重算的输入(封套)恰好没存。详见 `migrations/019_message_origin.sql`。
+//
+// ⚠️ 共享类型里**没有运行期数组**(server 侧禁 value import `@shared/*`),
+// 所以这两组闭集在这里各写一份 —— 与上面的 `MESSAGE_KINDS` 同一条处置,
+// 并由文件末尾那两条编译期断言钉住「与 shared 的联合互为子集」。
+export const MESSAGE_ORIGIN_SOURCES = ["turn", "broadcast"] as const;
+export type SessionMessageSource = (typeof MESSAGE_ORIGIN_SOURCES)[number];
+
+export function isSessionMessageSource(v: unknown): v is SessionMessageSource {
+  return typeof v === "string" && (MESSAGE_ORIGIN_SOURCES as readonly string[]).includes(v);
+}
+
+export const MESSAGE_TRIGGER_KINDS = ["user", "todo"] as const;
+export type SessionMessageTriggerKind = (typeof MESSAGE_TRIGGER_KINDS)[number];
+
+export function isSessionMessageTriggerKind(v: unknown): v is SessionMessageTriggerKind {
+  return typeof v === "string" && (MESSAGE_TRIGGER_KINDS as readonly string[]).includes(v);
+}
+
+/**
+ * 编译期对账:`A` 与 `B` 必须**互为子集**(多一个 / 少一个都红)。
+ *
+ * 为什么要它:上面那两组闭集是 shared 联合的**第二处**写法(第一处是协议类型)。
+ * 只有 shared 那一侧增长(例如 `TurnTrigger` 加第三种 `kind`)而这里漏跟时,
+ * 读侧会**抛**在一条合法数据上 —— 那是最糟的形态(数据没错,代码落后)。
+ * 这条断言把那个时刻提前到编译期。
+ */
+type _MutuallyAssignable<A extends string, B extends string> = [A] extends [B]
+  ? [B] extends [A]
+    ? true
+    : false
+  : false;
+type _AssertTrue<T extends true> = T;
+
+type _OriginSourcesInSync = _AssertTrue<
+  _MutuallyAssignable<SessionMessageSource, "turn" | "broadcast">
+>;
+type _TriggerKindsInSync = _AssertTrue<
+  _MutuallyAssignable<SessionMessageTriggerKind, TurnTriggerKind>
+>;
+
 export interface SessionRow {
   id: string;
   /**
@@ -71,6 +127,16 @@ export interface SessionMessageRow {
   kind: SessionMessageKind;
   content: string;
   createdAt: number;
+  /**
+   * 这个封套是谁发的(`session_messages.origin_source`,migration 019)。
+   *
+   * **`null` = 不属于任何封套** —— `kind='system'` 的平台通知,以及 019 之前的
+   * 存量行。读侧把它如实交给 `views.ts`,由那里合成
+   * `MessageOrigin` 的 `{ source: "unknown" }`。
+   */
+  originSource: SessionMessageSource | null;
+  /** 这一轮为什么存在(**只在 `originSource === "turn"` 时有值**)。 */
+  triggerKind: SessionMessageTriggerKind | null;
 }
 
 interface RawConversation {
@@ -88,6 +154,8 @@ interface RawMessage {
   kind: string;
   content: string;
   created_at: number;
+  origin_source: string | null;
+  trigger_kind: string | null;
 }
 
 /**
@@ -246,6 +314,30 @@ export function openDeliverableSession(
   return { created: true, sessionId };
 }
 
+/**
+ * 往 `session_messages` 插一行。
+ *
+ * ── ⚠️ `originSource` / `triggerKind` 是**必填实参**(不是可选)──────────
+ *
+ * 它们就是「这一轮为什么存在」的落库形状(W3-① 的闭合点)。**可选 = 漏填也
+ * 编译得过**,而漏填的表现是这条消息刷新之后**悄悄走回退判据** —— 业务经理被
+ * 待办叫醒的那一轮正文重新出现在对话页上,而界面上完全看不出来:那正是这次
+ * 要修的 bug。必填之后,每个调用点都必须显式说清自己写的是什么封套(TS 会把
+ * 它们全部点出来),`null` 也要白纸黑字写出来。
+ *
+ * 三条不变式在**这唯一一个写口**上判(库里的 CHECK 只能逐列判,表达不了
+ * 「哪两列的组合是合法的」):
+ *
+ *   · `triggerKind` 有值 ⟺ `originSource === "turn"` —— 回合**必然**有触发维度
+ *     (契约上 `TurnMessageStart.trigger` 必填),而播报 / 系统通知没有说话人之外
+ *     的维度;
+ *   · `originSource === "broadcast"` 时 `triggerKind` 必须是 `null` —— 这是契约里
+ *     `_BroadcastMustNotCarryTrigger` 的落库侧同一条纪律(播报无条件显示,
+ *     不许被任何回合级判据连坐)。
+ *
+ * 违反时**抛**,不静默降级:一条错封套写进库之后,现场只剩下一个读不出来的
+ * `unknown`(见 7-N)。
+ */
 export function appendSessionMessage(
   db: Database.Database,
   row: {
@@ -255,12 +347,29 @@ export function appendSessionMessage(
     kind: SessionMessageKind;
     content: string;
     createdAt: number;
+    /** 见 {@link SessionMessageRow.originSource};`null` = 不属于任何封套 */
+    originSource: SessionMessageSource | null;
+    /** 见 {@link SessionMessageRow.triggerKind};`null` = 没有说话人之外的维度 */
+    triggerKind: SessionMessageTriggerKind | null;
   },
 ): void {
+  const isTurn = row.originSource === "turn";
+  if (isTurn !== (row.triggerKind !== null)) {
+    throw new Error(
+      `appendSessionMessage: 封套形状不合法(origin_source=${String(row.originSource)}, ` +
+        `trigger_kind=${String(row.triggerKind)})—— ` +
+        `trigger_kind 有值 ⟺ origin_source === "turn";` +
+        `播报 / 系统通知必须写成 trigger_kind=null(id=${row.id})`,
+    );
+  }
   db.prepare(
-    `INSERT INTO session_messages (id, session_id, agent_id, kind, content, created_at)
-     VALUES (?, ?, ?, ?, ?, ?)`,
-  ).run(row.id, row.sessionId, row.agentId, row.kind, row.content, row.createdAt);
+    `INSERT INTO session_messages
+       (id, session_id, agent_id, kind, content, created_at, origin_source, trigger_kind)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(
+    row.id, row.sessionId, row.agentId, row.kind, row.content, row.createdAt,
+    row.originSource, row.triggerKind,
+  );
 }
 
 /** 单次读回的**每会话**条数上限。见 {@link normalizeMessageLimit}。 */
@@ -320,6 +429,21 @@ export function listSessionMessages(
     if (!isSessionMessageKind(r.kind)) {
       throw new Error(`session_messages 表里出现未定义 kind「${r.kind}」(id=${r.id})`);
     }
+    // 封套那两列**逐列验闭集**(与 kind 同一条纪律:表里的未定义值是数据错误,
+    // 不是「跳过它」)。`null` 是合法值 —— 它表示「不属于任何封套」(系统通知 /
+    // 019 之前的存量行),由 `views.ts` 合成 `{ source: "unknown" }`。
+    // **两列的组合**不在这里判:那是写口(`appendSessionMessage`)的责任,
+    // 读侧只管如实交出。
+    if (r.origin_source !== null && !isSessionMessageSource(r.origin_source)) {
+      throw new Error(
+        `session_messages 表里出现未定义 origin_source「${r.origin_source}」(id=${r.id})`,
+      );
+    }
+    if (r.trigger_kind !== null && !isSessionMessageTriggerKind(r.trigger_kind)) {
+      throw new Error(
+        `session_messages 表里出现未定义 trigger_kind「${r.trigger_kind}」(id=${r.id})`,
+      );
+    }
     return {
       id: r.id,
       sessionId: r.session_id,
@@ -327,6 +451,8 @@ export function listSessionMessages(
       kind: r.kind,
       content: r.content,
       createdAt: r.created_at,
+      originSource: r.origin_source,
+      triggerKind: r.trigger_kind,
     };
   });
 }

@@ -23,7 +23,7 @@
  * W1-① 的原话:「新读者一写 `e.trigger.kind` 就会在测试里 TypeError,而编译期抓不到。
  * **这 42 处要同批补。**」这份文件就是那条要求的**机器化**。
  *
- * ── 判据(两条规则,都是**源码级**扫描)──────────────────────────
+ * ── 判据(三条规则,都是**源码级**扫描)──────────────────────────
  *
  *   1. 每个 `type: "message_start"` 的**夹具字面量**(带 `messageId` 的那些)必须带
  *      `source`;`source: "turn"` 的还必须带 `trigger`,`source: "broadcast"` 的
@@ -31,6 +31,11 @@
  *   2. 每个**手搓的 `Turn` 字面量**(同一个字面量里同时有 `startedAt:` 与
  *      `blocks:`)必须带 `origin` —— 漏了它,`channelOf` 会在 `turn.origin.source`
  *      上抛,而 `tests/` 同样不受 tsc 约束。
+ *   3. **每个 `SessionMessageView` 夹具**(判别字段 `agentName:` —— 那是它独有的)
+ *      必须带 `origin`(W3-① 起必填)。漏了它 `messageToTurn` 会给出
+ *      `origin: undefined`,`channelOf` 读 `turn.origin.source` 时抛一个**看不出
+ *      是哪条字段漏了**的 TypeError —— 与规则 2 同一条理由,而这条是**新加的**:
+ *      `origin` 是 2026-10-06(W3-①)才变成必填的,存量夹具**(8 处)同批补齐。
  *
  * **唯一的豁免方式**是在那个字面量里写一行注释 `fixture-lint: allow`(故意喂不合法
  * 封套的守卫测试要用)。豁免是**白纸黑字**的,不是静默跳过。
@@ -167,6 +172,7 @@ export function lintSource(src: string): {
   findings: LintFinding[];
   messageStarts: number;
   turnLiterals: number;
+  messageViews: number;
 } {
   const blanked = blankComments(src);
   const findings: LintFinding[] = [];
@@ -222,11 +228,32 @@ export function lintSource(src: string): {
     }
   }
 
-  return { findings, messageStarts, turnLiterals };
+  // ── 规则 3:SessionMessageView 夹具必须带 `origin`(W3-①)──────────
+  //
+  // 判别字段是 `agentName:` —— `SessionMessageView` 独有的那一维(其它视图用
+  // `displayName` / `authorName`)。再要求同一个字面量里有 `kind:` 与 `createdAt:`,
+  // 免得把「碰巧有个 agentName 字段」的别的对象一并点名。
+  let messageViews = 0;
+  for (const m of blanked.matchAll(/agentName\s*:/g)) {
+    const range = extractLiteral(blanked, m.index);
+    if (range === null) continue;
+    if (!/[\s,{]kind\s*[:,}]/.test(range.text)) continue;
+    if (!/[\s,{]createdAt\s*[:,}]/.test(range.text)) continue;
+    messageViews += 1;
+    if (allowed(range)) continue;
+    if (!/[\s,{]origin\s*[:,}]/.test(range.text)) {
+      findings.push({
+        line: lineAt(m.index),
+        problem: "SessionMessageView 夹具缺 origin(REST 必带,W3-① 起必填)",
+      });
+    }
+  }
+
+  return { findings, messageStarts, turnLiterals, messageViews };
 }
 
 describe("夹具扫描器自检(正负样本 —— 坏掉的检查不等于检查失败)", () => {
-  it("正样本:带 source / trigger 的 message_start 与带 origin 的 Turn 都通过", () => {
+  it("正样本:带 source / trigger 的 message_start、带 origin 的 Turn 与 SessionMessageView 都通过", () => {
     const ok = `
       s.applyEvent({ type: "message_start", projectId: P, messageId: "m1", role: "assistant", agentId: BM,
         source: "turn", trigger: { kind: "todo", todoKind: "execute_work" } });
@@ -234,14 +261,19 @@ describe("夹具扫描器自检(正负样本 —— 坏掉的检查不等于检�
         startedAt: 0, origin: { source: "unknown" } };
       s.applyEvent({ type: "message_start", projectId: P, messageId: "m2", role: "assistant", agentId: BM,
         source: "broadcast" });
+      const body = { messages: [
+        { id: "h1", projectId: P, agentId: BM, agentName: "业务经理", kind: "assistant", content: "x",
+          createdAt: 1, origin: { source: "turn", trigger: { kind: "user" } } },
+      ] };
     `;
     const r = lintSource(ok);
     expect(r.findings).toEqual([]);
     expect(r.messageStarts, "两个 message_start 都必须被扫到").toBe(2);
     expect(r.turnLiterals, "那个 Turn 字面量必须被扫到(内层 [{...}] 不许把判据带偏)").toBe(1);
+    expect(r.messageViews, "那个 SessionMessageView 夹具必须被扫到").toBe(1);
   });
 
-  it("负样本:漏 source / 漏 trigger / 播报带 trigger / Turn 漏 origin —— 四样都要被点名", () => {
+  it("负样本:漏 source / 漏 trigger / 播报带 trigger / Turn 漏 origin / 视图漏 origin —— 五样都要被点名", () => {
     const bad = `
       s.applyEvent({ type: "message_start", projectId: P, messageId: "m1", role: "assistant", agentId: BM });
       s.applyEvent({ type: "message_start", projectId: P, messageId: "m2", role: "assistant", agentId: BM,
@@ -249,6 +281,9 @@ describe("夹具扫描器自检(正负样本 —— 坏掉的检查不等于检�
       s.applyEvent({ type: "message_start", projectId: P, messageId: "m3", role: "assistant", agentId: BM,
         source: "broadcast", trigger: { kind: "user" } });
       const t = { id: "m4", projectId: P, role: "assistant", agentId: BM, blocks: [], startedAt: 0 };
+      const body = { messages: [
+        { id: "m5", projectId: P, agentId: BM, agentName: "业务经理", kind: "assistant", content: "x", createdAt: 1 },
+      ] };
     `;
     const r = lintSource(bad);
     expect(r.findings.map((f) => f.problem)).toEqual([
@@ -256,7 +291,9 @@ describe("夹具扫描器自检(正负样本 —— 坏掉的检查不等于检�
       "回合封套(source: turn)缺 trigger(契约必填)",
       "播报封套(source: broadcast)不该带 trigger",
       "手搓的 Turn 字面量缺 origin(必填)",
+      "SessionMessageView 夹具缺 origin(REST 必带,W3-① 起必填)",
     ]);
+    expect(r.messageViews, "漏 origin 的那个视图夹具必须被扫到(不是静默 0)").toBe(1);
   });
 
   it("负样本:**注释里**的 message_start 不算夹具(契约讨论不该被误报)", () => {
@@ -267,6 +304,23 @@ describe("夹具扫描器自检(正负样本 —— 坏掉的检查不等于检�
     const r = lintSource(withComment);
     expect(r.findings).toEqual([]);
     expect(r.messageStarts).toBe(0);
+  });
+
+  it("负样本:`SessionMessageView` **类型定义**里的 agentName 不算夹具", () => {
+    // 判别字段之外还要 `kind` + `createdAt` —— 接口声明是 `agentName: string | null;`
+    // 这种形状,且没有 `createdAt:`(有的话也要求在字面量里,不是类型里)
+    const typesOnly = `
+      export interface SessionMessageView {
+        id: string;
+        agentId: string | null;
+        agentName: string | null;
+        kind: SessionMessageKind;
+        content: string;
+      }
+    `;
+    const r = lintSource(typesOnly);
+    expect(r.findings).toEqual([]);
+    expect(r.messageViews).toBe(0);
   });
 
   it("正样本:类型位置(Extract<…>)不算夹具", () => {
@@ -296,21 +350,27 @@ describe("夹具扫描器自检(正负样本 —— 坏掉的检查不等于检�
   });
 });
 
-describe("tests/** 的夹具必须带封套字段(42 处 message_start + Turn 字面量)", () => {
+describe("tests/** 的夹具必须带封套字段(42 处 message_start + Turn 字面量 + 视图夹具)", () => {
   const files = walkTests(TESTS).map((p) => relative(REPO, p)).filter((f) => f !== SELF);
 
   it("扫描范围非空:找到的测试文件与夹具数都够(W1-① 记的是 42 处)", () => {
     expect(files.length, "至少要扫到几个测试文件").toBeGreaterThan(3);
     let messageStarts = 0;
     let turnLiterals = 0;
+    let messageViews = 0;
     for (const f of files) {
       const r = lintSource(readFileSync(join(REPO, f), "utf8"));
       messageStarts += r.messageStarts;
       turnLiterals += r.turnLiterals;
+      messageViews += r.messageViews;
     }
-    // ⚠️ 这两条是**非空**断言:扫描路径一旦落空,这里会红 —— 而不是愉快地报 0 违规。
+    // ⚠️ 这三条是**非空**断言:扫描路径一旦落空,这里会红 —— 而不是愉快地报 0 违规。
     expect(messageStarts, "message_start 夹具数不许低于 W1-① 记下的 42").toBeGreaterThanOrEqual(42);
     expect(turnLiterals, "手搓的 Turn 字面量数不许低于补齐前的 5").toBeGreaterThanOrEqual(5);
+    expect(
+      messageViews,
+      "SessionMessageView 夹具数不许低于 W3-① 补齐前的 8(补齐后是 10:2 旧 + 4 新 + 2 turn-table + 2 app-socket)",
+    ).toBeGreaterThanOrEqual(8);
   });
 
   it("逐文件零违规", () => {

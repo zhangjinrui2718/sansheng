@@ -19,15 +19,19 @@
  * —— 而那正是 W1-① 点名的坑(42 个手搓夹具漏填 ⇒ 运行期 TypeError)。
  * 所以这里走真事件:`applyEvent` → `turns` → `channelOf` → 渲染。
  *
- * ── 与「刷新之后」那条缺口的关系(诚实记在最前面)──────────────────
+ * ── 与「刷新之后」那条缺口的关系(W3-① 已闭合,2026-10-06)───────────
  *
- * `SessionMessageView` 上**没有** `source` / `trigger`(库里没落这两维)⇒ REST 回填
- * 出来的轮 `origin` 只能是 `unknown`,判据**回退**到角色的两跳。所以:
+ * 这一段此前写的是**缺口**:`SessionMessageView` 上既没有 `source` 也没有
+ * `trigger`(库里没落这两维)⇒ REST 回填出来的轮 `origin` 只能是 `unknown`
+ * ⇒ 判据**回退**到角色的两跳 ⇒ **刷新一次,工件触发的业务经理回合又出现在对话页**。
+ *
+ * 现在两维落库了(`session_messages.origin_source` / `trigger_kind`,
+ * migration 019),`SessionMessageView.origin` **就是** `MessageOrigin`
+ * (`shared/types/platform.ts`)⇒ 刷新那条路与流式那条路**产出的形状完全相同**:
  *   - 判据①②③在**流式**这条路上逐条成立(下面每一条都有样本);
- *   - 刷新之后①**不成立**(工件触发的业务经理回合会重新出现)、②仍成立(播报的作者
- *     是业务经理 ⇒ 回退判据放行)。
- * 这条缺口的闭合点在 `src/platform/transport/views.ts` / `SessionMessageView`,
- * **不在本次可碰清单里** —— 下面 `REST 回填` 那一段把现状钉住,免得它被忘掉。
+ *   - **刷新之后同样成立** —— 见下面 `REST 回填` 那一段的两组样本:
+ *     ① 带封套的行(019 之后)按判据分流;② **不带封套的行(019 之前的存量行)**
+ *     仍是 `unknown`,回退判据对它们继续有效(那是**旧数据的兜底**,不是主判据)。
  */
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createElement } from "react";
@@ -146,7 +150,9 @@ describe("① 工件 / 待办触发的业务经理回合不进甲方时间线(�
     const turns = landed();
     expect(turns).toHaveLength(1);
     // 轮确实建出来了(数据层不丢),判据把它挡在通道外
-    expect(turns[0]?.origin).toEqual({ source: "turn", trigger: { kind: "todo", todoKind: "report_downstream" } });
+    // ⚠️ **只带 `kind`**(W3-① 起前端那条 origin 收窄到 `TurnTriggerKind`):
+    // `todoKind` 不参与判定,落库那条路也拿不到它 —— 两条路必须同形。
+    expect(turns[0]?.origin).toEqual({ source: "turn", trigger: { kind: "todo" } });
     const { timeline, hidden } = partitionTurns(turns, CTX);
     expect(timeline, "业务经理是 clientFacing,但这不是判据了").toEqual([]);
     expect(hidden).toBe(1);
@@ -341,21 +347,23 @@ describe("契约守卫:`message_start` 漏填 source / trigger ⇒ 抛,不静默
   });
 });
 
-// ── 刷新那条路:`unknown` 回退(缺口钉在这里,别让它悄悄变)─────────────
-describe("REST 回填:origin 只能是 unknown ⇒ 回退到角色的两跳判据", () => {
-  it("刷新后业务经理的历史**还在**(回退放行),worker 的历史仍然被滤掉", async () => {
+// ── 刷新那条路:封套从库里回来(W3-① 的闭合判据)─────────────────────
+//
+// 这一组是**这次改动的验收判据**:REST 回填出来的轮,`origin` 必须**照抄**
+// `SessionMessageView.origin`,与流式那条路同形。两组样本:
+//
+//   ① 带封套的行(migration 019 之后写的)⇒ 判据与流式**逐条一致**
+//      ——「工件触发的业务经理回合」刷新后**不再**出现在对话页;
+//   ② 不带封套的行(019 之前的存量行)⇒ `unknown` ⇒ 回退判据照旧。
+describe("REST 回填:封套随行回来 ⇒ 刷新与流式同一条判据(W3-①)", () => {
+  /** 把 `/projects/:id/messages` 的响应钉死,然后走一遍 `selectProject`。 */
+  async function loadWithMessages(
+    messages: Array<Record<string, unknown>>,
+  ): Promise<Turn[]> {
     vi.stubGlobal("fetch", async (url: string) => {
       const path = String(url).replace("/api", "");
       const body =
-        path === `/projects/${P}/messages`
-          ? {
-              projectId: P,
-              messages: [
-                { id: "h-bm", projectId: P, agentId: BM, agentName: "业务经理", kind: "assistant", content: "刷新后仍在", createdAt: 1 },
-                { id: "h-wk", projectId: P, agentId: WK, agentName: "工程师", kind: "assistant", content: "worker 的产出", createdAt: 2 },
-              ],
-            }
-          : {};
+        path === `/projects/${P}/messages` ? { projectId: P, messages } : {};
       return { ok: true, status: 200, statusText: "OK", text: async () => JSON.stringify(body) };
     });
     try {
@@ -363,13 +371,68 @@ describe("REST 回填:origin 只能是 unknown ⇒ 回退到角色的两跳判�
     } finally {
       vi.unstubAllGlobals();
     }
-    const turns = landed();
+    return landed();
+  }
+
+  it("① **工件触发的业务经理回合刷新后不再出现** —— 缺口闭合的正样本", async () => {
+    const turns = await loadWithMessages([
+      {
+        id: "h-bm-todo", projectId: P, agentId: BM, agentName: "业务经理",
+        kind: "assistant", content: "工件触发的内部交代(不该给甲方看)", createdAt: 1,
+        origin: { source: "turn", trigger: { kind: "todo" } },
+      },
+      {
+        id: "h-bm-user", projectId: P, agentId: BM, agentName: "业务经理",
+        kind: "assistant", content: "甲方亲口问的那一轮回答", createdAt: 2,
+        origin: { source: "turn", trigger: { kind: "user" } },
+      },
+      {
+        id: "h-bc", projectId: P, agentId: BM, agentName: "业务经理",
+        kind: "assistant", content: "播报:第三条路线已交付", createdAt: 3,
+        origin: { source: "broadcast" },
+      },
+      {
+        id: "h-wk", projectId: P, agentId: WK, agentName: "工程师",
+        kind: "assistant", content: "worker 的内部产出", createdAt: 4,
+        origin: { source: "turn", trigger: { kind: "todo" } },
+      },
+    ]);
+
+    // 判据**照抄**封套,不再有 `unknown` —— 这是本次改动的核心断言
+    expect(turns.map((t) => t.origin)).toEqual([
+      { source: "turn", trigger: { kind: "todo" } },
+      { source: "turn", trigger: { kind: "user" } },
+      { source: "broadcast" },
+      { source: "turn", trigger: { kind: "todo" } },
+    ]);
+
+    const { timeline, hidden } = partitionTurns(turns, CTX);
+    // 进甲方通道的只有三条:甲方触发的那一轮正文 + 播报(无条件)+ ... 见下
+    // ⚠️ **`h-bm-todo` 不在里面** —— 这正是缺口存在时**会**出现的那一条。
+    expect(timeline.map((x) => x.turn.id)).toEqual(["h-bm-user", "h-bc"]);
+    expect(hidden).toBe(2); // h-bm-todo + h-wk
+  });
+
+  it("② **019 之前的存量行仍是 `unknown`** ⇒ 回退判据对旧数据继续有效", async () => {
+    const turns = await loadWithMessages([
+      {
+        id: "h-bm", projectId: P, agentId: BM, agentName: "业务经理",
+        kind: "assistant", content: "刷新后仍在", createdAt: 1,
+        origin: { source: "unknown" },
+      },
+      {
+        id: "h-wk", projectId: P, agentId: WK, agentName: "工程师",
+        kind: "assistant", content: "worker 的产出", createdAt: 2,
+        origin: { source: "unknown" },
+      },
+    ]);
     expect(turns.map((t) => t.origin)).toEqual([{ source: "unknown" }, { source: "unknown" }]);
     const { timeline, hidden } = partitionTurns(turns, CTX);
+    // 回退判据认的是角色:业务经理(clientFacing)放行,worker 滤掉。
+    // **这是旧数据的兜底** —— 它保住了「刷新之后与业务经理的对话还在」,
+    // 代价是旧数据分不出「工件触发的那一轮」(那条信息当时根本没被记录)。
     expect(timeline.map((x) => x.turn.id)).toEqual(["h-bm"]);
     expect(hidden).toBe(1);
-    // ⚠️ **缺口如实钉住**:回退判据认的是角色,所以工件触发的那一轮在刷新后会回来。
-    // 闭合点在 `src/`(`SessionMessageView` 加这两维),不在前端。
     expect(timeline[0]?.turn.origin).toEqual({ source: "unknown" });
   });
 });

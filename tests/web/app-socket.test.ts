@@ -149,7 +149,8 @@ describe("首屏上下文 · decideInitialContext", () => {
       "/intake/messages": {
         projectId: null,
         messages: [
-          { id: "m1", projectId: null, agentId: null, agentName: null, kind: "user", content: "我想做点东西", createdAt: 1 },
+          // `origin` 必填(W3-①):这是一条甲方自己说的话 ⇒ 回合封套 + user。
+          { id: "m1", projectId: null, agentId: null, agentName: null, kind: "user", content: "我想做点东西", createdAt: 1, origin: { source: "turn", trigger: { kind: "user" } } },
         ],
       },
     });
@@ -201,7 +202,7 @@ describe("首屏上下文 · decideInitialContext", () => {
       "/projects/pj_new/messages": {
         projectId: "pj_new",
         messages: [
-          { id: "m1", projectId: "pj_new", agentId: null, agentName: null, kind: "user", content: "最初那句话", createdAt: 1 },
+          { id: "m1", projectId: "pj_new", agentId: null, agentName: null, kind: "user", content: "最初那句话", createdAt: 1, origin: { source: "turn", trigger: { kind: "user" } } },
         ],
       },
     });

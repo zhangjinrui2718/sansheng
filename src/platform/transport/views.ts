@@ -39,7 +39,7 @@ import { isProjectRole, type ProjectRole } from "../identity/role.js";
 import type { ProjectUsageAggregate, TurnUsageRow } from "../storage/repo/usage.js";
 import type {
   AskView, ArtifactView, BlockerView, ChangeView, ClientQuestionView,
-  MemberView, ProjectDetail, ProjectSummary, ProjectUsageView,
+  MemberView, MessageOrigin, ProjectDetail, ProjectSummary, ProjectUsageView,
   SessionMessageView, TurnUsageView, UsageByAgentView, WorkView,
 } from "@shared/types/platform.js";
 
@@ -213,6 +213,43 @@ export function toChangeView(row: ChangeRequestRow): ChangeView {
 
 // ── 会话消息 ────────────────────────────────────────────────────
 
+/**
+ * 把库里那两列(`origin_source` / `trigger_kind`,migration 019)合成
+ * `MessageOrigin` —— **封套形状的唯一合成点**。
+ *
+ * 放在这一层(读面)而不是仓储:仓储交出的是「库里有什么」,把两列**合成一个
+ * 判别联合**(以及「哪两种组合是合法的」)是读面的事 —— 与 `toWorkView` /
+ * `toAskView` 同一条分工。
+ *
+ * ── 三个分支的顺序就是判据的顺序 ─────────────────────────────────
+ *
+ *   1. `broadcast` ⇒ 播报封套。**无条件**进甲方通道,所以这里**不读**
+ *      `triggerKind`(契约上它也不该有值:写口的守卫在
+ *      `appendSessionMessage` 里拒了那种形状);
+ *   2. `turn` + 触发维度 ⇒ 回合封套,前端按 `trigger.kind` 分流;
+ *   3. 两列都为 `NULL` ⇒ `unknown`。**这是 019 之前写入的存量行**,也是
+ *      `kind='system'` 的平台通知 —— 前端对 `unknown` 的回退判据(按角色两跳)
+ *      对它们继续有效,这是有意的处置,不是遗漏。
+ *
+ * ⚠️ 剩下的组合(`turn` 缺 `trigger_kind`、或没有来源却有触发维度)是**写口的
+ * 不变式拒绝过的形状** ⇒ 走到这里说明库被绕过写口写过。**抛**,不静默降级成一个
+ * 猜的封套:猜错的方向正好是这次要修的 bug(把内部回合当成甲方的)。
+ */
+export function messageOriginOf(row: SessionMessageRow): MessageOrigin {
+  if (row.originSource === "broadcast") return { source: "broadcast" };
+  if (row.originSource === "turn" && row.triggerKind !== null) {
+    return { source: "turn", trigger: { kind: row.triggerKind } };
+  }
+  if (row.originSource === null && row.triggerKind === null) {
+    return { source: "unknown" };
+  }
+  throw new Error(
+    `session_messages 行上的封套形状不合法(id=${row.id}:origin_source=` +
+      `${String(row.originSource)}, trigger_kind=${String(row.triggerKind)})—— ` +
+      `写口(appendSessionMessage)只接受 (turn,+trigger) / (broadcast,null) / (null,null)`,
+  );
+}
+
 export function toMessageView(
   row: SessionMessageRow,
   name: (id: string) => string,
@@ -227,6 +264,10 @@ export function toMessageView(
     kind: row.kind,
     content: row.content,
     createdAt: row.createdAt,
+    // **封套跟着走**(W3-①):不带上它,REST 回填那条路上前端只能编一个
+    // `unknown` —— 而 `unknown` 会走回退判据,把工件触发的业务经理回合放进
+    // 对话页。判据从此**流式与刷新后是同一个**。
+    origin: messageOriginOf(row),
   };
 }
 

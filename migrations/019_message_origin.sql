@@ -1,0 +1,104 @@
+-- 019 · 会话消息的**封套**(来源 + 触发维度)—— 闭合「刷新之后判据消失」那个缺口
+--
+-- ── 它补的是什么(W3-① 的真 bug)──────────────────────────────────
+--
+-- 显示判据(设计 1 §2.10,W2-④ 定稿)是**两半**:
+--
+--   进甲方通道 ⟺ 用户消息 ∨ `source === "broadcast"` ∨ `trigger.kind === "user"` 的回合正文
+--
+-- 这两维此前**只活在 WS 封套上**(`TurnMessageStart.source` / `.trigger`、
+-- `BroadcastMessageStart.source`),**一条都没落库**:
+--
+--   · 流式那一路 ⇒ 判据成立(封套在内存里);
+--   · **刷新那一路** ⇒ `SessionMessageView` 上读不到任何一维 ⇒ 前端
+--     `messageToTurn` 只能给 `{ source: "unknown" }` ⇒ `channelOf` 走**回退**
+--     (`agentId → role → clientFacing`)。
+--
+-- 回退的代价是**具体的一条**:业务经理被工件/待办叫醒的那一轮
+-- (`trigger.kind = "todo"`,正文不该进对话页),因为业务经理是 `clientFacing`,
+-- 回退判据会把它**判进甲方通道** —— 于是「刷新一次,那一段又出现在对话页上」。
+-- 流式视图与刷新后视图在这一点上**不一致**,而界面上看不出来。
+--
+-- 前端当时的选择是**有据的**(回退比 fail-closed 好:fail-closed 会让刷新之后
+-- 与业务经理的整段对话消失),它写在 `web/src/lib/data.ts` 的 `channelOf` 注释里,
+-- 并明确标注「**这条缺口必须在 `src/` 侧闭合**」。本迁移就是那个闭合点。
+--
+-- ── 为什么落的是「封套的两维」而不是「算好的通道」────────────────
+--
+-- 一个诱人的替代是落一列 `channel`(`internal`/`client`,写侧算好)。
+-- **不选它**,理由是判据已经改过两次(7-* 的按角色 → W2 的按触发源),
+-- 而落「算好的通道」等于把**某个版本的判据冻进数据**:判据再改一次,
+-- 存量行就得整体重算(而重算的输入——封套——恰恰没存)。落**输入**之后,
+-- 判据怎么改都只是读侧的事。
+--
+-- 也**不是** `project_sessions.channel`(017)那一列:那一列是**会话的归属**
+-- (这条对话是交付对话还是项目内部会话),而这里要答的是**这一条消息由谁/为什么
+-- 产生**。两者独立,且**不可互推**:业务经理的回合与它的 `tell_client` 播报
+-- 都写进**同一条** `client` 通道会话(`host/serve.ts` 的 `channelForAgent`),
+-- 前者该收进内部视图、后者该无条件显示 —— 只看会话通道**分不开这两条**。
+--
+-- ── 存量行的处置(如实写)────────────────────────────────────────
+--
+-- 两列都可空 ⇒ 019 之前写的行全是 `(NULL, NULL)` ⇒ 读侧(此时是 `views.ts`
+-- 的 `messageOriginOf`)如实给 `{ source: "unknown" }` ⇒ 前端仍走回退判据。
+-- **不做回填,也回填不了**:那两维当时**根本没有被记录**,任何回填都是编造
+-- (把 `unknown` 猜成 `turn/user` 会让本来该收进内部视图的那一段永久上屏 ——
+-- 猜错的方向正好是这次要修的 bug)。设计 1 §2.10 记着这条「存量行仍是 unknown,
+-- 回退判据对它们继续有效」。
+--
+-- ── 为什么这次可以用 ALTER(而不是重建表)────────────────────────
+--
+-- 与 013 / 017 同类:加的是**两个全新的列**,不碰任何已有约束、不 DROP 任何东西。
+--   · 两列的 CHECK 是**它们自己的**闭集,不是 015 那种「放宽已有闭集」
+--     (`ALTER TABLE ADD CONSTRAINT` 只能收紧,放宽会无错应用而约束一字节没变);
+--   · `session_messages` 的既有约束(`kind` 的 CHECK、指向 `project_sessions`
+--     的 FK)都不受新列影响;
+--   · 两列都**可空**,所以 `ADD COLUMN` 不需要 DEFAULT(`NOT NULL` 才需要)。
+-- ⇒ 019 **不是** `INTENTIONAL_REBUILDS` 的成员(没有 DROP、没有重建、没有
+--    ALTER 已有列);`tests/platform/migrations.test.ts` 的重名守卫因此不会把它
+--    当成「同一张表被两个迁移创建」。
+--
+-- ── ⚠️ 将来若要放宽这两个闭集 ────────────────────────────────────
+--
+-- `origin_source` 镜像 `TurnMessageStart.source` / `BroadcastMessageStart.source`
+-- (判别联合的两个成员),`trigger_kind` 镜像 `TurnTrigger["kind"]`。**加第三个
+-- 成员 = 重建 `session_messages`**:
+--
+--   · 它**没有子表**(没有别的表 REFERENCES 它),所以重建时不需要先处置谁;
+--   · 但它有**一条指向 `project_sessions(id)` 的 FK**(`ON DELETE CASCADE`)——
+--     重建后必须原样写回,否则 009/012 那条注释记的静默级联删除(012 实测:
+--     重建 `project_sessions` 时删光了全部 `session_messages`)会换个方向再来一次。
+--
+-- ── 本迁移只做加法 ──────────────────────────────────────────────
+--
+-- 两条 `ALTER TABLE ... ADD COLUMN`,**一行 DROP 都没有**。
+
+-- ── ① 这个封套是谁发的 ──────────────────────────────────────────
+--
+--   · `turn`      —— 回合封套(`TurnMessageStart`):用户消息回显 + 该回合的助手正文
+--   · `broadcast` —— 播报封套(`BroadcastMessageStart`):只有 `tell_client` 发它
+--                    (`hub.ts` 的 `clientChannel.tell`),它**无条件**进甲方通道,
+--                    所以它这一支**不许**带 `trigger_kind`(契约上也没有:
+--                    `_BroadcastMustNotCarryTrigger`)。读侧的处置由 CHECK 与
+--                    `views.ts` 的 `messageOriginOf` 共同保证。
+--
+-- NULL = 这条消息**不属于任何封套**:`kind='system'` 的平台通知、以及 019 之前的存量行。
+ALTER TABLE session_messages ADD COLUMN origin_source TEXT
+  CHECK (origin_source IS NULL OR origin_source IN ('turn', 'broadcast'));
+
+-- ── ② 这一轮为什么存在 ──────────────────────────────────────────
+--
+-- 只在 `origin_source = 'turn'` 的那一支上有值:
+--
+--   · `user` —— 甲方亲口发起的那一轮(以及他在对话里那句话的回显)。**正文对甲方可见。**
+--   · `todo` —— 排空器按 `collectTodos` 的待办叫醒的那一轮。**正文不是对甲方说的话**,
+--               甲方要看的是成员页里那份「他产生了什么对话」。
+--
+-- ⚠️ **只落 `kind`,不落 `todoKind`。** 前端对 `turn` 封套**只读 `kind`**
+-- (`web/src/stores/chat.ts` 的 `isTurnTrigger` 与 `web/src/lib/data.ts` 的
+-- `channelOf`),`todoKind` 既不参与通道判定、也没有任何一个读者 —— 落它就是在库里
+-- 多一份会漂的闭合集(`TriggerTodoKind` 有 11 个取值,而增删它的地方是
+-- `runtime/dispatcher.ts` 的 `TODO_KINDS`)。共享类型 `MessageOrigin` 因此把
+-- trigger 收窄成 `{ kind }`:落库的与前端读的是**同一个形状**。
+ALTER TABLE session_messages ADD COLUMN trigger_kind TEXT
+  CHECK (trigger_kind IS NULL OR trigger_kind IN ('user', 'todo'));

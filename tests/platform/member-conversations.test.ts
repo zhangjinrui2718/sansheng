@@ -64,6 +64,9 @@ function msg(agentId: string | null, kind: "user" | "assistant" | "system", cont
   clock += 1;
   appendSessionMessage(db, {
     id: `m${seq}`, sessionId: S, agentId, kind, content, createdAt: clock,
+    // 封套(`origin_source` / `trigger_kind`)与本测试无关(它测的是 GROUP BY 分组、
+    // 不是通道判定)⇒ 显式写成 null / null。W3-① 起这两个字段是必填实参。
+    originSource: null, triggerKind: null,
   });
 }
 

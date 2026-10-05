@@ -176,6 +176,59 @@ export interface ArtifactView {
  */
 export type SessionMessageKind = "user" | "assistant" | "thinking" | "tool" | "system";
 
+/**
+ * 一个封套的**来源闭集** —— 与 `message_start` 那两条契约的判别键逐个对齐
+ * (`TurnMessageStart.source: "turn"` / `BroadcastMessageStart.source: "broadcast"`,
+ * 由本文件末尾的 `_MessageStartHasExactlyTwoSources` 钉住「只有这两种」)。
+ *
+ * 不加第三种是刻意的:每一条新封套都必须**显式**表态「它进哪条通道」,
+ * 不许有东西静默落进「既不是回合、也不是播报」的缝隙里。
+ */
+export type MessageOriginSource = "turn" | "broadcast";
+
+/**
+ * 一条消息 / 一轮**从哪个封套来** —— WS 封套、落库行、前端轮**共用的同一个形状**。
+ *
+ * ── 为什么它同时出现在三处(而不是各写一份)──────────────────────
+ *
+ * 这个类型是为了闭合 W3-① 那个缺口而抽出来的:显示判据是
+ * `source === "broadcast"` ∨ `trigger.kind === "user"`(见
+ * `web/src/lib/data.ts` 的 `channelOf`),而这两维此前**只在 WS 封套上**
+ * (内存里),库里一条都没有 ⇒ **一刷新,判据就没了**:
+ *
+ *   - 流式那一路:封套到了 ⇒ 判据成立;
+ *   - REST 回填那一路(`messageToTurn`):`SessionMessageView` 上读不到任何一维
+ *     ⇒ 只能给 `"unknown"` ⇒ 回退到「按角色的两跳」判据;
+ *   - 而回退判据把**业务经理**判进甲方通道(它是 `clientFacing`)⇒ 它被工件/待办
+ *     叫醒的那一轮正文,**刷新之后又出现在对话页上**。
+ *
+ * 现在封套落库了(`session_messages.origin_source` / `trigger_kind`,
+ * migration 019),`SessionMessageView.origin` 就是它的读侧形状;前端那条
+ * `TurnOrigin` 直接复用本类型 ⇒ **同一条判据只有一个形状**,
+ * 「REST 回填拿不到判据」在类型上不再可能。
+ *
+ * ── 三个取值 ────────────────────────────────────────────────────
+ *
+ *   - `turn`      —— 回合封套。带 `trigger.kind`:`user` 的正文进甲方通道,
+ *     `todo`(排空器按待办叫醒)的正文**不进**(甲方要看的是成员页那份工作记录)。
+ *   - `broadcast` —— 播报封套(`tell_client`)。**无条件**进甲方通道,所以它
+ *     **结构上没有** `trigger` 这一维 —— 与契约里的 `_BroadcastMustNotCarryTrigger`
+ *     同一条纪律:「顺手用 trigger 判一下播报」这个错误在类型上写不出来。
+ *   - `unknown`   —— **判据缺失**,不是「内部」。两个来源:① REST 回填一条
+ *     **019 之前写入的存量行**(那两列当时没被记录,回填就是编造 ——
+ *     `migrations/019_message_origin.sql` 记着为什么不回填);② 前端 `tool_start`
+ *     抢在 `message_start` 前面建轮。**折成 `null` 会让一个 `??` 把它静默当成
+ *     某一侧**,所以显式留第三个取值,逼每个读者表态。
+ *
+ * ⚠️ `unknown` 的处置**不是**「fail-closed 一律隐藏」:隐藏会让甲方刷新一次就
+ * 失去与业务经理的整段对话。前端的选择是**回退到有据可依的最好判据**(按角色
+ * 两跳,fail-open),并把这条路写在 `channelOf` 的注释里 —— 见设计 1 §2.10。
+ */
+export type MessageOrigin =
+  | { source: "turn"; trigger: { kind: TurnTriggerKind } }
+  | { source: "broadcast" }
+  | { source: "unknown" };
+
 export interface SessionMessageView {
   id: string;
   /**
@@ -193,6 +246,17 @@ export interface SessionMessageView {
   kind: SessionMessageKind;
   content: string;
   createdAt: number;
+  /**
+   * 这条消息**从哪个封套来**(migration 019 落库的两列)。
+   *
+   * **必填,不是可选** —— 与 `message_start` 的 `source` / `trigger` 同一条纪律:
+   * 可选 = 漏填也编译得过,而漏填的表现是**这条消息悄悄走回退判据**(W3-① 那个
+   * bug 原样复发),界面上看不出来。
+   *
+   * 019 之前的存量行是 `{ source: "unknown" }`(那两列当时没被记录)——
+   * 前端的回退判据对它们继续有效,这是有意的处置,不是遗漏。
+   */
+  origin: MessageOrigin;
 }
 
 /**
@@ -619,6 +683,19 @@ export type TriggerTodoKind =
 export type TurnTrigger =
   | { kind: "user" }
   | { kind: "todo"; todoKind: TriggerTodoKind };
+
+/**
+ * `TurnTrigger` 的**判别那一维**(前端 / 读面只需要它)。
+ *
+ * 判据只读 `kind`:通道分离问的是「这一轮为什么存在」,而 `todoKind` 是「哪一类
+ * 待办」—— 后者既不参与判定,也没有任何一个前端读者(`web/src/stores/chat.ts` 的
+ * `isTurnTrigger` 与 `web/src/lib/data.ts` 的 `channelOf` 都只读 `kind`)。
+ * 所以它**不落库**(`migrations/019_message_origin.sql` 只存 `trigger_kind`),
+ * 前端那条 `TurnOrigin` 也收窄到这一维 —— 契约上的三段联合(WS 封套 / 落库行 /
+ * 前端轮)因此是**同一个形状**,`web/src/stores/chat.ts` 的 `TurnOrigin` 直接
+ * 就是下面那个 `MessageOrigin`。
+ */
+export type TurnTriggerKind = TurnTrigger["kind"];
 
 /**
  * 一个**回合封套**的建轮事件(`source: "turn"`)。

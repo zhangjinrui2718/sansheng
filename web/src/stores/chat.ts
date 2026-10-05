@@ -23,10 +23,11 @@
 import { create } from "zustand";
 import {
   eventProjectId,
+  type MessageOrigin,
   type ProjectSummary,
   type ServerEvent,
   type SessionMessageView,
-  type TurnTrigger,
+  type TurnTriggerKind,
   type WsToolInfo,
 } from "@shared/types/platform";
 import * as api from "../lib/api";
@@ -48,15 +49,24 @@ export type Block =
 /**
  * **这一轮是从哪个封套建出来的**(设计 1 §2.10 的通道分离,W2-④)。
  *
+ * ⚠️ **W3-① 起它不再是前端自己的类型** —— 它就是契约里的
+ * `MessageOrigin`(`shared/types/platform.ts`)。原因:落库行也要带同一个形状
+ * (`SessionMessageView.origin`,migration 019),而那两处若各写一份,「刷新之后
+ * 判据消失」那个 bug 会以「两份形状漂开」的形式**复发**。现在:
+ *
+ *   - 实时流:`originOfMessageStart` 读 `message_start` 的 `source` / `trigger`;
+ *   - 刷新回填:`SessionMessageView.origin` **直接就是**这个类型;
+ *   ⇒ 两条路产出同一个形状,`channelOf` 只认它一个。
+ *
  * 两个维度合成一个字段,**不是两个平铺字段**:
  *
- *   - `source: "turn"` —— 回合封套(`shared/types/platform.ts` 的
- *     `TurnMessageStart`)。它**必须**带 `trigger`(这一轮为什么存在)。
+ *   - `source: "turn"` —— 回合封套(`TurnMessageStart`)。它**必须**带
+ *     `trigger`(这一轮为什么存在)。
  *   - `source: "broadcast"` —— 播报封套(`BroadcastMessageStart`,`tell_client`
  *     投递给甲方的那条独立消息)。它**没有** `trigger`,而且是结构性的:
  *     播报无条件显示,不能被任何「回合级」判据连坐。
- *   - `source: "unknown"` —— **仅有前端才有的第三种**:封套没到。两个来源:
- *     ① REST 回填(`messageToTurn` —— `SessionMessageView` 上没有这两维);
+ *   - `source: "unknown"` —— **判据缺失**(不是「内部」)。两个来源:
+ *     ① REST 回填一条 **019 之前写入的存量行**(那两列当时没被记录);
  *     ② `tool_start` 抢先建轮(`message_start` 还没到)。
  *
  * ── 为什么把 `trigger` 嵌进 `source` 而不是平铺两个字段 ──────────────
@@ -68,15 +78,18 @@ export type Block =
  *
  * ── 为什么 `"unknown"` 是一个**显式取值**,而不是 `null` ─────────────
  *
- * 它是「判据缺失」,不是「内部」。折成 `null` 之后 `channelOf` 里一个
- * `??` 或一次 `if (!origin)` 就会把「没有判据」静默当成某一侧 —— 而两条通道
- * 各错一次都要出人命(见 `channelOf` 的说明)。第三个取值强制每一个读者
- * 显式表态。
+ * 折成 `null` 之后 `channelOf` 里一个 `??` 或一次 `if (!origin)` 就会把
+ * 「没有判据」静默当成某一侧 —— 而两条通道各错一次都要出人命(见 `channelOf`
+ * 的说明)。第三个取值强制每一个读者显式表态。
+ *
+ * ── `trigger` 只有 `kind` 一维(不是 `TurnTrigger`)──────────────────
+ *
+ * `todoKind` 不参与通道判定、前端也没有第二个读者(见下面 `isTurnTriggerKind`
+ * 的说明),所以共享类型把它收在 `TurnTriggerKind` 上 —— 落库的
+ * (`trigger_kind`)与前端读的因此是**同一个形状**,不必再抄一份 11 个取值的
+ * 闭合集到前端来。
  */
-export type TurnOrigin =
-  | { source: "turn"; trigger: TurnTrigger }
-  | { source: "broadcast" }
-  | { source: "unknown" };
+export type TurnOrigin = MessageOrigin;
 
 export interface Turn {
   /** = 后端那条消息的 `messageId`(轮表的键,见 `ChatState.inFlight`)。 */
@@ -333,17 +346,17 @@ const newTurn = (
  * 真实运行路径上它不可能触发:四个发射点都在 `src/` 里,受 `tsc` 约束。
  */
 /**
- * `TurnTrigger` 的 module-level 类型守卫(与 `ToolCallCard` 的 `hasContentArray`
+ * `TurnTriggerKind` 的 module-level 类型守卫(与 `ToolCallCard` 的 `hasContentArray`
  * 同款约定:不用断言糊过去)。
  *
  * 只验**参与判定的那一维** `kind`:`todoKind` 是闭合集,但它既不参与通道判定、
  * 也不被前端读取 —— 在这里再抄一份闭合集就是第三处真相(AGENTS.md「派生值上到
- * 线上就是第二处真相」)。
+ * 线上就是第二处真相」)。**W3-① 起这条收窄不再是「前端自己的选择」**:
+ * 落库的 `trigger_kind` 存的**就是**这一维,所以下面 REST 回填那条路与这里
+ * 读的是同一个形状(`MessageOrigin` 的 `trigger: { kind }`)。
  */
-function isTurnTrigger(value: unknown): value is TurnTrigger {
-  if (typeof value !== "object" || value === null) return false;
-  const kind = (value as { kind?: unknown }).kind;
-  return kind === "user" || kind === "todo";
+function isTurnTriggerKind(value: unknown): value is TurnTriggerKind {
+  return value === "user" || value === "todo";
 }
 
 function originOfMessageStart(e: { source?: unknown; trigger?: unknown }): TurnOrigin {
@@ -353,14 +366,20 @@ function originOfMessageStart(e: { source?: unknown; trigger?: unknown }): TurnO
     // 带了也不影响判定 —— 播报无条件显示 —— 所以这里不把它当错误。
     return { source: "broadcast" };
   }
-  if (source !== "turn" || !isTurnTrigger(e.trigger)) {
+  const kind =
+    typeof e.trigger === "object" && e.trigger !== null
+      ? (e.trigger as { kind?: unknown }).kind
+      : undefined;
+  if (source !== "turn" || !isTurnTriggerKind(kind)) {
     throw new Error(
       "message_start 缺 source / trigger:契约里这两维是必填(shared/types/platform.ts 的 " +
         "TurnMessageStart / BroadcastMessageStart)。夹具漏填或版本错配 —— 静默降级会让" +
         "这条线按回退判据悄悄上屏,所以这里不降级。",
     );
   }
-  return { source: "turn", trigger: e.trigger };
+  // **只取 `kind`**(见 `isTurnTriggerKind` 的说明):`todoKind` 不参与判定,
+  // 而落库那条路根本拿不到它 —— 两条路必须产出同一个形状。
+  return { source: "turn", trigger: { kind } };
 }
 
 /**
@@ -414,12 +433,28 @@ export function inFlightTurns(
  * `agentId` 照抄(`SessionMessageView.agentId`,null = 甲方)—— §2.10.1 记的
  * 「拿到又丢掉」在这里收口;**用它做什么是 A3**。
  *
- * ⚠️ **`origin` 只能是 `{ source: "unknown" }`(W2-④)。** `SessionMessageView`
- * 上既没有 `source` 也没有 `trigger`(那是 WS 封套上的两维,库里没落)⇒ 刷新这条
- * 路径**拿不到「这一轮为什么存在」**。不许在这里猜一个 `{source:"turn", trigger:
- * {kind:"user"}}`:那会让工件触发的业务经理回合在刷新后**照样**进甲方时间线,
- * 而界面上完全看不出来 —— 猜错的方向必须留给 `channelOf` 显式回退(它会把
- * 这条缺口写在注释里,并有一条测试钉着)。
+ * ── ✅ **`origin` 不再是 `unknown`(W3-① 已闭合)**────────────────────
+ *
+ * 这里曾经**只能**给 `{ source: "unknown" }`:库里没落那两维,`SessionMessageView`
+ * 上也就没有 ⇒ 刷新之后判据消失 ⇒ `channelOf` 走回退(按角色两跳,fail-open)
+ * ⇒ **业务经理被工件/待办叫醒的那一轮正文,刷新一次又出现在对话页上**
+ * (流式那条路是对的,两条路不一致,而界面上看不出来)。
+ *
+ * 现在 `SessionMessageView.origin` **就是** `MessageOrigin`(migration 019 把
+ * 封套落进了 `session_messages.origin_source` / `trigger_kind`)⇒ 这里**照抄**,
+ * 不猜、不编:
+ *
+ * ```ts
+ * origin: m.origin,   // 而不是 { source: "unknown" }
+ * ```
+ *
+ * **两条路因此是同一个判据**:实时流读 WS 封套(`originOfMessageStart`),
+ * 刷新读库里的同两维(`toMessageView` → `messageOriginOf`)—— 两侧的形状是
+ * 同一个类型(`MessageOrigin`),所以「一边改了另一边没改」编译期就会红。
+ *
+ * ⚠️ **`unknown` 仍然存在,不是死代码**:019 之前写入的存量行那两列是 `NULL`
+ * (当时没有记录,回填就是编造),它们照样落到 `unknown` 上,由 `channelOf` 的
+ * 回退判据兜住 —— 见 `web/src/lib/data.ts` 的第 5 步。
  *
  * `projectId` 由调用方给:回填那条路径自己知道拉的是谁的对话
  * (`selectProject(id)` 给 `id`,`loadIntakeMessages()` 给 `null`)——
@@ -448,7 +483,7 @@ function messageToTurn(m: SessionMessageView, projectId: string | null): Turn {
     endedAt: m.createdAt,
     isStreaming: false,
     agentId: m.agentId,
-    origin: { source: "unknown" },
+    origin: m.origin,
   };
 }
 

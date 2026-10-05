@@ -368,19 +368,21 @@ export function useHarnessRoles(): {
 // 带 `source: "broadcast"`,无条件显示)。
 //
 // ⚠️ **`ctx` 还在,但它的地位被降级了(只剩回退)**:`origin === {source:"unknown"}`
-// 的那些轮是**封套没到**的轮 —— 只有一种真实现场:**REST 回填**
-// (`chat.ts` 的 `messageToTurn`)。`SessionMessageView` 上没有 `source` / `trigger`
-// (库里没落这两维)⇒ 刷新之后前端**拿不到新判据**。那时两条路:
+// 的那些轮是**封套没到**的轮。W3-① 之前它唯一的来源是 REST 回填
+// (`chat.ts` 的 `messageToTurn` —— 库里没落那两维);**现在缺口已闭合**
+// (`SessionMessageView.origin`,migration 019),`unknown` 只剩两个来源:
 //
-//   - 判成 `internal`(fail-closed):**刷新一次,与业务经理的整段对话就没了**
-//     (库里的助手消息全是 unknown 轮)—— 而且它同时抹掉播报(判据②在刷新后失效);
-//   - 按角色 `clientFacing` 回退(现状):对话保住、播报保住,但**工件触发的
-//     业务经理回合在刷新后仍会显示**(判据①只在流式那条路上成立)。
+//   - **019 之前写入的存量行**(那两列当时没被记录,回填就是编造)——
+//     本文件第 5 步的回退判据对它们继续有效;
+//   - 前端 `tool_start` 抢在 `message_start` 前面建轮(与库无关)。
 //
-// 选后者:**回退是有据可依的最好判据**,而前者的代价是「页面看起来被清空了」。
-// 这条缺口**必须在 `src/` 侧闭合**(`SessionMessageView` 加 `channel` 或 `trigger`,
-// 那一侧不在本批次的可碰清单里)—— 它写在 `channelOf` 的注释里,并有一条测试
-// (`tests/web/channel-new-criterion.test.ts` 的「unknown 回退」)钉着它的方向。
+// ⚠️ **不许把第 5 步删掉。** 它今天仍然真的会被读到(存量行 + 抢跑轮),
+// 而删掉它就得在「刷新即清空对话」(fail-closed)与「所有 unknown 轮一律显示」
+// 之间二选一 —— 两个都错。它现在的定位是**对旧数据的兜底**,不是主判据。
+//
+// 历史(留着,因为它是这条设计的理由):缺口存在时第 5 步是**刷新后的全部历史**,
+// 而回退判据按角色两跳 ⇒ 业务经理(`clientFacing`)被工件/待办叫醒的那一轮,
+// 刷新之后又出现在对话页上。两条路(流式 / 刷新)判据不一致 —— 那正是 W3-①。
 
 /** 一轮属于哪条通道。三值而不是布尔:系统提示既不是甲方说的,也不是内部角色的。 */
 export type TurnChannel = "client" | "system" | "internal";
@@ -439,12 +441,11 @@ export function channelContextOf(input: {
  *
  * ── 为什么 `ctx` 这个参数还留着(而不是简化签名)──────────────────
  *
- * 第 5 步**真的会读它**:`unknown` 轮在今天不是罕见分支,而是**刷新后的全部历史**
- * (`chat.ts` 的 `messageToTurn`)。把 `ctx` 从签名里删掉,就得在「刷新即清空对话」
- * 与「所有 unknown 轮一律显示」之间二选一 —— 两个都错。删掉参数省下的是两个调用点
- * (`MessageList` / `ChatSurface` 经 `channelActivityOf`),代价是判据**无声地**
- * 倒向一侧。等 `src/` 侧把 `SessionMessageView` 补上这两维之后,第 5 步与整个
- * `ChannelContext` 才能一起删 —— 那是另一次改动,不是顺手。
+ * 第 5 步**真的会读它**:`unknown` 在今天**不是**「刷新后的全部历史」了
+ * (W3-① 已闭合),但它仍是**019 之前存量行**的判据 —— 用户库里就有这样一批消息。
+ * 把 `ctx` 从签名里删掉,就得在「旧数据一律清空」与「旧数据一律显示」之间二选一
+ * —— 两个都错。删掉参数省下的是两个调用点(`MessageList` / `ChatSurface` 经
+ * `channelActivityOf`),代价是判据**无声地**倒向一侧。
  */
 export function channelOf(turn: Turn, ctx: ChannelContext): TurnChannel {
   if (turn.role === "system") return "system";

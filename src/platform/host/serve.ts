@@ -550,6 +550,10 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
     const userMessageId = newId("m");
     appendSessionMessage(db, {
       id: userMessageId, sessionId, agentId: null, kind: "user", content, createdAt: at,
+      // **封套:回合 + `user`** —— 甲方亲口发起的那一轮(W3-① 落库)。
+      // 它与下面 `hub.emitMessageStart(...)` 那一行是**同一份判据的两个落点**:
+      // 一处给实时流,一处给刷新后的 REST 回填 —— 两边必须说同一件事。
+      originSource: "turn", triggerKind: "user",
     });
     hub.emitMessageStart(projectId, userMessageId, "user", null, { kind: "user" });
     hub.emitDelta(projectId, userMessageId, content);
@@ -870,6 +874,11 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
         appendSessionMessage(db, {
           id: newId("m"), sessionId, agentId, kind: "assistant",
           content: text, createdAt: now(),
+          // **封套:回合 + 这一轮的触发维度**(W3-①)。`trigger` 是本函数的
+          // 形参、且是**必填**的 —— 它同时喂给 `hub.emitMessageStart`(实时)
+          // 与这里(落库),所以「流式判据」与「刷新后的判据」不可能分叉:
+          // 业务经理被待办叫醒的那一轮,两处都是 `todo` ⇒ 都不进甲方通道。
+          originSource: "turn", triggerKind: trigger.kind,
         });
       }
       hub.emitMessageEnd(projectId, messageId);
@@ -1014,6 +1023,11 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
         appendSessionMessage(db, {
           id: newId("m"), sessionId, agentId, kind: "assistant",
           content: text, createdAt: now(),
+          // **封套:回合 + 触发维度**(W3-①)。执行这一条路(worker / 质检 /
+          // 整合)今天全都是 `todo` 触发的 —— 正文是组织内部在动,不该进对话页;
+          // 但它**照实落库**,而不是在这里写死:判据留在读侧一处
+          // (`messageOriginOf` + `channelOf`),将来多一条触发维度时不用改这里。
+          originSource: "turn", triggerKind: trigger.kind,
         });
       }
       hub.emitMessageEnd(projectId, messageId);
@@ -1394,6 +1408,10 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
         `⚠️ 平台检测:平台叫醒的回合没留工作记录(未调 tell_client,正文也没有行首标记)\n` +
         `${where}\n${facts}\n正文前 ${UNANNOUNCED_TEXT_HEAD_CHARS} 字:${hit.textHead}`,
       createdAt: now(),
+      // **不属于任何封套**:平台通知不是回合、不是播报。读侧给
+      // `{ source: "unknown" }`,而前端第 1 步就按 `kind='system'` 把它摘进
+      // 系统带(与「封套没到」互不影响)。
+      originSource: null, triggerKind: null,
     });
   }
 
@@ -1442,6 +1460,8 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
         `⚠️ 组织停止推进(${r.rounds} 个回合后):${r.stopDetail}` +
         (who !== "" ? `\n本轮路径:${who}` : ""),
       createdAt: now(),
+      // 同上一处:平台通知不属于任何封套(见 `reportUnannouncedTurn`)。
+      originSource: null, triggerKind: null,
     });
   }
 

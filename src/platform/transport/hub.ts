@@ -499,6 +499,14 @@ export class PlatformHub {
           kind: "assistant",
           content: message,
           createdAt: at,
+          // **封套:播报**(W3-① 落库)。它与下面 `emitBroadcastStart` 那一行是
+          // **同一件事的两个落点** —— 实时流说「这是播报」,库里也要说同一句,
+          // 否则刷新之后这条播报会走回退判据(业务经理 → clientFacing ⇒ 显示)。
+          // 今天两者结论相同,但那是巧合;**判据必须落在同一个形状上**。
+          //
+          // `triggerKind: null` 不是省略 —— 契约上播报**不许**带 trigger
+          // (`_BroadcastMustNotCarryTrigger`),写口的不变式会拒掉别的写法。
+          originSource: "broadcast", triggerKind: null,
         });
         const messageId = this.deps.newId("msg");
         // **播报封套**(`source: "broadcast"`),不是回合封套 —— 它不带 `trigger`:

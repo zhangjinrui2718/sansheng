@@ -433,18 +433,20 @@ describe("BC2 meetings", () => {
 describe("BC2 会话", () => {
   it("会话按项目归属;消息按会话归属", () => {
     insertSession(db, { id: "s1", projectId: "pj_1", createdAt: clock });
-    appendSessionMessage(db, { id: "m1", sessionId: "s1", agentId: null, kind: "user", content: "你好", createdAt: clock });
-    appendSessionMessage(db, { id: "m2", sessionId: "s1", agentId: ids.bm, kind: "assistant", content: "在", createdAt: clock + 1 });
+    // 封套是 `appendSessionMessage` 的**必填实参**(W3-①):这里照实写
+    // —— 甲方的回显是 `turn/user`,业务经理的正文按触发维度写。
+    appendSessionMessage(db, { id: "m1", sessionId: "s1", agentId: null, kind: "user", content: "你好", createdAt: clock, originSource: "turn", triggerKind: "user" });
+    appendSessionMessage(db, { id: "m2", sessionId: "s1", agentId: ids.bm, kind: "assistant", content: "在", createdAt: clock + 1, originSource: "turn", triggerKind: "user" });
     expect(listSessions(db, "pj_1").map((s) => s.id)).toEqual(["s1"]);
     const msgs = listSessionMessages(db, "s1");
     expect(msgs).toHaveLength(2);
-    expect(msgs[0]).toMatchObject({ agentId: null, kind: "user" });
-    expect(msgs[1]).toMatchObject({ agentId: ids.bm, kind: "assistant" });
+    expect(msgs[0]).toMatchObject({ agentId: null, kind: "user", originSource: "turn", triggerKind: "user" });
+    expect(msgs[1]).toMatchObject({ agentId: ids.bm, kind: "assistant", originSource: "turn", triggerKind: "user" });
   });
 
   it("messages.agent_id 可空 = 甲方说的话", () => {
     insertSession(db, { id: "s1", projectId: "pj_1", createdAt: clock });
-    appendSessionMessage(db, { id: "m1", sessionId: "s1", agentId: null, kind: "user", content: "x", createdAt: clock });
+    appendSessionMessage(db, { id: "m1", sessionId: "s1", agentId: null, kind: "user", content: "x", createdAt: clock, originSource: "turn", triggerKind: "user" });
     expect(listSessionMessages(db, "s1")[0]!.agentId).toBeNull();
   });
 
@@ -692,6 +694,7 @@ describe("BC2 接待会话(project_id NULL)", () => {
     insertSession(db, { id: "s_intake", projectId: null, createdAt: clock });
     appendSessionMessage(db, {
       id: "m1", sessionId: "s_intake", agentId: null, kind: "user", content: "我想做点东西", createdAt: clock,
+      originSource: "turn", triggerKind: "user",
     });
     expect(listSessionMessages(db, "s_intake")).toHaveLength(1);
   });
@@ -711,6 +714,7 @@ describe("BC2 接待会话(project_id NULL)", () => {
     insertSession(db, { id: "s_proj", projectId: "pj_1", createdAt: clock });
     appendSessionMessage(db, {
       id: "m1", sessionId: "s_proj", agentId: null, kind: "user", content: "x", createdAt: clock,
+      originSource: "turn", triggerKind: "user",
     });
     insertSession(db, { id: "s_intake", projectId: null, createdAt: clock });
     db.prepare(`DELETE FROM projects WHERE id = ?`).run("pj_1");

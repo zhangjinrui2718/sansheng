@@ -87,6 +87,11 @@ function seed(sessionId: string, n: number, tag: string, base = BASE, step = 1):
       kind: i % 2 === 0 ? "assistant" : "user",
       content: `${id} 的正文`,
       createdAt: base + i * step,
+      // ⚠️ **封套(`origin_source` / `trigger_kind`)与本测试无关** ⇒ 显式写成
+      // `null / null`,即「019 之前写入的存量行」那种形状(读侧合成
+      // `{ source: "unknown" }`)。W3-① 起这两个字段是 `appendSessionMessage` 的
+      // **必填实参** —— 落库行必须说清自己从哪个封套来,不许漏填之后静默走回退判据。
+      originSource: null, triggerKind: null,
     });
     ids.push(id);
   }
@@ -214,6 +219,7 @@ describe("bug① · 对话页数据源的窗口:取的是最新 N 条,不是最�
       appendSessionMessage(db, {
         id, sessionId: S_INTERNAL, agentId: null, kind: "user",
         content: `${id} 的正文`, createdAt: BASE, // ← 全部同一个 created_at
+        originSource: null, triggerKind: null, // 封套与本测试无关(见 seed 的说明)
       });
       inserted.push(id);
     }
