@@ -109,9 +109,17 @@ outbox 事件 + 一条未 `accepted` 的 `deliverable` 工件(压住 `integrate`
 ② 成员页只渲染 90 字截断(Members.tsx 的 excerpt(m.content, 90)),全文只在 title 悬停
    —— 而「事后能看出当时发生了什么」(7-N)要的正是那一段全文
 ③ `splitWorkLog` 对它的**主输入**走不到(todo 回合整轮不进对话页);不是死代码,但主路径已改道
-④ ~/.sansheng 的 harness/system_prompts/ 里还躺着 12 个**旧角色名**的文件
-   (communicator.* / planner.md / executor.md / critic.md / …),运行期**只读声明的 12 个单元**
-   ⇒ 它们是死的,但会误导下一个读盘的人。没删(删用户数据要先确认)
+④ ~~~/.sansheng 的 harness/system_prompts/ 里躺着 12 个**旧角色名**的文件~~~ → ✅ **已清**
+   (2026-10-05,按用户指令;判据不是「名字看着旧」而是**与 `promptUnitIds()` 做差集**:
+   留下命中的 12 个、搬走不在声明集合里的 12 个、且**声明了但盘上没有的必须是 0**)
+   搬走 = 可恢复,隔离在 `~/.sansheng/harness/backups/legacy-prompt-units-<ts>/`
+   (是 `backups/prompts/` 的**兄弟**目录 ⇒ 不进 Harness 页的备份清单、不干扰 `listBackups`)
+   清理后按**读取侧真代码**复核:四角色 4/4·4/4·4/4·3/3 装载、**缺 0**,
+   业务经理系统提示 **14340 字符**(与 arm B 实测一致),三条渠道规矩都在。
+   脚本:`.probe/w3-legacy-prompts.mts`(默认只打印两侧清单,`--move` 才搬)
+   + `.probe/w3-verify-prompts.mts`(清理后的复核)
+   ⚠️ 同类残留还有一处 **没动**(不是这次的范围):`harness/tools-stale-backup/` 里
+   `communicator.json` / `critic.json` / `executor.json` / … (上次会话已隔离;`harness/tools/` 现在是空的)
 ⑤ 2719 上那个 `node /opt/homebrew/bin/sansheng`(软链到本仓库 dist)是 **14:37 起的进程**:
    内存里是 W3 之前的代码;它的库也还是 schema 18。**要吃到 W3-① 得重启它**
    (重启会自动应用 migration 019)
