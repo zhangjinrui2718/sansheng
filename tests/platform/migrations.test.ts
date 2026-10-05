@@ -1245,4 +1245,264 @@ describe("016 放宽 artifacts.kind(重建表:两条 CASCADE 子表 + 一条 NO 
     expect(body).toMatch(/project_id\s+TEXT\s+NOT\s+NULL\s+REFERENCES\s+projects\(id\)\s+ON\s+DELETE\s+CASCADE/i);
     expect(createdTables(sql)).toContain("artifacts");
   });
+
+  // ── 7. ⚠️ 这条守卫**看不见** 017 加的第 4 条外键 ────────────────
+  it("守卫的作用域:它跑的是 `upTo015` 的 schema,**017 加的第 4 条外键不在它的视野里**", async () => {
+    // 这不是「守卫失效」,是它的作用域本来就只有 016 重建前的那张表 —— 但它是一处
+    // **容易被误读成全面覆盖**的地方(AGENTS.md:一个坏掉的检查不等于「检查失败」,
+    // 它可能返回一个看起来正常的答案)。所以这里把作用域钉成断言:
+    const db = await upTo015();
+    expect(
+      (db.pragma(`foreign_key_list(project_sessions)`) as Array<{ table: string }>)
+        .filter((fk) => fk.table === "artifacts"),
+      "upTo015 的 schema 里 project_sessions 还没有指向 artifacts 的外键(017 才加)",
+    ).toEqual([]);
+    db.close();
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════
+// 017 · 交付会话(纯加法:两个新列)
+// ══════════════════════════════════════════════════════════════════
+
+/**
+ * C4 的 migration:给 `project_sessions` 加 `deliverable_artifact_id` 与 `channel`。
+ *
+ * 与 015 / 016 的关键不同:**它是纯加法,不是重建**。015 / 016 只能重建表,是因为
+ * 它们要**放宽已有 CHECK 的表达式**(SQLite 改不了,ADD CONSTRAINT 只能收紧);
+ * 017 加的是两个全新列,不碰任何既有约束,所以两行 `ALTER TABLE ADD COLUMN` 就够。
+ *
+ * 于是这个 describe 的重点与 016 相反 —— 不是「重建有没有吃数据」,而是
+ * **「存量行有没有被改一个字」**:
+ *   - 行数与内容**逐字不变**(这正是纯加法的验收判据);
+ *   - 存量行 `channel='internal'`(DEFAULT 生效)、`deliverable_artifact_id IS NULL`;
+ *   - `foreign_key_check` / `integrity_check` 干净;
+ *   - 新列可空、无 DROP、外键是 `REFERENCES artifacts(id)`(⚠️ 它让
+ *     `artifacts` 的**第 4 条**外键出现 —— 016 的重建前提守卫跑的是 `upTo015`,
+ *     看不见它,所以在下面单独钉住全 schema 的那个数)。
+ */
+describe("017 交付会话(纯加法:两个新列)", () => {
+  /** 到 `maxVersion` 为止的真 schema(002 的 vec0 不可用时跳过,与 `upTo015` 同形)。 */
+  async function upTo(maxVersion: number) {
+    const Database = (await import("better-sqlite3")).default;
+    const db = new Database(":memory:");
+    db.pragma("foreign_keys = ON");
+    for (const f of FILES) {
+      if (f.version > maxVersion) break;
+      try {
+        db.exec(f.sql);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        if (f.version === 2 && /vec0|no such module/i.test(msg)) continue;
+        throw err;
+      }
+    }
+    return db;
+  }
+
+  function migration017() {
+    const m = FILES.find((f) => f.version === 17);
+    expect(m, "017 迁移文件缺失").toBeDefined();
+    return m!;
+  }
+
+  /** 一个**有数据**的 016 库:`project_sessions` 那条会话 + 它的消息都要逐字活下来。 */
+  async function seeded016() {
+    const db = await upTo(16);
+    db.exec(`INSERT INTO agents (id,role,specialization,display_name,created_at)
+             VALUES ('wk','worker','engineering','工人',1)`);
+    db.exec(`INSERT INTO agents (id,role,specialization,display_name,created_at)
+             VALUES ('bm','business_manager',NULL,'业务经理',1)`);
+    db.exec(`INSERT INTO agents (id,role,specialization,display_name,created_at)
+             VALUES ('pm','project_manager',NULL,'项目经理',1)`);
+    db.exec(`INSERT INTO projects (id,name,client,goal,status,created_at)
+             VALUES ('pj_1','语音机器人调研','甲方','目标','active',1)`);
+    // 存量会话行:正文带中文 / 引号 / 反斜杠 —— 逐字对比要能看出被动过
+    db.exec(`INSERT INTO project_sessions (id,project_id,created_at)
+             VALUES ('s_old','pj_1',11)`);
+    db.exec(`INSERT INTO session_messages (id,session_id,agent_id,kind,content,created_at)
+             VALUES ('m_1','s_old',NULL,'user','甲方说:"我要三条路线的对比" \\ 现场',12)`);
+    db.exec(`INSERT INTO session_messages (id,session_id,agent_id,kind,content,created_at)
+             VALUES ('m_2','s_old','bm','assistant','收到,先看约束',13)`);
+    db.exec(`INSERT INTO artifacts (id,project_id,conversation_id,kind,status,author_agent_id,
+                                    title,body,metadata_json,created_at,updated_at,work_id)
+             VALUES ('d_1','pj_1',NULL,'deliverable','accepted','pm','交付物','正文',NULL,14,14,NULL)`);
+    return db;
+  }
+
+  type Db = Awaited<ReturnType<typeof seeded016>>;
+
+  /** 存量行的快照 —— **只取老列**,所以「新列加了没有」不会污染「老列变没变」。 */
+  const snapshot = (db: Db) => ({
+    rows: db.prepare(`SELECT id, project_id, created_at FROM project_sessions ORDER BY id`).all(),
+    messages: db.prepare(`SELECT * FROM session_messages ORDER BY id`).all(),
+    artifacts: db.prepare(`SELECT * FROM artifacts ORDER BY id`).all(),
+  });
+
+  // ── 1. 纯加法:存量行逐字不变 ────────────────────────────────
+  it("**存量行逐字不变**:行数 / `project_sessions` / `session_messages` / `artifacts` 一模一样", async () => {
+    const db = await seeded016();
+    const before = snapshot(db);
+    // 正样本自检:样本不是空的(逐字对比在空集上毫无意义)
+    expect(before.rows, "样本是空的 —— 逐字对比失去意义").toHaveLength(1);
+    expect(before.messages).toHaveLength(2);
+    expect(before.artifacts).toHaveLength(1);
+
+    db.exec(migration017().sql);
+
+    expect(snapshot(db), "017 动了存量数据 —— 纯加法不该改任何一个老列").toEqual(before);
+    db.close();
+  });
+
+  it("存量行 `channel='internal'`、`deliverable_artifact_id IS NULL`(DEFAULT 生效)", async () => {
+    const db = await seeded016();
+    db.exec(migration017().sql);
+    expect(
+      db.prepare(`SELECT id, channel, deliverable_artifact_id FROM project_sessions`).all(),
+    ).toEqual([{ id: "s_old", channel: "internal", deliverable_artifact_id: null }]);
+    db.close();
+  });
+
+  it("`foreign_key_check` 与 `integrity_check` 干净", async () => {
+    const db = await seeded016();
+    db.exec(migration017().sql);
+    expect(db.pragma("foreign_key_check")).toEqual([]);
+    expect((db.pragma("integrity_check") as Array<{ integrity_check: string }>)[0]?.integrity_check)
+      .toBe("ok");
+    db.close();
+  });
+
+  // ── 2. 列的形状 ──────────────────────────────────────────────
+  it("新列的形状:`deliverable_artifact_id` 可空、`channel` NOT NULL DEFAULT 'internal' + CHECK", async () => {
+    const db = await seeded016();
+    db.exec(migration017().sql);
+    const cols = db.pragma("table_info(project_sessions)") as Array<{
+      name: string; notnull: number; dflt_value: string | null; type: string;
+    }>;
+    const deliv = cols.find((c) => c.name === "deliverable_artifact_id")!;
+    expect(deliv, "`deliverable_artifact_id` 没建出来 —— 那条握手协议的名字不能改").toBeDefined();
+    expect(deliv.type).toBe("TEXT");
+    expect(deliv.notnull, "它必须可空(NULL = 这条会话不是交付开出来的)").toBe(0);
+    expect(deliv.dflt_value).toBeNull();
+
+    const channel = cols.find((c) => c.name === "channel")!;
+    expect(channel.type).toBe("TEXT");
+    expect(channel.notnull, "`channel` 必须 NOT NULL —— 否则「这条消息属于哪条对话」又有第三种答案").toBe(1);
+    expect(channel.dflt_value).toBe("'internal'");
+    db.close();
+  });
+
+  it("`channel` 的闭集:两个合法值写得进,**非法值被 CHECK 拒掉**(负样本)", async () => {
+    const db = await seeded016();
+    db.exec(migration017().sql);
+    db.exec(`INSERT INTO project_sessions (id,project_id,created_at,channel) VALUES ('s_c','pj_1',20,'client')`);
+    db.exec(`INSERT INTO project_sessions (id,project_id,created_at,channel) VALUES ('s_i','pj_1',21,'internal')`);
+    expect(
+      db.prepare(`SELECT id, channel FROM project_sessions WHERE id IN ('s_c','s_i') ORDER BY id`).all(),
+    ).toEqual([
+      { id: "s_c", channel: "client" },
+      { id: "s_i", channel: "internal" },
+    ]);
+    expect(
+      () => db.exec(`INSERT INTO project_sessions (id,project_id,created_at,channel) VALUES ('s_x','pj_1',22,'甲方')`),
+      "非法通道值必须被 schema 拦住 —— 它在应用层是 `SessionChannel` 联合,漏进来就是静默错分",
+    ).toThrow(/CHECK constraint failed/i);
+    db.close();
+  });
+
+  it("外键:`deliverable_artifact_id` → `artifacts(id)`,**NO ACTION**(悬空引用响亮被拒)", async () => {
+    const db = await seeded016();
+    db.exec(migration017().sql);
+    const fks = (db.pragma(`foreign_key_list(project_sessions)`) as Array<{
+      table: string; from: string; on_delete: string;
+    }>).filter((fk) => fk.table === "artifacts");
+    expect(fks).toEqual([
+      { id: 0, seq: 0, table: "artifacts", from: "deliverable_artifact_id",
+        to: "id", on_update: "NO ACTION", on_delete: "NO ACTION", match: "NONE" },
+    ]);
+    // 正样本:挂到那条真的交付物上 —— 成功
+    db.exec(`INSERT INTO project_sessions (id,project_id,created_at,deliverable_artifact_id)
+             VALUES ('s_deliv','pj_1',30,'d_1')`);
+    // 负样本:悬空引用 —— 被外键拒掉,而且必须**响亮**
+    expect(
+      () => db.exec(`INSERT INTO project_sessions (id,project_id,created_at,deliverable_artifact_id)
+                     VALUES ('s_bad','pj_1',31,'d_不存在')`),
+    ).toThrow(/FOREIGN KEY constraint failed/i);
+    expect(db.pragma("foreign_key_check")).toEqual([]);
+    db.close();
+  });
+
+  // ── 3. ⚠️ `artifacts` 的第 4 条外键(016 的守卫看不见它)────────
+  it("**全 schema 的核对**:引用 `artifacts` 的外键从 3 条变 **4** 条(第 4 条是这个新列)", async () => {
+    const db = await seeded016();
+    db.exec(migration017().sql);
+    const tables = (db.prepare(
+      `SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'`,
+    ).all() as Array<{ name: string }>).map((r) => r.name);
+    const children: Array<{ table: string; from: string; onDelete: string }> = [];
+    const referenced = new Set<string>();
+    for (const t of tables) {
+      for (const fk of db.pragma(`foreign_key_list(${t})`) as Array<{
+        table: string; from: string; on_delete: string;
+      }>) {
+        referenced.add(fk.table);
+        if (fk.table === "artifacts") children.push({ table: t, from: fk.from, onDelete: fk.on_delete });
+      }
+    }
+    // 正样本:探测器真的看得见外键
+    expect(referenced.has("projects"), "探测器坏了:projects 明明被多张表引用").toBe(true);
+    expect(
+      children.sort((a, b) => `${a.table}.${a.from}`.localeCompare(`${b.table}.${b.from}`)),
+      "引用 artifacts 的外键集合变了 —— 016 的重建步骤(备份哪张子表 / 谁会被隐式 DELETE 级联)" +
+        "与这个集合一一对应。**第 4 条是 017 加的 `project_sessions.deliverable_artifact_id`" +
+        "(NO ACTION)**:将来若第二次重建 `artifacts`,处置方式与 `asks.resolution_artifact_id` 同形" +
+        "(先置 NULL、重建后回填),而不是备份成子表",
+    ).toEqual([
+      { table: "artifact_links", from: "artifact_id", onDelete: "CASCADE" },
+      { table: "artifact_links", from: "target_artifact_id", onDelete: "CASCADE" },
+      { table: "asks", from: "resolution_artifact_id", onDelete: "NO ACTION" },
+      { table: "project_sessions", from: "deliverable_artifact_id", onDelete: "NO ACTION" },
+    ]);
+    db.close();
+  });
+
+  // ── 4. 变异验证:文件形态 ────────────────────────────────────
+  it("文件形态:两行 `ALTER TABLE ADD COLUMN`,**一行 DROP 都没有**,不建表、不带 IF NOT EXISTS", () => {
+    const sql = migration017().sql;
+    const body = stripSqlComments(sql);
+    const alters = [...body.matchAll(/ALTER\s+TABLE\s+([a-z_]+)\s+ADD\s+COLUMN\s+([a-z_]+)/gi)]
+      .map((m) => `${m[1]}.${m[2]}`);
+    expect(alters, "017 只该加两列,而且列名是握手协议(读面按名字查 schema)").toEqual([
+      "project_sessions.deliverable_artifact_id",
+      "project_sessions.channel",
+    ]);
+    expect(body, "017 里出现了 DROP —— 纯加法不该有它(批次 18 的静默删数据就是 DROP 那条路)")
+      .not.toMatch(/\bDROP\b/i);
+    expect(createdTables(sql), "017 不该建表(建表就带回「IF NOT EXISTS 撞名静默无操作」那个面)")
+      .toEqual([]);
+    expect(body).not.toMatch(/\bIF\s+NOT\s+EXISTS\b/i);
+    // ⚠️ 关键:它不是重建表 ⇒ 不该被登记进 `INTENTIONAL_REBUILDS`
+    const rebuilt = INTENTIONAL_REBUILDS.some((r) => r.files.includes("017_deliverable_session.sql"));
+    expect(rebuilt, "017 是纯加法,不该出现在 INTENTIONAL_REBUILDS 里").toBe(false);
+  });
+
+  it("**变异验证**:删掉 CHECK 或删掉列,守卫必须红", async () => {
+    // 这条不是断言迁移文件,而是断言**上面那些断言有牙**:同一个库,把 017 的两个
+    // 关键成分分别拿掉之后,判据必须立刻不成立。
+    const noCheck = await seeded016();
+    noCheck.exec(`ALTER TABLE project_sessions ADD COLUMN deliverable_artifact_id TEXT REFERENCES artifacts(id)`);
+    noCheck.exec(`ALTER TABLE project_sessions ADD COLUMN channel TEXT NOT NULL DEFAULT 'internal'`);
+    expect(
+      () => noCheck.exec(`INSERT INTO project_sessions (id,project_id,created_at,channel) VALUES ('s_x','pj_1',22,'甲方')`),
+      "没有 CHECK 时非法通道值写得进去 —— 上面那条「闭集」断言不是空话",
+    ).not.toThrow();
+    noCheck.close();
+
+    const noColumn = await seeded016();
+    noColumn.exec(`ALTER TABLE project_sessions ADD COLUMN channel TEXT NOT NULL DEFAULT 'internal' CHECK (channel IN ('internal','client'))`);
+    const cols = (noColumn.pragma("table_info(project_sessions)") as Array<{ name: string }>).map((c) => c.name);
+    expect(cols, "少了那一列,读面(`deliveredArtifactIds`)就只能如实退化 —— 上面那条存在性断言不是空话")
+      .not.toContain("deliverable_artifact_id");
+    noColumn.close();
+  });
 });
