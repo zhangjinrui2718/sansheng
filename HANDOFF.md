@@ -16,7 +16,7 @@
 ## 状态
 
 ```
-W4  本次提交:`feat(web): 工件页产出图 DAG + 成员页按角色分栏 + 「此刻在做什么」读面`
+W4  `b98c71a` feat(web): 工件页产出图 DAG + 成员页按角色分栏 + 「此刻在做什么」读面
 1305 passed / 62 files · 两条 typecheck 0 · npm run build 绿 · check:design E1–E14 绿 · as any 0
 新增:`GET /api/projects/:id/live`(ProjectLiveView)· `ArtifactView.workId`(契约)
 真机验证:在 `~/.sansheng/` 的**副本**上起宿主(真 provider / 真库),三个端点逐条 curl;
