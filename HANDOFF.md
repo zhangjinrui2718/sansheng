@@ -18,7 +18,7 @@
 ## 状态
 
 ```
-W10 🔖 提交号见紧随其后的 docs(handoff) 提交
+W10 2667813 fix(dispatcher+serve): maxRounds 口径拆成 派发/turns + 空转派发留痕 + 被拒不再算成功
     fix(dispatcher+serve): maxRounds 口径拆成 派发/turns + 空转派发留痕 + 被拒不再算成功
 1411 passed / 66 files · 两条 typecheck 0 · npm run build 绿 · check:design E1–E14 绿 · as any 0
 ```
