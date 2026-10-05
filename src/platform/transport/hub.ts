@@ -30,13 +30,13 @@ import type { IncomingMessage } from "node:http";
 import type { Duplex } from "node:stream";
 import type Database from "better-sqlite3";
 import type { ClientChannel, ClientQuestion } from "../client/port.js";
-import { getArtifact, type ArtifactRow } from "../storage/repo/artifacts.js";
+import { getArtifact } from "../storage/repo/artifacts.js";
 import {
   listSessions, insertSession, appendSessionMessage, findSessionByChannel,
   type SessionChannel,
 } from "../storage/repo/sessions.js";
 import { getProjectRow } from "../storage/repo/projects.js";
-import { toArtifactView, toClientQuestionView, toWorkView } from "./views.js";
+import { toClientQuestionView, toWorkView } from "./views.js";
 import { getAgent } from "../storage/repo/agents.js";
 import type {
   ClientCommand, ClientQuestionView, ServerEvent, WsToolInfo,
@@ -238,10 +238,9 @@ export class PlatformHub {
     this.broadcast({ type: "project_opened", projectId, name });
   }
 
-  /** 新工件落库后调用 —— 前端据此刷新黑板。 */
-  emitArtifactCreated(row: ArtifactRow): void {
-    this.broadcast({ type: "artifact_created", artifact: toArtifactView(this.deps.db, row, (id) => id) });
-  }
+  // ⚠️ 这里**没有** `emitArtifactCreated`:它自批次 12 引入起就没有任何调用方
+  // (工件变化目前只经 HTTP 回查到达前端),于 B3 死代码清理删除。
+  // 与之配套的 `artifact_created` 契约成员 / 前端 handler 由各自的持有者处置。
 
   emitWorkChanged(projectId: string, workId: string, status: string): void {
     this.broadcast({ type: "work_changed", projectId, workId, status: status as never });

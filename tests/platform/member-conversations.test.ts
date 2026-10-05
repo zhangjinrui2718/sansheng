@@ -4,9 +4,12 @@
  * ── 这个端点存在的**唯一**理由,就是这个文件要钉住的那条判据 ──────────
  *
  * `GET /api/projects/:id/messages`(`listProjectMessages`)是**给对话页的**:它没有
- * agent 谓词,而且每条会话取的是 `ORDER BY created_at LIMIT n` 的**最早** n 条、
- * 最后再 `slice(-n)`。拿它在前端按 `agent_id` 分组,「业务经理说了几条」就会在
- * 消息量增长时**静默少数** —— 而少数的那一版和正确的那一版在屏幕上长得一模一样。
+ * agent 谓词,而且**每个会话只交回一窗口**(默认最新 200 条)。拿它在前端按
+ * `agent_id` 分组,「业务经理说了几条」会在消息量超过窗口时**静默少数** ——
+ * 而少数的那一版和正确的那一版在屏幕上长得一模一样。
+ * (那个窗口**修好之前取的是最早 200 条**,bug①;复核与回归见
+ * `tests/platform/project-messages-window.test.ts`。窗口的**存在**没变,所以这条
+ * 「条数只能来自 SQL GROUP BY」的判据不受影响。)
  *
  * 所以:条数必须来自 SQL `GROUP BY`,`messages` 只是每组的一页。这里的正负样本是
  *   · 正:`total` == 测试自己用裸 SQL 数出来的 `GROUP BY agent_id` 结果;

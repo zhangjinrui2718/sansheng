@@ -29,7 +29,7 @@ import {
 } from "../storage/repo/blockers.js";
 import { listChanges, type ChangeRequestRow } from "../storage/repo/changes.js";
 import {
-  listSessions, listSessionMessages, type SessionMessageRow,
+  listSessions, listSessionMessages, normalizeMessageLimit, type SessionMessageRow,
 } from "../storage/repo/sessions.js";
 import { getAgent } from "../storage/repo/agents.js";
 import {
@@ -229,28 +229,71 @@ export function toMessageView(
 }
 
 /**
- * 一条会话(项目会话**或接待会话**)的全部消息,按时间归并。
+ * 一条会话(项目会话**或接待会话**)的最新消息,按时间归并。
  *
  * `projectId === null` = 接待会话(第一个项目之前,见
  * `migrations/012_intake_session.sql`)。走同一个函数是有意的:接待会话与项目会话
  * 是**同一种东西**,只是前者还没有项目 —— 两套读法迟早会漂。
+ *
+ * ── `limit` 的语义:**每个会话各取最新 `limit` 条**(不是「全体最新 limit 条」)──
+ *
+ * 调用方是对话页(HTTP 的两条路由 + `web/src/lib/data.ts` 的通道分流),它一次
+ * 拿回全部消息再按通道分开渲染。所以 `limit` 是**一条对话**的窗口,不是整个
+ * 项目的配额:
+ *
+ *   - `thinking` / `tool` 也落库,内部会话轻易超过 `limit`。若 `limit` 是**全体**
+ *     的,甲方那场交付对话(设计 1 §2.11.6 的可见性不变量:交付会话与内部会话
+ *     是两条)会被内部刷屏整段挤出窗口;
+ *   - 而被挤掉这件事**在页面上看不出来** —— `partitionTurns().hidden` 数的是
+ *     「拿到的轮里被通道滤掉几条」,数不出「压根没拿到的那些」。
+ *
+ * 代价(如实写在这里):单次响应最多 `limit × 会话数` 条。项目里会话数在结构上
+ * 很少 —— 一条 `internal`(每项目至多一条)+ **每场交付一条 `client`**。
+ *
+ * ── 为什么没有「归并后再切一刀」──────────────────────────────────
+ *
+ * 这里曾经在归并之后 `out.slice(-limit)`:输入是「每个会话各取**最早** limit 条」,
+ * 那一刀切出来的就不是「最新的 limit 条」,而是「最早那批里较晚的一部分」——
+ * 与上面「按时间归并」的注释自相矛盾。它与最早的 `ORDER BY created_at LIMIT`
+ * 是 bug① 的两层,只修一层等于没修:若保留这一刀,每会话窗口(它必然**是**
+ * 全体最新 limit 条的父集)又会被削回全体最新 limit 条,「每会话」当场失效。
+ *
+ * ── 次序:`(createdAt, id)` 全序 ────────────────────────────────
+ *
+ * 同一毫秒的消息本来就不可排序,`id` 只做第二键 —— 要的是**全序**(两次调用
+ * 结果一样、换 `limit` 不换行),不是「真实发生次序」的断言。它与
+ * `listSessionMessages` 的 `ORDER BY created_at DESC, id DESC` 是同一把尺,
+ * 所以「每会话取最新 N 条」的截断与这里的归并同序。
  */
 export function listProjectMessages(
   db: Database.Database,
   projectId: string | null,
   limit = 200,
 ): SessionMessageView[] {
+  const perSession = normalizeMessageLimit(limit);
+  // `0` = 「一条都不要」。别把它喂给 SQL:`LIMIT NULL` 在 SQLite 里是不设上限。
+  if (perSession === 0) return [];
   const name = agentNameCache(db);
   const out: SessionMessageView[] = [];
   for (const s of listSessions(db, projectId)) {
-    for (const m of listSessionMessages(db, s.id, limit)) {
+    for (const m of listSessionMessages(db, s.id, perSession)) {
       out.push(toMessageView(m, name, projectId));
     }
   }
   // 多个会话时按时间归并 —— 虽然当前是「每项目一条连续对话」,
-  // 但表结构允许多条,归并保证换形态时接口不用改
-  out.sort((a, b) => a.createdAt - b.createdAt);
-  return out.slice(-limit);
+  // 但表结构允许多条(交付会话),归并保证接口不用改
+  out.sort((a, b) => a.createdAt - b.createdAt || compareId(a.id, b.id));
+  return out;
+}
+
+/**
+ * 全序的第二键(见 `listProjectMessages` 的次序说明)。
+ *
+ * 用码点比较而不是 `localeCompare` —— 后者随 locale 变,而「全序」的全部价值
+ * 就在于它对同一份数据永远给同一个答案。
+ */
+function compareId(a: string, b: string): number {
+  return a < b ? -1 : a > b ? 1 : 0;
 }
 
 // ── 项目 ────────────────────────────────────────────────────────

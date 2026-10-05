@@ -263,17 +263,60 @@ export function appendSessionMessage(
   ).run(row.id, row.sessionId, row.agentId, row.kind, row.content, row.createdAt);
 }
 
+/** 单次读回的**每会话**条数上限。见 {@link normalizeMessageLimit}。 */
+export const MESSAGE_LIMIT_MAX = 2000;
+
+/**
+ * 把调用方给的 `limit` 规范化成 `[1, MESSAGE_LIMIT_MAX]` 的整数。
+ *
+ * **`0` 是唯一的例外**:它表示「一条都不要」,而不是「至少 1 条」——
+ * `limit ≤ 0` 与 `NaN` / `Infinity` 一律归零(读面无界是失败,不是宽容)。
+ * 调用方拿到 `0` 就该直接返回空,别把它喂给 SQL(`LIMIT NULL` 在 SQLite 里
+ * 是**不设上限**,那正是这里要堵的路)。
+ *
+ * 规范化只写一处:`listSessionMessages` 与 `views.ts` 的 `listProjectMessages`
+ * 都从这里取——两处各写一份 `Math.min(Math.max(...))` 迟早会漂。
+ */
+export function normalizeMessageLimit(limit: number): number {
+  if (!Number.isFinite(limit)) return 0;
+  return Math.min(Math.max(Math.floor(limit), 0), MESSAGE_LIMIT_MAX);
+}
+
+/**
+ * 某个会话的**最新** `limit` 条消息,按时间**升序**返回(`[0]` 是最旧的那条)。
+ *
+ * ── ⚠️ 这个 `LIMIT` 切的是**尾巴**,不是头(bug①)────────────────────
+ *
+ * 它曾经是 `ORDER BY created_at LIMIT ?` —— 没有 `DESC` 的 `LIMIT` 切的是
+ * **最早** n 条,于是「第 201 条起永远取不到」:对话页刷新之后历史冻在旧窗口,
+ * 而库里新消息一条不少。修法就是让 `LIMIT` 作用在**降序**结果上,再 `reverse()`
+ * 交回升序 —— 返回顺序是本函数原有的契约,调用方(归并 / 逐条比对测试)依赖它。
+ *
+ * ── `(created_at, id)` 是**全序**,不是「真实写下次序」的断言 ──────────
+ *
+ * **同一毫秒内的消息本来就不可排序**(本项目已踩过)。`id` 在这里只做第二键,
+ * 把「同毫秒」变成一个有稳定答案的位置:要的是「两次读一模一样、换 `limit`
+ * 不换行」,不声称这就是它们真正被插入的顺序。第二键与
+ * {@link findSessionByChannel} 用同一把尺(`id`),所以同一毫秒的次序在整个
+ * 仓储层是一致的。
+ *
+ * `limit ≤ 0` / 非有限 ⇒ 空数组(见 {@link normalizeMessageLimit});上限 2000。
+ */
 export function listSessionMessages(
   db: Database.Database,
   sessionId: string,
   limit = 200,
 ): SessionMessageRow[] {
+  const n = normalizeMessageLimit(limit);
+  if (n === 0) return [];
   const rows = db
     .prepare(
-      `SELECT * FROM session_messages WHERE session_id = ? ORDER BY created_at LIMIT ?`,
+      `SELECT * FROM session_messages WHERE session_id = ?
+       ORDER BY created_at DESC, id DESC LIMIT ?`,
     )
-    .all(sessionId, Math.min(Math.max(limit, 1), 2000)) as RawMessage[];
-  return rows.map((r) => {
+    .all(sessionId, n) as RawMessage[];
+  // 降序取尾巴、升序交回去 —— 两件事分开写,免得下次有人把 DESC 当成返回顺序
+  return rows.reverse().map((r) => {
     if (!isSessionMessageKind(r.kind)) {
       throw new Error(`session_messages 表里出现未定义 kind「${r.kind}」(id=${r.id})`);
     }
