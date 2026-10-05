@@ -70,6 +70,18 @@ describe("平台通知 · 分类(只认首行前缀)", () => {
     expect(classifyPlatformNotice("\n⚠️ 组织停止推进(8 个回合后):…")).toBe("other");
   });
 
+  it("新文案(2026-10-05 起:改成「N 次派发 · 其中 M 个真回合」)仍归 stop", () => {
+    // 前缀没变、口径变了 —— 分类靠前缀,所以**改口径不该改分类**。
+    // 这条是给下一次改文案的人留的护栏:改坏了会在分类上体现出来。
+    expect(
+      classifyPlatformNotice(
+        "⚠️ 组织停止推进(8 次派发 · 其中 2 个真回合):已达单次排空上限 8 次派发" +
+          "(其中 2 个真回合),仍有待办没跑完 —— 已停下(不是静默停:这条会广播并落库)\n" +
+          "本轮路径:pm → wk\n派发了但没跑起来的 6 次:\n  · 第 2 次 wk · execute_work —— 被拒:工作项已是终态(done)",
+      ),
+    ).toBe("stop");
+  });
+
   it("负样本:认不出来的 system 文本退化成「平台通知」,不猜", () => {
     expect(classifyPlatformNotice("")).toBe("other");
     expect(classifyPlatformNotice("服务重启完成")).toBe("other");

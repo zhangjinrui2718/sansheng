@@ -2,7 +2,111 @@
 
 ---
 
-# ⚡ 最新一轮 · W9(2026-10-05 晚)· 平台通知落到项目页 + 对话页只留一行摘要
+# ⚡ 最新一轮 · W10(2026-10-05 晚)· 「8 个回合」那条告警的计量口径 + 空转留痕
+
+> W9(平台通知落到项目页)仍然有效 —— 这一轮改的是**那条告警自己说什么**。
+
+用户三条(原话):
+
+> 把两个数都报出来:cascade_stopped / 落库文案区分 attempts(派发)与 turns(真跑起来)
+> →「8 次尝试 · 其中 2 个真回合」。语义不变,只加现场。
+> 让空转回合留痕:拒绝/失败的那次派发写一行(哪怕是 system 消息里的「wk ×4 被拒:工作项
+> 已是终态」),别只走 WS。
+> runWorkInSession 补 failed:拒绝 → failed: true,别再让平台替空回合写库(这条会改 drain
+> 行为,需要配测试,风险比 1、2 高)。
+
+## 状态
+
+```
+W10 🔖 提交号见紧随其后的 docs(handoff) 提交
+    fix(dispatcher+serve): maxRounds 口径拆成 派发/turns + 空转派发留痕 + 被拒不再算成功
+1411 passed / 66 files · 两条 typecheck 0 · npm run build 绿 · check:design E1–E14 绿 · as any 0
+```
+
+## ① 先钉住真机现场(这一轮全部改动的依据)
+
+10/05 17:14 那条「⚠️ 组织停止推进(8 个回合后)」——**8 次派发里只有 2 个真回合**:
+
+| 派发 | 谁 | SDK 会话里的 prompt | turn_usage |
+|---|---|---|---|
+| 1 | pm | 17:08:22.336 → 17:09:48.432(+工具 6 次) | 4870 output |
+| 2–7 | wk/wk/pm/wk/wk/pm | **一条都没有**(33 ms 内走完) | **无行** |
+| 8 | qa | 17:09:48.468 → 17:14:11.765 | 15612 output |
+
+判据是**四个角色的 SDK 会话 JSONL 全量导出**(`~/.sansheng/agent/sessions/…/*.jsonl` 的
+`timestamp` 字段),不是推断。旁证:停止落库在 17:14:11.770,下一次 pm 回合的平台注入在
+17:14:21.779 ⇒ **+10.009 s**(fixed-delay 定时器把排空接回来了,所以撞上界不是"卡死")。
+
+⇒ 那 6 次的现场在库里**为零**:错误只走 WS 广播、`dispatcher` 的日志只走 stdout(那次进程的
+输出没被捕获)、`dispatch_attempts` 行会被 `pruneAttempts` 清掉。**这就是 7-N 说的「见不到的
+现场等于没有现场」。**
+
+## ② 口径:`rounds`(派发)vs `turns`(真跑起来)
+
+- `DispatchOutcome = "ran" | "refused" | "failed"`;`DrainVisit` 每条带 `outcome` + `detail`。
+- `DrainResult.turns` 新增;`rounds` 保留原名(它 = attempts,改名只会制造一次无声的口径漂移)。
+- `stopDetail` 改成「已达单次排空上限 N 次派发(其中 M 个真回合)…」;告警标题改成
+  「⚠️ 组织停止推进(N 次派发 · 其中 M 个真回合)」。**「N 个 agent 回合」这种写法被禁了。**
+- `cascade_stopped` 载荷加 `turns`(与 `rounds` 并列)。
+
+## ③ 空转留痕:`formatIdleTrail`
+
+拒绝/失败的那几次进 `visited`,由 `formatIdleTrail`(纯函数)渲染成告警里的清单:
+
+```
+派发了但没跑起来的 6 次:
+  · 第 2 次 wk · execute_work —— 被拒:工作项已是终态(done),不该再执行
+  · …(超 6 条折成一行「另有 k 次同类空转」—— 折叠不静默)
+```
+
+同一份文案进三处:`log.muted`(stdout)、`cascade_stopped` 广播、落库的 `system` 消息。
+另加一行逐次派发的日志:`dispatcher: ✖ 第 N 次派发没跑起来(refused)—— wk · …`。
+
+## ④ `runWorkInSession` 补 `failed`(③,风险最高的那条)
+
+`runWorkItem` 的 `checkRunnable` 拒绝三类工作项(已是终态 / 负责人不存在 / 负责人不是 worker)
+时返回 `outcome:"refused"` + 空回合,**没调模型**;而 `runWorkInSession` 此前整段忽略它 ⇒
+一次什么都没做的派发被 dispatcher 当成**成功**(`dispatcher.ts` 的 `!aborted && !failed` 消费支
+会替它走平台记账)。现在:拒绝 → `failed: true, refused: true, detail: <refusalReason>`;
+建会话失败与抛错也补 `failed` + `detail`。
+
+⚠️ **这条改的是判定语义,所以说明它今天到底变了什么**:`execute_work` 那一支在消费块里
+**没有任何记账动作**(`review_work` / `report_downstream` / `handover` 才走 `runAgentTurn`),
+所以**真机行为今天不变** —— 变的是契约的诚实性(空回合不再自称成功)与**接下来谁能看见它**
+(②的清单会把拒绝原因逐条报出来)。
+
+## ⑤ 没做的事(如实记)
+
+- **没动 `maxRounds` 的默认值(8)** —— 它是「烧 token 的上界」,口径修好之后再谈需不需要调。
+- **没把空转次数单列成一个旋钮**(例如「空转不计入上界」)——那会把「防原地打转」的保护拆掉,
+  需要单独一轮。
+- 那 6 次派发**具体走的是哪条分支**(拒绝 / 建会话失败 / prompt 前抛错)仍然没能从产物里复原:
+  本轮的 ②③ 正是为了让**下一次**能看出来,而不是回头去猜这一回。
+
+## 验收链(本次实跑)
+
+```
+npx tsc -p tsconfig.server.json --noEmit   # 0
+npx tsc -p tsconfig.web.json --noEmit      # 0
+npm test                                   # 1411 passed / 66 files
+npm run build                              # 绿
+npm run check:design                       # ✓ E1–E14
+grep -rn 'as any' src/ web/src/            # 0
+```
+
+## 新增判据
+
+- `tests/platform/dispatcher.test.ts` · 「派发(rounds) ≠ 真回合(turns)」5 条:两次都被拒 ⇒
+  `rounds=2, turns=0` 且文案含「上限 2 次派发 / 其中 0 个真回合」;跑一个拒一个 ⇒ `turns=1` 且
+  空转清单只列没跑起来的那次;`failed` 与 `refused` 的用词不同;全跑起来 ⇒ 清单为空(不摆 0 占位);
+  `formatIdleTrail` 的正/负样本与折叠。
+- `tests/platform/dispatch-trigger.test.ts` · 真宿主跑一次撞上界:落库的告警必须同时含
+  「1 次派发」「其中 1 个真回合」,且**不许**再出现「个 agent 回合」。
+- `tests/web/platform-notices.test.ts` · 新文案仍归 `stop`(分类靠前缀,不靠口径 —— 改坏了会红)。
+
+---
+
+# ⚡ 上一轮 · W9(2026-10-05 晚)· 平台通知落到项目页 + 对话页只留一行摘要
 
 > ⚠️ 日期取本机 `date` 与 git 提交时间(2026-10-05 20:3x);**上一节 W8 标题写的 2026-10-07 与
 > git 记录不一致** —— 那一节不改(历史),这一节以 git 为准。

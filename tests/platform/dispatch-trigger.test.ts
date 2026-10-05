@@ -257,6 +257,22 @@ describe("硬上界不会被门铃的重跑绕过(真机跑出来的洞)", () =>
     // 第二条工作项根本没被碰过(没有被叫醒的痕迹)
     const w2 = db.prepare(`SELECT status FROM works WHERE id='w2'`).get() as { status: string };
     expect(w2.status).toBe("open");
+
+    // ── 2026-10-05:告警文案里的「N 个回合」是假现场,现在必须给**两个数** ──
+    //
+    // 真机那条写「已达单次排空上限 8 个 agent 回合」,而 8 次派发里只有 2 个真回合。
+    // 这里这一跑只有 1 次派发,而它**真的**叫醒了一个 agent(假会话的 prompt 正常返回)
+    // ⇒ 两个数必须都是 1;而且「N 个 agent 回合」那半句不许再出现。
+    const alarm = db
+      .prepare(
+        `SELECT content FROM session_messages WHERE content LIKE '%组织停止推进%'
+          ORDER BY created_at DESC LIMIT 1`,
+      )
+      .get() as { content: string } | undefined;
+    expect(alarm, "撞上界必须落一条 system 消息(到界不静默)").toBeDefined();
+    expect(alarm!.content).toContain("1 次派发");
+    expect(alarm!.content).toContain("其中 1 个真回合");
+    expect(alarm!.content).not.toContain("个 agent 回合");
   });
 });
 

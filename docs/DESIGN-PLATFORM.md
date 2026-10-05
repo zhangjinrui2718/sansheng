@@ -1842,6 +1842,8 @@ AgentRuntime
 **一定会停**,三层:
 
 1. **硬上界** `maxRounds`(默认 8,`--max-cascade-rounds` 可配)。到界**不静默停**:返回 `stopReason`,宿主广播 `cascade_stopped` + 落一条 `system` 会话消息。界面回到 `idle` 而用户以为「还在跑」或「已经做完了」,两种误解都会让他在错误的时刻做决定。
+
+   ⚠️ **它数的是「派发次数」,不是「跑了几个 agent 回合」**(2026-10-05 真机修正)。拒绝执行(`runWorkItem` 的 `checkRunnable` 判这条工作项不该跑)与建会话失败都占一次派发,却**没有叫醒任何 agent**;真机那条告警写着「8 个 agent 回合」而实际只有 2 个真回合(其余 6 次 33 ms 内返回,四个角色的 SDK 会话里连一条 prompt 记录都没有)。所以现在 `DrainResult` 同时给 `rounds`(派发)与 `turns`(真跑起来),两者都进告警文案与 `cascade_stopped` 载荷,空转的那几次逐条列进告警(谁 / 哪条待办 / 为什么没跑起来)——「N 个 agent 回合」这种只报一个数的写法**是假现场**。
 2. **尝试预算** `maxAttemptsPerTodo`(默认 3),记在 `dispatch_attempts` 的 `(project_id, todo_key)` 上。某条待办被叫醒若干次而目标一动不动 → 不再叫醒它,并**广播一次**(不静默)。待办消失时账本行被删掉,所以「同一件事再次出现」自动拿到新预算。
 
    ⚠️ 这与批次 20 的 `stallStore` + 项目状态签名的本质区别有两条,而正是那两条让它安全:

@@ -37,7 +37,7 @@ import {
   collectPendingWork, hasActionableWork, renderPendingWork,
 } from "../../src/platform/runtime/pendingWork.js";
 import {
-  collectTodos, drainProject, renderTask,
+  collectTodos, drainProject, renderTask, formatIdleTrail,
   DEFAULT_REPORT_BATCH_SIZE, DEFAULT_REPORT_MAX_DELAY_MS,
   type DrainTurnReport, type DrainWorkReport,
 } from "../../src/platform/runtime/dispatcher.js";
@@ -1055,5 +1055,108 @@ describe("任务 5 · 合并唤醒", () => {
     ).n;
     expect(bullets).toBe(3);
     expect(consumed).toBe(bullets);
+  });
+});
+
+// ══ 派发 vs 真回合(2026-10-05 那条「8 个回合」告警的回归)═════════════════
+//
+// 真机现场:一条 `max_rounds` 告警写着「已达单次排空上限 **8 个 agent 回合**」,
+// 而同一份 `visited` 路径背后的 8 次派发里**只有 2 个真回合** —— 另外 6 次在 33 ms 内
+// 返回,四个角色的 SDK 会话里连一条 prompt 记录都没有(既没花钱也没干活)。
+//
+// 那条文案是**假现场**:它让用户以为「组织跑了 8 个回合还没干完」。这一组的判据就是
+// 把它钉死:①`rounds` 是派发次数;②`turns` 才是真回合;③空转的那几次**带着理由**
+// 进 `visited`,并能被 `formatIdleTrail` 渲染成告警里的清单。
+describe("派发(rounds) ≠ 真回合(turns)—— 一条被计数污染的告警的回归", () => {
+  /** 一条永远被拒绝的工作项待办(宿主侧的 `checkRunnable` 拒绝就长这样)。 */
+  const refusedReport = (workId: string): DrainWorkReport => ({
+    workId, title: "t", status: "open",
+    aborted: false, timedOut: false, text: "", toolCalls: [],
+    failed: true, refused: true, detail: "工作项已是终态(done),不该再执行",
+  });
+
+  it("两次派发都**被拒** ⇒ rounds=2 · turns=0,且理由进 visited", async () => {
+    mkWork({ id: "wk_a" });
+    const r = await drainProject({
+      db, projectId: "p1", now: () => T0, log: () => {}, maxRounds: 2,
+      runAgentTurn: async () => okTurn,
+      runWork: async (_a, workId) => refusedReport(workId),
+    });
+    expect(r.rounds).toBe(2);
+    expect(r.turns, "两次都没叫醒任何 agent").toBe(0);
+    expect(r.stopReason).toBe("max_rounds");
+    // 文案必须**两个数都给**,而且不许再出现「N 个 agent 回合」那种口径
+    expect(r.stopDetail).toContain("上限 2 次派发");
+    expect(r.stopDetail).toContain("其中 0 个真回合");
+    expect(r.visited.map((v) => v.outcome)).toEqual(["refused", "refused"]);
+    expect(r.visited[0]?.detail).toContain("已是终态");
+  });
+
+  it("跑起来一个 + 被拒一个 ⇒ turns=1 · rounds=2,空转清单只列没跑起来的那次", async () => {
+    mkWork({ id: "wk_a" });
+    mkWork({ id: "wk_b" });
+    const r = await drainProject({
+      db, projectId: "p1", now: () => T0, log: () => {}, maxRounds: 2,
+      runAgentTurn: async () => okTurn,
+      runWork: async (_a, workId) => {
+        if (workId === "wk_b") return refusedReport(workId);
+        updateWorkStatus(db, workId, "done", T0 + 1);
+        return {
+          workId, title: "t", status: "done",
+          aborted: false, timedOut: false, text: "done", toolCalls: [],
+        };
+      },
+    });
+    expect([r.rounds, r.turns]).toEqual([2, 1]);
+    expect(r.visited.map((v) => [v.kind, v.outcome])).toEqual([
+      ["execute_work", "ran"],
+      ["execute_work", "refused"],
+    ]);
+    const trail = formatIdleTrail(r.visited);
+    expect(trail, "只列没跑起来的那一次").toHaveLength(1);
+    expect(trail[0]).toContain("被拒");
+    expect(trail[0]).toContain("已是终态");
+  });
+
+  it("回合**失败**(不是拒绝)也空转,但理由词是「没跑起来」", async () => {
+    // 项目零工作项 ⇒ pm 的 decompose 待办;假回合报 failed + 原因
+    const r = await drainProject({
+      db, projectId: "p1", now: () => T0, log: () => {}, maxRounds: 1,
+      runAgentTurn: async () => ({ ...okTurn, failed: true, detail: "no_model:没有可用的 provider" }),
+      runWork: async () => { throw new Error("不该被调用"); },
+    });
+    expect([r.rounds, r.turns]).toEqual([1, 0]);
+    expect(r.visited[0]?.outcome).toBe("failed");
+    const trail = formatIdleTrail(r.visited);
+    expect(trail[0]).toContain("没跑起来");
+    expect(trail[0]).toContain("no_model");
+  });
+
+  it("全都跑起来了 ⇒ turns === rounds,空转清单是空的(不摆 0 占位)", async () => {
+    const r = await drainProject({
+      db, projectId: "p1", now: () => T0, log: () => {}, maxRounds: 1,
+      runAgentTurn: async () => okTurn,
+      runWork: async () => { throw new Error("不该被调用"); },
+    });
+    expect([r.rounds, r.turns]).toEqual([1, 1]);
+    expect(r.visited[0]?.outcome).toBe("ran");
+    expect(r.visited[0]?.detail).toBeNull();
+    expect(formatIdleTrail(r.visited)).toEqual([]);
+  });
+
+  it("formatIdleTrail 的**折叠**不静默:超上限的折成一行计数(正负样本)", () => {
+    const visit = (i: number, outcome: "ran" | "refused" | "failed") => ({
+      agentId: "wk", kind: "execute_work" as const, label: `第 ${i} 条`,
+      outcome, detail: outcome === "ran" ? null : `理由 ${i}`,
+    });
+    // 负样本:全是 ran ⇒ 一行都不该有
+    expect(formatIdleTrail([visit(1, "ran"), visit(2, "ran")])).toEqual([]);
+    // 正样本:8 次空转 + limit 6 ⇒ 6 行明细 + 1 行折叠(合计说明 2 次)
+    const many = Array.from({ length: 8 }, (_, i) => visit(i + 1, "refused"));
+    const lines = formatIdleTrail(many, 6);
+    expect(lines).toHaveLength(7);
+    expect(lines[6]).toContain("另有 2 次");
+    // 序号是**派发次序**(第 1 次…),不是「第几条空转」—— 告警里要能对上路径
+    expect(lines[0]).toContain("第 1 次");
   });
 });

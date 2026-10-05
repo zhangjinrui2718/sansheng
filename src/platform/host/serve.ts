@@ -40,6 +40,7 @@ import { runWorkItem } from "../runtime/execution.js";
 import { ORG, ensureOrg, orgReady } from "../runtime/org.js";
 import {
   drainProject,
+  formatIdleTrail,
   type DrainResult, type DrainTurnReport, type DrainWorkReport,
 } from "../runtime/dispatcher.js";
 import { createPlatformApp } from "../transport/http.js";
@@ -758,6 +759,14 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
     readonly openedProjectIds: readonly string[];
     /** 会话建不出来 / 抛错 —— 这一回合什么都做不了 */
     readonly failed: boolean;
+    /**
+     * **这一次没跑起来的一句话现场**(建会话失败的原因 / 抛错信息)。
+     *
+     * 7-N:排空器那条「N 次派发 · 其中 M 个真回合」的告警要能解释「没跑起来的是什么
+     * 状况」,而这句原因只有宿主知道(它握着 `got.message` / 异常)。不带它的话,
+     * 告警只能写「有 6 次没跑起来」——那仍然是一个说不清理由的数字。
+     */
+    readonly failureReason?: string;
   }
 
   /**
@@ -799,6 +808,7 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
       return {
         aborted: false, timedOut: false, text: "", toolCalls: [],
         openedProjectIds: [], failed: true,
+        failureReason: `${got.code}:${got.message}`,
       };
     }
     const session = got.session;
@@ -934,6 +944,7 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
       return {
         aborted, timedOut: false, text: textBuf.join(""), toolCalls: [],
         openedProjectIds: [], failed: true,
+        failureReason: e instanceof Error ? e.message : String(e),
       };
     } finally {
       inflight.delete(pooledKey(projectId, agentId));
@@ -963,6 +974,8 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
       return {
         workId, title, status: before?.status ?? "open",
         aborted: false, timedOut: false, text: "", toolCalls: [],
+        failed: true,
+        detail: `${got.code}:${got.message}`,
       };
     }
     const session = got.session;
@@ -1041,6 +1054,15 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
           error: { code: "turn_timeout", message: `工作项 ${workId} 的回合超时收尾` },
         });
       }
+      // ── 拒绝执行 ≠ 成功(2026-10-05 补)────────────────────────────
+      //
+      // `runWorkItem` 的 `checkRunnable` 会拒绝三类工作项(已是终态 / 负责人不存在 /
+      // 负责人不是 worker),那时它**没调模型**、返回 `outcome: "refused"`。
+      // 这个返回值此前被整段忽略 ⇒ 一个什么都没做的派发被 dispatcher 当成
+      // **成功**(`failed` 缺席),于是:①它的空转被记进「N 个回合」;②`!aborted &&
+      // !failed` 那一支会替它走平台记账(今天 `execute_work` 恰好没有记账动作,
+      // 但那是「今天恰好」)。现在如实报 `failed` + `refused`,理由一起带出去。
+      const refused = execution.outcome === "refused";
       return {
         workId,
         title: execution.work.title,
@@ -1049,6 +1071,11 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
         timedOut: execution.turn.timedOut,
         text,
         toolCalls: execution.turn.toolCalls,
+        failed: refused,
+        ...(refused ? { refused: true } : {}),
+        ...(refused
+          ? { detail: execution.refusalReason ?? `工作项 ${workId} 被拒绝执行` }
+          : {}),
       };
     } catch (e) {
       hub.broadcast({
@@ -1063,6 +1090,8 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
       return {
         workId, title, status: getWork(db, workId)?.status ?? before?.status ?? "open",
         aborted, timedOut: false, text: textBuf.join(""), toolCalls: [],
+        failed: true,
+        detail: e instanceof Error ? e.message : String(e),
       };
     } finally {
       inflight.delete(pooledKey(projectId, agentId));
@@ -1322,6 +1351,7 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
           return {
             aborted: r.aborted, timedOut: r.timedOut, text: r.text, toolCalls: r.toolCalls,
             failed: r.failed,
+            ...(r.failureReason !== undefined ? { detail: r.failureReason } : {}),
           };
         });
       },
@@ -1450,9 +1480,25 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
    *
    * 「预算用尽」只在**第一次**用尽时播报(`newlyExhausted`)—— 否则每 10 秒一条
    * system 消息,那也是一种静默。
+   *
+   * ── 2026-10-05:文案里的「N 个回合」是假的,现在报**两个数** ─────────
+   *
+   * 真机那条写着「已达单次排空上限 8 个 agent 回合」,而 8 次派发里只有 2 个真回合
+   * (其余 6 次 33 ms 内返回、没叫醒任何 agent —— 见 `DispatchOutcome`)。
+   * 所以:①标题与正文都写「N 次派发 · 其中 M 个真回合」;②把**空转的那几次**
+   * 逐条列出来(谁、哪条待办、为什么没跑起来)—— 那是「预算花在哪了」的答案,
+   * 而它正是用户看到这条告警时第一个会问的问题。折叠不静默:超出上限的折成一行计数。
    */
   function announceDrain(projectId: string, r: DrainResult): void {
     const who = r.visited.map((v) => v.agentId).join(" → ");
+    // `turns` 与 `rounds` 并列出现的地方必须都带上「派发/真回合」这两个词,
+    // 否则读者会把 `rounds` 当成回合数(那正是这条告警此前的错)。
+    const spread = `${r.rounds} 次派发 · 其中 ${r.turns} 个真回合`;
+    const idleLines = formatIdleTrail(r.visited);
+    const idleBlock =
+      idleLines.length > 0
+        ? `\n派发了但没跑起来的 ${r.rounds - r.turns} 次:\n${idleLines.join("\n")}`
+        : "";
     const reason = r.stopReason;
     const reportable =
       reason === "max_rounds" || (reason === "no_progress" && r.newlyExhausted.length > 0);
@@ -1460,15 +1506,17 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
     // 每 10 秒一行「排空结束」会把真正有信息量的行淹掉
     if (r.rounds === 0 && !reportable) return;
     log.muted(
-      `platform: ${channelLabel(projectId)}排空结束 —— ${r.rounds} 回合,` +
+      `platform: ${channelLabel(projectId)}排空结束 —— ${spread},` +
         `停止原因 ${reason}(${r.stopDetail})` +
-        (who !== "" ? `\n        路径:${who}` : ""),
+        (who !== "" ? `\n        路径:${who}` : "") +
+        idleBlock,
     );
     if (!reportable) return;
     hub.broadcast({
       type: "cascade_stopped",
       projectId,
       rounds: r.rounds,
+      turns: r.turns,
       reason,
       detail: r.stopDetail,
     });
@@ -1482,8 +1530,9 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
       agentId: null,
       kind: "system",
       content:
-        `⚠️ 组织停止推进(${r.rounds} 个回合后):${r.stopDetail}` +
-        (who !== "" ? `\n本轮路径:${who}` : ""),
+        `⚠️ 组织停止推进(${spread}):${r.stopDetail}` +
+        (who !== "" ? `\n本轮路径:${who}` : "") +
+        idleBlock,
       createdAt: now(),
       // 同上一处:平台通知不属于任何封套(见 `reportUnannouncedTurn`)。
       originSource: null, triggerKind: null,

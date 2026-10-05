@@ -35,7 +35,7 @@
   判据的一部分:同一对节点上两类边**方向一致**时不是环(真机那份数据就是这样),方向相反
   才是环(`mutualPairs` 会点名是哪两条边)。写反会让「交付」跑到最左、并且把一个不存在的
   环报出来(`web/src/lib/workGraph.ts` 的 `collectEdges`)。
-- 基线:**1405 passed / 66 test files** · 两条 typecheck 0 error · `check:design` E1–E14 全绿。
+- 基线:**1411 passed / 66 test files** · 两条 typecheck 0 error · `check:design` E1–E14 全绿。
 - **角色中文名只有一处**:`src/platform/runtime/org.ts` 的 `ORG`(播种 + `RoleHarnessView.displayName`
   共用);前端兜底表 `web/src/lib/vocab.ts` 的 `ROLE_LABEL` 必须逐项相同,由
   `tests/web/role-names.test.ts` 跨边界对照。**不许在某个页面里再写一张名字表**
@@ -129,6 +129,14 @@ shared/types/            跨端协议类型(platform.ts / settings.ts)
 
 **一定会停三层**:硬上界 `maxRounds`(默认 8,`--max-cascade-rounds` 可配)+ **尝试预算** `dispatch_attempts`(按 `(项目, todo_key)` 记账,默认 3 次;目标行动了就清零)+ **墙钟上界** `wallClockTimeoutMs`(默认 10 分钟,`--turn-wall-clock-ms` 可配)。到界 / 预算用尽**不静默**:广播 `cascade_stopped` + 落一条 `system` 会话消息(预算用尽只在**第一次**用尽时播报,否则每 10 秒一条也是静默)。
 
+> ⚠️ **`maxRounds` 数的是「派发次数」,不是「跑了几个 agent 回合」**(2026-10-05 真机钉住)。
+> 拒绝执行(`runWorkItem` 的 `checkRunnable` 判这条工作项不该跑)与建会话失败都算一次
+> 派发,却**没有叫醒任何 agent** —— 真机那条告警写着「8 个 agent 回合」,而 8 次派发里
+> 只有 **2 个真回合**(其余 6 次 33 ms 内返回,四个角色的 SDK 会话里连一条 prompt 记录
+> 都没有)。所以 `DrainResult` 同时给 `rounds`(派发)与 `turns`(真跑起来),两者都进
+> 告警文案与 `cascade_stopped` 载荷;空转的那几次逐条进告警(谁 / 哪条待办 / 为什么没跑
+> 起来,`formatIdleTrail`,超 6 条折成一行计数)。**改文案时别再把 `rounds` 写成「回合」。**
+
 > 前两层管「**还要不要叫醒**」,第三层管「**已经叫醒的那一个回合还能跑多久**」—— 一个回合卡在某个工具上时前两层都拦不住(它占着项目 busy 闩,而账本记的是次数不是时长;真机现场是一个 worker 回合跑了 16 分钟还在 `curl` 文档)。到点由平台 `AgentSession.abort()` **真的打断**,然后**按超时处置**:还没终态就记 `failed`(经唯一写口写出 `work_failed` 事件 → 业务经理的汇报待办),它自己已终态 / 已 blocked 就不覆盖。**为什么是 `failed` 而不是留在 `in_progress`**:留着 = 静默死(不在任何 outbox 事件里、会被反复叫醒直到预算用尽、然后永久停在原地),而每次叫醒再买一个完整的墙钟上界。**Wave 1 只做完了判定与打断,运行期吃不到它**(宿主没把 `ServeOptions.turnWallClockMs` 接出去,于是「我调了上界」与「它根本没生效」在真机上长得一样);Wave 2 把那条线接上了,而且**两条路都要接**(`runAgentTurn` 聊天那条 + `runWorkInSession` 执行那条 —— 只接前者等于没接)。
 
 **合并唤醒:少打扰甲方的第二刀(判定侧的时机收窄)**。写入侧只对「根工作项终态 / 里程碑 / `work_failed` / high|critical 阻塞」写 outbox —— **但真机复核发现它在扁平结构下是空转的**:用户自己的库**当时**是 `9 work → 9 root → 0 中间`(⚠️ **2026-10-05 复核三次,形状每次都不同,所以别把它当常量**:`9 root` → `1 根 + 4 子` → **同一晚 W3-③ 实测是 `0 work / 0 项目 / 0 工件`**(该库被清过)。判据永远是那两条 `SELECT COUNT(*) …`,**结论不变**:按「是根」判会让扁平库里的每条真活失去执行者),而**运行期任务提示词里明写着要建树**(`runtime/dispatcher.ts:517-518` 的 `decompose_project` 正文:
@@ -200,7 +208,7 @@ help
 ```
 npx tsc -p tsconfig.server.json --noEmit
 npx tsc -p tsconfig.web.json --noEmit
-npm test                  # 1405 passed / 66 files
+npm test                  # 1411 passed / 66 files
 npm run build
 npm run check:design      # 设计一致性 E1–E14
 ```

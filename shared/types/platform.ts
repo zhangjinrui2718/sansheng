@@ -1079,7 +1079,17 @@ export type ServerEvent =
   | {
       type: "cascade_stopped";
       projectId: string;
+      /**
+       * **派发次数**(attempts)。⚠️ 它**不是**「跑了几个 agent 回合」:
+       * 拒绝执行(工作项已是终态 / 负责人不是 worker)与建会话失败都算一次派发,
+       * 却没有叫醒任何 agent。真回合数见 `turns`。
+       *
+       * 2026-10-05 真机:一条 `max_rounds` 告警写着「8 个 agent 回合」,而 8 次派发
+       * 里只有 2 个真回合 —— 只报一个数就是**假现场**。
+       */
       rounds: number;
+      /** 其中**真的叫醒了一个 agent** 的次数(`≤ rounds`) */
+      turns: number;
       reason: "max_rounds" | "no_progress";
       detail: string;
     }

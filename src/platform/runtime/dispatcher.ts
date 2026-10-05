@@ -1630,6 +1630,20 @@ export interface DrainTurnReport {
   readonly toolCalls: readonly ToolCallRecord[];
   /** 会话没建出来 / 回合抛错 —— 这一回合什么都做不了,不能当作「已经交代过了」 */
   readonly failed?: boolean;
+  /**
+   * **拒绝执行**(不是失败):待办本身不该被跑(例如工作项已是终态、负责人不是 worker)。
+   *
+   * ⚠️ 与 `failed` 分开是有理由的:两者在界面上都表现为「这一次没成」,但**原因与
+   * 该做什么**完全不同 —— 失败要重试 / 要人看,拒绝说明**判据漏了一条**(为什么
+   * 会派一条不该跑的待办)。宿主侧由 `runWorkItem` 的 `checkRunnable` 产出
+   * (`ExecutionResult.refusalReason`),在这之前它**只体现在日志里**。
+   */
+  readonly refused?: boolean;
+  /**
+   * 这一次没跑起来的一句话现场(拒绝理由 / 抛错信息)。**没有就 `null`/省略**——
+   * 7-N:空转的那几次必须事后看得出「当时是什么状况」,而不是只有一行「失败了」。
+   */
+  readonly detail?: string;
 }
 
 export interface DrainWorkReport extends DrainTurnReport {
@@ -1696,15 +1710,75 @@ export interface DrainDeps {
 
 export type DrainStopReason = "exhausted" | "max_rounds" | "no_progress" | "cancelled";
 
+/**
+ * 一次派发的结局。**这是「8 个回合」那条告警里唯一能分辨真假的东西。**
+ *
+ * 2026-10-05 真机现场:一条 `max_rounds` 告警写着「8 个 agent 回合」,而 8 次派发里
+ * **只有 2 个真回合** —— 另外 6 次在 33 ms 内返回,四个角色的 SDK 会话里连一条
+ * prompt 记录都没有(既没花钱,也没干活)。根因是计数写成了「派发次数」而文案写成
+ * 了「agent 回合」。所以结局必须逐条记下来:它同时是给用户看的现场(见
+ * `formatIdleTrail`)与给下一个改判据的人看的账。
+ */
+export type DispatchOutcome =
+  /** 真的叫醒了一个 agent(它跑了;跑成什么样是 `DrainTurnReport` 自己的事) */
+  | "ran"
+  /** 待办被拒绝执行 —— `runWorkItem` 的 `checkRunnable` 判它不该跑(没调模型) */
+  | "refused"
+  /** 派发了但没跑起来(建会话失败 / 抛错 / 回合成败未知) */
+  | "failed";
+
 export interface DrainVisit {
   readonly agentId: string;
   readonly kind: TodoKind;
   readonly label: string;
+  /** 这一派发有没有真的跑起来 —— 见 {@link DispatchOutcome} */
+  readonly outcome: DispatchOutcome;
+  /** 拒绝/失败时的一句话现场(跑起来了就是 `null`) */
+  readonly detail: string | null;
+}
+
+/**
+ * 空转派发的清单(纯函数,`announceDrain` 与测试共用)。
+ *
+ * 「空转」= 派发出去但没叫醒任何 agent。**必须让它们出现在告警里**:它们是
+ * 「预算花在哪了」的答案,而这正是那条 `max_rounds` 告警存在时用户第一个会问的问题。
+ *
+ * `limit` 之外的那些折成一行计数 —— 项目大了可能出现几十次空转,整段铺上去
+ * 会把真正的信息(停了 / 还有活在)淹掉。折叠**不静默**:折几条写在那一行里。
+ */
+export function formatIdleTrail(
+  visited: readonly DrainVisit[],
+  limit = 6,
+): readonly string[] {
+  // 序号取**派发次序**(`i + 1`),这样告警里的「第 3 次」能与 `本轮路径` 和日志对上。
+  // 不要用 `indexOf` 反查:那既慢又依赖「对象不复用」这个没写在类型里的前提。
+  const idle: Array<{ readonly v: DrainVisit; readonly n: number }> = [];
+  visited.forEach((v, i) => {
+    if (v.outcome !== "ran") idle.push({ v, n: i + 1 });
+  });
+  if (idle.length === 0) return [];
+  const lines = idle.slice(0, Math.max(limit, 0)).map(({ v, n }) => {
+    const why = v.detail !== null && v.detail !== "" ? `:${v.detail}` : "";
+    return `  · 第 ${n} 次 ${v.agentId} · ${v.kind} —— ${v.outcome === "refused" ? "被拒" : "没跑起来"}${why}`;
+  });
+  if (idle.length > lines.length) {
+    lines.push(`  · 另有 ${idle.length - lines.length} 次同类空转(同上,不再逐条展开)`);
+  }
+  return lines;
 }
 
 export interface DrainResult {
   readonly projectId: string;
+  /**
+   * **派发次数**(= attempts)。⚠️ 它**不是**「真跑起来的回合数」:
+   * 拒绝执行与建会话失败都算一次派发却不叫醒任何 agent。真回合数见 `turns`。
+   *
+   * 名字保留 `rounds` 是刻意的:里里外外(CLI 上界、`stopDetail`、历史告警文案、
+   * 既有测试)都用它,改名只会制造一次无声的口径漂移。
+   */
   readonly rounds: number;
+  /** 其中**真的叫醒了一个 agent** 的次数(`outcome === "ran"`)。`turns ≤ rounds` */
+  readonly turns: number;
   readonly stopReason: DrainStopReason;
   /** 为什么停的一句话 —— 撞上界 / 预算用尽时宿主据此告诉用户 */
   readonly stopDetail: string;
@@ -1759,6 +1833,8 @@ export async function drainProject(deps: DrainDeps): Promise<DrainResult> {
   const maxAttempts = deps.maxAttemptsPerTodo ?? DEFAULT_MAX_ATTEMPTS;
   const visited: DrainVisit[] = [];
   let rounds = 0;
+  /** 其中**真的叫醒了一个 agent** 的次数(见 `DispatchOutcome`) */
+  let turns = 0;
   let stopReason: DrainStopReason = "exhausted";
   let stopDetail = "没有可执行的待办了";
   let reportedToClient = false;
@@ -1773,8 +1849,11 @@ export async function drainProject(deps: DrainDeps): Promise<DrainResult> {
     }
     if (rounds >= maxRounds) {
       stopReason = "max_rounds";
+      // ⚠️ 文案必须带**两个数**:这个上界数的是**派发次数**,而「派发」不等于
+      // 「叫醒了一个 agent」(2026-10-05 真机:8 次派发里只有 2 个真回合)。
+      // 只报一个数会让人以为「组织跑了 8 个回合还没干完」——那是**假现场**。
       stopDetail =
-        `已达单次排空上限 ${maxRounds} 个 agent 回合,仍有待办没跑完 —— ` +
+        `已达单次排空上限 ${maxRounds} 次派发(其中 ${turns} 个真回合),仍有待办没跑完 —— ` +
         `已停下(不是静默停:这条会广播并落库)`;
       break;
     }
@@ -1833,9 +1912,15 @@ export async function drainProject(deps: DrainDeps): Promise<DrainResult> {
 
     const todo = board.runnable[0]!;
     rounds++;
-    visited.push({ agentId: todo.agentId, kind: todo.kind, label: todo.label });
+    // 先记一条「还不知道结局」的 visit(这一行的位置就是派发次序),跑完再把结局写回去
+    // —— 日志行要在回合**开始之前**出来(一个回合可能跑十几分钟,先有行才看得出它在跑)。
+    visited.push({
+      agentId: todo.agentId, kind: todo.kind, label: todo.label,
+      outcome: "ran", detail: null,
+    });
+    const visitAt = visited.length - 1;
     deps.log(
-      `dispatcher: 第 ${rounds}/${maxRounds} 回合 → ${todo.agentId}(${todo.role}) · ${todo.label}`,
+      `dispatcher: 第 ${rounds}/${maxRounds} 次派发 → ${todo.agentId}(${todo.role}) · ${todo.label}`,
     );
     // **先记账再跑**:进程在回合中途被杀死也算用掉一次预算 ——
     // 否则「每跑必崩」的待办会无限重试。
@@ -1846,6 +1931,8 @@ export async function drainProject(deps: DrainDeps): Promise<DrainResult> {
 
     let aborted = false;
     let failed = false;
+    let refused = false;
+    let detail: string | null = null;
     try {
       if (todo.kind === "execute_work") {
         if (todo.target === null) {
@@ -1857,18 +1944,42 @@ export async function drainProject(deps: DrainDeps): Promise<DrainResult> {
         const r = await deps.runWork(todo.agentId, todo.target, todo.kind);
         aborted = r.aborted;
         failed = r.failed === true;
+        refused = r.refused === true;
+        detail = r.detail ?? null;
       } else {
         const r = await deps.runAgentTurn(todo.agentId, renderTask(deps.db, todo), todo.kind);
         aborted = r.aborted;
         failed = r.failed === true;
+        refused = r.refused === true;
+        detail = r.detail ?? null;
       }
     } catch (err) {
       // 一次回合抛错**不该**让整个排空炸掉 —— 后面可能还有别的角色能动。
       // 但要留现场:日志里写清是谁、哪个待办、什么错。
       failed = true;
+      detail = err instanceof Error ? err.message : String(err);
       deps.log(
-        `dispatcher: ✖ ${todo.agentId} 的「${todo.label}」抛错 —— ` +
-          `${err instanceof Error ? err.message : String(err)}`,
+        `dispatcher: ✖ ${todo.agentId} 的「${todo.label}」抛错 —— ${detail}`,
+      );
+    }
+
+    // ── 结局:这一次派发有没有**真的叫醒一个 agent** ──────────────────
+    //
+    // ⚠️ 这一段是 2026-10-05 那条「8 个回合」告警的直接产物。当时 8 次派发里 6 次
+    // 在 33 ms 内返回、库里零痕迹,而文案写成「8 个 agent 回合」——**假现场**。
+    // 现在:①结局进 `visited`(谁被叫醒过、谁没有);②没跑起来的那几次各留一行
+    // 日志(不只在 WS 上闪一下);③`turns` 与 `rounds` 一起进 `DrainResult`,
+    // 由宿主写进告警文案。
+    const outcome: DispatchOutcome = refused ? "refused" : failed ? "failed" : "ran";
+    if (outcome === "ran") turns++;
+    else {
+      visited[visitAt] = {
+        agentId: todo.agentId, kind: todo.kind, label: todo.label, outcome, detail,
+      };
+      deps.log(
+        `dispatcher: ✖ 第 ${rounds} 次派发没跑起来(${outcome})—— ` +
+          `${todo.agentId} · ${todo.label}` +
+          (detail !== null && detail !== "" ? `:${detail}` : ""),
       );
     }
 
@@ -1930,11 +2041,14 @@ export async function drainProject(deps: DrainDeps): Promise<DrainResult> {
   // 「什么都没跑」的安静停不刷日志 —— 定时器每 10 秒来一次,每次都打一行
   // 「排空结束(0 回合)」会把真正有信息量的行淹掉(宿主那边同理)
   if (rounds > 0 || newlyExhausted.length > 0) {
-    deps.log(`dispatcher: 排空结束(${rounds} 回合 · ${stopReason})—— ${stopDetail}`);
+    deps.log(
+      `dispatcher: 排空结束(${rounds} 次派发 · ${turns} 个真回合 · ${stopReason})—— ${stopDetail}`,
+    );
   }
   return {
     projectId: deps.projectId,
     rounds,
+    turns,
     stopReason,
     stopDetail,
     visited,
