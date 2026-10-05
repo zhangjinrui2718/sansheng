@@ -120,10 +120,16 @@ program
     "合并唤醒:最老的一条事件等多久就叫醒一次(毫秒;默认 300000 = 5 分钟)",
     "300000",
   )
+  .option(
+    "--max-concurrent-projects <n>",
+    "同时排空几个项目(硬上界;并发之后三条账全按项目记,它是全局花费的代理指标;默认 3)",
+    "3",
+  )
   .action(async (opts: {
     host: string; port: string; cwd?: string; data?: string; open: boolean;
     maxCascadeRounds: string; schedulerInterval: string; dispatchInterval: string;
     turnWallClockMs: string; reportBatchSize: string; reportMaxDelayMs: string;
+    maxConcurrentProjects: string;
   }) => {
     const rounds = Number(opts.maxCascadeRounds);
     const interval = Number(opts.schedulerInterval);
@@ -131,6 +137,7 @@ program
     const turnWallClock = Number(opts.turnWallClockMs);
     const reportBatch = Number(opts.reportBatchSize);
     const reportDelay = Number(opts.reportMaxDelayMs);
+    const maxProjects = Number(opts.maxConcurrentProjects);
     await runPlatformServe({
       dataDir: opts.data ?? dataDir(),
       host: opts.host,
@@ -148,6 +155,8 @@ program
       reportBatchSize: Number.isFinite(reportBatch) && reportBatch > 0 ? reportBatch : 3,
       reportMaxDelayMs:
         Number.isFinite(reportDelay) && reportDelay > 0 ? reportDelay : 300_000,
+      maxConcurrentProjects:
+        Number.isFinite(maxProjects) && maxProjects > 0 ? maxProjects : 3,
     });
   });
 

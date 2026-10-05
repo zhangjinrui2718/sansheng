@@ -27,7 +27,7 @@
 import { serve } from "@hono/node-server";
 import { serveStatic } from "@hono/node-server/serve-static";
 import { Hono } from "hono";
-import { existsSync } from "node:fs";
+import { existsSync, mkdirSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Server } from "node:http";
@@ -124,6 +124,40 @@ export interface ServeOptions {
   readonly reportBatchSize?: number;
   readonly reportMaxDelayMs?: number;
   /**
+   * **同时排空几个项目**(默认 3)。
+   *
+   * ⚠️ 这是**唯一**限制「全局同时在烧多少 token」的东西。并发之后
+   * `maxCascadeRounds` / `dispatch_attempts` / `turnWallClockMs` **全都按项目记**,
+   * 没有任何一条是按进程记的 —— 所以项目的并发数就是全局花费的代理指标,
+   * 它必须是一个硬上界,而不是「尽力而为」。
+   *
+   * 并行**只在项目之间**:同一个项目内部仍由 `hub.isBusy` 串行(理由见
+   * `createPlatformHost` 里排空器那一段的注释)。
+   */
+  readonly maxConcurrentProjects?: number;
+  /**
+   * **给每个项目一个独立的工作目录**(默认**关**)。
+   *
+   * 打开时:会话的 `cwd` = `<工作根>/projects/<projectId>`,接待会话仍是工作根本身。
+   * 它挡的是 SDK 的**按绝对路径的文件变更队列**造成的跨项目耦合
+   * (`pi-coding-agent/dist/core/tools/file-mutation-queue.js` 的
+   * `withFileMutationQueue(filePath, fn)`:`edit` / `write` 先 `resolveToCwd(path, cwd)`
+   * 再按绝对路径排队)—— 同一路径串行(**不会损坏文件**),不同路径并行。
+   * 于是两个项目的 worker 若用**同一个相对路径**,今天会解析到同一个绝对路径 →
+   * 排队、后写覆盖先写 = 语义冲突。独立 cwd 让同一个相对路径落在不同目录。
+   *
+   * ── 为什么默认关(这条与「D4 要做」的裁决不一致,理由在证据里)──────
+   *
+   * 打开它会**改掉已有项目的相对路径根**:工作根里已经产出的文件(真机现场:
+   * `~/sansheng-workspace/` 下就摆着当前唯一那个项目的交付物)在新根下**看不见**,
+   * 而没有任何东西会告诉 worker「你的文件搬走了」——那是一次静默破坏。
+   * 而收益(两个项目同时改同一个相对路径)需要 ≥2 个项目同时开工才发生:
+   * 真机库 `SELECT COUNT(*) FROM projects` = 1。所以顺序是「先把工作根搬进
+   * 项目子目录,再打开这个开关」,而不是反过来。
+   * 机制、测试与开关都在,打开只需一个参数(或 CLI 一行,见报告)。
+   */
+  readonly isolateProjectCwd?: boolean;
+  /**
    * 测试 seam:替换真实的 `createAgentSession`(与 `session.ts` 的 DI 同一条理由 ——
    * 「到底把什么交给了 SDK」/「中断有没有到达会话」这类断言不该需要 provider 与网络)。
    * 生产不传。
@@ -156,6 +190,37 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
   const newId = booted.newId;
 
   const cwd = opts.cwd ?? booted.settings.cwd;
+
+  /**
+   * 某个上下文的会话工作目录(D4)。
+   *
+   * **默认就是工作根本身**(`opts.isolateProjectCwd` 未打开)—— 这条默认值是有
+   * 证据的选择,不是懒:`settings.cwd` 是用户配的「工作根」,而设计文档明写
+   * `code.*` **项目无关**(`harness/authorize.ts:126`),真机工作根里还摆着
+   * 唯一那个项目已经产出的文件。打开隔离会把这些文件的相对路径根搬走,
+   * 而没有任何东西会通知 worker。
+   *
+   * 打开后每个项目一个子目录。目录**必须真的存在**:SDK 的 `bash` 会
+   * `fsAccess(cwd)` 并在不存在时报「Working directory does not exist」
+   * (`pi-coding-agent/dist/core/tools/bash.js`),而 SDK 只建会话目录
+   * (`SessionManager` 的 `sessionDir`),不建 cwd 本身。
+   * 建不出来时**退回工作根**并留一行 warn —— 建目录失败不该让这个项目连会话
+   * 都建不出来(那会把一个目录问题放大成「组织不动」)。
+   */
+  function sessionCwd(projectId: string | null): string {
+    if (opts.isolateProjectCwd !== true || projectId === null) return cwd;
+    const dir = join(cwd, "projects", projectId);
+    try {
+      mkdirSync(dir, { recursive: true });
+    } catch (e) {
+      log.warn(
+        `platform: 建项目 ${projectId} 的工作目录失败(${dir})—— 退回工作根 ${cwd}:` +
+          `${e instanceof Error ? e.message : String(e)}`,
+      );
+      return cwd;
+    }
+    return dir;
+  }
 
   /**
    * 当前模型。**可变** —— 用户在界面上改了 provider 之后必须换掉,
@@ -409,8 +474,21 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
     }
 
     // 门铃**不 await**:排空是平台自己的循环,用户那条消息的回合到这儿就结束了。
-    // 同一个项目的排空由 `drainOne` 的 busy 闩挡住重叠(这里 busy 刚放开)。
-    if (nudgeTarget !== null) nudge();
+    // **按项目敲**:`drainOne` 的 busy 闩只挡得住同一个项目的重叠,而门铃按项目记
+    // 才不会让「A 排空期间 B 敲门」被吞掉(见 `nudge` / `drainProjectLoop`)。
+    if (nudgeTarget !== null) {
+      nudge(nudgeTarget);
+      // ── 唯一一次需要**全局**扫的门铃 ──────────────────────────────
+      //
+      // `project.open` 是**项目无关**能力,业务经理在项目里也持有它 —— 也就是说这个
+      // 回合可能立起了**另一个**项目,而那个项目不在 `nudgeTarget` 里。旧实现
+      // (门铃一律扫全部活跃项目)会顺手把它捡起来;按项目敲之后必须显式补这一下,
+      // 否则它只能等下一个 tick(≤10s,不是错,但没必要丢掉这个信号)。
+      //
+      // ⚠️ **接待会话那次立项仍然不敲**(上面 `if (projectId !== null)` 已经挡住):
+      // 那是刻意的 —— 用户还没看过目标,不该在他确认之前花他的 token。
+      if (openedProjectIds.length > 0) nudge();
+    }
   }
 
   // ── 会话池(上下文 + agent)──────────────────────────────────
@@ -453,10 +531,13 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
    *
    * ── 为什么**接待会话不装门铃**(真机 E2E 抓到的洞)────────────────
    *
-   * 门铃挂在工具调用上,而门铃一响 `drainAll` 会扫**全部活跃项目**。接待会话里
+   * 门铃挂在工具调用上,而门铃一响排空器就会去查「现在该谁动」。接待会话里
    * `project_open` 刚把项目建出来的那一刻,新项目就已经是 active —— 于是门铃
    * 会在用户**还没看过项目目标**之前就叫醒项目经理去拆解、worker 去开工。
    * 这正是批次 20 明确定为**不该发生**的事(在他确认之前花他的 token)。
+   *
+   * (门铃现在是**按项目**记的 —— `nudge(projectId)`。这个洞的判断不因此改变:
+   * 接待会话根本不该有门铃,而不是「门铃扫哪个项目」的问题。)
    *
    * 修法在**装配层**:接待会话的会话不带门铃(`projectId === null`)。项目内的
    * 迁移照旧敲门 —— 那里用户已经在项目里了。用户被切进新项目之后的第一句话
@@ -475,15 +556,17 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
     const created = await createPlatformSession(
       // `onStateChange` = 门铃:任何**可能改变流水线状态**的工具调用成功后,
       // 平台立刻去查一次「现在该谁动」(见 runtime/dispatcher.ts)。
-      // 它不携带状态,判定永远重新查库 —— 所以这里给一个无参回调就够了。
+      // 它不携带状态,判定永远重新查库 —— 回调里那个 `projectId` 只是**去哪查**。
       // **接待会话不装**(理由见本函数上面那一段):否则立项当场就把组织叫起来了。
       {
         ...booted.deps,
         client: hub.clientChannel,
-        ...(projectId !== null ? { onStateChange: () => nudge() } : {}),
+        // 门铃挂**这个项目** —— 见 `nudge` 的注释:门铃按项目记,这样一个项目的
+        // 排空不会吞掉另一个项目的敲门(D3)。
+        ...(projectId !== null ? { onStateChange: () => nudge(projectId) } : {}),
       },
       agentId, projectId, {
-        cwd,
+        cwd: sessionCwd(projectId),
         agentDir: booted.settings.agentDir ?? join(opts.dataDir, "agent"),
         model: currentModel,
         dataDir: opts.dataDir,
@@ -775,30 +858,124 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
   // `stallStore` 与 `cascadeStates` 整块消失:它们要挡的两件事(「同一个待办
   // 被反复叫醒」与「撞上界时下游结果不丢」)现在分别由库里的尝试预算
   // (`dispatch_attempts`)与 outbox(`dispatch_events`)承担。
+  //
+  // ── 并发模型(D1–D3):**并行只在项目之间** ──────────────────────
+  //
+  //   ① `drainingProjects`(每项目一个闩)—— 取代原先后宿主级的 `draining`。
+  //      原来那个闩的唯一理由是防**叠**:「一次排空可能比定时器间隔还长,
+  //      不加闩就会叠起来跑(而每一层都在花 token)」。而「叠」这件事的判据是
+  //      **(项目, 排空)** 而不是 **(排空)**:同一个项目叠起来才会重复花 token
+  //      (`hub.isBusy` 也挡着那一半),不同项目叠起来恰恰是这次要的效果。
+  //      宿主级闩还有一个它自己看不见的副作用:它把「全局同时只有一个项目在跑」
+  //      变成了事实上的第二道上界 —— 拆它的时候必须同时把上界**显式**建出来,
+  //      那就是 ②。
+  //   ② `projectSlots`(全局信号量,上限 `maxConcurrentProjects`,默认 3)——
+  //      唯一限制「全局同时在烧多少 token」的东西(**硬上界**,见 ServeOptions)。
+  //   ③ `nudgedProjects`(每项目一个打点)—— 取代原先后宿主级的 `nudgedWhileBusy`。
+  //
+  // ⚠️ 形状上为什么不选「外层留一个 pass 闩 + pass 内并行」:那样**做不到 D3**。
+  //    pass 内并行意味着所有项目要在一个 barrier 处汇合,于是「A 排空期间 B 敲门」
+  //    只能等 A 那一整次排空跑完才被处理 —— 而 A 的一次排空可以跑几分钟
+  //    (真机现场:一个 worker 回合 16 分钟)。要「B 立刻被处理」,B 的排空就必须
+  //    是**独立的一条循环**,只受 ② 的上界约束,不等别人。
+  //    代价是「两趟 pass 会重复扫一遍项目列表」—— 那不是 token,是几条 SQL:
+  //    没有待办的项目在 `drainProject` 里查一次就退,一个回合都不跑。
+  //
+  // ⚠️⚠️ **绝不在项目内部并发**(R1 读出来的两条雷,今天因「同一项目只有一个
+  //    排空者 + `hub.isBusy` 串行」而不可达 —— 一旦项目内并行就会踩上):
+  //
+  //    (a) `getOrCreateSession` 是 **check-then-act**(见上面 `sessions.get` →
+  //        `await createPlatformSession` → `sessions.set`):同一个
+  //        `(projectId, agentId)` 并发进入,两边都读到 `undefined`,于是建出
+  //        **两条**会话,后一次 `set` 覆盖前一条;而被覆盖的那条**永远不会被
+  //        `disposeSessionsFor` 回收** —— 泄漏一条带订阅的常驻会话。
+  //    (b) `inflight` 的键是 `projectId | null`,**不是** `(projectId, agentId)`:
+  //        同一个项目里两个角色并发时,后者的中断登记覆盖前者 ⇒ 用户的
+  //        「中断」只到得了最后一个回合。
+  //
+  //    这两条**不需要修**(现在的并行不会让它们可达),但必须留在这里 ——
+  //    下一个顺手把 `Promise.all` 加进项目内部的人要先看见它们。
 
-  let draining = false;
+  /** 每个项目一个排空闩:**同一个项目**的排空永不重叠(不同项目互不阻塞)。 */
+  const drainingProjects = new Set<string>();
+  /** 每个项目一个打点:排空期间有人敲过门 → 那一趟跑完再查一遍。 */
+  const nudgedProjects = new Set<string>();
+  /** 全局并发上限(硬上界,见 ServeOptions.maxConcurrentProjects)。 */
+  const projectSlots = createSemaphore(
+    Math.max(1, opts.maxConcurrentProjects ?? DEFAULT_MAX_CONCURRENT_PROJECTS),
+  );
+
   /**
-   * 「排空进行中有人敲过门」。
+   * 门铃:状态迁移后敲一下。**不携带任何状态**,只说「现在去查一下」。
    *
-   * 这不是「刚才发生了什么」的记忆 —— 它不参与任何判定(`collectTodos` 永远
-   * 重新查库)。它只是门铃的打点:排空跑到「没有待办」为止,所以门铃在忙碌期间
-   * 响过就再跑一遍外层循环,免得刚查完那一刻落地的状态要等下一次定时器。
+   * `projectId` 给了就只排那一个;不给 = **扫全部活跃项目**。
+   * 无参那条路今天只有**一个**调用点(见 `handleUserMessage` 末尾):项目内也能
+   * 用 `project.open` 立起**别的**项目,那是唯一「一次状态迁移影响到别的项目」的
+   * 场合 —— 旧实现(门铃一律扫全部)会顺手把新项目捡起来,按项目敲之后要显式补。
+   * 定时器那条路不走这里,它自己调 `drainAll("timer")`。
+   *
+   * **按项目敲是要紧的**:宿主级那个单一打点(`nudgedWhileBusy`)会让
+   * 「A 排空期间 B 敲门」被吞掉 —— 不是因为它记不住,而是因为「故意停下
+   * (`max_rounds` / 预算用尽)就不再重跑」这条防叠判据原来是**全局**的:
+   * 只要任何一个项目故意停下,B 的敲门就一起被丢掉(B 要等下一个 10s tick)。
+   * 现在这条判据随项目走,一个项目停它的,B 照跑。
    */
-  let nudgedWhileBusy = false;
-
-  /** 门铃:状态迁移后敲一下。**不携带任何状态**,只说「现在去查一下」。 */
-  function nudge(): void {
-    if (draining) {
-      nudgedWhileBusy = true;
-      return;
-    }
-    void drainAll("nudge").catch((err: unknown) => {
+  function nudge(projectId?: string): void {
+    const run =
+      projectId !== undefined
+        ? drainProjectLoop(projectId)
+        : drainAll("nudge");
+    void run.catch((err: unknown) => {
       log.error(`platform: 排空失败 —— ${err instanceof Error ? err.message : String(err)}`);
     });
   }
 
   /**
-   * 扫一遍全部活跃项目,每个排空到没有待办为止。
+   * **一个项目**的排空循环:拿到许可 → 查到没有待办为止 → 期间被敲过门再来一遍。
+   *
+   * 幂等:同一个项目已有排空者在跑时只记一次打点,不排第二条(那才是「叠」)。
+   * 已停下(**故意**撞上界 / 预算用尽)的项目**不因门铃重跑** —— 该等下一次
+   * 定时器,那是它存在的理由(兜底),而不是把上界让给门铃。这条判据是**按项目**
+   * 的(D3 的洞正是它原来为全局)。
+   */
+  function drainProjectLoop(projectId: string): Promise<DrainResult | null> {
+    if (drainingProjects.has(projectId)) {
+      nudgedProjects.add(projectId);
+      return Promise.resolve(null);
+    }
+    drainingProjects.add(projectId);
+    return runProjectDrain(projectId).finally(() => {
+      drainingProjects.delete(projectId);
+      // ⚠️ **这里刻意不删 `nudgedProjects` 里的这一项。** 它看起来像一次漏掉的
+      // 清理,删了就会重新造出 D3 的洞:门铃可能恰好在「循环判完条件、闩还没放开」
+      // 的那个缝里响,而它记下的正是这一项 —— 删掉 = 那次敲门被吞。留着是安全的:
+      // 下一次进这个循环的第一件事就是清它。
+    });
+  }
+
+  async function runProjectDrain(projectId: string): Promise<DrainResult | null> {
+    // 许可在**循环外**拿一次:这一整个项目在这段时间里都在烧 token,中途放掉
+    // 会让第 4 个项目插进来,而上界就不再是上界。
+    const release = await projectSlots.acquire();
+    try {
+      let last: DrainResult | null = null;
+      let deliberateStop = false;
+      do {
+        // 先清打点再查库:这一趟之后**新**响的门铃才会让循环再跑一遍。
+        nudgedProjects.delete(projectId);
+        last = await drainOne(projectId);
+        if (last !== null && (last.stopReason === "max_rounds" || last.stopReason === "no_progress")) {
+          deliberateStop = true;
+        }
+      } while (!deliberateStop && nudgedProjects.has(projectId));
+      return last;
+    } finally {
+      release();
+    }
+  }
+
+  /**
+   * 扫一遍**全部活跃项目**(定时器兜底,以及判不出来源的门铃)。
    *
    * `source` 只用于**留痕**(门铃 / 定时器)—— 两个触发点的行为完全一样,
    * 判定与排空都不因它改变。没有这一行,事后就无法回答「这一步是谁触发的」,
@@ -808,58 +985,35 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
    * 都是「没有待办」—— 每次都打一行「排空开始/结束」会在几小时里刷满日志,
    * 把真正有信息量的行淹掉(与超时扫描「只在集合变化时广播」同一条理由)。
    * 有回合数才留痕:`排空收尾(触发=… · N 回合 · 路径 …)`。
+   *
+   * **它 await 自己启动的那些循环** —— `startFixedDelay` 靠这个保住
+   * 「上一轮跑完再等 10s」的语义(它自己也 await `run()`)。已经在跑的
+   * (门铃先起的)项目返回 `null`,不由这一趟负责。
    */
   async function drainAll(source: "nudge" | "timer"): Promise<void> {
-    if (draining) {
-      nudgedWhileBusy = true;
-      return;
-    }
-    draining = true;
-    let projects = 0;
-    let rounds = 0;
-    let path: string[] = [];
-    let deliberateStop = false;
-    try {
-      do {
-        nudgedWhileBusy = false;
-        projects = 0;
-        rounds = 0;
-        path = [];
-        deliberateStop = false;
-        for (const p of listProjects(db, "active")) {
-          projects++;
-          const r = await drainOne(p.id);
-          if (r === null) continue;
-          rounds += r.rounds;
-          path.push(...r.visited.map((v) => v.agentId));
-          if (r.stopReason === "max_rounds" || r.stopReason === "no_progress") {
-            deliberateStop = true;
-          }
+    const ids = listProjects(db, "active").map((p) => p.id);
+    // 一个项目炸了不该拖停这一趟的其它项目 —— 逐项收口,并且**响亮**(7-N)。
+    const results = await Promise.all(
+      ids.map(async (id) => {
+        try {
+          return await drainProjectLoop(id);
+        } catch (err) {
+          log.error(
+            `platform: 项目 ${id} 排空失败 —— ${err instanceof Error ? err.message : String(err)}`,
+          );
+          return null;
         }
-        /**
-         * ── 重跑一次的条件(真机跑出来的一个洞)──────────────────────────
-         *
-         * 「排空进行中有人敲过门」时再查一遍:否则刚查完那一刻落地的状态要等
-         * 下一次定时器。**但不许绕过硬上界**:排空自己跑出来的工具门铃
-         * (`work_update` / `work_create` …)也会把 `nudgedWhileBusy` 置真,
-         * 于是一次 `maxRounds=1` 的排空会「1 回合 → 重跑 → 1 回合 → 重跑 …」
-         * 一直跑下去 —— `maxRounds` 从「单次排空的上界」退化成「每趟的上界」,
-         * 而它唯一的用途就是**烧 token 的闸**(真机实测:设 1 之后仍然一路跑完
-         * 了 wk → qa → bm)。
-         *
-         * 所以:**故意停下(max_rounds / 预算用尽)就不再重跑**。该等下一次
-         * 定时器 —— 那是它存在的理由(兜底),而不是把上界让给门铃。
-         */
-      } while (nudgedWhileBusy && !deliberateStop);
-    } finally {
-      draining = false;
-      if (rounds > 0) {
-        log.muted(
-          `platform: 排空收尾(触发=${source} · ${projects} 个项目 · ${rounds} 回合` +
-            (path.length > 0 ? ` · 路径 ${path.join("→")}` : "") +
-            ")",
-        );
-      }
+      }),
+    );
+    const ran = results.filter((r): r is DrainResult => r !== null);
+    const rounds = ran.reduce((n, r) => n + r.rounds, 0);
+    const path = ran.flatMap((r) => r.visited.map((v) => v.agentId));
+    if (rounds > 0) {
+      log.muted(
+        `platform: 排空收尾(触发=${source} · ${ids.length} 个项目 · ${rounds} 回合` +
+          (path.length > 0 ? ` · 路径 ${path.join("→")}` : "") +
+          ")",
+      );
     }
   }
 
@@ -867,8 +1021,9 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
    * 排空一个项目。返回它的结果(`null` = 因为正在跑别的回合而让开)。
    *
    * `hub.isBusy` 是**重入闩**的一半:用户消息那条路正在跑同一个项目的回合时,
-   * 排空让开(那条路自己会在回合结束后敲门)。另一半是上面的 `draining` ——
-   * 一次排空可能比定时器间隔还长,不加闩就会叠起来跑(而每一层都在花 token)。
+   * 排空让开(那条路自己会在回合结束后敲门)。另一半是 `drainingProjects`
+   * (按项目)—— 同一个项目的排空不叠(叠起来每一层都在花 token)。
+   * **跨项目不挡**:那正是这次要的并行,上界由 `projectSlots` 给。
    */
   async function drainOne(projectId: string): Promise<DrainResult | null> {
     if (hub.isBusy(projectId)) {
@@ -1071,6 +1226,57 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
 
 /** 排空定时器的默认间隔:**fixed-delay 10 秒**(上一轮跑完再等 10 秒)。 */
 const DEFAULT_DISPATCH_INTERVAL_MS = 10_000;
+
+/**
+ * **同时排空几个项目**的默认值。
+ *
+ * 取 3 的理由(用户拍板,这里记下它为什么是个合理的数):并发之后
+ * `maxCascadeRounds` / `dispatch_attempts` / `turnWallClockMs` **全部按项目记**,
+ * 没有任何一条约束「全局同时在烧多少 token」—— 于是并发项目数就是那个代理指标,
+ * 它必须是一个**硬**上界。3 是「大多数机器上真能并行(每个回合都在等网络 I/O)、
+ * 又不会让一次用户消息引爆 N 倍花费」的那个数;它可配,而不是从代码里拿掉。
+ */
+const DEFAULT_MAX_CONCURRENT_PROJECTS = 3;
+
+/**
+ * 计数信号量(**FIFO**,释放幂等)。
+ *
+ * 为什么是信号量而不是「`Promise.all` + 分批」:分批的语义是「每批之间有个
+ * barrier」—— 第 4 个项目要等整批跑完才轮到,而一次排空可以跑几分钟。
+ * 信号量是「谁先到谁先拿,跑完一个立刻补一个」,既守住上界又不引入 barrier
+ * (D3 要的「B 立刻被处理」正是靠没有 barrier)。
+ *
+ * 公平性是刻意的(FIFO 等待队列):不排队的话,后到的项目可能一直抢在
+ * 前面,已经拿闩的那个项目永远轮不到 —— 表现是「某一个项目一直不动」,
+ * 而那种故障在日志里几乎看不出来。
+ */
+function createSemaphore(permits: number): { acquire(): Promise<() => void> } {
+  let free = permits;
+  const waiters: Array<(release: () => void) => void> = [];
+
+  const makeReleaser = (): (() => void) => {
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      const next = waiters.shift();
+      if (next !== undefined) next(makeReleaser());
+      else free++;
+    };
+  };
+
+  return {
+    acquire(): Promise<() => void> {
+      if (free > 0) {
+        free--;
+        return Promise.resolve(makeReleaser());
+      }
+      return new Promise<() => void>((resolve) => {
+        waiters.push(resolve);
+      });
+    },
+  };
+}
 
 // ── 事件桥 ──────────────────────────────────────────────────────
 
