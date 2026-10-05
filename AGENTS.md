@@ -8,7 +8,7 @@
 - **Sansheng(三生)** = 单用户本机常驻 Node 服务:Pi SDK 驱动**四个角色的 agent 组织**,SQLite 持久化,HTTP + WS + 托管前端。
 - **组织架构是一等数据**:`agents` / `projects` / `project_assignments` 在库里,**角色属性在代码里**(`ROLE_SPECS`)。制品是工件(`artifacts` 表),不是聊天记录。
 - 默认 `127.0.0.1:2719`;数据目录默认 `~/.sansheng/`,可用 `--data` 或 `SANSHENG_DATA` 覆盖。
-- 基线:**977 passed / 37 test files** · 两条 typecheck 0 error · `check:design` E1–E14 全绿。
+- 基线:**1065 passed / 44 test files** · 两条 typecheck 0 error · `check:design` E1–E14 全绿。
 - 日志只走 stdout:`~/.sansheng/logs/sansheng.log` 恒为 0 字节,别去 tail 它。
 
 ## 源码地图(`find src -name '*.ts' | wc -l` = 56)
@@ -160,7 +160,7 @@ help
 ```
 npx tsc -p tsconfig.server.json --noEmit
 npx tsc -p tsconfig.web.json --noEmit
-npm test                  # 977 passed / 37 files
+npm test                  # 1065 passed / 44 files
 npm run build
 npm run check:design      # 设计一致性 E1–E14
 ```
