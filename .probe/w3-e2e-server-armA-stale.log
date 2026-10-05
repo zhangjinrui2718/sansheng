@@ -1,0 +1,13 @@
+[06:51:01] muted platform: 托管前端 /Users/fuyao/projects/sansheng/dist/web
+[06:51:01] ok    Sansheng 平台服务
+[06:51:01] muted   数据目录: /tmp/w3-e2e/1791182976
+[06:51:01] muted   项目: 1 个
+[06:51:01] ok    listening on http://127.0.0.1:2729
+[06:51:04] muted dispatcher: 第 1/8 回合 → bm(business_manager) · 向甲方交代下游的 1 条结果(其中有该立刻说的(失败 / 高危阻塞))
+[06:51:04] muted platform: 建了 bm 在项目 p_e2e_1791183049956的会话(工具面 26 个 · 系统提示 5722 字符)
+[06:52:05] warn  platform: ⚠️ 平台叫醒的回合没留工作记录 —— 项目 p_e2e_1791183049956 · bm · 回合 msg_muuw5dma38jh0a81(待办类别 report_downstream;成功投递的 tell_client 0 次(共调用 0 次);收尾时项目级未消费事件 1 条)。正文前 120 字:"我先看一下项目的实际状况,再判断要不要播报。我看清楚了。这是 W3 E2E 验收项目 —— 目标本身写着「验证平台叫醒业务经理的回合会留下工作记录([未播报])」,被叫醒的原因是 E2E 夹具故意触发的一次下游失败,目的就是看我会怎么处置。"
+[06:52:05] muted dispatcher: 排空结束(1 回合 · exhausted)—— 没有可执行的待办了
+[06:52:05] muted platform: 项目 p_e2e_1791183049956排空结束 —— 1 回合,停止原因 exhausted(没有可执行的待办了)
+        路径:bm
+[06:52:48] muted 平台服务收到退出信号,正在关闭
+[06:52:48] muted platform: 已丢弃全部 1 条常驻会话(服务关闭)

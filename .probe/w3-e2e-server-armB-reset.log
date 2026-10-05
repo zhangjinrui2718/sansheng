@@ -1,0 +1,11 @@
+[06:52:54] muted platform: 托管前端 /Users/fuyao/projects/sansheng/dist/web
+[06:52:54] ok    Sansheng 平台服务
+[06:52:54] muted   数据目录: /tmp/w3-e2e/1791182976
+[06:52:54] muted   项目: 1 个
+[06:52:54] ok    listening on http://127.0.0.1:2729
+[06:52:57] muted dispatcher: 第 1/8 回合 → bm(business_manager) · 向甲方交代下游的 1 条结果(其中有该立刻说的(失败 / 高危阻塞))
+[06:52:57] muted platform: 建了 bm 在项目 p_e2e_1791183049956的会话(工具面 26 个 · 系统提示 14340 字符)
+[06:53:32] warn  platform: ⚠️ 平台叫醒的回合没留工作记录 —— 项目 p_e2e_1791183049956 · bm · 回合 msg_muuw7tf3k0ayw1uh(待办类别 report_downstream;成功投递的 tell_client 0 次(共调用 0 次);收尾时项目级未消费事件 1 条)。正文前 120 字:"我需要先查证一下项目现场 —— \"arm B 夹具\" 这个失败的工作项跟立项时说的\"登录\"目标似乎不挨着,得搞清楚项目里到底在跑什么。第二次触发了 —— 同一类事件,同一套判断。项目里已经有上一轮(也是我)写的处置记录,把\"为什么不播\"和\""
+[06:53:32] muted dispatcher: 排空结束(1 回合 · exhausted)—— 没有可执行的待办了
+[06:53:32] muted platform: 项目 p_e2e_1791183049956排空结束 —— 1 回合,停止原因 exhausted(没有可执行的待办了)
+        路径:bm

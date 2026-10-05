@@ -612,6 +612,153 @@ tool_start      { projectId, messageId, agentId: string | null, tool: WsToolInfo
 
 **「谁面向甲方」不需要新字段**:前端由 `agentId` → `MemberView.role` → `HarnessView.roles[].clientFacing` **两跳**算出,两个端点都已经在页面上被读过。接待会话没有项目(**没有成员表**),**但 `/api/harness` 是全局的** —— 所以那条路径不缺输入。
 
+> ⚠️ **2026-10-06 更正:这条两跳判据已经**降级**成回退判据。** 主判据改成了下面那两维
+> (`source` / `trigger`)—— 理由见 §2.10.4 前面那段「按触发源判」。两跳今天**仍然会跑**,
+> 但只在 `origin === { source: "unknown" }` 时(019 之前写入的存量行;见 W3-① 那一节)。
+
+**2026-10-06 追加:另两维(`source` / `trigger`)—— 判据不是「谁在说」,而是「谁发的封套 / 这一轮为什么存在」**
+
+上表拒掉 `speakerRole` / `channel` 的理由是**它们是派生值**。下面这两维**不是派生值** ——
+它们回答的是「这个封套是谁发的」与「这一轮为什么存在」,从 `agentId` / 角色 / 会话通道
+**任何一处都推不出来**。而它们是判据的**全部输入**(见 §2.10.4 前那段):
+
+| 字段 | 读者是谁 | 结论 |
+|---|---|---|
+| `TurnMessageStart.source: "turn"` | 前端 `originOfMessageStart`(`web/src/stores/chat.ts`)→ `channelOf` | ✅ **加**(判别联合的一半) |
+| `TurnMessageStart.trigger: TurnTrigger`(**必填**) | 同上:`channelOf` 只放 `trigger.kind === "user"` 的回合正文进甲方通道 | ✅ **加** |
+| `BroadcastMessageStart.source: "broadcast"` | `channelOf`:播报**无条件**进甲方通道 | ✅ **加** |
+| `BroadcastMessageStart.trigger` | **没有读者,而且不允许存在** —— 播报与「这一轮为什么存在」正交,给它挂一个 `trigger` 只会让「顺手用 trigger 判播报」重新变成可写错的代码 | ❌ **结构上不存在**(`_BroadcastMustNotCarryTrigger`) |
+| `source` 的第三个取值 | 没有 —— 加第三种(例如「系统提示流」)会让某条封套**静默**落进「既不是回合、也不是播报」的缝隙 | ❌ **断言封死**(`_MessageStartHasExactlyTwoSources`) |
+
+**判据(两半,不在这里重新论证)**:
+
+```
+进甲方通道 ⟺ 用户消息(agentId === null)
+          ∨ source === "broadcast"            // tell_client 的播报,无条件
+          ∨ (source === "turn" ∧ trigger.kind === "user")
+```
+
+### 2.10.2b W3-① · 这两维**必须落库** —— 「刷新之后判据消失」那个缺口
+
+> **这一节记的是一条真 bug 的闭合过程。** 它此前是**已知缺口**,写在
+> `web/src/lib/data.ts` 的 `channelOf` 注释里,并有一条测试钉着它的方向。
+
+| | 流式那一路 | 刷新(REST 回填)那一路 —— **修之前** |
+|---|---|---|
+| 判据来源 | `message_start` 的 `source` / `trigger`(在内存里) | `SessionMessageView` —— **一个字节都没有** |
+| `origin` | 真实封套 | 只能是 `{ source: "unknown" }` |
+| `channelOf` 走到哪一步 | 第 3/4 步(封套判据) | **第 5 步(回退:按角色两跳)** |
+| 后果 | 工件触发的业务经理回合正文**不进**对话页 | 业务经理是 `clientFacing` ⇒ **又进了** |
+
+⇒ 同一个回合,刷新一次就换了通道,而**界面上看不出任何异常**。两害相权之后前端的
+选择是**回退**(而不是 fail-closed):fail-closed 会让「刷新一次,与业务经理的整段对话
+就没了」—— 那看起来像页面被清空。
+
+**闭合方式:落封套的输入,不落「算好的通道」。**
+
+```
+migration 019    session_messages.origin_source   ∈ {turn, broadcast} | NULL
+                 session_messages.trigger_kind    ∈ {user, todo}      | NULL
+shared/types     SessionMessageView.origin: MessageOrigin(必填)
+                 MessageOrigin = {turn, trigger:{kind}} | {broadcast} | {unknown}
+```
+
+三条决定,每条都有理由(细节见 `migrations/019_message_origin.sql`):
+
+1. **不落 `channel` 一列。** 判据已经改过两次(按角色 → 按触发源),落「算好的通道」
+   等于把某个版本的判据冻进数据 —— 而判据再改一次时,重算的输入(封套)恰好没存。
+2. **`trigger_kind` 只存 `kind`,不存 `todoKind`。** 前端对回合封套**只读 `kind`**
+   (`isTurnTriggerKind`),`todoKind` 既不参与判定也没有读者 —— 落它就是多一份会漂的
+   11 值闭合集。于是**落库的形状与前端读的形状是同一个**(`MessageOrigin` 的
+   `trigger: { kind }`),WS 那条路也照着它收窄。
+3. **`unknown` 保留,且**不回填存量行**。** 019 之前写入的行两列都是 `NULL` ⇒ 读侧如实
+   给 `unknown` ⇒ 第 5 步回退判据对它们继续有效。**不回填是因为回填不了**:那两维当时
+   根本没被记录,任何回填都是编造 —— 而猜错的方向(把内部回合猜成 `turn/user`)正是
+   这次要修的那个 bug。
+
+**闭合点在两处,缺一不可**(`transport/views.ts` 的 `messageOriginOf` 是**唯一**合成点):
+
+- **写**:`repo/sessions.ts` 的 `appendSessionMessage` 把两维定成**必填实参**,并在那唯一
+  一个写口上判「`trigger_kind` 有值 ⟺ `origin_source === 'turn'`」。五处调用点各自显式
+  声明(`serve.ts` 的用户消息 / 两处助手正文 / 两处系统通知、`hub.ts` 的 `tell_client` 播报)。
+- **读**:`SessionMessageView.origin` 必填;`http.ts` 成员页那条**显式列名**的 SQL 也补上
+  两列(漏列时 `undefined` 与「存量行」在类型上长得一样 —— 那里选择**抛**)。
+- **前端**:`TurnOrigin` **就是** shared 的 `MessageOrigin`(不再是前端自己的类型),
+  `messageToTurn` 照抄 `m.origin`。⇒ 两条路产出同一个形状,「一边改了另一边没改」编译期就红。
+
+**回归判据**(`tests/platform/message-origin.test.ts` + `tests/web/channel-origin-criterion.test.ts`):
+带封套的行刷新之后按判据分流 —— **`h-bm-todo` 不再出现在对话页**;不带封套的行仍是
+`unknown` 并走回退(旧数据兜底)。夹具守卫在 `tests/web/fixture-envelope-fields.test.ts`
+的**规则 3**(`SessionMessageView` 夹具必须带 `origin`;`tests/**` 不参与 typecheck)。
+
+#### 2.10.2c W3-③ · 提示词**不是**从仓库直接生效的 —— 出厂副本、常驻会话,与 `[未播报]` 的实测
+
+> 这一节记的是 **2026-10-05 的一次真机端到端**(真 provider `minimax-cn/MiniMax-M3`、
+> 真宿主、真排空器触发、真模型写正文)。**证据全部落在 `.probe/`**(脚本 + 原样输出 +
+> 抓下来的 REST 载荷),可复核:`node .probe/w3-e2e-watch.mjs <dataDir> <baseline>`,
+> 回放判据在 `tests/web/w3-e2e-real-payload.test.ts`。
+
+**① 运行期读的是数据目录那一份,而它**不会**自动跟着仓库更新。**
+
+```
+仓库  harness/system_prompts/*.md          ← 改的是这一份,可 git 审阅
+  │  npm run build:server → scripts/copy-harness.mjs
+  ▼
+dist/harness/system_prompts/*.md           ← **出厂副本**(「恢复出厂」的字节来源)
+  │  POST /api/harness/units/:id/reset  →  harness/write.ts 的 resetPromptUnit
+  ▼                                          (备份 → 原子写 → 回读)
+<dataDir>/harness/system_prompts/{unit}.md ← **运行期唯一读的那一份**
+```
+
+两侧都**没有自动同步**:boot 不播撒、也不覆盖(AGENTS.md 已记「新数据目录不会自动播撒
+出厂单元」;**反向那一半此前没记**)。⇒ **改了仓库提示词而没做一次 reset,运行期的模型
+什么都收不到。**
+
+实测(`~/.sansheng`,W3-③ 动手前):
+
+| 单元 | 数据目录 | 出厂 | 缺了什么 |
+|---|---|---|---|
+| `business_manager.core.md` | **39 行** | 215 行 | 「正文是工作记录 / 工件触发的回合不进甲方通道 / `[未播报]` 必须写在第一行」全都没有 |
+| `business_manager.align.md` | 63 行 | 125 行 | 接待会话与项目内的分段、提问必须走 `ask_client` |
+| `business_manager.protocol.md` | 55 行 | 91 行 | 两条渠道的对照表 |
+| `quality_reviewer.core.md` | 64 行 | 71 行 | (小改) |
+
+⇒ **W2 那套「按触发源判通道」在真机上从来没有生效过** —— 不是代码没接线,是**规矩
+没送到模型手上**。已按 §2.10.2b 的 `reset` 写回(`.probe/w3-reset-prompts.mts`;
+被覆盖的文件全部落在 `<dataDir>/harness/backups/prompts/*.bak`)。
+
+**② 常驻会话把系统提示**在建会话那一刻定盘** —— 所以 reset 之后必须重启进程。**
+
+`promptAssembly` 在每个**新会话**建立时读盘一次,而会话池的键是 `(上下文, agent)`、
+进程活着就一直复用。实测:reset 之后**同一个进程**里再触发一次,系统提示仍是
+**5722 字符**;重启进程后同一次触发的系统提示是 **14340 字符**
+(`.probe/w3-e2e-server-armA-stale.log` / `-armB-reset.log` 各有一行「系统提示 N 字符」)。
+AGENTS.md 说工具集合文件「改完不用重启」—— 那句话对**新会话**成立,对**已经建好的**
+会话不成立;而业务经理那条会话恰好是最常驻的那一条。
+
+**③ `[未播报]` 的实测:两回合都没能让平台认账(这是本次 E2E 的结论,不是猜测)。**
+
+| | arm A(旧提示词) | arm B(**reset 之后**,系统提示 14340 字符) |
+|---|---|---|
+| 触发 | 真排空器 `report_downstream`(一条 `work_failed` 事件) | 同上(再放一条事件) |
+| 正文里有 `[未播报]` 这五个字吗 | ❌ 没有 | ✅ **写了** |
+| 位置 | — | ❌ **在第 3 行的行中**(`…路径仍然成立。[未播报] 评估 1 条 —— …`) |
+| 平台的「没留工作记录」告警 | ⚠️ 触发 | ⚠️ **仍然触发**(判据是 `/^[ \t]*\[未播报\]/` 逐行匹配) |
+| `splitWorkLog`(A4) | 不触发 | **不触发**(标记不在行首) |
+
+**这不是代码 bug**:平台(`serve.ts`)与界面(`MessageList.tsx`)的行首判据**逐字一致**,
+而且两处都按行 `split` —— 我把真正文那一行**只把标记挪到行首**之后,分流立刻成立
+(正样本对照在 `tests/web/w3-e2e-real-payload.test.ts`;负样本是行中引述,不得分流)。
+
+**它是提示词的合规失败**:`business_manager.core.md:180-184` 明写「**它必须在正文的第一行**,
+不是文末的备注」,而真模型把标记写进了段落中间 —— 按提示词自己的说法,那**「等于没写」**。
+⇒ **修法不是「再加一句提示词」(§9.4 那条归因的教训),而是机制**:机制已经有了
+(`detectUnannouncedTurn` 落一条 `system` 告警并广播),它这一次**如实报了**
+—— 也就是说,**这条链路的每一环都对,只有模型的合规率是 0/2**。
+
+**④ 顺带一条形状修正**:同一晚实测 `~/.sansheng` 已经是 **0 项目 / 0 工作项 / 0 工件**
+(与 HANDOFF 里「1 根 + 4 子」的快照不是同一个库)。详见 §9.4 的第三次复核框。
+
 #### 2.10.3 ⚠️ 与本次改动相邻的一条实缺陷:回合中途的播报会吞掉前半段
 
 **先钉住现状(实测,不是推断)。** 临时探针直接驱动 `chat.ts` 的 `applyEvent`(它是 store 上的纯逻辑,见 `tests/web/ghost-echo.test.ts:33-37` 的同款用法;探针跑完已删):
@@ -633,14 +780,42 @@ tool_start      { projectId, messageId, agentId: string | null, tool: WsToolInfo
 
 #### 2.10.4 「思考」块与 `[未播报]` 那一行,在甲方视图里留不留
 
-| 内容 | 今天落在哪 | 甲方视图里留不留 | 判据 |
-|---|---|---|---|
-| **业务经理的 `thinking`** | **只在 WS 流里,从不落库** —— `thinkBuf` 被 push 之后**没有任何读者**(`host/serve.ts:539` 声明、`:1058` push、`:572`/`:683` 传参,再无第三处);`grep -rn 'kind: "thinking"' src/` = **0** | **留,但默认折叠**(与今天的 `ThinkingBlock` 一致) | 它是**与你对话的那个人的推理**,不是别人的;而且它**留不住** —— 一旦要求「历史里也能检查」,就得先落库(`session_messages.kind` 的 CHECK **已经允许** `'thinking'`,`migrations/009:47`),那是写入侧改动,不是展示改动 |
-| **其他三个角色的 `thinking`** | 同样只在流里 | **成员页里看不到,而且这是结构性的** | 同上:**没有落库就没有历史**。要让「检查」覆盖推理,必须先落库(§12 #13) |
-| **`[未播报]` 那一行** | 是业务经理**正文的一部分**,随正文落成 `assistant` 会话消息(`serve.ts:578-581`) | **留,但必须与「播报」视觉分开** | 它是 §2.9 那条纪律的**唯一现场**(§2.9 末):删了它,「判断过」与「漏了」在记录里就长得一模一样。硬要求写在 `harness/system_prompts/business_manager.protocol.md:65`(「正文必须写一行 `[未播报]` 工作记录……**这是硬要求**」),格式示例在 `business_manager.core.md:131` |
-| **分流的判据** | — | **行首匹配 `[未播报]`** → 折进一块「工作记录」,不进甲方气泡 | 提示词原话就叫它「**工作记录**」,**它本来不是对甲方说的话**;而它是**机器可判的**(行首定界)。当反例判据:`"[未播报]"` 出现在行中不得分流 |
+> ⚠️ **2026-10-06 已被取代(两处)。** 下面这张表是**当时**的落地方案(按角色两跳 + `[未播报]`
+> 在甲方视图里「留、可展开」)。W2-④ 之后判据改成**按触发源**,于是:
+>
+> 1. **工件触发(平台叫醒)的回合正文整轮不进甲方视图** —— 不再有「留但要展开」这回事:
+>    它根本不在这条通道里(`channelOf` 第 4 步 ⇒ `partitionTurns` 归入 `hidden`)。
+>    页面上留下的是那条计数提示:「另有 N 条回合不在这条通道里(不是由你触发、也不是播报)
+>    —— 到「成员」页逐人查看」。
+> 2. **工作记录改到成员页查**(`Members.tsx` 的逐人会话清单)。**这是刻意的**:它是
+>    「组织内部在动」的现场,不是对甲方说的话。
+>
+> ⇒ 本表整段作为**历史**保留(它解释 `thinking` 为什么不落库、`[未播报]` 为什么必须写得机器可判),
+> 但**「甲方视图里留不留」那一列不再是现行判据**;现行判据只有上面 §2.10.2 那两半。
 
-**一句话判据**:两者都属于**内部视图**,甲方视图要**能展开**而不是**看不到** —— 看不到就等于平台替他删了证据。
+| 内容 | 今天落在哪 | ~~甲方视图里留不留~~(历史) | 判据 |
+|---|---|---|---|
+| **业务经理的 `thinking`** | **只在 WS 流里,从不落库** —— `thinkBuf` 被 push 之后**没有任何读者**(`host/serve.ts:539` 声明、`:1058` push、`:572`/`:683` 传参,再无第三处);`grep -rn 'kind: "thinking"' src/` = **0** | **留,但默认折叠** | 它是**与你对话的那个人的推理**,不是别人的;而且它**留不住** —— 一旦要求「历史里也能检查」,就得先落库(`session_messages.kind` 的 CHECK **已经允许** `'thinking'`,`migrations/009:47`),那是写入侧改动,不是展示改动 |
+| **其他三个角色的 `thinking`** | 同样只在流里 | **成员页里看不到,而且这是结构性的** | 同上:**没有落库就没有历史**。要让「检查」覆盖推理,必须先落库(§12 #13) |
+| **`[未播报]` 那一行** | 是业务经理**正文的一部分**,随正文落成 `assistant` 会话消息(`serve.ts:874`) | ~~留,但必须与「播报」视觉分开~~ ⇒ **整轮不进对话页;成员页可查** | 它是 §2.9 那条纪律的**唯一现场**(§2.9 末):删了它,「判断过」与「漏了」在记录里就长得一模一样。硬要求写在 `harness/system_prompts/business_manager.core.md:164-199`(「每个回合的正文都以一行工作记录开头」;平台按 `^[未播报]` 认它,写成列表项或放在文末**都不算**) |
+| **分流的判据**(A4) | `web/src/components/chat/MessageList.tsx` 的 `splitWorkLog`(纯函数)**仍然在**,仍然有测试(`tests/web/a4-worklog-thinking.test.ts`) | **行首匹配 `[未播报]`** → 折进一块「工作记录」,不进甲方气泡 | 见下面「⚠️ A4 的输入变得很窄了」 |
+
+**一句话判据(历史版)**:两者都属于**内部视图**,甲方视图要**能展开**而不是**看不到** ——
+看不到就等于平台替他删了证据。
+
+> ⚠️ **A4 的输入变得很窄了(2026-10-06 复核,如实记)。** `splitWorkLog` 只作用在
+> **进了甲方通道的助手正文**上(`MessageList` 渲染的是 `partitionTurns().timeline`)。
+> 而 `[未播报]` 那一行按提示词**只产生在平台叫醒(todo)的回合**里(`business_manager.core`
+> 「平台把你叫醒的回合(工件触发),正文的第一行就是工作记录标记」;`detectUnannouncedTurn`
+> 也只检查 `trigger.kind === "todo"` 的回合)—— 那种回合**现在整轮不进对话页**。
+> ⇒ 于是那条分流对**它最主要的输入**是走不到的(不是死代码,但主路径已改道)。
+>
+> **残余缺口(不静默)**:①成员页只渲染 **90 字截断**的 `.truncate` 正文
+> (`Members.tsx` 的 `excerpt(m.content, 90)`),全文只在 `title` 悬停提示里 ——
+> 而「事后能看出当时发生了什么」(7-N)要的正是**那一段全文**;
+> ②`splitWorkLog` 与 `[未播报]` 只对**没调 `tell_client` 的客户端可见回合**才有意义
+> (一次用户触发、且该回合没播 —— 提示词 `business_manager.core:187-188` 的那半句)。
+> 两条都不属于本批次的改动范围,记在这里以免被当成「已经处理」。
 
 ### 2.11 工件驱动的流水线:一张声明式规则表(2026-10-04 新增)
 
@@ -731,6 +906,32 @@ Rule = {
 ```
 
 **四条实例(上两条已有、下两条是新补的):**
+
+> ⚠️ **2026-10-06 更正:上表只是**当时**要新增的四条 —— `runtime/dispatcher.ts` 的
+> `RULES` 现在共 **11 条**(`id: "…"` 数一遍即得,`grep -c '^    id: "' src/platform/runtime/dispatcher.ts`)。
+> 下表把四条补成**全量 11 条**,行号与 `PRIORITY` 一起对齐(此前 §2.11.4 与本文件
+> §9.4 的待办表都**缺第 11 条 `resolve_blocked_work`**,而它是「子项 blocked 没有
+> 驱动者」那条真机静默停摆的修法 —— 缺它比缺别的更容易让人以为「卡住是设计如此」)。
+
+| id | `on` | 动作(`then.kind` / 目标) | `PRIORITY` |
+|---|---|---|---|
+| `answer_pending_ask` | `ask_opened` · `ask_answered` · `tick` | `answer_ask` / 名册上那位 | 0 |
+| `attend_pending_meeting` | `meeting_concluded` · `tick` | `attend_meeting` / 名册上那位 | 1 |
+| `review_pending_change` | `change_decided` · `tick` | `review_change` / 名册上那位 | 2 |
+| `fix_stranded_assignment` | `work_status_changed` · `tick` | `fix_work_assignment` / 项目经理 | 3 |
+| **`resolve_blocked_work`** | `work_status_changed` · `tick` | `resolve_blocked_work` / 项目经理 | 4 |
+| `decompose_empty_project` | `tick` | `decompose_project` / 项目经理 | 5 |
+| `execute_assigned_work` | `work_status_changed` · `tick` | `execute_work` / worker | 6 |
+| `review_done_works` | `work_status_changed` · `tick` | `review_work` / 质检 | 7 |
+| `integrate_reviewed_subtree` | `work_status_changed` · `artifact_inserted` · `tick` | `integrate` / 项目经理 | 8 |
+| `handover_deliverable` | `artifact_inserted` · `tick` | `handover` / 业务经理 | 9 |
+| `report_downstream_events` | `work_status_changed` · `tick` | `report_downstream` / 业务经理 | 10 |
+
+> `PRIORITY` 是**字典**(`dispatcher.ts` 的 `const PRIORITY`),所以「数字小的先跑」
+> 是可查的,不是推断。两条「修」的待办(3 / 4)刻意挨在一起并排在拆解之前:
+> 派活错了与活被卡住都是项目经理的**存量修复**,它们挡着下面的执行 / 审查 / 整合。
+
+**四条实例的判据细节(原文保留,仍是这四条的设计理由):**
 
 | id | `on` | `if`(机械判据) | 动作 | `why` |
 |---|---|---|---|---|
@@ -862,8 +1063,8 @@ ensureSession(...)           const existing = listSessions(...); if (existing.le
 |---|---|---|---|
 | **A1** | 契约:`message_start` / `tool_start` 加必填 `agentId`;`hub.emitMessageStart` 加参数;`tell_client` 把 `ctx.agent.id` 透传进通道(§2.10.2 末) | 先定契约,4 个构造点才有共同目标 | 两条 `tsc --noEmit` 全 **0 error**;`git grep -n 'emitMessageStart'` 的每个调用点都显式传了 agent |
 | **A2** | 前端:**按 `messageId` 的轮表**取代 `currentTurn` 单槽(`chat.ts:350-411`) | 不做它,`agentId` 救不了 §2.10.3 的吞字 | **新增一条回归测试**,钉住 §2.10.3 那段序列的输出 = 两轮(`msgA` = 「AAABBB」、`msgB` = 「播报」);`tests/web/ghost-echo.test.ts` 5 条**不改**仍绿 |
-| **A3** | 对话页只渲染 `agentId IS NULL`(甲方)或该 agent `clientFacing`;成员页加「他产生了什么对话」清单 | 有了 A1/A2 才有判据 | 真机库(13 条:`wk`5/`bm`4/`pm`1/`qa`1/`null`2)打开对话页**只看到 `bm`4 + `user`2**;成员页四个角色各自的条数正确;`npm test` 全绿(**≥840**,含 A2 新增的那条回归测试) |
-| **A4** | `[未播报]` 行首分流成「工作记录」块;`thinking` 保持折叠(§2.10.4) | 与 A3 同一处渲染 | 含 `[未播报]` 的消息在对话页**可见**且**不在甲方气泡里**;**负样本**:行中出现的 `"[未播报]"` 不得被分流 |
+| **A3** | 对话页只渲染 `agentId IS NULL`(甲方)或该 agent `clientFacing`;成员页加「他产生了什么对话」清单 | 有了 A1/A2 才有判据 | 真机库(13 条:`wk`5/`bm`4/`pm`1/`qa`1/`null`2)打开对话页**只看到 `bm`4 + `user`2**;成员页四个角色各自的条数正确;`npm test` 全绿(**≥840**,含 A2 新增的那条回归测试)<br>⚠️ **判据已被取代(W2-④)**:两跳只是 `origin === unknown` 时的**回退**,主判据是 `source` / `trigger`(§2.10.2)。A3 的**验收事实**(成员页八个分组、条数来自 `GROUP BY`)仍然有效 |
+| **A4** | `[未播报]` 行首分流成「工作记录」块;`thinking` 保持折叠(§2.10.4) | 与 A3 同一处渲染 | 含 `[未播报]` 的消息在对话页**可见**且**不在甲方气泡里**;**负样本**:行中出现的 `"[未播报]"` 不得被分流<br>⚠️ **判据已被取代(W2-④ + W3-③)**:`[未播报]` 只产生在**平台叫醒(todo)的回合**里,而那种回合**整轮不进对话页** ⇒ 分流的**主输入走不到了**。真机实测还发现它常常**不在行首**(见 §2.10.2c 的③与 `.probe/w3-e2e-turn2-reset-prompts.txt`):`splitWorkLog` 在真正文上**不触发**,而同行首化之后立刻触发 |
 | **B1** | 规则表骨架:现有 8 个分支改写成 `RULES`(`on`/`if`/`then`/`why`),**行为完全不变** | 先重构再加规则 | `tests/platform/dispatcher.test.ts` **一字不改**全绿;`collectTodos` 的入参仍只有 `(db, projectId, now, 预算)`,不读进程内状态 |
 | **B2** | 触发侧接线:`NUDGE_CAPABILITIES` 加 `blackboard.write`;宿主把 `execution.producedArtifacts` 当**「值不值得重查」的布尔**用(不是判据) | 工件事件必须真能叫醒一次,规则才有机会跑 | 新测试:`board_write` 成功后 nudge 被敲一次;且 `collectTodos` 在「有事件 / 无事件」两种输入下**输出相同**(纯度回归) |
 | **B3** | **接线那条今天被丢掉的产出**:`producedArtifacts` 已经算出来了,但 `host/serve.ts:673-713` 只读 `turn` / `work`,**没有读者**(全仓引用 = `execution.ts` 内 7 处 + `tests/platform/execution.test.ts` 7 处) | 它是「工件驱动」现成的钩子,不用它就得另外偷听 `board_write` | 宿主路径上能观察到「本回合产出了 N 个工件」;`renderExecutionReport`(`execution.ts:397`)的 CLI 行为不变 |
@@ -1536,7 +1737,7 @@ AgentRuntime
 | 角色 | 「可执行的待办」 | 判据来源 |
 |---|---|---|
 | `business_manager` | **有下游结果还没向甲方交代**(且过了**合并窗口**:攒够 N 条 / 最老的一条等到 T)**或**有立刻可播的(失败 / 高危阻塞) | `dispatch_events`(outbox)里未消费的行 |
-| `project_manager` | 有人问它;有变更待评;**项目一个工作项都没有**(还没拆解);**有工作项被派给了非 worker** | `pendingWork.ts` + `works` |
+| `project_manager` | 有人问它;有变更待评;**项目一个工作项都没有**(还没拆解);**有工作项被派给了非 worker**;**有工作项停在 `blocked` 而没有驱动者**(第 11 条规则 `resolve_blocked_work` —— 2026-10-06 补记,此前本表漏了它) | `pendingWork.ts` + `works` |
 | `worker` | **分派给它、前置已满足、还没到终态**的工作项 | `pendingWork.ts` 的 `myOpenWorks` |
 | `quality_reviewer` | 有人问它;有变更待评;**有做完但没审的产出** | `works.status='done' AND review_state='pending'` |
 
@@ -1588,7 +1789,18 @@ AgentRuntime
 
 > 我觉得现在**业务经理干的事情太多了** …… 业务经理就不需要再将项目实际执行的**细节进展**直接同步给用户,你看聊天记录里面的一长串,**真真甲方不关心这些**
 
-写入侧已经收过一刀(`updateWorkStatus` 只对**根工作项**终态 / 里程碑 / `work_failed` / severity ∈ {high, critical} 的阻塞写 outbox)。**但真机复核发现那一刀在扁平结构下是空转的**:用户自己的库是 `9 work → 9 root → 0 中间`。扁平结构下**每条工作项终态都是「根终态」**,写入侧的判据条条命中,一条也没筛掉。
+写入侧已经收过一刀(`updateWorkStatus` 只对**根工作项**终态 / 里程碑 / `work_failed` / severity ∈ {high, critical} 的阻塞写 outbox)。**但真机复核发现那一刀在扁平结构下是空转的**:库的形状是 `9 work → 9 root → 0 中间`。扁平结构下**每条工作项终态都是「根终态」**,写入侧的判据条条命中,一条也没筛掉。
+
+> ⚠️ **2026-10-05 复核(第三次,形状又变了 —— 所以判据要写成「不看形状也对」)。**
+> 当天 `~/.sansheng/sansheng.db` 的形状先后是:①`9 work → 9 root`(上面那次实测的库)
+> → ②`1 根 + 4 子`(2026-10-05 早些时候的复核,由 `runtime/dispatcher.ts:51-55` 记着)
+> → ③**`0 work`(同一晚 W3-③ 实测:该库被清过,只剩 4 个 agent、1 条接待会话、8 条
+> 会话消息、0 项目 / 0 工作项 / 0 工件)**。
+> 判据:`SELECT COUNT(*) FROM works` 与 `SELECT COUNT(*) FROM works WHERE parent_work_id IS NOT NULL`。
+> **教训**:「真机库是什么形状」这件事**没有稳定答案**(用户会重置、会重开),所以
+> 任何判据都不许建立在「库是扁平的 / 库是树」之上 —— 这也是 `deliveryCollected` 那条
+> 「没有后代时判 R 自己」的写法(§2.11.4 的③)成立的同一个理由。下面那段 2026-10-04
+> 的归因修正**仍然有效**,它讲的是「不要从 grep 不到推出不存在」,与形状无关。
 
 > ⚠️ **2026-10-04 修正:那条「为什么是扁平的」归因是错的(结论不变)。** 原文写「`grep -rn parentWorkId harness/` 是空的 —— **没有任何地方告诉项目经理要建树**」。**grep 的结果对,推出来的结论错**:作用域只扫了 `harness/`(提示词单元目录),而**运行期的任务提示词**里明明白白写着这句话 —— `decompose_project` 那个待办渲染出的正文里有一行「多件产出同属**一个交付物**时,用 `parentWorkId` 把它们挂到一条根工作项下面 —— 中间工作项的完成只对项目内部可见,整个交付物收口才向甲方交代一次」(`runtime/dispatcher.ts:517-518`)。
 >
