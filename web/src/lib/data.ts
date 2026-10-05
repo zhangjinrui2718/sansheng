@@ -37,12 +37,14 @@ import type {
   MemberView,
   ProjectDetail,
   ProjectRole,
+  ProjectUsageResponse,
+  ProjectUsageView,
   RoleHarnessView,
   WorkView,
 } from "@shared/types/platform";
 import * as api from "./api";
 import { errorMessage } from "./api";
-import { useChatStore, type Turn } from "../stores/chat";
+import { useChatStore, type ChatStatus, type Turn } from "../stores/chat";
 
 /** 客户端请求的页大小。后端有上限时由后端截断,这里不假装知道它的上限。 */
 export const ARTIFACT_LIMIT = 200;
@@ -246,6 +248,49 @@ export function useMemberConversations(projectId: string | null): Loaded<MemberC
   return { data: r.data?.groups ?? [], loading: r.loading, error: r.error };
 }
 
+// ── 用量(这个项目花了多少 token)──────────────────────────────────
+
+/**
+ * 本项目的 token 用量聚合(契约 `ProjectUsageView`)。
+ *
+ * ── 三条与这个页面直接相关的决定 ──────────────────────────────────
+ *
+ *   ① `projectId === null` **不发空结果,而是读接待会话那条端点**
+ *      (`GET /api/intake/usage`)。接待会话是产品里**第一个花钱的回合**,
+ *      把它显示成「还没有数据」等于把一笔真花掉的钱藏起来。
+ *   ② `days` **必须由调用方传**:「今日」与「最近 7 天」是两个不同的问题,
+ *      而窗口一旦写死在这一层,页面就再也问不了「总共花了多少」
+ *      (那个数在 `allTime` 里,不受窗口影响)。
+ *   ③ 刷新靠 `projectRevision` —— WS 的 `usage_recorded` / `agent_end` 等事件
+ *      递增它,页面据此回查权威值。**权威值永远以后端为准**:事件会丢(断流),
+ *      库不会。`loading` 初值为 `true`(见文件头):「还没查过」不是「查过了,是 0」。
+ *
+ * ⚠️ 返回的 `data` **可以是 `null`**(与 `useArtifacts` 那些返回 `[]` 的 hook 不同):
+ * 数组有一条诚实的空值(「没有工件」),而用量**没有** —— 一个凭空造的 `0`
+ * 会在首帧被读成「这个项目一分钱没花」,与「还没查过」长得一模一样
+ * (文件头那条 `loading` 初值为 true 的规矩说的就是这件事)。
+ * 调用方应当只在 `loading === false && error === null` 时把数字当数字。
+ */
+export function useProjectUsage(
+  projectId: string | null,
+  options?: { days?: number; limit?: number },
+): Loaded<ProjectUsageView | null> {
+  const revision = useChatStore((s) => s.projectRevision);
+  const days = options?.days;
+  const limit = options?.limit;
+  const r = useLoad<ProjectUsageResponse>(
+    () => {
+      const opts = {
+        ...(days !== undefined ? { days } : {}),
+        ...(limit !== undefined ? { limit } : {}),
+      };
+      return projectId !== null ? api.getProjectUsage(projectId, opts) : api.getIntakeUsage(opts);
+    },
+    [projectId, revision, days, limit],
+  );
+  return { data: r.data?.usage ?? null, loading: r.loading, error: r.error };
+}
+
 // ── 角色能力面(全局面;对话页的「谁面向甲方」判据的一半)─────────────
 
 /**
@@ -399,4 +444,83 @@ export function partitionTurns(
     timeline.push({ turn, channel });
   }
   return { timeline, hidden };
+}
+
+// ── 运行态也按通道派生:输入框的禁用判据(bug A,2026-10-05)──────────────
+//
+// 「有人在跑」不等于「你不能说话」。传输级的 `ChatState.status` 是前者:
+// 任何角色的 `message_start` / `delta` 都无条件把它置成 `"streaming"`
+// (`stores/chat.ts` 的两处),而排空器会让四个角色在**同一个项目**里背靠背地跑
+// (真机 2026-10-05:01:11–01:29 的 8 个回合 = pm → bm → pm → wk → wk → wk → qa → bm)。
+// ⇒ 只要**任一**内部角色在跑,顶部就是「推演中」、输入框就被禁用 ——
+// 而用户只是在等 worker 干活,他本来该能随时跟业务经理说话。
+//
+// 所以运行态在这里**按通道重算**,不读那个全局位:
+//
+//     输入框禁用 ⟺ **甲方通道**在**本上下文**里有在飞的轮(业务经理正在回你)
+//     内部角色在跑 ⟹ 只影响显示(「内部推进中」)+ 中断按钮,**不影响可用性**
+//
+// 两处刻意的取舍(都有理由,别顺手改回去):
+//   ① `status === "streaming"` 这一位**被忽略** —— 它答的是「有没有人在跑」,
+//      而这个判据要答的是「**你的**对话在不在跑」(见 `surfaceStatusOf`)。
+//   ② 范围是**当前上下文**(`contextKey`):别的项目里的业务经理正在说话,
+//      不该锁住你这里的输入框。服务端的「忙」闩也是**按项目**的
+//      (`transport/hub.ts` 的 `busy` 集合,键就是 projectId),两者同粒度。
+
+/** 一条在飞轮按通道的三分。 */
+export interface ChannelActivity {
+  /** 甲方通道:甲方自己说的 ∪ 面向甲方的角色(只有业务经理)正在说的 */
+  readonly client: readonly Turn[];
+  /** 内部角色(pm / wk / qa)—— **不**禁用输入框,只提示「内部推进中」 */
+  readonly internal: readonly Turn[];
+  /** 平台通知(`role: "system"`)—— 两边都不算 */
+  readonly system: readonly Turn[];
+}
+
+/**
+ * 把**当前上下文**里在飞的轮按通道分开(纯函数,逐字复用 `channelOf`)。
+ *
+ * `contextKey` = 当前上下文,**`null` = 接待会话**(与 `Turn.projectId` /
+ * `message_start.projectId` 逐字同义)。它是**恒等比较,不是通配** ——
+ * 与 `agent_end` 只收自己那个上下文的轮是同一条纪律:别的项目里在飞的轮
+ * 既不该在这里算作活动,也不该被这里收口。
+ */
+export function channelActivityOf(
+  turns: readonly Turn[],
+  ctx: ChannelContext,
+  contextKey: string | null,
+): ChannelActivity {
+  const client: Turn[] = [];
+  const internal: Turn[] = [];
+  const system: Turn[] = [];
+  for (const turn of turns) {
+    if (turn.projectId !== contextKey) continue;
+    const channel = channelOf(turn, ctx);
+    if (channel === "client") client.push(turn);
+    else if (channel === "internal") internal.push(turn);
+    else system.push(turn);
+  }
+  return { client, internal, system };
+}
+
+/**
+ * 对话页顶部的状态。比传输级的 `ChatStatus` 多一档:
+ * **`internal` = 只有内部角色在跑**(输入框照常可用,见上面那段)。
+ */
+export type SurfaceStatus = "idle" | "streaming" | "internal" | "error" | "connecting";
+
+/**
+ * 顶部状态 + 输入框判据的派生。
+ *
+ * ⚠️ `raw` 只在 `error` / `connecting` 两档被采用 —— **`"streaming"` 那一位刻意
+ * 不读**。改成「`raw === "streaming"` 就返回 `streaming`」等于把 bug A 原样复活:
+ * 真机上 worker 每跑一轮,顶部就显示「推演中」、输入框永久禁用,而用户看不见
+ * 任何一条内部角色的发言(`partitionTurns` 把它们滤掉了)。
+ */
+export function surfaceStatusOf(raw: ChatStatus, activity: ChannelActivity): SurfaceStatus {
+  if (raw === "error") return "error";
+  if (raw === "connecting") return "connecting";
+  if (activity.client.length > 0) return "streaming";
+  if (activity.internal.length > 0) return "internal";
+  return "idle";
 }
