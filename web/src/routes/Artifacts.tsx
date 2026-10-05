@@ -1108,21 +1108,25 @@ export function UnattachedArtifacts({
     <Section
       title="不挂在任何环节上的工件"
       count={artifacts.length}
-      hintTitle="这些工件的 workId 为 null —— 契约里这是合法状态:它们不由某条工作项产出。"
+      hint="已在图上(按 kind 落在自己那一行)"
+      hintTitle="这些工件的 workId 为 null —— 契约里这是合法状态:它们不由某条工作项产出。⚠️ 它们**不是「没画出来」**:推进图里每一件工件都按自己的 kind 落在一行上(决策 / 会议 / 变更 / 甲方问答各有各的道),这一块只是**同一批工件的清单**(逐条可看详情)。"
     >
       {/* `.ss-dag-orphan`:安静一点,不与主图争注意力(类在 globals.css 里)。 */}
       <div className="ss-dag-orphan">
         <div className="ss-note" style={{ marginBottom: 6 }}>
           {"这些是决策 / 会议记录 / 变更记录 / 甲方问答 —— 它们本来就不由某条工作项产出" +
-            "(契约里 ArtifactView.workId 为 null 是合法状态,不是「还没归位」)," +
-            "所以它们不出现在上面的流程图上。"}
+            "(契约里 ArtifactView.workId 为 null 是合法状态,不是「还没归位」)。" +
+            "⚠️ **它们已经在上面那张图上**(按 kind 落在自己那一行),所以这里默认收起:" +
+            "点开是为了逐条看详情 / 抄 id,不是因为图上没画。"}
         </div>
-        <ArtifactGroups
-          artifacts={artifacts}
-          known={known}
-          openId={openId}
-          onToggleDetail={onToggleDetail}
-        />
+        <Disclosure summary={`展开清单(${artifacts.length} 条 · 可逐条看详情)`}>
+          <ArtifactGroups
+            artifacts={artifacts}
+            known={known}
+            openId={openId}
+            onToggleDetail={onToggleDetail}
+          />
+        </Disclosure>
       </div>
     </Section>
   );
@@ -1439,7 +1443,9 @@ export function ArtifactsPage() {
                 {
                   label: "无环节",
                   value: unattachedCount,
-                  title: "workId 为 null 的工件数 —— 它们不由某条工作项产出,列在页面下方那一块",
+                  title:
+                    "workId 为 null 的工件数 —— 它们不由某条工作项产出,但**已经画在图上**" +
+                    "(按 kind 落在自己那一行)。页面下方那一块只是**同一批工件的清单**(可逐条看详情)。",
                 },
               ]}
             />

@@ -18,7 +18,7 @@
 
 ```
 W5  `ac0fc5d` feat(web): 角色命名统一 + 工件页主视图换成时间轴泳道
-1363 passed / 65 files · 两条 typecheck 0 · npm run build 绿 · check:design E1–E14 绿 · as any 0
+1364 passed / 65 files · 两条 typecheck 0 · npm run build 绿 · check:design E1–E14 绿 · as any 0
 新增:`web/src/lib/timeline.ts`(布局纯函数)· `.probe/w5-{artifacts,members}-preview.html`
 ```
 
@@ -105,6 +105,19 @@ npm test                                   # 1363 passed / 65 files
 npm run check:design                       # ✓ E1–E14
 grep -rn 'as any' src/ web/src/            # 0
 ```
+
+### 补记(用户追问后的一处假话)
+
+> 「不挂在任何环节上的工件 6 —— 这些工件是不是已经在图上面了?」
+
+**是的,已经在图上**(决策那道 6 个点)。而页面正文里那句
+「所以它们**不出现在上面的流程图上**」是**换图之前的旧话** —— 旧 DAG 只画挂上环节的
+工件,这句在当时是对的;换成时间轴之后它变成了**假话**,而且它就印在屏幕上。
+
+处置:改掉那句话(现在写「⚠️ 它们已经在上面那张图上……这里默认收起是为了逐条看详情」),
+把清单**默认折叠**(不再与图重复占版面,内容与「详情」按钮一个都不删),
+并把这条钉成负样本(`artifact-timeline.test.ts` 的「页面不许再说无环节的工件没画在图上」)。
+这类「屏幕上说着与事实相反的话、而看起来完全正常」正是本项目反复警惕的形态。
 
 ---
 

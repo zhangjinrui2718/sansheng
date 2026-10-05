@@ -241,6 +241,23 @@ describe("① 工件 = 点:20 件恰好 20 个,6 件不挂环节的也在图上"
     expect(html).not.toContain("还没归位");
   });
 
+  it("⚠️ 页面不许再说「无环节的工件没画在图上」(那是 DAG 时代的旧话)", () => {
+    // 这条来自用户的追问:「不挂在任何环节上的工件 6 —— 这些工件是不是已经在图上面了?」
+    // 在换成时间轴之前,那句话是**对的**(旧 DAG 只画挂上环节的工件);换图之后
+    // 它变成了**假话**,而它偏偏写在页面正文里(正是本项目最忌的那种「屏幕上说着
+    // 与事实相反的话,而看起来完全正常」)。所以钉成一条负样本。
+    const full = renderScreen();
+    expect(full, "页面还在说无环节的工件没画出来").not.toContain("不出现在上面的流程图上");
+    expect(full, "改成了「已经在图上」就该看得见这句话").toContain("已经在上面那张图上");
+    // 正样本:同一批工件既有图上的点,也有清单里的一行(两处都对得上,不是二选一)
+    const ids = tagsWith(full, "data-mark-id").map((t) => attrOf(t, "data-mark-id")!);
+    for (const d of DECISION_IDS) expect(ids).toContain(d);
+    expect(full).toContain("决策零");
+    // 清单**默认收起**(不再与图重复占版面),但内容仍在 DOM 里(可展开)
+    expect(full).toContain("展开清单(6 条 · 可逐条看详情)");
+    expect(/<details[^>]*\sopen/.test(full), "清单默认必须是收起的").toBe(false);
+  });
+
   it("状态不是 `open` 的点有一圈可区分的描边;`open` 的没有(负样本)", () => {
     const html = renderTimeline();
     const accepted = tagById(html, "data-mark-id", "r7"); // status: accepted

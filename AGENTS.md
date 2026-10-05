@@ -17,7 +17,7 @@
   一种工件 kind 一道)。分层 DAG(`web/src/lib/workGraph.ts`)降级成默认折叠的「依赖关系图」——
   真机数据里**存在依赖环**,分层排不出来,五条工作项全挤在一列、边互相穿(用户的原话是
   「缠在一起了」);时间轴上 x 是时间的函数,**不需要解位置**。
-- 基线:**1363 passed / 65 test files** · 两条 typecheck 0 error · `check:design` E1–E14 全绿。
+- 基线:**1364 passed / 65 test files** · 两条 typecheck 0 error · `check:design` E1–E14 全绿。
 - **角色中文名只有一处**:`src/platform/runtime/org.ts` 的 `ORG`(播种 + `RoleHarnessView.displayName`
   共用);前端兜底表 `web/src/lib/vocab.ts` 的 `ROLE_LABEL` 必须逐项相同,由
   `tests/web/role-names.test.ts` 跨边界对照。**不许在某个页面里再写一张名字表**
@@ -180,7 +180,7 @@ help
 ```
 npx tsc -p tsconfig.server.json --noEmit
 npx tsc -p tsconfig.web.json --noEmit
-npm test                  # 1363 passed / 65 files
+npm test                  # 1364 passed / 65 files
 npm run build
 npm run check:design      # 设计一致性 E1–E14
 ```
