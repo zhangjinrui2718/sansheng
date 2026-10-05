@@ -15,7 +15,7 @@
 ## 状态
 
 ```
-W8  `本次提交` feat(web): 角色 harness 单独成卡 + 工作项页顺序(依赖图 → 推进图 → 环节详情)
+W8  `6076aab` feat(web): 角色 harness 单独成卡 + 工作项页顺序(依赖图 → 推进图 → 环节详情)
 1396 passed / 65 files · 两条 typecheck 0 · npm run build 绿 · check:design E1–E14 绿 · as any 0
 ```
 
