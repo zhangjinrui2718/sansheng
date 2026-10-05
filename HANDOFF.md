@@ -11,7 +11,7 @@
 ## 状态
 
 ```
-W7  `本次提交` feat(web): 成员页删两段噪音 + Harness 并入成员 tab + 两处诚实接线
+W7  `476df5c` feat(web): 成员页删两段噪音 + Harness 并入成员 tab + 两处诚实接线
 1382 passed / 65 files · 两条 typecheck 0 · npm run build 绿 · check:design E1–E14 绿 · as any 0
 导航:**9 个 tab → 7 个**(W6 去掉「工件」,W7 去掉「Harness」)
 ```
