@@ -1,5 +1,120 @@
 # Sansheng 项目交接包
 
+---
+
+# ⚡ 最新一轮(2026-10-05)· **先读这一节**
+
+> 平台升级之后的一轮:**4 条真机 bug + 3 条新能力 + 用户那个问题的正解**。
+> **下面 v9.0 那一节仍然有效**(它讲平台是怎么建起来的);这一节讲**它现在到哪儿了**。
+
+## 状态
+
+```
+**15 个提交在本地未推送**(GitHub 443 不通,非代码问题)
+1169 passed / 53 files · 两条 typecheck 0 · npm run build 绿 · check:design E1–E14 绿 · as any 0
+```
+
+## 先做这三件
+
+```
+1. git push origin master          # 15 个提交
+2. 读 AGENTS.md(自动注入)+ docs/DESIGN-PLATFORM.md §2.10 / §2.11 / §2.12
+3. 读 .probe/channel-audit.out.txt # 170 行,用户那个问题的**完整取证**
+```
+
+## 用户最后那个问题 = 正解已落地(提交 `6d7abd8`)
+
+用户原话:「这些对话过程**不需要展示在和我对话的框里面**,就算有 meeting 应该不在这个通道里面」;
+后来上升成原则:「在页面上需要展示的就只有「**由用户触发在页面上展示的通道**」」。
+
+**⚡ 我曾两次判断错,别重走:**
+1. **「过滤失效,执行者的过程漏进来了」→ 错。** `ask_client` 与 `tell_client` **只出现在
+   business_manager 的 ceiling 里**,而那串工具里**同时有这两个** ⇒ 按定义不可能是 worker。
+   **执行者的轮确实全被滤掉了**(`hidden=6` = wk×3 + pm×2 + qa×1,一条不漏)。
+2. **「按触发源过滤会吞掉有价值的简报」→ 多虑了。** 因为 `tell_client` 的播报**本来就是一条独立消息**。
+
+**落地的判据(塌缩成两半):**
+```
+回合**正文**显示与否  ←  trigger.kind   ("user" 显示 / "todo" 不显示)
+**播报**显示与否      ←  **无条件显示**   (独立成消息,不受 trigger 影响)
+进 client 通道 ⟺ 用户消息 ∨ source==="broadcast" ∨ trigger.kind==="user" 的回合正文
+```
+契约是 `source` 判别联合(`TurnMessageStart` 必填 `trigger` / `BroadcastMessageStart`
+**类型上没有** `trigger`)⇒ **正交是类型事实,那类 bug 写不出来**。
+渲染在**块**的粒度再筛一次(`tool`/`thinking`)⇒ **折成一行可展开的「内部过程 N 步」**,
+折叠态**不报工具名、不报一个字推理**。提示词:正文=**工作记录**,对甲方的话**必须走 `tell_client`**。
+
+## 还剩什么(W3,三件)
+
+```
+① **闭合刷新缺口** —— 当前设计的**真 bug**
+   SessionMessageView(与库里的 session_messages)**既没有 source 也没有 trigger**
+   ⇒ REST 回填只能是 origin:"unknown" ⇒ 回退按角色两跳(fail-open)
+   ⇒ **流式期间判据成立;刷新一次,工件触发的 BM 回合会重新出现在对话页**
+   闭合点:transport/views.ts + shared 的 SessionMessageView(+ 可能一条落库列 / migration 019)
+
+② **文档欠账** —— 见下「已过时的文档」
+
+③ **端到端(唯一还没被真机证明的一环)**
+   npm run build:server → **一次 reset**(把出厂提示词写回 ~/.sansheng/)→ 跑一个真实工件触发回合
+   ⇒ 验证 `[未播报]` 真会出现、A4 的 splitWorkLog 真会触发
+```
+
+## ⚠️ 已过时的文档(别信这几处)
+
+| 位置 | 写的 | 实际 |
+|---|---|---|
+| `AGENTS.md` 基线 | 1065 / 44 | **1169 / 53** |
+| `AGENTS.md` 排空器段 | 「真机库扁平 9 work → 9 root → 0 中间」 | **1 根 + 4 子真树**;那段归因已过期 |
+| `DESIGN-PLATFORM.md` §2.10.2 | message_start 形状 | 已加 `source`/`trigger` |
+| `DESIGN-PLATFORM.md` §2.10.4 | `[未播报]`「留,但必须与播报视觉分开」「甲方视图要能**展开**」 | **已被取代** —— 工件触发回合**整轮不进**;工作记录改到**成员页**可查 |
+| `DESIGN-PLATFORM.md` §2.12 的 A3/A4 行 | 「只渲染 `agentId IS NULL` 或该 agent `clientFacing`」 | **已被取代** |
+| `DESIGN-PLATFORM.md` §9.4 / §2.11.4 | 规则表 / 待办表 | 缺第 11 条 `resolve_blocked_work`;`PRIORITY` 与行号已漂 |
+
+**`check:design` 不管这些,所以它不会红** —— 需要一次显式的文档更新。
+
+## ⚠️ 被推翻的判断清单(11 个 subagent 累计推翻 30+ 处,别重新论证)
+
+```
+①「文档说扁平 ⇒ 写入侧收紧空转」→ 真机已是真树,归因过期
+②「status 全局、不按通道过滤」   → **真因是服务端忙闩粒度**(按项目 → 必须按 (上下文, agent))
+③「容器根 blocked 卡住整合」     → **根 blocked 不卡**;真正卡住的是**子项的 blocked,它没有驱动者**
+④「那串 ⚙ 是执行者的过程」       → 是**业务经理自己的**
+⑤「工作项上有没有 ask」          → **这条边不存在**;真正的原料是 **blocker_blocks**
+⑥「真机日志第 4/8 回合」         → 日志恒 0 字节,**不可复核**
+⑦「worker 因 ask_client 而 blocked」→ 真机不存在,是 **BM 自己**在等
+⑧「PM 可以用 work_assign 改派」  → **work_assign 也拒收非 worker**
+⑨「nudgedWhileBusy 按项目就够」  → **deliberateStop 也是全局的**(实验证明)
+⑩「接待会话回合 session_id 为 NULL」→ 实测**非 NULL**
+⑪「onInterrupt 能分别中断」       → 协议上**不可表达**;实现的是超集
+⑫「sessionCount() 能看见会话泄漏」→ **Map.size 看不见**(后写覆盖前写)⇒ 那条绿灯没牙
+⑬「触发源可以直接当显示判据」     → ✓ **可以** —— 因为播报是独立消息、无条件显示
+```
+
+**⑫ 最值得记**:判据必须是「`createAgentSession` 被调用了几次」,不是会话池的 `Map.size`。
+
+## ⚠️ 用户库的现状
+
+```
+~/.sansheng/sansheng.db · schema v17(016/017 已应用)
+项目「催收语音机器人升级」:5 works = **1 根 + 4 子(真树)** · 工件 13 · 消息 16
+  根 [blocked] · 子 done/done/blocked/open/open
+⇒ **它停在「一条 blocked 的子项」上** —— `20ca9a2` 修的正是这个
+⇒ 重跑排空后它应该会自己继续走(S4 判据在真机库副本上已验)
+⚠️ 2719 上的 serve 是 09:01 起的**旧 build** —— 要看新行为得重启
+```
+
+## 这一轮反复被验证的三条纪律
+
+1. **「代码里写了逻辑」≠「它有读者」** —— 判断机制是否生效看**真机数据里的形状**,不是 grep。
+2. **每个诊断先拿已知答案的样本自检**:一个必须命中的正样本 + 一个必须不命中的负样本。
+   **一个坏掉的检查不等于检查失败,它可能返回一个看起来正常的答案。**
+3. **`tests/**` 完全不参与 typecheck**(两条 tsconfig 都 exclude `**/*.test.ts`)
+   ⇒ 夹具漏字段是**运行期 TypeError,编译期抓不到**。
+   `tests/web/fixture-envelope-fields.test.ts` 是为此建的源码级 lint(自带正负样本自检 + 非空断言)。
+
+---
+
 **生成时间**:2026-10-04 CST · **v9.0**(平台侧全量新建:BC0–BC7 + 工具层 + 接线 + BC6 执行 + 角色提示词,11 个批次)
 **上一版**:v8.0(批次 7-O harness 写面 + 8-A…8-D 角色职能核查迭代),见下。
 **适用**:下一会话(主对话 / worker)开盒即读
