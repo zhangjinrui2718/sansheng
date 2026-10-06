@@ -27,6 +27,7 @@ import {
   type ProjectSummary,
   type ServerEvent,
   type SessionMessageView,
+  type SessionSummaryView as SessionSummary,
   type TurnTriggerKind,
   type TriggerTodoKind,
   type WsToolInfo,
@@ -111,6 +112,16 @@ export interface Turn {
    * `ChatState.inFlight` 里记的那条跨项目截断。
    */
   projectId: string | null;
+  /**
+   * 这一轮落在**哪条对话线**上(migration 024)。**必填** ——
+   * 一个项目下面可以有多条线,而按 `projectId` 过滤会把**所有线**混进同一个面板
+   * (那在「一个项目一条对话」的年代是对的)。
+   *
+   * ⚠️ **它和 `projectId` 是两个维度**:`projectId` 答「哪个项目」,
+   * `sessionId` 答「这个项目里的哪条线」。接待会话的 `sessionId` 是那唯一一条
+   * 接待会话的 id —— 它**不是** `null`(null 在这里是「读不到」,不是「没有」)。
+   */
+  sessionId: string;
   role: Role;
   blocks: Block[];
   startedAt: number;
@@ -160,6 +171,19 @@ export interface ChatState {
    * 合法组合只有三种:`(true, null)` 接待中、`(false, null)` 未选、`(false, id)` 项目内。
    */
   intakeActive: boolean;
+  /**
+   * 当前**在看哪条对话线**(migration 024)。`null` = 还没解析出来。
+   *
+   * ⚠️ **它与 `projectId` 是两个维度**:`projectId` 选「哪个项目」,`sessionId`
+   * 选「这个项目里的哪条线」。2026-10-06 之前后者**不存在**,所有线的消息混在
+   * 一起 —— 而那在「一个项目一条对话」的年代是对的。
+   *
+   * ⚠️ **接待会话也有 sessionId**(那唯一一条接待会话的 id)。它**不是** `null` ——
+   * `null` 在这里是「还没解析出来」,而这两件事必须分得开。
+   */
+  sessionId: string | null;
+  /** 这个项目下面有哪几条对话线(读面 `GET /api/projects/:id/sessions`)。 */
+  sessions: SessionSummary[];
   /** 首屏上下文是否已经决定过(见 `decideInitialContext`)。 */
   contextDecided: boolean;
   /** 当前项目的工作项 / 工件 / 提问发生变更 —— 详情页据此回查。 */
@@ -298,6 +322,15 @@ export interface ChatState {
   loadProjects(): Promise<void>;
   selectProject(id: string): Promise<void>;
   /**
+   * 切到某条对话线(migration 024)。
+   *
+   * ⚠️ 它**不**改 `projectId` —— 那两件事独立:换线是「这个项目里的哪条」,
+   * 换项目是「哪个项目」。混在一起之后「我在看哪」就需要两个字段做仲裁。
+   */
+  selectSession(sid: string): Promise<void>;
+  /** 另开一条对话线并切过去。`title` 可省 —— 平台不猜它该叫什么 */
+  newThread(title?: string): Promise<void>;
+  /**
    * **首屏上下文**:拉项目列表,一个项目都没有就进接待会话;有项目就什么都不做
    * (保持原来的「未选项目」,不擅自替用户选中某个项目)。
    *
@@ -336,9 +369,12 @@ const newTurn = (
   agentId: string | null,
   projectId: string | null,
   origin: TurnOrigin,
+  /** 落在哪条对话线上(migration 024) */
+  sessionId: string,
 ): Turn => ({
   id,
   projectId,
+  sessionId,
   role,
   blocks: [],
   startedAt: Date.now(),
@@ -437,6 +473,15 @@ function isSessionTodoKind(value: unknown): value is TriggerTodoKind {
  * `inFlightOrder` 不会脱节」这条不变量只有一处需要维护:`isNew` 由表本身推导,
  * 调用方不可能忘记追加顺序。
  */
+/**
+ * ⚠️ **`inFlight` 是**所有**会话的进行中轮,不分对话线** ——
+ * `flushAgentEnd` / `currentTurn` 的跨会话截断靠它成立
+ * (见 `ChatState.inFlight` 那条注释)。所以这里**不过滤**,过滤在**渲染那一侧**
+ * (`channelActivityOf(..., sessionId)`)。
+ *
+ * 曾经想过在这里按 `sessionId` 挡掉别的线,那是错的:业务经理在 A 线跑一个回合
+ * 时,那个 `agent_end` 必须还能把这一轮 flush 掉 —— 按线挡住会让它永远收不了尾。
+ */
 function withTurn(
   s: Pick<ChatState, "inFlight" | "inFlightOrder">,
   t: Turn,
@@ -525,6 +570,9 @@ function messageToTurn(m: SessionMessageView, projectId: string | null): Turn {
   return {
     id: m.id,
     projectId,
+    // REST 回填那条路:`sessionId` **行里就有**(契约的 `SessionMessageView.sessionId`),
+    // 不猜、不从 projectId 反推。
+    sessionId: m.sessionId,
     role,
     blocks,
     startedAt: m.createdAt,
@@ -540,6 +588,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
   projectsLoading: false,
   projectId: null,
   intakeActive: false,
+  sessionId: null,
+  sessions: [],
   contextDecided: false,
   projectRevision: 0,
   projectsRevision: 0,
@@ -577,6 +627,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
     set({
       projectId: id,
       intakeActive: false,
+      sessionId: null,
+      sessions: [],
       turns: [],
       inFlight: {},
       inFlightOrder: [],
@@ -584,21 +636,69 @@ export const useChatStore = create<ChatState>((set, get) => ({
       error: null,
       status: "idle",
     });
+    // 先拉会话清单,再挑一条线 —— **顺序不能反**:主线��可能已经不存在了
+    // (交付会话被开出来过),那时挑不出可看的线,而直接拉 messages 会拿到
+    // 一个「归并了所有线」的结果。
+    let sessions: SessionSummary[] = [];
     try {
-      const res = await api.getProjectMessages(id);
-      // 拉取期间用户可能已经切走 —— 迟到的响应不许覆盖当前项目。
-      if (get().projectId !== id) return;
-      set({
-        turns: (res.messages ?? []).map((m) => messageToTurn(m, id)),
-        inFlight: {},
-        inFlightOrder: [],
-        currentTurn: null,
-        status: "idle",
-      });
+      sessions = (await api.listProjectSessions(id)).sessions ?? [];
     } catch (e) {
       if (get().projectId !== id) return;
+      set({ error: { code: "sessions_load_failed", message: errorMessage(e) }, status: "error" });
+      return;
+    }
+    if (get().projectId !== id) return;
+    set({ sessions });
+    // 默认看**主对话**:待办的回合落在那里,甲方不开新线时它就是那条线。
+    const main = sessions.find((s) => s.kind === "main") ?? sessions[0];
+    if (main === undefined) {
+      set({
+        sessionId: null, turns: [], inFlight: {}, inFlightOrder: [],
+        currentTurn: null, status: "idle",
+      });
+      return;
+    }
+    await get().selectSession(main.id);
+  },
+
+  /**
+   * 切到某条对话线(migration 024)。
+   *
+   * ⚠️ **拉取期间用户可能又切走** —— 迟到的响应不许覆盖当前选中的线。
+   * 判据是 `sessionId` 的**恒等比较**(与 `selectProject` 同一条纪律)。
+   */
+  async selectSession(sid) {
+    const id = get().projectId;
+    if (id === null) return;
+    set({ sessionId: sid, turns: [], inFlight: {}, inFlightOrder: [], currentTurn: null, status: "idle" });
+    try {
+      const res = await api.getProjectMessages(id, sid);
+      if (get().sessionId !== sid) return;
+      set({
+        turns: (res.messages ?? []).map((m) => messageToTurn(m, id)),
+        inFlight: {}, inFlightOrder: [], currentTurn: null, status: "idle",
+      });
+    } catch (e) {
+      if (get().sessionId !== sid) return;
       set({ error: { code: "messages_load_failed", message: errorMessage(e) }, status: "error" });
     }
+  },
+
+  /** 另开一条对话线并切过去。**平台不猜它叫什么** —— `title` 由甲方给。 */
+  async newThread(title) {
+    const id = get().projectId;
+    if (id === null) return;
+    const r = await api.createProjectSession(id, title);
+    set((s) => ({
+      sessions: [
+        ...s.sessions,
+        {
+          id: r.sessionId, kind: "thread", title: r.title, channel: "internal",
+          deliverableArtifactId: null, createdAt: Date.now(), lastMessageAt: Date.now(),
+        },
+      ],
+    }));
+    await get().selectSession(r.sessionId);
   },
 
   async decideInitialContext() {
@@ -629,8 +729,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
       const res = await api.getIntakeMessages();
       // 拉取期间用户可能已经切到某个项目 —— 迟到的响应不许覆盖当前上下文。
       if (!get().intakeActive) return;
+      const msgs = res.messages ?? [];
       set({
-        turns: (res.messages ?? []).map((m) => messageToTurn(m, null)),
+        turns: msgs.map((m) => messageToTurn(m, null)),
+        // ⚠️ **接待会话也有 sessionId**(那唯一一条的 id)。它从消息里读出来,
+        // 不另查一次接口 —— 而**没有消息的接待会话拿不到它**(那条会话由第一条
+        // 消息惰性建出)。那时它就是「还没有」,发送时省略 sessionId 即可
+        // (契约里它是**可选的**,省略 = 后端按项目/接待解析出那条)。
+        sessionId: msgs[0]?.sessionId ?? get().sessionId,
         inFlight: {},
         inFlightOrder: [],
         currentTurn: null,
@@ -652,16 +758,23 @@ export const useChatStore = create<ChatState>((set, get) => ({
     //
     // `origin` 是 **`trigger.kind === "user"` 的正样本**:这是甲方亲口发起的那一轮,
     // 它当然进甲方通道(与 server 回显那条 `message_start(user)` 同源)。
-    const t = newTurn(
-      `u_${Date.now().toString(36)}`,
-      "user",
-      null,
-      intakeActive ? null : projectId,
-      { source: "turn", trigger: { kind: "user" } },
-    );
-    set((s) => ({ turns: [...s.turns, { ...t, blocks: [{ kind: "text", text }] }] }));
+    // ⚠️ **`sessionId` 还没解析出来时不做乐观上屏** —— 而不是拿一个假的填上。
+    // 拿 `""` 或 `"<unknown>"` 填进去,那条轮就永远匹配不上任何真实的会话,
+    // 而它躺在时间线上看起来完全正常(7-N:见不到的现场等于没有现场)。
+    const line = get().sessionId;
+    if (line !== null) {
+      const t = newTurn(
+        `u_${Date.now().toString(36)}`,
+        "user",
+        null,
+        intakeActive ? null : projectId,
+        { source: "turn", trigger: { kind: "user" } },
+        line,
+      );
+      set((s) => ({ turns: [...s.turns, { ...t, blocks: [{ kind: "text", text }] }] }));
+    }
     // 接待会话发送 `projectId: null` —— 契约里这就是「第一个项目之前」那条会话
-    socket.sendToProject(intakeActive ? null : projectId, text);
+    socket.sendToProject(intakeActive ? null : projectId, text, line ?? undefined);
   },
 
   sendInterrupt() {
@@ -737,7 +850,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         const origin = originOfMessageStart(e);
         set((s) => ({
           ...withTurn(s, {
-            ...newTurn(e.messageId, "assistant", e.agentId, e.projectId, origin),
+            ...newTurn(e.messageId, "assistant", e.agentId, e.projectId, origin, e.sessionId),
             isStreaming: true,
           }),
           status: "streaming",
@@ -803,7 +916,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
         // 而不是在这里猜一个 `trigger`。
         const t =
           get().inFlight[e.messageId] ??
-          newTurn(e.messageId, "assistant", e.agentId, e.projectId, { source: "unknown" });
+          newTurn(
+            e.messageId, "assistant", e.agentId, e.projectId,
+            { source: "unknown" }, e.sessionId,
+          );
         set((s) => ({
           ...withTurn(s, { ...t, blocks: [...t.blocks, { kind: "tool", tool: e.tool }] }),
           // 「他最后一次动手是什么工具」在运行态里是一个要显示的事实 —— 工具一开始
@@ -862,8 +978,18 @@ export const useChatStore = create<ChatState>((set, get) => ({
             inFlightOrder: s.inFlightOrder.filter((id) => !flushed.has(id)),
           };
           const stillLive = inFlightTurns(kept);
+          // ⚠️ **flush 按 `projectId`,落进 `turns` 却要按 `sessionId`**(migration 024)。
+          //
+          // 收尾必须**按项目**做(一条 `agent_end` 要把它自己那个上下文里所有
+          // 进行中的轮都收掉,包括别的线上的 —— 否则那条轮永远收不了尾),
+          // 但**落进 `turns`** 只能落**当前正在看的那条线**的:用户正看着
+          // 「W1–W7 调研推进」时,「v2 的想法」那边刚跑完的一轮**不该**冒出来。
+          //
+          // ⚠️ 这**不是**丢数据 —— `inFlight` 里它照样在,切到那条线时
+          // `selectSession` 会从库里把完整历史拉回来。
+          const visible = finished.filter((t) => s.sessionId === null || t.sessionId === s.sessionId);
           return {
-            turns: finished.length > 0 ? [...s.turns, ...finished] : s.turns,
+            turns: visible.length > 0 ? [...s.turns, ...visible] : s.turns,
             ...kept,
             // 兼容指针只在**它指向的轮真的被收口**时交接:`withTurn` 的语义是
             // 「最近一次被写入的进行中轮」,所以交接给还活着的那一轮(没有才 null)。

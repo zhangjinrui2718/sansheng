@@ -47,6 +47,7 @@ import type {
   MemoryFragmentView,
   MessagesResponse,
   ProjectDetail,
+  ProjectSessionsResponse,
   ProjectLiveView,
   ProjectStatus,
   ProjectSummary,
@@ -198,9 +199,38 @@ export function getProject(id: string): Promise<{ project: ProjectDetail }> {
   return request<{ project: ProjectDetail }>(`/projects/${encodeURIComponent(id)}`);
 }
 
-/** 项目的一条连续对话。 */
-export function getProjectMessages(id: string): Promise<MessagesResponse> {
-  return request<MessagesResponse>(`/projects/${encodeURIComponent(id)}/messages`);
+/**
+ * 项目的一条对话。
+ *
+ * ⚠️ `sessionId` **可省**:省略 = 后端把该项目下**所有**会话归并返回。
+ * 那是 1:1 时代的正确行为,而**对话页必须传** —— 一个项目下面有多条线,
+ * 归并会把「模型在 A 线说的话」混进「B 线的面板」。
+ */
+export function getProjectMessages(id: string, sessionId?: string): Promise<MessagesResponse> {
+  const q = sessionId !== undefined ? `?sessionId=${encodeURIComponent(sessionId)}` : "";
+  return request<MessagesResponse>(`/projects/${encodeURIComponent(id)}/messages${q}`);
+}
+
+/** 这个项目下面有哪几条对话线(migration 024)。 */
+export function listProjectSessions(id: string): Promise<ProjectSessionsResponse> {
+  return request<ProjectSessionsResponse>(`/projects/${encodeURIComponent(id)}/sessions`);
+}
+
+/**
+ * 另开一条对话线。
+ *
+ * ⚠️ `title` **可省** —— 不给就是 `null`,界面显示「对话」。平台**不猜**这条线
+ * 该叫什么(那要看甲方在谈什么,§2.11.3:不做语义猜测),编一个「对话 2」出来
+ * 会让人以为甲方真的这么命名过。
+ */
+export function createProjectSession(
+  id: string,
+  title?: string,
+): Promise<{ sessionId: string; projectId: string; kind: "thread"; title: string | null }> {
+  const q = title !== undefined && title.trim() !== ""
+    ? `?title=${encodeURIComponent(title.trim())}`
+    : "";
+  return request(`/projects/${encodeURIComponent(id)}/sessions${q}`);
 }
 
 /**

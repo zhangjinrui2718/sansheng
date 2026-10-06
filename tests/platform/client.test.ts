@@ -337,17 +337,19 @@ describe("A1 · hub 的两个「建轮」事件带说话人,播报落库也用�
 
   it("emitMessageStart 把 agentId 原样放进事件(null = 甲方),并带上 trigger + source:\"turn\"", () => {
     const { hub, events } = hubCapturing();
-    hub.emitMessageStart("p1", "m1", "assistant", ids.pm, { kind: "todo", todoKind: "execute_work" });
-    hub.emitMessageStart("p1", "m2", "user", null, { kind: "user" });
+    hub.emitMessageStart("p1", "s_main", "m1", "assistant", ids.pm, { kind: "todo", todoKind: "execute_work" });
+    hub.emitMessageStart("p1", "s_main", "m2", "user", null, { kind: "user" });
     expect(events).toEqual([
       {
-        type: "message_start", source: "turn", projectId: "p1", messageId: "m1",
-        role: "assistant", agentId: ids.pm,
+        // ⚠️ `sessionId` 在场(migration 024):一个项目下面有多条对话线,
+        // 而前端按 `projectId` 过滤会把**所有线**混进同一个面板。
+        type: "message_start", source: "turn", projectId: "p1", sessionId: "s_main",
+        messageId: "m1", role: "assistant", agentId: ids.pm,
         trigger: { kind: "todo", todoKind: "execute_work" },
       },
       {
-        type: "message_start", source: "turn", projectId: "p1", messageId: "m2",
-        role: "user", agentId: null,
+        type: "message_start", source: "turn", projectId: "p1", sessionId: "s_main",
+        messageId: "m2", role: "user", agentId: null,
         trigger: { kind: "user" },
       },
     ]);
@@ -355,10 +357,11 @@ describe("A1 · hub 的两个「建轮」事件带说话人,播报落库也用�
 
   it("emitToolStart 把 agentId 原样放进事件(tool_start 自己也能建轮)", () => {
     const { hub, events } = hubCapturing();
-    hub.emitToolStart("p1", "m1", { id: "t1", name: "board_write" }, ids.wk);
+    hub.emitToolStart("p1", "s_main", "m1", { id: "t1", name: "board_write" }, ids.wk);
     expect(events).toEqual([
       {
-        type: "tool_start", projectId: "p1", messageId: "m1", agentId: ids.wk,
+        type: "tool_start", projectId: "p1", sessionId: "s_main",
+        messageId: "m1", agentId: ids.wk,
         tool: { id: "t1", name: "board_write" },
       },
     ]);
@@ -406,7 +409,7 @@ describe("A1 · hub 的两个「建轮」事件带说话人,播报落库也用�
   it("`todoKind` 原样透传:每个 TodoKind 都收得下(闭合集,不吞不改)", () => {
     const { hub, events } = hubCapturing();
     TODO_KINDS.forEach((k, i) => {
-      hub.emitMessageStart("p1", `m${i}`, "assistant", ids.pm, { kind: "todo", todoKind: k });
+      hub.emitMessageStart("p1", "s_main", `m${i}`, "assistant", ids.pm, { kind: "todo", todoKind: k });
     });
     expect(TODO_KINDS.length).toBeGreaterThan(0); // 正样本:集合非空,否则下面恒真
     expect(
@@ -417,7 +420,7 @@ describe("A1 · hub 的两个「建轮」事件带说话人,播报落库也用�
   it("**正交**:「工件触发的汇报」那一轮的正文不进对话页,而它同轮的播报照常进", async () => {
     const { hub, events } = hubCapturing();
     // ① 排空器按待办叫醒业务经理 —— 这一轮的**正文**不是对甲方说的话
-    hub.emitMessageStart("p1", "m-report", "assistant", ids.bm, {
+    hub.emitMessageStart("p1", "s_main", "m-report", "assistant", ids.bm, {
       kind: "todo", todoKind: "report_downstream",
     });
     // ② 同一轮里它调 `tell_client` 播报 —— 这是**另一条封套**
@@ -443,7 +446,7 @@ describe("A1 · hub 的两个「建轮」事件带说话人,播报落库也用�
     // 不是「值为 undefined」,是键不存在(JSON 里也搜不到)。
     expect("trigger" in broadcast!).toBe(false);
     expect(Object.keys(broadcast!).sort()).toEqual(
-      ["agentId", "messageId", "projectId", "role", "source", "type"],
+      ["agentId", "messageId", "projectId", "role", "sessionId", "source", "type"],
     );
     // 反证:body 那条**有** trigger,所以「用 trigger 判显示」的实现会把播报判掉
     expect("trigger" in body!).toBe(true);
@@ -451,7 +454,7 @@ describe("A1 · hub 的两个「建轮」事件带说话人,播报落库也用�
 
   it("`source` 只有两种取值:回合驱动流程 / 播报", async () => {
     const { hub, events } = hubCapturing();
-    hub.emitMessageStart("p1", "m1", "user", null, { kind: "user" });
+    hub.emitMessageStart("p1", "s_main", "m1", "user", null, { kind: "user" });
     await hub.clientChannel.tell({ projectId: "p1", message: "播报", agentId: ids.bm });
     const sources = events
       .filter((e) => e.type === "message_start")

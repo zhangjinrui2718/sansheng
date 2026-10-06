@@ -77,7 +77,16 @@ describe.skipIf(!present)("W3-③ 实机载荷回放:真回合 → 真判据", (
     const body = load<MessagesBody>(MESSAGES);
     vi.stubGlobal("fetch", async (url: string) => {
       const path = String(url).replace("/api", "");
-      const payload = path === `/projects/${PROJECT}/messages` ? body : {};
+      // ⚠️ sessions 那一支(migration 024):`selectProject` 先列会话再拉那条线的消息
+      // ⚠️ `messages` 用 `startsWith` 而不是 `===`:它现在带 `?sessionId=`
+      // (migration 024)。等于匹配会让这个夹具**静默地**什么都不返回 ——
+      // 而那个表现是「回填的消息一条都没有」,不像一个路径匹配写错了。
+      const payload = path.startsWith(`/projects/${PROJECT}/messages`)
+        ? body
+        : path === `/projects/${PROJECT}/sessions`
+          ? { projectId: PROJECT, sessions: [{ id: "s_main", kind: "main", title: null,
+              channel: "internal", deliverableArtifactId: null, createdAt: 0, lastMessageAt: 1 }] }
+          : {};
       return { ok: true, status: 200, statusText: "OK", text: async () => JSON.stringify(payload) };
     });
     try {

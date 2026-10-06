@@ -250,16 +250,29 @@ describe("A2 · REST 回填也把 agentId 带进轮里", () => {
   });
 
   it("selectProject 拉回的消息按 SessionMessageView.agentId 落轮(null = 甲方)", async () => {
+    // ⚠️ `/projects/:id/sessions` **必须也在夹具里**(migration 024):`selectProject`
+    // 现在先列会话、挑一条线,再拉那条线的消息。少了这一条,`listProjectSessions`
+    // 拿 404 ⇒ `sessions` 空 ⇒ 没有线可选 ⇒ **一条消息都不回填** ——
+    // 而那个表现像「REST 回填坏了」,其实是夹具缺了一条路由。
     const routes: Record<string, unknown> = {
-      "/projects/p-rest/messages": {
+      "/projects/p-rest/sessions": {
+        projectId: "p-rest",
+        sessions: [
+          {
+            id: "s_main", kind: "main", title: null, channel: "internal",
+            deliverableArtifactId: null, createdAt: 0, lastMessageAt: 2,
+          },
+        ],
+      },
+      "/projects/p-rest/messages?sessionId=s_main": {
         projectId: "p-rest",
         messages: [
           // ⚠️ `origin` 是 `SessionMessageView` 的**必填**字段(W3-①,migration 019):
           // REST 回填现在照抄库里的封套。漏了它 `channelOf` 会抛一个看不出是哪条
           // 字段漏了的 TypeError(`tests/` 不受 tsc 约束)—— 由
           // `fixture-envelope-fields.test.ts` 的规则 3 扫着。
-          { id: "m1", projectId: "p-rest", agentId: "ag_wk", agentName: "wk", kind: "assistant", content: "我来做", createdAt: 1, origin: { source: "turn", trigger: { kind: "todo" } } },
-          { id: "m2", projectId: "p-rest", agentId: null, agentName: null, kind: "user", content: "好", createdAt: 2, origin: { source: "turn", trigger: { kind: "user" } } },
+          { id: "m1", sessionId: "s_main", projectId: "p-rest", agentId: "ag_wk", agentName: "wk", kind: "assistant", content: "我来做", createdAt: 1, origin: { source: "turn", trigger: { kind: "todo" } } },
+          { id: "m2", sessionId: "s_main", projectId: "p-rest", agentId: null, agentName: null, kind: "user", content: "好", createdAt: 2, origin: { source: "turn", trigger: { kind: "user" } } },
         ],
       },
     };
@@ -277,5 +290,8 @@ describe("A2 · REST 回填也把 agentId 带进轮里", () => {
       ["m1", "ag_wk"],
       ["m2", null],
     ]);
+    // ⚠️ 正样本自检:每条轮都记着**它落在哪条线**上(migration 024)。
+    // 不写这一条,「模型在 A 线说的话出现在 B 线面板」就会长得像一段正常回复。
+    expect(useChatStore.getState().turns.map((t) => t.sessionId)).toEqual(["s_main", "s_main"]);
   });
 });

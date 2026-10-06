@@ -276,6 +276,10 @@ export function toMessageView(
   return {
     id: row.id,
     projectId,
+    // ⚠️ `sessionId` **行里就有**(列名 `session_id`),不像 `projectId` 要调用点
+    // 传进来 —— 那是消息属于哪个项目,而它能从行里推出的只有 session。
+    // 前端按它把消息分流到对应的那条对话线(migration 024)。
+    sessionId: row.sessionId,
     agentId: row.agentId,
     agentName: row.agentId !== null ? name(row.agentId) : null,
     kind: row.kind,
@@ -329,19 +333,31 @@ export function listProjectMessages(
   db: Database.Database,
   projectId: string | null,
   limit = 200,
+  /**
+   * **只看哪一条对话线**(migration 024)。`null` = 全部会话归并(旧行为)。
+   *
+   * ⚠️ 归并模式在多会话下**仍然可用但不该用在对话页**:一个项目下面现在有多条
+   * 线,把它们按时间混成一条会让「模型在 A 线说的话出现在 B 线的面板里」。
+   * 对话页**必须**传 `sessionId`;归并留给「这个项目一共说过什么」这类
+   * 全景视图(成员页的 `memberConversations` 就是另一条读面)。
+   */
+  sessionId?: string,
 ): SessionMessageView[] {
   const perSession = normalizeMessageLimit(limit);
   // `0` = 「一条都不要」。别把它喂给 SQL:`LIMIT NULL` 在 SQLite 里是不设上限。
   if (perSession === 0) return [];
   const name = agentNameCache(db);
+  const sessions = sessionId === undefined
+    ? listSessions(db, projectId)
+    : listSessions(db, projectId).filter((s) => s.id === sessionId);
   const out: SessionMessageView[] = [];
-  for (const s of listSessions(db, projectId)) {
+  for (const s of sessions) {
     for (const m of listSessionMessages(db, s.id, perSession)) {
       out.push(toMessageView(m, name, projectId));
     }
   }
-  // 多个会话时按时间归并 —— 虽然当前是「每项目一条连续对话」,
-  // 但表结构允许多条(交付会话),归并保证接口不用改
+  // 多个会话时按时间归并 —— `(created_at, id)` 是全序(第二键见下面那句注释)。
+  // 对话页传了 `sessionId` 时这里只有一条会话,归并是恒等操作。
   out.sort((a, b) => a.createdAt - b.createdAt || compareId(a.id, b.id));
   return out;
 }

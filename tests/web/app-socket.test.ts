@@ -63,7 +63,9 @@ describe("App 级 socket 单例", () => {
 
   it("store 动作经单例发送契约里的 send 命令(项目为中心)", () => {
     expect(useChatStore.getState().socket).toBeTruthy();
-    useChatStore.setState({ projectId: "p-wire" });
+    // ⚠️ `sessionId` 也要给(migration 024):不给它就不做乐观上屏 ——
+    // 那不是「乐观上屏坏了」,是「这一轮不知道该记到哪条线上」。
+    useChatStore.setState({ projectId: "p-wire", sessionId: "s_wire" });
     const inst = FakeWebSocket.instances[0]!;
     inst.sentMessages.length = 0;
 
@@ -72,6 +74,8 @@ describe("App 级 socket 单例", () => {
     expect(parsed.some((c) => c.type === "send" && c.projectId === "p-wire" && c.content === "你好")).toBe(
       true,
     );
+    // ⚠️ `sessionId` 一路带到线上(否则消息落到主对话,而不是用户选的那条线)
+    expect(parsed.some((c) => c.type === "send" && c.sessionId === "s_wire")).toBe(true);
     // 乐观上屏:用户那条消息立刻进 turns(不等 server 回 message_start)
     expect(useChatStore.getState().turns.some((t) => t.role === "user")).toBe(true);
   });
@@ -115,15 +119,23 @@ describe("首屏上下文 · decideInitialContext", () => {
   /** 桩掉 fetch:api.ts 是唯一的网络出口,所以这里只需认路径。 */
   function stubApi(routes: Record<string, unknown>): void {
     vi.stubGlobal("fetch", async (url: string) => {
-      const path = String(url).replace("/api", "");
-      if (!(path in routes)) {
+      // ⚠️ **去掉 query 再查表**(migration 024):`messages` 现在带
+      // `?sessionId=`,而夹具的键是干净的路径。
+      // ⚠️ 下面还兜一层「路径前缀匹配」:少一层就会让夹具**静默返回 404**,
+      // 而那个表现是「消息一条都没回来」,不像一个路由表写错了。
+      const raw = String(url).replace("/api", "");
+      const path = raw.split("?")[0] ?? raw;
+      const hit = path in routes
+        ? path
+        : Object.keys(routes).find((k) => raw === k || raw.startsWith(`${k}?`));
+      if (hit === undefined) {
         return { ok: false, status: 404, statusText: "Not Found", text: async () => "{}" };
       }
       return {
         ok: true,
         status: 200,
         statusText: "OK",
-        text: async () => JSON.stringify(routes[path]),
+        text: async () => JSON.stringify(routes[hit]),
       };
     });
   }
@@ -199,10 +211,18 @@ describe("首屏上下文 · decideInitialContext", () => {
     resetStore();
     useChatStore.setState({ intakeActive: true, projectId: null, contextDecided: true });
     stubApi({
+      // ⚠️ sessions 那一支**必须有**(migration 024):`selectProject` 先列会话、
+      // 挑一条线、再拉那条线的消息。少了它 ⇒ 没有线可选 ⇒ 一条都不回填 ——
+      // 而那个表现像「立项之后消息没迁过来」,其实是夹具缺了一条路由。
+      "/projects/pj_new/sessions": {
+        projectId: "pj_new",
+        sessions: [{ id: "s_main", kind: "main", title: null, channel: "internal",
+          deliverableArtifactId: null, createdAt: 0, lastMessageAt: 1 }],
+      },
       "/projects/pj_new/messages": {
         projectId: "pj_new",
         messages: [
-          { id: "m1", projectId: "pj_new", agentId: null, agentName: null, kind: "user", content: "最初那句话", createdAt: 1, origin: { source: "turn", trigger: { kind: "user" } } },
+          { id: "m1", sessionId: "s_main", projectId: "pj_new", agentId: null, agentName: null, kind: "user", content: "最初那句话", createdAt: 1, origin: { source: "turn", trigger: { kind: "user" } } },
         ],
       },
     });

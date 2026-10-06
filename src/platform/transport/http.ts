@@ -51,7 +51,9 @@ import {
 import {
   aggregateProjectUsage, normalizeUsageDayLimit, normalizeUsageDays,
 } from "../storage/repo/usage.js";
+import { ensureSession } from "../transport/hub.js";
 import {
+  getSession, insertSession, listSessions, listSessionMessages,
   isSessionMessageKind, isSessionMessageSource, isSessionMessageTodoKind, isSessionMessageTriggerKind,
 } from "../storage/repo/sessions.js";
 import type { SessionMessageKind, SessionMessageRow } from "../storage/repo/sessions.js";
@@ -248,7 +250,94 @@ export function createPlatformApp(deps: HttpDeps): Hono {
   app.get("/api/projects/:id/messages", (c) => {
     const id = c.req.param("id");
     if (getProjectRow(db, id) === null) return c.json(err("not_found", "项目不存在", 404).body, 404);
-    return c.json({ projectId: id, messages: listProjectMessages(db, id) });
+    // ⚠️ `?sessionId=` —— 对话页**必须**传(migration 024):一个项目下面有多条
+    // 对话线,不传就是**归并**(把所有的线混成一条),那在 1:1 的年代是对的。
+    // ⚠️ 传了但那条线**不属于这个项目** ⇒ 404 而不是空列表 —— 空列表在界面上
+    // 与「这条线还没有消息」**长得一模一样**(7-N:见不到的现场等于没有现场)。
+    const sid = c.req.query("sessionId");
+    if (sid !== undefined && getSession(db, sid)?.projectId !== id) {
+      return c.json(err("not_found", `对话 ${sid} 不属于项目 ${id}`, 404).body, 404);
+    }
+    return c.json({ projectId: id, messages: listProjectMessages(db, id, 200, sid) });
+  });
+
+  /**
+   * **这个项目下面有哪几条对话线**(migration 024)。
+   *
+   * ⚠️ 对话页的「我在看哪条线」是**单指针**,而项目底下现在可以有多条 ——
+   * 所以前端必须有地方知道「有哪些」。`kind='main'` 那条排在最前:它是排空器
+   * 触发的回合落的地方(待办是项目级的),也是不指定时的默认落点。
+   */
+  app.get("/api/projects/:id/sessions", (c) => {
+    const id = c.req.param("id");
+    if (getProjectRow(db, id) === null) return c.json(err("not_found", "项目不存在", 404).body, 404);
+    // ⚠️ **保证主对话存在**(`ensureSession` 的语义,幂等)。不做这一步,一个
+    // **刚立项、还没说过一句话**的项目会返回空列表 —— 而前端的对话页正是靠
+    // 这个列表决定「我在看哪条线」的,空列表 ⇒ 没有线可看 ⇒ **既没有历史也
+    // 发不出消息**(那条项目看上去像坏了)。
+    //
+    // 为什么一个 GET 会有副作用:`ensureSession` **本来就**是幂等的惰性建会话,
+    // 而它的返回值在旧路径里是**必然有**的(前端从不问「有哪些会话」)。
+    // 现在前端问了,就得有人回答「至少有主对话这一条」。
+    ensureSession(db, id, deps.now(), deps.newId, "client");
+    const rows = listSessions(db, id)
+      .map((s) => {
+        const last = listSessionMessages(db, s.id, 1);
+        const lastAt = last.length > 0 ? last[0]!.createdAt : s.createdAt;
+        return {
+          id: s.id,
+          kind: s.kind,
+          title: s.title,
+          channel: s.channel,
+          deliverableArtifactId: s.deliverableArtifactId,
+          createdAt: s.createdAt,
+          lastMessageAt: lastAt,
+        };
+      })
+      // 主对话在前,其余按最近活跃度
+      .sort((a, b) =>
+        (a.kind === "main" ? 0 : 1) - (b.kind === "main" ? 0 : 1) || b.lastMessageAt - a.lastMessageAt,
+      );
+    return c.json({ projectId: id, sessions: rows });
+  });
+
+  /**
+   * **另开一条对话线**。
+   *
+   * ⚠️ **谁起名由调用点决定,但平台不猜**:不传 `title` 就是 `null`,读面显示
+   * 「对话」—— 编一个「对话 2」出来会让人以为甲方真的这么叫过。
+   *
+   * ⚠️ 开线是**可逆**的(没有「删线」之前它只增不减),所以这里没有确认门;
+   * 而**关项目**不可逆,那一条才需要确认(见 `project_close`)。
+   */
+  app.post("/api/projects/:id/sessions", async (c) => {
+    const id = c.req.param("id");
+    if (getProjectRow(db, id) === null) return c.json(err("not_found", "项目不存在", 404).body, 404);
+    let body: { title?: unknown } = {};
+    try {
+      body = (await c.req.json()) as { title?: unknown };
+    } catch {
+      body = {};
+    }
+    if (body.title !== undefined && typeof body.title !== "string") {
+      return c.json(err("invalid_args", "title 必须是字符串", 400).body, 400);
+    }
+    const title = typeof body.title === "string" && body.title.trim() !== ""
+      ? body.title.trim()
+      : null;
+    const sid = deps.newId("s");
+    insertSession(db, {
+      id: sid,
+      projectId: id,
+      createdAt: deps.now(),
+      // ⚠️ **`channel` 用 `internal`,不是 `client`** —— 与 `ensureSession` 的
+      // 惰性建会话同一条纪律:甲方通道的会话只由平台在 `handover` 成功后开。
+      // 在这里造一条 `client` 会话,会让「哪条对话是哪场交付开的」重新变成猜的。
+      channel: "internal",
+      kind: "thread",
+      title,
+    });
+    return c.json({ sessionId: sid, projectId: id, kind: "thread", title }, 201);
   });
 
   /**

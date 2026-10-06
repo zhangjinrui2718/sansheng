@@ -100,8 +100,17 @@ export class PlatformSocket {
    * `ClientCommand`)。那一段里与你说话的是业务经理,它的工具面只有
    * `project_open` 与 `memory_*` —— 谈拢之后它自己立项并广播 `project_opened`。
    */
-  sendToProject(projectId: string | null, content: string): void {
-    this.send({ type: "send", projectId, content });
+  /**
+   * ⚠️ `sessionId` **可省**(migration 024):省略 = 落到该项目的主对话。
+   *
+   * 漏传的表现是「消息落到了主对话而不是你选的那条线」—— **看得见**的错
+   * (它出现在另一条线上),所以它不像服务端那七条事件那样必填。
+   */
+  sendToProject(projectId: string | null, content: string, sessionId?: string): void {
+    this.send({
+      type: "send", projectId, content,
+      ...(sessionId !== undefined ? { sessionId } : {}),
+    });
   }
 
   /** 中断某个上下文正在跑的一轮(`null` = 接待会话)。 */

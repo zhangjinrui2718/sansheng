@@ -270,6 +270,13 @@ export interface SessionMessageView {
    * 只是它的身份不是项目。
    */
   projectId: string | null;
+  /**
+   * 这条消息落在**哪条对话线**上(migration 024)。
+   *
+   * ⚠️ **前端必须按它过滤**:一个项目下面可以有多条线,而按 `projectId` 过滤会
+   * 把**所有线**混进同一个面板 —— 那在「一个项目一条对话」的年代是对的。
+   */
+  sessionId: string;
   /** null = 甲方说的话 */
   agentId: string | null;
   agentName: string | null;
@@ -646,6 +653,33 @@ export interface MessagesResponse {
 }
 
 /**
+ * `GET /api/projects/:id/sessions` —— **这个项目下面有哪几条对话线**
+ * (migration 024)。
+ *
+ * ⚠️ 一个项目下面可以有多条对话线,而对话页的「我在看哪条」是**单指针** ——
+ * 所以前端必须有一个地方知道「有哪些」。`kind='main'` 那条排在最前:它是
+ * 排空器触发的回合落的地方(待办是**项目级**的,不属于任何一条甲方开的线),
+ * 也是不指定时的默认落点。
+ */
+export interface SessionSummaryView {
+  id: string;
+  /** `main` = 主对话;`thread` = 甲方另开的线 */
+  kind: "main" | "thread";
+  /** 这条线叫什么。**`null` = 甲方没起名** —— 读面显示「对话」,不编一个出来 */
+  title: string | null;
+  channel: "internal" | "client";
+  /** 它是不是某场交付开出来的(`handover` 的终止判据就在这一列) */
+  deliverableArtifactId: string | null;
+  createdAt: number;
+  lastMessageAt: number;
+}
+
+export interface ProjectSessionsResponse {
+  projectId: string;
+  sessions: SessionSummaryView[];
+}
+
+/**
  * `GET /api/intake/messages` —— **接待会话**(第一个项目之前)的一条连续对话。
  *
  * `projectId` 恒为 `null`:那不是「缺失」,而是这条会话的身份(它还不属于任何项目)。
@@ -783,7 +817,24 @@ export type ClientCommand =
    * 服务端随即广播 `project_opened`。**不需要用户先填一张「创建项目」表单**:
    * 立项是业务经理的动作,不是甲方的动作。
    */
-  | { type: "send"; projectId: string | null; content: string }
+  | {
+      type: "send";
+      projectId: string | null;
+      content: string;
+      /**
+       * 发到**哪条对话线**(migration 024)。**可省** —— 省略时服务端按
+       * `(projectId, channel)` 解析出该项目的主对话,那是旧行为。
+       *
+       * ⚠️ **为什么它是可选的而不是必填**:可省 = 「不传也能跑」,而漏传的表现是
+       * 「消息落到了主对话而不是你选的那条线」—— 那是**看得见**的错(消息出现在
+       * 另一条线上),不是静默的。而必填会让**每一个**旧调用点当场编译失败,
+       * 包括还没迁到多会话的那些。
+       *
+       * ⚠️ 服务端**校验它属于这个项目** —— 不校验就是「一条线可以被任意项目引用」,
+       * 那会让消息落进一个甲方看不见的会话(7-N:见不到的现场等于没有现场)。
+       */
+      sessionId?: string;
+    }
   /** 回答一个等甲方拍板的问题 —— 走 resolveClientQuestion,落 decision 工件 */
   | { type: "answer_client_question"; questionId: string; answer: string }
   /** `null` = 中断接待会话正在跑的那一轮 */
@@ -974,6 +1025,8 @@ export interface TurnMessageStart {
   source: "turn";
   /** 这一轮为什么存在。**必填** —— 见本接口的说明 */
   trigger: TurnTrigger;
+  /** 这一轮发生在**哪条对话线**上(migration 024)。**必填** —— 见 `ServerEvent` 那段说明 */
+  sessionId: string;
 }
 
 /**
@@ -1005,6 +1058,8 @@ export interface BroadcastMessageStart {
   agentId: string | null;
   /** 这个封套是**播报**(`tell_client`),不是任何回合的正文 */
   source: "broadcast";
+  /** 播报落在**哪条对话线**上(migration 024)。**必填** —— 同上 */
+  sessionId: string;
 }
 
 /**
@@ -1058,16 +1113,33 @@ export type ServerEvent =
   | { type: "pong"; ts: number }
   | TurnMessageStart
   | BroadcastMessageStart
-  | { type: "delta"; projectId: string | null; messageId: string; text: string }
+
+  /**
+   * ⚠️ **七条消息类事件都带 `sessionId`**(migration 024)。
+   *
+   * 一个项目下面现在可以有多条对话线,而前端此前**按 `projectId` 过滤**消息 ——
+   * 那在 1:1 的年代是对的,现在它会把**所有线**的消息混进同一个面板。
+   *
+   * 为什么逐条加而不是「合成一个 message 事件」:这些事件是**流式**的,
+   * `delta` / `thinking_delta` 走的是同一条 WS 连接(7-I 的两条流分离不许合并),
+   * 而 `tool_start` / `tool_end` 还要带 `agentId`。
+   *
+   * ⚠️ **`sessionId` 是必填,不是可选** —— 与 `send` 那侧相反。理由:
+   * 一个事件**落错会话**的表现是「模型在 A 线说的话出现在 B 线的面板里」,
+   * 而那种错在界面上**看不出来**(它就是一段正常的回复)。漏填必须编译失败,
+   * 哪怕代价是逐个改所有发射点(那个列表是封闭的:下面这七条)。
+   */
+  | { type: "delta"; projectId: string | null; sessionId: string; messageId: string; text: string }
   /**
    * 内部推理。**与 delta 是两条流,永不混流** ——
    * 7-I 的现场:判据写成了不存在的 "thinking",1853 字符推理落进 content
    * 被当成正式回复展示给用户。
    */
-  | { type: "thinking_delta"; projectId: string | null; messageId: string; text: string }
+  | { type: "thinking_delta"; projectId: string | null; sessionId: string; messageId: string; text: string }
   | {
       type: "message_end";
       projectId: string | null;
+      sessionId: string;
       messageId: string;
       /**
        * 这一次 LLM 调用的用量。**可选**:调用点不传时整个字段缺席
@@ -1094,13 +1166,14 @@ export type ServerEvent =
   | {
       type: "tool_start";
       projectId: string | null;
+      sessionId: string;
       messageId: string;
       /** 谁在调这个工具。取值域与 `message_start` 同源(`null` = 甲方);实际调用方总是某个角色 */
       agentId: string | null;
       tool: WsToolInfo;
     }
-  | { type: "tool_end"; projectId: string | null; messageId: string; tool: WsToolInfo }
-  | { type: "agent_end"; projectId: string | null; ts: number }
+  | { type: "tool_end"; projectId: string | null; sessionId: string; messageId: string; tool: WsToolInfo }
+  | { type: "agent_end"; projectId: string | null; sessionId: string; ts: number }
   /**
    * **业务经理在接待会话里把项目立起来了** —— 前端应刷新项目列表并切到它。
    *

@@ -419,10 +419,14 @@ describe("③ 真宿主:排空叫醒业务经理时,封套带的是待办真值,
     const db = host.booted.deps.db;
     const starts: Array<{ agentId: string | null; trigger: TurnTrigger | undefined }> = [];
     const real = host.hub.emitMessageStart.bind(host.hub);
+    // ⚠️ 形参顺序跟着 migration 024 变了(`sessionId` 插在第二位)。
+    // 这条 mock 之所以必须逐字对齐:写错的话 `starts` 会**悄悄收集到错误的
+    // 那一维**,而断言只检查 `agentId` 与 `trigger` —— 也就是说「收集错了」
+    // 表现得像「断言没抓到」,而不是像编译错误。
     vi.spyOn(host.hub, "emitMessageStart").mockImplementation(
-      (projectId, messageId, role, agentId, trigger) => {
+      (projectId, sessionId, messageId, role, agentId, trigger) => {
         starts.push({ agentId, trigger });
-        real(projectId, messageId, role, agentId, trigger);
+        real(projectId, sessionId, messageId, role, agentId, trigger);
       },
     );
     return { db, starts, runNow: () => host!.dispatchTimer.runNow() };

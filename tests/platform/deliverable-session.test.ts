@@ -191,6 +191,9 @@ describe("C4 · `openDeliverableSession`(平台在 `handover` 回合成功后开
     expect(getSession(db, r.sessionId)).toEqual({
       id: "s_deliv_d1", projectId: "p1", createdAt: T0 + 1000,
       channel: "client", deliverableArtifactId: "d1",
+      // migration 024:交付对话是**主对话**(`kind='main'`,不是甲方另开的线),
+      // `title` 没人起过 ⇒ `null`(**不编一个「对话 1」出来**)。
+      kind: "main", title: null,
     });
     // 它是**没有消息**的一条空对话:正文由业务经理随后的回合说,平台不替它叙事
     expect(listSessionMessages(db, r.sessionId)).toEqual([]);

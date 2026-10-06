@@ -48,7 +48,7 @@ import { attachHub, clientFacingAgentId, ensureSession, PlatformHub } from "../t
 import { startFixedDelay, startScheduler, type FixedDelayLoop, type Scheduler } from "./scheduler.js";
 import { resetPlatformData } from "./reset.js";
 import {
-  appendSessionMessage, type SessionChannel,
+  appendSessionMessage, getSession, type SessionChannel,
 } from "../storage/repo/sessions.js";
 import { ROLE_SPECS } from "../identity/role.js";
 import { resolveClientQuestion } from "../tools/client.js";
@@ -413,9 +413,44 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
   // 编码成键只在池子内部用。
   const sessions = new Map<string, AgentSession>();
 
-  /** 会话池的键。上下文 `null` = 接待会话。 */
-  function pooledKey(projectId: string | null, agentId: string): string {
-    return `${projectId ?? "<intake>"}::${agentId}`;
+  /**
+   * 该上下文里**主对话**的 id —— 排空器触发的回合与内部角色的工作会话都用它。
+   *
+   * ⚠️ 它**惰性建出**一条会话:排空器第一次叫醒某个角色时,项目里可能还没有任何
+   * 会话行。而 `ensureSession` 对 `channel='client'` 有明确的回退(落回项目内部
+   * 会话,理由见 `hub.ts` 里那个函数),所以这里建出来的**永远是 `internal` 主
+   * 会话** —— 不会凭空造出一条「甲方通道」会话,那会让「哪条对话是哪场交付开的」
+   * 重新变成猜的。
+   *
+   * ⚠️ **为什么待办不落在甲方开的线上**:待办是**项目级**的(「有工作项做完了」
+   * 这件事不属于某一条对话),而甲方开的线是**他自己的**。让排空器去动某一条
+   * 线,会让那条线里出现一句甲方没问过的话。
+   */
+  function mainSessionOf(projectId: string | null, agentId: string): string {
+    return ensureSession(db, projectId, now(), newId, channelForAgent(db, agentId));
+  }
+
+  /**
+   * 会话池的键。上下文 `null` = 接待会话。
+   *
+   * ⚠️ **2026-10-06 加了中间那一段 `sessionId`**(migration 024)。
+   *
+   * 原来键是 `(项目, 角色)`,于是同一个项目的**所有对话线共用同一个 SDK 会话**
+   * —— 那在「一个项目一条对话」的年代是对的,而现在项目下面可以有多条线,
+   * 共用的后果是**模型分不清这几条线**:甲方在「v2 的想法」里说的话会出现在
+   * 「W1–W7 调研推进」的上下文里。
+   *
+   * ⚠️ **保留 `projectId` 作为前缀**,而不是把键换成 `(sessionId, 角色)`:
+   * `contextPrefix(projectId)` 那一整套(`disposeSessionsFor` 的「丢掉某个上下文
+   * 里所有角色」、`onInterrupt` 的「停掉这个上下文里正在跑的每一个回合」)
+   * 都靠前缀匹配。键的**形状**是那两处的隐式契约 —— 换形状就要同时改两处语义,
+   * 而那两处的正确性不依赖「一条项目一条会话」。三段键让前缀继续成立。
+   *
+   * 排空器触发的回合一律走**主对话**(`kind='main'`):待办是**项目级**的,
+   * 它不属于任何一条甲方开的线。
+   */
+  function pooledKey(projectId: string | null, sessionId: string, agentId: string): string {
+    return `${projectId ?? "<intake>"}::${sessionId}::${agentId}`;
   }
   function contextPrefix(projectId: string | null): string {
     return `${projectId ?? "<intake>"}::`;
@@ -477,8 +512,8 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
   const hub = new PlatformHub(
     { db, now, newId },
     {
-      onUserMessage: async (projectId, content) => {
-        await handleUserMessage(projectId, content);
+      onUserMessage: async (projectId, content, sessionId) => {
+        await handleUserMessage(projectId, content, sessionId);
       },
       onAnswerQuestion: async (questionId, answer) => {
         const r = resolveClientQuestion(db, questionId, answer, now(), {
@@ -550,7 +585,12 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
    * 把接待会话的消息迁进新项目、丢掉接待会话、广播 `project_opened` 让前端切过去。
    * **用户从不需要填「创建项目」表单**:立项是业务经理的动作。
    */
-  async function handleUserMessage(projectId: string | null, content: string): Promise<void> {
+  async function handleUserMessage(
+    projectId: string | null,
+    content: string,
+    /** 甲方指定发到哪条对话线(migration 024)。缺省 = 主对话 */
+    onSession?: string,
+  ): Promise<void> {
     if (projectId !== null) {
       const project = getProjectRow(db, projectId);
       if (project === null) {
@@ -576,11 +616,33 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
 
     ensureOrg(db, now());
     const at = now();
-    // **通道 = `client`(调用点显式声明)**:这是**甲方说的话**,它属于甲方通道。
-    // 交付对话开出来之后它落在那场交付的对话里;开出来之前明确回退到项目内部会话
-    // (交付之前不存在第二条对话)。接待会话(`projectId === null`)的通道由
-    // `ensureSession` 内部按 `project_id IS NULL` 处置,与这个实参无关。
-    const sessionId = ensureSession(db, projectId, at, newId, "client");
+    // ── 解析「发到哪条对话线」(migration 024)────────────────────────
+    //
+    // ⚠️ **校验它属于这个项目** —— 不校验就是「一条线可以被任意项目引用」,消息会
+    // 落进一个甲方在当前界面**看不见**的会话,而界面上什么都不显示
+    // (7-N:见不到的现场等于没有现场)。
+    //
+    // ⚠️ **接待会话不接受 `sessionId`**:全局只有一条(`idx_session_single_intake`),
+    // 给了别的 id 只会是一条不属于这里的会话。
+    let target = onSession;
+    if (target !== undefined) {
+      const row = getSession(db, target);
+      if (row === null || row.projectId !== projectId) {
+        hub.broadcast({
+          type: "error", projectId,
+          error: {
+            code: "not_found",
+            message: `对话 ${target} 不在这个项目里 —— 消息没有落进去(而不是落到某处你看不见的地方)`,
+          },
+        });
+        return;
+      }
+    } else {
+      // **通道 = `client`(调用点显式声明)**:这是**甲方说的话**,它属于甲方通道。
+      // 交付对话开出来之后它落在那场交付的对话里;开出来之前明确回退到项目内部会话。
+      target = ensureSession(db, projectId, at, newId, "client");
+    }
+    const sessionId = target;
 
     // 1. 用户消息先落库 —— 落库和广播的顺序反了会出现「用户看见自己说了话,
     //    刷新后它没了」
@@ -592,9 +654,9 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
       // 一处给实时流,一处给刷新后的 REST 回填 —— 两边必须说同一件事。
       originSource: "turn", triggerKind: "user",
     });
-    hub.emitMessageStart(projectId, userMessageId, "user", null, { kind: "user" });
-    hub.emitDelta(projectId, userMessageId, content);
-    hub.emitMessageEnd(projectId, userMessageId);
+    hub.emitMessageStart(projectId, sessionId, userMessageId, "user", null, { kind: "user" });
+    hub.emitDelta(projectId, sessionId, userMessageId, content);
+    hub.emitMessageEnd(projectId, sessionId, userMessageId);
 
     // 2. 拿(或建)业务经理的常驻会话,跑一个回合,事件桥到前端
     const bm = ORG.find((m) => m.role === "business_manager")!;
@@ -741,11 +803,27 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
    * 迁移照旧敲门 —— 那里用户已经在项目里了。用户被切进新项目之后的第一句话
    * (`handleUserMessage` 末尾的 nudge)才是那条流水线的起点。
    */
+  /**
+   * ⚠️ **参数用对象,不用位置参数**(2026-10-06)。
+   *
+   * 上一版是 `getOrCreateSession(projectId, sessionId, agentId)` —— 位置参数,
+   * 而我在两个调用点都写成了 `(projectId, agentId, sessionId)`。**TypeScript
+   * 没有抓到它**:三个形参都是 `string`,类型完全合法。
+   *
+   * 后果不是编译失败,是一句让人以为是数据坏了的运行时错误:
+   * `wk:assembly:no_such_agent: 找不到 agent s_muwpzsbp5jb3nd4s` —— 那个
+   * `s_...` 是**会话 id**,它被当成了 agentId 去 `getAgent` 查。
+   *
+   * ⇒ 这一层的形状就是「两个都是 string 的位置参数」,所以改成对象。
+   * 同纪律:`emitXxx(projectId, sessionId, messageId, ...)` 那一族是**接口**
+   * (前端也调),保持位置参数不动,但它们的**类型不同**(`string` vs `string|null`),
+   * 编译器能抓 —— 这也是为什么错的那个先炸了。
+   */
   async function getOrCreateSession(
-    projectId: string | null,
-    agentId: string,
+    args: { projectId: string | null; sessionId: string; agentId: string },
   ): Promise<SessionAcquire> {
-    const key = pooledKey(projectId, agentId);
+    const { projectId, sessionId, agentId } = args;
+    const key = pooledKey(projectId, sessionId, agentId);
     const cached = sessions.get(key);
     if (cached !== undefined) return { ok: true, session: cached };
     if (currentModel === null) {
@@ -834,8 +912,12 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
     agentId: string,
     task: string,
     trigger: TurnTrigger,
+    /** 落在**哪条对话线**上。缺省 = 该项目的主对话(排空器触发的回合走这条) */
+    onSession?: string,
   ): Promise<AgentTurnOutcome> {
-    const got = await getOrCreateSession(projectId, agentId);
+    const got = await getOrCreateSession({
+      projectId, agentId, sessionId: onSession ?? mainSessionOf(projectId, agentId),
+    });
     if (!got.ok) {
       hub.broadcast({
         type: "error", projectId,
@@ -859,12 +941,12 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
     // 查不到这个 agent 时**取 `internal`(fail-closed)**:宁可让一条发言留在
     // 内部会话里,也不把可能是内部角色的发言塞进甲方通道 —— 与前端
     // `channelOf`(web/src/lib/data.ts)同一条纪律,连失效方向都一样。
-    const sessionId = ensureSession(db, projectId, now(), newId, channelForAgent(db, agentId));
+    const sessionId = onSession ?? mainSessionOf(projectId, agentId);
     const messageId = newId("msg");
     // 建轮那一刻就把说话人钉住 —— 这一条是**跑这个回合的那个 agent**(参数,不是常量):
     // `handleUserMessage` 传业务经理,排空器传项目经理 / 质检(见 `drainOne` 的回调)。
     // `trigger` 同理,而且是**两个互相独立**的维度(见 `TurnTrigger` 上方那张表)。
-    hub.emitMessageStart(projectId, messageId, "assistant", agentId, trigger);
+    hub.emitMessageStart(projectId, sessionId, messageId, "assistant", agentId, trigger);
     const textBuf: string[] = [];
     const thinkBuf: string[] = [];
 
@@ -873,7 +955,7 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
     // **登记必须发生在第一次 await 之前。** 放在 `await runTurn(...)` 之后等于
     // 永远登记不上:WS 的每一条消息是各自 fire-and-forget 处理的,中断消息会在
     // 这个回合还卡在 await 里的时候就被处理掉。这正是「死接线」得以藏身的缝隙。
-    inflight.set(pooledKey(projectId, agentId), () => {
+    inflight.set(pooledKey(projectId, sessionId, agentId), () => {
       aborted = true;
       // `AgentSession.abort()` 是 async 且会等到 agent 真正 idle。这里**不 await**:
       // WS 的消息处理器不该被一次取消阻塞住。但失败要留现场(7-N),不许静默。
@@ -911,7 +993,7 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
           ? { wallClockTimeoutMs: opts.turnWallClockMs }
           : {}),
         onEvent: (ev) => {
-          bridge(ev, projectId, messageId, agentId, hub, textBuf, thinkBuf);
+          bridge(ev, projectId, sessionId, messageId, agentId, hub, textBuf, thinkBuf);
         },
       });
       // 助手消息落库(项目活过会话)。落的是**真正说话的那个 agent**,不是写死 bm。
@@ -933,8 +1015,8 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
           todoKind: trigger.kind === "todo" ? trigger.todoKind : null,
         });
       }
-      hub.emitMessageEnd(projectId, messageId);
-      hub.emitAgentEnd(projectId);
+      hub.emitMessageEnd(projectId, sessionId, messageId);
+      hub.emitAgentEnd(projectId, sessionId);
       if (aborted) {
         // 用户主动中断,但 SDK 的 prompt() 正常返回了(abort 让回合收敛)。
         // 已经拿到的正文照样落库 —— 中断不是丢弃,是「到此为止」。
@@ -971,8 +1053,8 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
           `platform: ${channelLabel(projectId)}上 ${agentId} 的回合被用户中断:` +
             `${e instanceof Error ? e.message : String(e)}`,
         );
-        hub.emitMessageEnd(projectId, messageId);
-        hub.emitAgentEnd(projectId);
+        hub.emitMessageEnd(projectId, sessionId, messageId);
+        hub.emitAgentEnd(projectId, sessionId);
       } else {
         hub.broadcast({
           type: "error", projectId,
@@ -981,7 +1063,7 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
             message: `${agentId}:${e instanceof Error ? e.message : String(e)}`,
           },
         });
-        hub.emitAgentEnd(projectId);
+        hub.emitAgentEnd(projectId, sessionId);
       }
       return {
         aborted, timedOut: false, text: textBuf.join(""), toolCalls: [],
@@ -989,7 +1071,7 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
         failureReason: e instanceof Error ? e.message : String(e),
       };
     } finally {
-      inflight.delete(pooledKey(projectId, agentId));
+      inflight.delete(pooledKey(projectId, sessionId, agentId));
     }
   }
 
@@ -1007,7 +1089,10 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
   ): Promise<DrainWorkReport> {
     const before = getWork(db, workId);
     const title = before?.title ?? workId;
-    const got = await getOrCreateSession(projectId, agentId);
+    // ⚠️ **内部角色固定走主对话**:工作项执行是**项目级**的,不是某条甲方开的线。
+    const got = await getOrCreateSession({
+      projectId, agentId, sessionId: mainSessionOf(projectId, agentId),
+    });
     if (!got.ok) {
       hub.broadcast({
         type: "error", projectId,
@@ -1030,11 +1115,11 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
     // 它由 `drainOne` 的 `runWork` 回调按待办把 agent 传进来。`trigger` 同理:
     // 这一支**只**可能由 `execute_work` 待办触发,而那个值仍然是**从 `todo.kind`
     // 传下来的真值**(不是这里写的字面量)—— 见 `dispatcher.ts` 的 `DrainDeps.runWork`。
-    hub.emitMessageStart(projectId, messageId, "assistant", agentId, trigger);
+    hub.emitMessageStart(projectId, sessionId, messageId, "assistant", agentId, trigger);
     const textBuf: string[] = [];
     const thinkBuf: string[] = [];
     let aborted = false;
-    inflight.set(pooledKey(projectId, agentId), () => {
+    inflight.set(pooledKey(projectId, sessionId, agentId), () => {
       aborted = true;
       void session.abort().catch((err: unknown) => {
         log.error(
@@ -1060,7 +1145,7 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
           : {}),
         // 让 worker 这一回合也流式上屏 —— 否则它在界面上是一段没有反应的等待
         onEvent: (ev) => {
-          bridge(ev, projectId, messageId, agentId, hub, textBuf, thinkBuf);
+          bridge(ev, projectId, sessionId, messageId, agentId, hub, textBuf, thinkBuf);
         },
       });
       // ⚠️ **这里刻意不读 `execution.producedArtifacts`**(B3 的裁决:它是**报告**,
@@ -1089,8 +1174,8 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
           todoKind: trigger.kind === "todo" ? trigger.todoKind : null,
         });
       }
-      hub.emitMessageEnd(projectId, messageId);
-      hub.emitAgentEnd(projectId);
+      hub.emitMessageEnd(projectId, sessionId, messageId);
+      hub.emitAgentEnd(projectId, sessionId);
       if (execution.work.status !== before?.status) {
         hub.emitWorkChanged(projectId, workId, execution.work.status);
       }
@@ -1131,8 +1216,8 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
           message: `执行 ${workId} 时抛错:${e instanceof Error ? e.message : String(e)}`,
         },
       });
-      hub.emitMessageEnd(projectId, messageId);
-      hub.emitAgentEnd(projectId);
+      hub.emitMessageEnd(projectId, sessionId, messageId);
+      hub.emitAgentEnd(projectId, sessionId);
       return {
         workId, title, status: getWork(db, workId)?.status ?? before?.status ?? "open",
         aborted, timedOut: false, text: textBuf.join(""), toolCalls: [],
@@ -1140,7 +1225,7 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
         detail: e instanceof Error ? e.message : String(e),
       };
     } finally {
-      inflight.delete(pooledKey(projectId, agentId));
+      inflight.delete(pooledKey(projectId, sessionId, agentId));
     }
   }
 
@@ -1787,6 +1872,7 @@ function channelForAgent(db: Database.Database, agentId: string): SessionChannel
 function bridge(
   ev: AgentSessionEvent,
   projectId: string | null,
+  sessionId: string,
   messageId: string,
   agentId: string,
   hub: PlatformHub,
@@ -1799,23 +1885,23 @@ function bridge(
     // 于是内部推理落进了正文被展示给用户
     if (u.type === "text_delta" && typeof u.delta === "string") {
       textBuf.push(u.delta);
-      hub.emitDelta(projectId, messageId, u.delta);
+      hub.emitDelta(projectId, sessionId, messageId, u.delta);
     } else if (u.type === "thinking_delta" && typeof u.delta === "string") {
       thinkBuf.push(u.delta);
-      hub.emitThinking(projectId, messageId, u.delta);
+      hub.emitThinking(projectId, sessionId, messageId, u.delta);
     }
     return;
   }
   if (ev.type === "tool_execution_start") {
     // `tool_start` 也能建轮(前端),所以它同样要带说话人 —— 与 `bridge` 的
     // `message_start` 用的是同一个 agent(见 §2.10.2)
-    hub.emitToolStart(projectId, messageId, {
+    hub.emitToolStart(projectId, sessionId, messageId, {
       id: ev.toolCallId, name: ev.toolName, args: ev.args,
     }, agentId);
     return;
   }
   if (ev.type === "tool_execution_end") {
-    hub.emitToolEnd(projectId, messageId, {
+    hub.emitToolEnd(projectId, sessionId, messageId, {
       id: ev.toolCallId, name: ev.toolName, result: ev.result, isError: ev.isError === true,
     });
   }

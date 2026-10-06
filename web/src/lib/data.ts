@@ -801,12 +801,24 @@ export function channelActivityOf(
   turns: readonly Turn[],
   ctx: ChannelContext,
   contextKey: string | null,
+  /**
+   * 当前在看**哪条对话线**(migration 024)。`null` = **不按线过滤**。
+   *
+   * ⚠️ 为什么这里需要它:一个项目下面可以有多条线,而 `contextKey` 只是项目。
+   * 只按项目过滤 ⇒ 「模型在 A 线说的话」出现在「B 线的面板」—— 而那看起来
+   * 完全就是一段正常的回复(7-N:见不到的现场等于没有现场)。
+   *
+   * ⚠️ `null` 保留旧行为(不过滤)而不是「一条都不显示」:调用点把它当成
+   * 「我还不知道我在看哪条线」,那时显示全部**比显示空白可诊断**。
+   */
+  sessionKey?: string | null,
 ): ChannelActivity {
   const client: Turn[] = [];
   const internal: Turn[] = [];
   const system: Turn[] = [];
   for (const turn of turns) {
     if (turn.projectId !== contextKey) continue;
+    if (sessionKey != null && turn.sessionId !== sessionKey) continue;
     const channel = channelOf(turn, ctx);
     if (channel === "client") client.push(turn);
     else if (channel === "internal") internal.push(turn);

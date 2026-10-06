@@ -97,7 +97,19 @@ export interface HubHandlers {
   /**
    * 用户在一个项目(或**接待会话**,`null`)里说了句话 —— host 负责建会话 / 跑回合。
    */
-  readonly onUserMessage: (projectId: string | null, content: string) => Promise<void>;
+  /**
+   * 甲方发一句话。
+   *
+   * ⚠️ `sessionId` **可省**(migration 024):省略 = 落到该项目的主对话,那是旧行为。
+   * 漏传的表现是「消息落到了主对话而不是你选的那条线」—— **看得见**的错,
+   * 所以它不像 WS 事件那七条那样必填(那七条漏传会把模型在 A 线说的话
+   * 显示在 B 线的面板里,而那种错在界面上看不出来)。
+   */
+  readonly onUserMessage: (
+    projectId: string | null,
+    content: string,
+    sessionId?: string,
+  ) => Promise<void>;
   /** 用户答了一个 client_question */
   readonly onAnswerQuestion: (questionId: string, answer: string) => Promise<void>;
   readonly onInterrupt: (projectId: string | null) => void;
@@ -313,7 +325,7 @@ export class PlatformHub {
             });
             return;
           }
-          await this.handlers.onUserMessage(cmd.projectId, cmd.content);
+          await this.handlers.onUserMessage(cmd.projectId, cmd.content, cmd.sessionId);
           return;
         }
         case "answer_client_question":
@@ -386,13 +398,15 @@ export class PlatformHub {
    */
   emitMessageStart(
     projectId: string | null,
+    sessionId: string,
     messageId: string,
     role: "user" | "assistant",
     agentId: string | null,
     trigger: TurnTrigger,
   ): void {
     this.broadcast({
-      type: "message_start", source: "turn", projectId, messageId, role, agentId, trigger,
+      type: "message_start", source: "turn", projectId, sessionId,
+      messageId, role, agentId, trigger,
     });
   }
 
@@ -412,18 +426,22 @@ export class PlatformHub {
    */
   private emitBroadcastStart(
     projectId: string | null,
+    sessionId: string,
     messageId: string,
     role: "user" | "assistant",
     agentId: string | null,
   ): void {
-    this.broadcast({ type: "message_start", source: "broadcast", projectId, messageId, role, agentId });
+    this.broadcast({
+      type: "message_start", source: "broadcast", projectId, sessionId,
+      messageId, role, agentId,
+    });
   }
-  emitDelta(projectId: string | null, messageId: string, text: string): void {
-    this.broadcast({ type: "delta", projectId, messageId, text });
+  emitDelta(projectId: string | null, sessionId: string, messageId: string, text: string): void {
+    this.broadcast({ type: "delta", projectId, sessionId, messageId, text });
   }
   /** 内部推理走**独立**事件 —— 与 delta 永不混流(7-I 的现场)。 */
-  emitThinking(projectId: string | null, messageId: string, text: string): void {
-    this.broadcast({ type: "thinking_delta", projectId, messageId, text });
+  emitThinking(projectId: string | null, sessionId: string, messageId: string, text: string): void {
+    this.broadcast({ type: "thinking_delta", projectId, sessionId, messageId, text });
   }
   /**
    * 一条助手消息流完了。
@@ -446,10 +464,14 @@ export class PlatformHub {
    */
   emitMessageEnd(
     projectId: string | null,
+    sessionId: string,
     messageId: string,
     usage?: { input: number; output: number; cacheRead: number },
   ): void {
-    this.broadcast({ type: "message_end", projectId, messageId, ...(usage !== undefined ? { usage } : {}) });
+    this.broadcast({
+      type: "message_end", projectId, sessionId, messageId,
+      ...(usage !== undefined ? { usage } : {}),
+    });
   }
   /**
    * **一个回合的用量刚落库** —— 实时把这一笔推给前端。
@@ -479,17 +501,18 @@ export class PlatformHub {
    */
   emitToolStart(
     projectId: string | null,
+    sessionId: string,
     messageId: string,
     tool: WsToolInfo,
     agentId: string | null,
   ): void {
-    this.broadcast({ type: "tool_start", projectId, messageId, agentId, tool });
+    this.broadcast({ type: "tool_start", projectId, sessionId, messageId, agentId, tool });
   }
-  emitToolEnd(projectId: string | null, messageId: string, tool: WsToolInfo): void {
-    this.broadcast({ type: "tool_end", projectId, messageId, tool });
+  emitToolEnd(projectId: string | null, sessionId: string, messageId: string, tool: WsToolInfo): void {
+    this.broadcast({ type: "tool_end", projectId, sessionId, messageId, tool });
   }
-  emitAgentEnd(projectId: string | null): void {
-    this.broadcast({ type: "agent_end", projectId, ts: this.deps.now() });
+  emitAgentEnd(projectId: string | null, sessionId: string): void {
+    this.broadcast({ type: "agent_end", projectId, sessionId, ts: this.deps.now() });
   }
 
   /**
@@ -568,9 +591,9 @@ export class PlatformHub {
         const messageId = this.deps.newId("msg");
         // **播报封套**(`source: "broadcast"`),不是回合封套 —— 它不带 `trigger`:
         // 播报与「这一轮为什么存在」正交,它无条件显示。见 `emitBroadcastStart`。
-        this.emitBroadcastStart(projectId, messageId, "assistant", agentId);
-        this.emitDelta(projectId, messageId, message);
-        this.emitMessageEnd(projectId, messageId);
+        this.emitBroadcastStart(projectId, sessionId, messageId, "assistant", agentId);
+        this.emitDelta(projectId, sessionId, messageId, message);
+        this.emitMessageEnd(projectId, sessionId, messageId);
       },
     };
   }

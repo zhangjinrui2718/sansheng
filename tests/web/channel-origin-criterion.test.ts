@@ -365,7 +365,13 @@ describe("REST 回填:封套随行回来 ⇒ 刷新与流式同一条判据(W3-�
     vi.stubGlobal("fetch", async (url: string) => {
       const path = String(url).replace("/api", "");
       const body =
-        path === `/projects/${P}/messages` ? { projectId: P, messages } : {};
+        // ⚠️ sessions 那一支**必须有**(migration 024):`selectProject` 先列会话、
+        // 挑一条线、再拉那条线的消息。少了它 ⇒ 没有线可选 ⇒ 一条都不回填,
+        // 而那个表现像「REST 回填坏了」。
+        path === `/projects/${P}/sessions`
+          ? { projectId: P, sessions: [{ id: "s_main", kind: "main", title: null,
+              channel: "internal", deliverableArtifactId: null, createdAt: 0, lastMessageAt: 1 }] }
+          : path.startsWith(`/projects/${P}/messages`) ? { projectId: P, messages } : {};
       return { ok: true, status: 200, statusText: "OK", text: async () => JSON.stringify(body) };
     });
     try {

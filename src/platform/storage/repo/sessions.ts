@@ -45,6 +45,19 @@ export function isSessionChannel(v: unknown): v is SessionChannel {
   return typeof v === "string" && (SESSION_CHANNELS as readonly string[]).includes(v);
 }
 
+/**
+ * 会话**是哪条线**(migration 024)。与上面的 `SessionChannel` **正交**:
+ * `channel` 说的是「谁看得见」(渲染归属),`kind` 说的是「它是哪条对话」
+ * (会话身份)。接待会话的 `kind` 恒为 `main` —— 它是全局唯一一条,不是「某条线」。
+ */
+export type SessionKind = "main" | "thread";
+
+export const SESSION_KINDS: readonly SessionKind[] = ["main", "thread"];
+
+export function isSessionKind(v: unknown): v is SessionKind {
+  return typeof v === "string" && (SESSION_KINDS as readonly string[]).includes(v);
+}
+
 // ── 会话消息的**封套**(migration 019)────────────────────────────
 //
 // 这两维此前只活在 WS 封套上、**一条都没落库**,于是刷新之后前端拿不到判据
@@ -146,6 +159,18 @@ export interface SessionRow {
    * `runtime/dispatcher.ts` 的 `deliveredArtifactIds`。
    */
   deliverableArtifactId: string | null;
+  /**
+   * 这条会话是哪条线(migration 024)。
+   *
+   * · `main`   —— 项目的**主对话**,`ensureSession` 按 channel 复用的那一条,
+   *               也是**排空器触发的回合**落的地方(待办是项目级的,不属于某条线)。
+   * · `thread` —— 甲方**主动另开**的一条对话线。
+   *
+   * 存量行一律 `main` —— 那是事实,不是猜的(见该迁移文件头)。
+   */
+  kind: SessionKind;
+  /** 这条线叫什么。**`null` = 甲方没起名** —— 不编一个出来(理由同上) */
+  title: string | null;
 }
 
 export interface SessionMessageRow {
@@ -183,6 +208,8 @@ interface RawConversation {
   created_at: number;
   channel: string;
   deliverable_artifact_id: string | null;
+  kind: string;
+  title: string | null;
 }
 
 interface RawMessage {
@@ -212,17 +239,23 @@ export function insertSession(
     createdAt: number;
     channel?: SessionChannel;
     deliverableArtifactId?: string | null;
+    /** 缺省 `main`。`thread` 只由甲方**显式开线**时用 */
+    kind?: SessionKind;
+    title?: string | null;
   },
 ): void {
   db.prepare(
-    `INSERT INTO project_sessions (id, project_id, created_at, channel, deliverable_artifact_id)
-     VALUES (?, ?, ?, ?, ?)`,
+    `INSERT INTO project_sessions
+       (id, project_id, created_at, channel, deliverable_artifact_id, kind, title)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     row.id,
     row.projectId,
     row.createdAt,
     row.channel ?? "internal",
     row.deliverableArtifactId ?? null,
+    row.kind ?? "main",
+    row.title ?? null,
   );
 }
 
@@ -233,12 +266,24 @@ function toSessionRow(raw: RawConversation): SessionRow {
         `闭集是 ${SESSION_CHANNELS.join(" | ")},schema 的 CHECK 本该拦住它`,
     );
   }
+  // ⚠️ 迁移之前的历史现场(`.probe/` 的库副本)没有这两列 ⇒ 兜底成 `main`/`NULL`,
+  // 与 024 之后写进去的值**完全一致**(存量行确实都是主对话)。抛错的那条纪律
+  // 在这里**故意不适用** —— 那不是「数据错了」,是「这张表更宽了」。
+  const kind = raw.kind === undefined ? "main" : raw.kind;
+  if (!isSessionKind(kind)) {
+    throw new Error(
+      `project_sessions 表里出现未定义 kind「${kind}」(id=${raw.id})—— ` +
+        `闭集是 ${SESSION_KINDS.join(" | ")},schema 的 CHECK 本该拦住它`,
+    );
+  }
   return {
     id: raw.id,
     projectId: raw.project_id,
     createdAt: raw.created_at,
     channel: raw.channel,
     deliverableArtifactId: raw.deliverable_artifact_id,
+    kind,
+    title: raw.title ?? null,
   };
 }
 

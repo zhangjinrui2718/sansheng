@@ -31,6 +31,7 @@ import { useMemo, useState } from "react";
 import { inFlightTurns, useChatStore } from "@/stores/chat";
 import { useSettingsStore, activeProviderOf } from "@/stores/settings";
 import { MessageList } from "./MessageList";
+import { SessionPicker } from "./SessionPicker";
 import { ChatComposer } from "./ChatComposer";
 import { Pill } from "@/components/ui/primitives";
 import { projectStatusLabel, projectStatusTone } from "@/lib/vocab";
@@ -93,9 +94,13 @@ export function ChatSurface() {
       }),
     [members.data, harness.roles, harness.ready, intakeActive],
   );
+  // ⚠️ **两个维度都要给**(migration 024):`contextKey` 是「哪个项目」,
+  // `sessionId` 是「这个项目里的哪条线」。只给前一个 ⇒ 一个项目下面所有线的
+  // 消息混进同一个面板。
+  const sessionId = useChatStore((s) => s.sessionId);
   const activity = useMemo(
-    () => channelActivityOf(live, ctx, contextKey),
-    [live, ctx, contextKey],
+    () => channelActivityOf(live, ctx, contextKey, sessionId),
+    [live, ctx, contextKey, sessionId],
   );
   const surface = surfaceStatusOf(status, activity);
   /**
@@ -149,6 +154,7 @@ export function ChatSurface() {
             {provider && modelId ? `${provider} / ${modelId}` : "未连接"}
           </span>
         </div>
+        <SessionPicker />
         <div className="flex items-center gap-2 flex-none ss-meta">
           <SurfaceStatusIndicator status={surface} />
           {/* 中断按钮的可见性跟「有没有在飞的轮」走,不跟输入框的可用性走 ——
