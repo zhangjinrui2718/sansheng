@@ -65,6 +65,11 @@ export const PLATFORM_DATA_TABLES: readonly string[] = [
   // ⚠️ 它同时引 `artifacts` 与 `projects` ⇒ 必须排在**两者之前**(外键安全顺序:
   // 子先于父)。漏登记的后果与上面那三张同形:「重置」在有提问记录的库上直接 500。
   "client_questions",
+  // BC-021 质检的审查结论
+  //
+  // ⚠️ 它引 `works` / `projects` / `agents`,而 `artifacts` 那条是 **NO ACTION**
+  // ⇒ 删工件不会级联,但删工作项会。所以排在 `works` 之前、`artifacts` 之后。
+  "review_verdicts",
   // BC1 项目与工作
   "work_deps",
   "works",

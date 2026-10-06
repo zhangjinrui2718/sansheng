@@ -22,7 +22,7 @@ export function parseCapabilityUnion(md) {
   if (!m) return null;
   const caps = new Map();
   for (const line of m[1].split("\n")) {
-    const hit = line.match(/"([a-z]+(?:\.[a-z]+)+)"/);
+    const hit = line.match(/"([a-z_]+(?:\.[a-z_]+)+)"/);
     if (hit) caps.set(hit[1], null);
   }
   return caps;
@@ -36,7 +36,7 @@ export function parseToolTable(md) {
   for (const line of m[1].split("\n")) {
     if (!line.startsWith("|")) continue;
     const cols = line.split("|").slice(1, -1).map((c) => c.trim());
-    const cap = (cols[0].match(/`([a-z]+(?:\.[a-z]+)+)`/) || [])[1];
+    const cap = (cols[0].match(/`([a-z_]+(?:\.[a-z_]+)+)`/) || [])[1];
     if (!cap) continue;
     map.set(cap, [...cols[1].matchAll(/`([a-z_]+)`/g)].map((x) => x[1]));
   }
@@ -53,7 +53,7 @@ export function parseMatrix(md) {
   const granted = new Map(roles.map((r) => [r, new Set()]));
   for (const line of rows.slice(2)) {
     const cols = line.split("|").slice(1, -1).map((c) => c.trim());
-    const caps = [...(cols[0] || "").matchAll(/`([a-z]+(?:\.[a-z]+)+)`/g)].map((x) => x[1]);
+    const caps = [...(cols[0] || "").matchAll(/`([a-z_]+(?:\.[a-z_]+)+)`/g)].map((x) => x[1]);
     if (!caps.length) continue;
     roles.forEach((role, i) => {
       if ((cols[i + 1] || "").includes("✅")) for (const c of caps) granted.get(role).add(c);
@@ -137,7 +137,7 @@ export function parseCeilings(md) {
     // 只取规范列表本身:遇到引用块(说明文字)或 writeKinds 就截断
     const cut = block.search(/^\s*(?:>|\*\*writeKinds\*\*)/m);
     if (cut >= 0) block = block.slice(0, cut);
-    const caps = new Set([...block.matchAll(/`([a-z]+(?:\.[a-z]+)+)`/g)].map((x) => x[1]));
+    const caps = new Set([...block.matchAll(/`([a-z_]+(?:\.[a-z_]+)+)`/g)].map((x) => x[1]));
     if (caps.size) out.set(secs[i][1], caps);
   }
   return out;

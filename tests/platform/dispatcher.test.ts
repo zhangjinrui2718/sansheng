@@ -22,6 +22,7 @@ import { openPlatformDb, openPlatformMemoryDb } from "../../src/platform/storage
 import { insertAgent } from "../../src/platform/storage/repo/agents.js";
 import { insertProject, addMember, removeMember } from "../../src/platform/storage/repo/projects.js";
 import { ensureProjectOrg } from "../../src/platform/runtime/org.js";
+import { insertReviewVerdict } from "../../src/platform/storage/repo/reviewVerdicts.js";
 import {
   insertWork, getWork, updateWorkStatus, listWorks, listWorksPendingReview,
 } from "../../src/platform/storage/repo/works.js";
@@ -130,6 +131,27 @@ function pmIntegrate(agentId: string, task: string, on: Database.Database = db):
       kind: "deliverable", status: "open", authorAgentId: "pm",
       title: `${root.title} 的交付`, body: "整合完成:结论与依据见子项产出",
       metadataJson: null, createdAt: T0 + 100, updatedAt: T0 + 100, workId: root.id,
+    });
+  }
+}
+
+/**
+ * 假质检:**调 `review_verdict(pass)`**。
+ *
+ * ⚠️ 021 之后,质检回合结束**不等于**「这条产出审过了」—— 平台只认
+ * `review_verdicts` 里那一行。判据从「回合成功结束」翻成「存在 pass 结论」
+ * 是为了堵真机事故(2026-10-06 08:57:质检判不通过,而平台把工作项标成已审,
+ * 不通过成为死信)。代价是**每一个模拟质检的测试都必须显式给结论** ——
+ * 这正是那件事的可观测性:漏了就会看到「它被重审了」。
+ *
+ * 不通过那条走向由 `tests/platform/review-verdict.test.ts` 专门覆盖,
+ * 这个文件的职责是别的,不该在这里顺手断言。
+ */
+function qaPass(on: Database.Database = db): void {
+  for (const w of listWorksPendingReview(on, "p1")) {
+    insertReviewVerdict(on, {
+      workId: w.id, projectId: "p1", verdict: "pass", severity: "low",
+      findingArtifactId: null, note: "夹具:通过", reviewedBy: "qa", createdAt: T0 + 100,
     });
   }
 }
@@ -357,6 +379,8 @@ describe("drainProject · 尝试预算(库里的账本,取代内存 stallStore)"
       runAgentTurn: async (agentId, task): Promise<DrainTurnReport> => {
         // C3:项目经理被叫醒整合时写出那条 `deliverable`(否则它会一直是待办)
         pmIntegrate(agentId, task);
+        // 021:质检必须显式给 pass 结论,否则平台不认为它审过了(会重审)
+        if (agentId === "qa") qaPass();
         const count = (db.prepare(`SELECT COUNT(*) AS n FROM works`).get() as { n: number }).n;
         if (count === 0) {
           n++;
@@ -517,7 +541,11 @@ describe("drainProject · 消费语义(at-least-once)", () => {
     const w = mkWork();
     const r = await drainProject({
       db, projectId: "p1", now: () => T0, log: () => {}, ...NO_COALESCE,
-      runAgentTurn: async (agentId, task) => { pmIntegrate(agentId, task); return okTurn; },
+      runAgentTurn: async (agentId, task) => {
+        pmIntegrate(agentId, task);
+        if (agentId === "qa") qaPass(); // 021:质检必须显式给结论
+        return okTurn;
+      },
       runWork: async (_agentId, workId) => {
         updateWorkStatus(db, workId, "done", T0 + 1);
         mkArtifact("art_1");
@@ -570,7 +598,11 @@ describe("drainProject · 消费语义(at-least-once)", () => {
     expect(listPendingDispatchEvents(db, "p1")).toHaveLength(1);
     const r2 = await drainProject({
       db, projectId: "p1", now: () => T0, log: () => {}, ...NO_COALESCE,
-      runAgentTurn: async (agentId, task) => { pmIntegrate(agentId, task); return okTurn; },
+      runAgentTurn: async (agentId, task) => {
+        pmIntegrate(agentId, task);
+        if (agentId === "qa") qaPass(); // 021:质检必须显式给结论
+        return okTurn;
+      },
       runWork: async () => { throw new Error("不该被调用"); },
     });
     // 中间那个 `pm` 是 C3 的整合(它写出交付物 ⇒ 这条待办随即消失)
@@ -625,6 +657,7 @@ describe("排空器 · 重启后补跑(状态在库里)", () => {
         runAgentTurn: async (agentId, task): Promise<DrainTurnReport> => {
           seen.push(agentId);
           pmIntegrate(agentId, task, db2); // ← C3 的整合那一环(用重启后的连接)
+          if (agentId === "qa") qaPass(db2); // 021:质检必须显式给结论
           return okTurn;
         },
         runWork: async () => { throw new Error("重启后没有可执行的工作项"); },

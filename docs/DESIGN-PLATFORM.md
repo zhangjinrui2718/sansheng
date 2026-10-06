@@ -1204,6 +1204,9 @@ export type Capability =
   | "code.write"          // 改代码
   | "code.exec"           // 跑命令
   | "work.report"         // 汇报进度
+  // 审查结论(migration 021):平台**只认** `review_verdict` 这一个工具调用,
+  // 不解析 `review_finding` 的正文 —— 见 §3.2 后面那段。
+  | "work.review_verdict" // 质检:通过 / 不通过
 ```
 
 > **2026-10-03 补录**:上表在首版里漏了 8 条,全部属于同一类缺陷 —— **有动词却无法发现动词的输入**。最严重的两条是 `collab.meeting.respond` / `collab.meeting.conclude`:§5.4 描述了完整的会议流程并引用了这两个动词,但联合里没有定义,意味着**会议一旦发起就永远无法表态、无法收尾**。另外 `collab.read` 是修这一批时发现的同类问题:`collab.answer` 要 `askId`,但没有任何能力能**发现**待答的提问。
@@ -1246,9 +1249,10 @@ export type Capability =
 | `code.read` | `read` / `grep` / `find` / `ls` | SDK 内置 | |
 | `code.write` | `edit` / `write` | SDK 内置 | |
 | `code.exec` | `bash` | SDK 内置 | |
-| `work.report` | `report` | workId, status, summary, artifacts? | |
+| `work.report` | `report` | workId, status, summary, artifacts? |
+| `work.review_verdict` | `review_verdict` | workId, verdict(pass\|fail), severity, findingArtifactId?, note? | 质检的结论 | |
 
-**33 条 capability 展开成 41 个工具。**
+**34 条 capability 展开成 42 个工具。**
 
 `work.assign` 与 `work.create` 共用同一套 `assignee{role, spec?}` 解析(见 §3.3)—— 改派和分派走同一条路径,避免「改派绕过了歧义检查」这种不一致。
 

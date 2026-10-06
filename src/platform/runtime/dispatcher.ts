@@ -112,6 +112,7 @@ import {
   isTerminalWorkStatus, type WorkRow, type WorkStatus,
 } from "../storage/repo/works.js";
 import { blockersForWork } from "../storage/repo/blockers.js";
+import { latestReviewVerdict } from "../storage/repo/reviewVerdicts.js";
 import {
   listArtifacts, getArtifact, type ArtifactRow,
 } from "../storage/repo/artifacts.js";
@@ -1495,8 +1496,19 @@ export function renderTask(db: Database.Database, todo: DriverTodo): string {
         "# 现在轮到你了:审查刚完成的产出\n\n" +
         renderPendingReviews(db, todo) +
         "\n\n用 `board_list` / `work_read` 核实:**目标达成了吗?依据能复核吗?边界越了吗?**\n" +
-        "然后把结论写成 `review_finding` —— **通过也要写通过的依据**(「我核对了 X、Y、Z」),\n" +
-        "「过了」两个字在事后没有任何价值。"
+        "然后做两件**都必须**做的事:\n\n" +
+        "1. 把结论写成 `review_finding` 工件 —— **通过也要写通过的依据**" +
+        "(「我核对了 X、Y、Z」),「过了」两个字在事后没有任何价值\n" +
+        "2. **调 `review_verdict` 报出结论**(`workId` / `verdict` / `severity`;" +
+        "有审查意见工件就一并给 `findingArtifactId`)\n\n" +
+        "⚠️ **第 2 步不是可选项**:平台**只认这个调用**,不读你写的正文。" +
+        "不给结论 ⇒ 平台不认为你审过了,这条产出会被**重新交给你审**。" +
+        "而 `verdict='fail'` 会让平台把这条工作项**退回给 worker 重做一轮** —— " +
+        "所以判 fail 之前先问一句:是「目标没达成」还是「形式没对齐」?" +
+        "后者若不影响可用性,判 fail 会让整轮白跑。\n\n" +
+        "**两份不是一回事**:工件是给人看的现场,`review_verdict` 是给机器读的判据。" +
+        "只有前者的话,平台分不清「通过」与「不通过」—— 那正是 2026-10-06 那次" +
+        "「质检判了不通过、平台却标成已审」的根因。"
       );
     case "report_downstream":
       return (
@@ -2112,7 +2124,22 @@ export async function drainProject(deps: DrainDeps): Promise<DrainResult> {
     // 不能静默漏掉。
     if (!aborted && !failed) {
       if (todo.kind === "review_work") {
-        for (const id of todo.refs) markWorkReviewed(deps.db, id, deps.now());
+        // ⚠️ **021 之后,判据从「回合成功结束」翻成「存在一条 pass 结论」。**
+        //
+        // 翻之前:回合成功就 `markWorkReviewed` —— 于是质检判「不通过」与判
+        // 「通过」在库里**长得一模一样**(都是 `review_state='done'`)。真机事故
+        // (2026-10-06 08:57)就是这么发生的:质检给根工作项判了不通过、6 条判据
+        // 0 条达成、审查意见 3352 字,而库里的工作项是 done/done,**不会再审第二次**,
+        // 不通过也没有任何读者 —— 死信。
+        //
+        // 翻之后:回合成功但**没有结论** ⇒ **不消费**,留在 `pending`,下一 tick 重审,
+        // 并在告警里点名「质检跑完了但没给结论」。模型忘了调 `review_verdict`
+        // 的失效方向从此是「多重审一次」,而不是「静默认审过了」——
+        // 与 `authorize.ts` 的 fail-closed 同一个方向。
+        for (const id of todo.refs) {
+          const v = latestReviewVerdict(deps.db, id);
+          if (v?.verdict === "pass") markWorkReviewed(deps.db, id, deps.now());
+        }
       }
       if (todo.kind === "report_downstream") {
         consumePendingDispatchEvents(deps.db, deps.projectId, todo.agentId, deps.now());

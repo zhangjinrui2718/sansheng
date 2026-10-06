@@ -34,6 +34,7 @@ import { CONTROL_TOOLS } from "./control.js";
 import { COLLAB_TOOLS } from "./collab.js";
 import { MEMORY_TOOLS } from "./memory.js";
 import { CLIENT_TOOLS } from "./client.js";
+import { REVIEW_TOOLS } from "./review.js";
 import { NUDGE_CAPABILITIES } from "../runtime/dispatcher.js";
 import { fail, type PlatformTool, type ToolResult, type ToolRunContext } from "./types.js";
 
@@ -45,6 +46,7 @@ export const ALL_PLATFORM_TOOLS: readonly PlatformTool[] = [
   ...COLLAB_TOOLS,
   ...MEMORY_TOOLS,
   ...CLIENT_TOOLS,
+  ...REVIEW_TOOLS,
 ];
 
 /** 工具名 → 工具定义 */

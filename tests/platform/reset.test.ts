@@ -40,6 +40,7 @@ import { insertProject, addMember } from "../../src/platform/storage/repo/projec
 import { insertWork } from "../../src/platform/storage/repo/works.js";
 import { insertArtifact } from "../../src/platform/storage/repo/artifacts.js";
 import { recordClientQuestion } from "../../src/platform/storage/repo/clientQuestions.js";
+import { insertReviewVerdict } from "../../src/platform/storage/repo/reviewVerdicts.js";
 import { insertSession, appendSessionMessage } from "../../src/platform/storage/repo/sessions.js";
 import { insertDispatchEvent, bumpAttempt } from "../../src/platform/storage/repo/dispatch.js";
 import { insertTurnUsage } from "../../src/platform/storage/repo/usage.js";
@@ -167,6 +168,15 @@ async function seedEverything(): Promise<{ project: string; work: string; agent:
   // 有提问记录的库上直接 500。走仓储而不是裸 SQL:它是这条记录唯一的生产写口。
   recordClientQuestion(db, {
     questionArtifactId: "q_test", projectId: project, askedBy: agent, askedAt: NOW,
+  });
+
+  // review_verdicts(021):一条 `fail`。**选 fail 不选 pass** —— 那正是事故现场
+  // 的形状(质检判了不通过),而 `pass` 那条会让这张表在夹具里看不出任何问题。
+  // `finding_artifact_id` 留空:它对 `artifacts` 是 NO ACTION,留空才不把夹具
+  // 绑在工件上(工件上面已经被别的测试用掉了)。
+  insertReviewVerdict(db, {
+    workId: root, projectId: project, verdict: "fail", severity: "medium",
+    findingArtifactId: null, note: "夹具:判不通过", reviewedBy: reviewer, createdAt: NOW,
   });
 
   insertSession(db, { id: "s_test", projectId: project, createdAt: NOW });

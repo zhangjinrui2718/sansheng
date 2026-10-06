@@ -125,7 +125,10 @@ describe("能力面已完整(BC5 接线前置)", () => {
 
   it("注册表一致性问题为 0", () => {
     expect(registrySnapshot().problems).toEqual([]);
-    expect(registrySnapshot().implemented).toBe(34);
+    // 34 → 35:021 的 `review_verdict`(质检的审查结论,见 tools/review.ts)。
+    // 这个数**必须手工跟着改** —— 若从代码自动推导,它就永远等于自己,
+    // 那一刻它就不再是「有没有人偷偷加了工具」的哨兵了。
+    expect(registrySnapshot().implemented).toBe(35);
   });
 
   it("client 工具已注册", () => {

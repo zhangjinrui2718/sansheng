@@ -300,11 +300,14 @@
 
 ### 5.4 Capability Ceiling
 
-`project.read` · `work.read` · `work.list` · `collab.ask` · `collab.escalate` · `collab.answer` · `collab.read` · `collab.meeting.read` · `collab.meeting.respond` · `blackboard.read` · `blackboard.write`(**仅 `review_finding`**)· `change.review` · `change.read` · `blocker.open` · `blocker.read` · `memory.read`
+`project.read` · `work.read` · `work.list` · `collab.ask` · `collab.escalate` · `collab.answer` · `collab.read` · `collab.meeting.read` · `collab.meeting.respond` · `blackboard.read` · `blackboard.write`(**仅 `review_finding`**)· `change.review` · `change.read` · `blocker.open` · `blocker.read` · `memory.read` · `work.review_verdict`(migration 021)
 
 **writeKinds**:`["review_finding"]` —— **只允许写这一种工件**。这是三重门控(capability × scope × writeKind)里最窄的一个,设计上有意为之:审查员能发言,但不能污染其他记录。
 
 **它有 `collab.meeting.respond` 但没有 `collab.convene` / `collab.meeting.conclude`** —— 能被叫去开会并表态,但不能发起、也不能替主持人收尾。
+
+> **`work.review_verdict` 让「审出了什么」成为一行结构化事实**,而不是只躺在 `review_finding` 的正文里。真机事故(2026-10-06 08:57):质检判**不通过**、6 条验收判据 0 条达成、审查意见 3352 字,而平台把那条工作项标成了**已审** —— 因为 `markWorkReviewed` 的判据是「质检回合成功结束」而不是「判通过」,不通过因此没有任何读者(死信)。`review_verdict` 就是那个读者:调用它写一行,`pass` 让平台标已审,`fail` 让平台走 `works.status` 唯一写口**重开**这条工作项。⚠️ 它**不持 `work.update`** —— 边界没松:质检能**说**它不合格,不能**自己改**它。
+>
 
 ### 5.5 出厂工具集合
 
@@ -318,7 +321,8 @@
     "board_list", "board_read", "board_write",
     "change_review", "change_list", "change_read",
     "blocker_open", "blocker_list", "blocker_read",
-    "memory_search"
+    "memory_search",
+    "review_verdict"
   ],
   "deny": ["convene", "meeting_conclude", "read", "grep", "find", "ls",
            "edit", "write", "bash", "tell_client", "ask_client",
@@ -326,7 +330,7 @@
 }
 ```
 
-**20 个工具。** `deny` 显式列出代码工具、会议主持、项目范围与工作分派 —— 审查员可以**参加**会议但不能**发起或收尾**,可以**看**工作项但不能**创建或改派**。
+**21 个工具。** `deny` 显式列出代码工具、会议主持、项目范围与工作分派 —— 审查员可以**参加**会议但不能**发起或收尾**,可以**看**工作项但不能**创建或改派**。
 
 ### 5.6 提示词单元
 
@@ -389,13 +393,14 @@
 | `memory.read` | ✅ | ✅ | ✅ | ✅ |
 | `memory.write` | ✅ | — | — | — |
 | `work.report` | — | ✅ | ✅ | — |
+| `work.review_verdict` | — | — | — | ✅ |
 | `code.read` | — | — | ✅ | — |
 | `code.write` | — | — | ✅ | — |
 | `code.exec` | — | — | ✅ | — |
 | **`client.ask`** | **✅** | — | — | — |
 | **`client.message`** | **✅** | — | — | — |
 
-**共 33 条 capability。** 读这张表最该看的是**最后两行** —— 整个组织里只有一个角色能跟甲方说话,这不是提示词里的约定,是这张表的形状决定的。
+**共 34 条 capability。** 读这张表最该看的是**最后两行** —— 整个组织里只有一个角色能跟甲方说话,这不是提示词里的约定,是这张表的形状决定的。
 
 三处值得单独注意:
 

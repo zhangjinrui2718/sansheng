@@ -55,7 +55,10 @@ export type Capability =
   | "code.read"
   | "code.write"
   | "code.exec"
-  | "work.report";
+  | "work.report"
+  // ── 021:审查结论。**平台只认这个工具调用**,不解析 review_finding 的正文 ——
+  // 见 tools/review.ts 文件头(事故 2026-10-06 08:57)。
+  | "work.review_verdict";
 
 /** 闭合集数组形式 —— 遍历/校验用。顺序与设计文档一致。 */
 export const CAPABILITIES = [
@@ -92,6 +95,7 @@ export const CAPABILITIES = [
   "code.write",
   "code.exec",
   "work.report",
+  "work.review_verdict",
 ] as const satisfies readonly Capability[];
 
 /**
@@ -115,7 +119,8 @@ export type PlatformToolName =
   | "blocker_open" | "blocker_update" | "blocker_list" | "blocker_read"
   | "memory_search" | "memory_remember"
   | "ask_client" | "tell_client"
-  | "report";
+  | "report"
+  | "review_verdict";
 
 export type ToolName = SdkToolName | PlatformToolName;
 
@@ -167,6 +172,7 @@ export const CAPABILITY_TOOLS: Readonly<Record<Capability, readonly ToolName[]>>
   "code.write": ["edit", "write"],
   "code.exec": ["bash"],
   "work.report": ["report"],
+  "work.review_verdict": ["review_verdict"],
 };
 
 /** SDK 内置工具名集合。**必须先于 PLATFORM_TOOLS 初始化** —— 后者在模块加载期

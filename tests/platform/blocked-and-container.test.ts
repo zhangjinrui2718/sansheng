@@ -48,6 +48,7 @@ import {
   type WorkStatus,
 } from "../../src/platform/storage/repo/works.js";
 import { insertArtifact } from "../../src/platform/storage/repo/artifacts.js";
+import { insertReviewVerdict } from "../../src/platform/storage/repo/reviewVerdicts.js";
 import { insertBlocker, blockWork } from "../../src/platform/storage/repo/blockers.js";
 import {
   collectPendingWork, hasActionableWork,
@@ -376,7 +377,15 @@ describe("丙② · 整合成功后平台把容器置 `done`(唯一写口 `updat
       db, projectId: "p1", now: () => T0, log: () => {},
       runAgentTurn: async (agentId, task) => {
         pmWritesDeliverable(agentId, task);
-        if (agentId === "qa") stateWhenQaWoke = getWork(db, root)!.reviewState;
+        if (agentId === "qa") {
+          stateWhenQaWoke = getWork(db, root)!.reviewState;
+          // 021:质检必须显式给 pass 结论 —— 平台不再把「回合结束」当成「审过了」。
+          // 少了这一行,这条工作项会留在 `pending` 被重审,本文件的断言就变成在测别的东西。
+          insertReviewVerdict(db, {
+            workId: root, projectId: "p1", verdict: "pass", severity: "low",
+            findingArtifactId: null, note: "夹具:通过", reviewedBy: "qa", createdAt: T0 + 100,
+          });
+        }
         return okTurn;
       },
       runWork: async () => { throw new Error("这一串里没有工作项要执行"); },
