@@ -27,7 +27,7 @@
  *     通道」——输入框禁用与屏幕上显示的东西因此仍然是**同一个判据**
  *     (`channelOf`),这正是 bug A 那次修好的一半,不许在这里另立一份。
  */
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { inFlightTurns, useChatStore } from "@/stores/chat";
 import { useSettingsStore, activeProviderOf } from "@/stores/settings";
 import { MessageList } from "./MessageList";
@@ -98,6 +98,7 @@ export function ChatSurface() {
   // `sessionId` 是「这个项目里的哪条线」。只给前一个 ⇒ 一个项目下面所有线的
   // 消息混进同一个面板。
   const sessionId = useChatStore((s) => s.sessionId);
+  const contextNotice = useChatStore((s) => s.contextNotice);
   const activity = useMemo(
     () => channelActivityOf(live, ctx, contextKey, sessionId),
     [live, ctx, contextKey, sessionId],
@@ -178,6 +179,25 @@ export function ChatSurface() {
           CJK 会被压成「一个字一行」(看起来像样式没加载)。 */}
       <SessionPicker />
 
+      {/* ⚠️ **上下文刚换过时的那一句解释**(2026-10-06 真机事故的修复)。
+          接待会话里立项 → 服务端把消息整体迁进新项目 → 界面切过去。
+          迁移是对的,但**切换必须有解释**:否则用户经历的是「我发了句话、
+          等了很久、界面变了、我的话不知道去哪了」。
+          它不是一条平台记录(库里不该为界面提示多写一行),所以是前端状态。 */}
+      {contextNotice !== null && (
+        <div
+          className="flex-none"
+          style={{
+            padding: "6px 16px", fontSize: 11, lineHeight: "1.6",
+            color: "var(--bone-dim)",
+            background: "var(--ink-1)",
+            borderBottom: "1px solid var(--ink-3)",
+          }}
+        >
+          {contextNotice}
+        </div>
+      )}
+
       <MessageList />
 
       <ChatComposer
@@ -236,8 +256,47 @@ export function SurfaceStatusIndicator({ status }: { status: SurfaceStatus }) {
           "服务端在本项目这一轮排空结束前可能拒收(那条错误会显示在会话里)"
         : undefined;
   return (
-    <span className={className} title={title}>
+    <span className={`${className} flex items-center gap-1`} title={title}>
       ● {label}
+      <ElapsedSince streaming={status === "streaming" || status === "internal"} />
+    </span>
+  );
+}
+
+/**
+ * 「已经跑了多少秒」。
+ *
+ * ⚠️ **为什么需要它**(2026-10-06 真机事故):业务经理有一轮跑了 **3 分 50 秒**
+ * —— 那 3 分 50 秒里屏幕上只有用户自己的乐观上屏气泡,「推演中」四个字不动的。
+ * 用户据此判断「被中断了、没人回应」。
+ *
+ * 而那 3 分 50 秒里系统**确实在干活**(开项目、拆解、读旧项目)。
+ * ⇒ 一个**会走的秒数**是最便宜的证伪:它把「死了」与「在忙」分开。
+ *
+ * ⚠️ **它只是秒数,不是承诺**:不代表还剩多久。超过 60 秒换算成分钟 ——
+ * 「已经 3 分 20 秒」比「已经 200 秒」可读得多。
+ */
+function ElapsedSince({ streaming }: { streaming: boolean }) {
+  const [now, setNow] = useState(() => Date.now());
+  const [since, setSince] = useState<number | null>(null);
+
+  // 只在跑的时候计时;一停下来就把基准丢掉(下一次流式重新开始算)
+  useEffect(() => {
+    if (!streaming) {
+      setSince(null);
+      return;
+    }
+    setSince(Date.now());
+    const t = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, [streaming]);
+
+  if (since === null) return null;
+  const sec = Math.max(0, Math.round((now - since) / 1000));
+  const text = sec < 60 ? `${sec} 秒` : `${Math.floor(sec / 60)} 分 ${sec % 60} 秒`;
+  return (
+    <span className="sansheng-text-mute" style={{ fontSize: 10 }} title="这一轮已经跑了多久">
+      {text}
     </span>
   );
 }

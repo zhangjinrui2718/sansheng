@@ -186,6 +186,21 @@ export interface ChatState {
   sessions: SessionSummary[];
   /** 首屏上下文是否已经决定过(见 `decideInitialContext`)。 */
   contextDecided: boolean;
+  /**
+   * **上下文刚刚换过,以及为什么**(`null` = 没换过)。
+   *
+   * ⚠️ **2026-10-06 真机事故的修复**。接待会话里立项之后,服务端会把接待会话的
+   * 消息**整体迁进新项目**并删掉接待会话(C4 的设计:那段对话就是立项背景)。
+   * 客户端随即切到新项目 —— 但**切换是静默的**,而用户刚经历的是「我发了一句话,
+   * 等了很久,界面变了,我的话不知道去哪了」。
+   *
+   * 迁移本身是对的(不留着接待会话是因为它的工具面是接待模式的)。缺的是
+   * **告诉任何人它发生过** —— 7-N:见不到的现场等于没有现场。
+   *
+   * ⚠️ 它是**前端状态**,不落库:库里不该为一次界面提示多一行 `system` 消息
+   * (`session_messages` 的 `kind='system'` 只有两个生产者,都是平台自己的事实)。
+   */
+  contextNotice: string | null;
   /** 当前项目的工作项 / 工件 / 提问发生变更 —— 详情页据此回查。 */
   projectRevision: number;
   /**
@@ -320,7 +335,13 @@ export interface ChatState {
   socket: PlatformSocket | null;
 
   loadProjects(): Promise<void>;
-  selectProject(id: string): Promise<void>;
+  /**
+   * 切到某个项目。
+   *
+   * ⚠️ `notice` 是**给用户看的一句话**(切换原因)。它在切换时出现在对话页顶部,
+   * 直到下一次切换或用户发消息为止 —— 因为「界面变了」这件事必须**有解释**。
+   */
+  selectProject(id: string, opts?: { notice?: string }): Promise<void>;
   /**
    * 切到某条对话线(migration 024)。
    *
@@ -591,6 +612,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   sessionId: null,
   sessions: [],
   contextDecided: false,
+  contextNotice: null,
   projectRevision: 0,
   projectsRevision: 0,
   activityRevision: 0,
@@ -623,12 +645,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
   },
 
-  async selectProject(id) {
+  async selectProject(id, opts) {
     set({
       projectId: id,
       intakeActive: false,
       sessionId: null,
       sessions: [],
+      contextNotice: opts?.notice ?? null,
       turns: [],
       inFlight: {},
       inFlightOrder: [],
@@ -714,6 +737,20 @@ export const useChatStore = create<ChatState>((set, get) => ({
     set({
       projectId: null,
       intakeActive: true,
+      // ⚠️ **这两行是 2026-10-06 真机事故的修复**(migration 024 的后续)。
+      //
+      // 原来这里只清了 `projectId` / `intakeActive`,**`sessionId` 与 `sessions`
+      // 留着上一个项目的值**。于是:
+      //   用户在项目 A 的对话里 → 点「接待会话」→ 发一句话
+      //   → `sendMessage` 把 **A 的 sessionId** 连同 `projectId: null` 一起发出去
+      //   → 服务端校验归属:`getSession(A的会话).projectId !== null`
+      //   → **`code: not_found`,消息被拒**
+      //   → 用户看到自己的乐观上屏气泡,然后**什么都没有**。
+      //
+      // 而「被服务端拒收」这件事**没有任何反馈** —— 表现与「服务端挂了」一模一样,
+      // 且整条链路上没有一个异常:每一个动作都是正常点击。
+      sessionId: null,
+      sessions: [],
       turns: [],
       inFlight: {},
       inFlightOrder: [],
@@ -761,7 +798,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
     // ⚠️ **`sessionId` 还没解析出来时不做乐观上屏** —— 而不是拿一个假的填上。
     // 拿 `""` 或 `"<unknown>"` 填进去,那条轮就永远匹配不上任何真实的会话,
     // 而它躺在时间线上看起来完全正常(7-N:见不到的现场等于没有现场)。
-    const line = get().sessionId;
+    // ⚠️ **接待会话里根本不发 `sessionId`** —— 全局只有那一条接待会话
+    // (迁移里的部分唯一索引),没有「选哪条」这回事,带上它只会多一条能错的路径。
+    // 这条与 `startIntake` 里清指针是**两层**:一层治「指针带过来」,
+    // 一层治「就算带过来了也别发」。
+    // 提示已经显示过了,用户开始新的话题 ⇒ 它不该一直挂着。
+    set({ contextNotice: null });
+    const line = intakeActive ? null : get().sessionId;
     if (line !== null) {
       const t = newTurn(
         `u_${Date.now().toString(36)}`,
@@ -1028,7 +1071,17 @@ export const useChatStore = create<ChatState>((set, get) => ({
         // 而它看起来完全正常。
         invalidateHarnessCache();
         set((s) => ({ projectsRevision: s.projectsRevision + 1 }));
-        if (onIntake) void get().selectProject(e.projectId);
+        if (onIntake) {
+          // ⚠️ **带一句解释过去**。接待会话的消息已经被服务端迁进新项目、
+          // 接待会话本身被删掉了 —— 那是一次**静默的上下文变更**,而用户刚
+          // 经历的是「我发了一句话、等了很久、界面变了」。
+          //
+          // 迁移是对的(C4 的设计:那段对话就是立项背景),缺的只是**告诉任何人
+          // 它发生过**。这句话是那一半。
+          void get().selectProject(e.projectId, {
+            notice: `已立项「${e.name}」—— 你刚才在接待会话里说的那些话,已经一起搬到这个项目里了。`,
+          });
+        }
         return;
       }
 
