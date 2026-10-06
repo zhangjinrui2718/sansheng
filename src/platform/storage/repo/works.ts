@@ -86,8 +86,20 @@ export const WORK_TRANSITIONS: Readonly<Record<WorkStatus, readonly WorkStatus[]
   blocked: ["open", "in_progress", "done", "failed", "cancelled"],
   // 退回重做(§12 #9)—— 代价见下面【裁决 ①】。
   done: ["in_progress"],
-  // 重试。failed 不在待办里、也跑不了,这条边是它唯一的复活路径。
-  failed: ["in_progress"],
+  // `failed` 的两条出边。**2026-10-06 真机现场补的第二条**:
+  //
+  //   之前只有 `in_progress`,而它是「原样重跑」——真机那条失败的工作项
+  //   (合并 7 份报告,单回合 109,231 token 撞墙钟)重跑会**同样超时**。
+  //   于是只剩一个动作:新建更窄的工作项。**而旧的这条 `failed` 没有办法退役**
+  //   (`cancelled` 不在出边里)⇒ 它永远停在 `failed` ⇒ 任何「看到 failed 就
+  //   重新划范围」的规则都会一直叫(直到预算用尽),而项目经理**做完了正事**
+  //   却收不了尾。
+  //
+  // 加 `cancelled` 的理由与 `cancelled: []` **不冲突**:后者说的是「`cancelled`
+  // 自己没有出边」(它是真终态,不可复活),而这里是「**可以走进来**」。
+  // 一条被重新规划取代掉的失败工作项,它的正确归宿就是「不做了」——
+  // 没有这个动作,「失败」就成了一个只进不出的坑。
+  failed: ["in_progress", "cancelled"],
   // **真终态**,没有出边 —— 见下面【裁决 ②】。
   cancelled: [],
 };

@@ -440,7 +440,24 @@ describe("任务 2 · WORK_TRANSITIONS 表本身", () => {
     expect(isWorkTransitionAllowed("done", "open")).toBe(false);
     expect(isWorkTransitionAllowed("done", "done")).toBe(true); // 同状态 = 幂等空操作
     expect(isWorkTransitionAllowed("failed", "open")).toBe(false);
-    expect(isWorkTransitionAllowed("failed", "cancelled")).toBe(false);
+    // ⚠️ **`failed → cancelled` 现在是允许的(2026-10-06 真机现场改判)**。
+    //
+    // 这一条原来断言 `false`,而它把**两件不同的事**混成了一件:
+    //   · **复活**(`failed → in_progress`):让一条失败的活原样再跑一次。
+    //     一直允许,而且一直该谨慎(真机那条重跑会同样超时)。
+    //   · **退役**(`failed → cancelled`):把一条**已被重新规划取代**的失败
+    //     工作项标成「不做了」。它走��的是**另一个终态**,没有复活任何东西。
+    //
+    // 只留复活那条边时,一个真实的坑就形成了:项目经理把一条超时的工作项拆成
+    // 更窄的几条、活也干完了,而**旧的 `failed` 出不来** —— 它永远停在
+    // `failed`,于是任何「看到 failed 就重新划范围」的规则都会一直叫到预算用尽,
+    // 而项目经理**做完了正事却收不了尾**。
+    //
+    // ⇒ 判据不是「终态不许出去」,是「**终态不许被复活**」:
+    // `cancelled` 零出边(仍是真终态、不可复活),`done` 只能回 `in_progress`。
+    expect(isWorkTransitionAllowed("failed", "cancelled")).toBe(true);
+    // ⚠️ 退役之后**不能复活** —— `cancelled` 的零出边就是这一条
+    expect(isWorkTransitionAllowed("cancelled", "in_progress")).toBe(false);
   });
 
   it("同状态一律放行(幂等空操作,不算迁移)", () => {

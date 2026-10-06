@@ -92,7 +92,7 @@ function sync(r: Promise<ToolResult> | ToolResult): ToolResult {
 
 // ── ① 规则表是闭合的 ────────────────────────────────────────────
 
-describe("B1 · 规则表:每个 `TodoKind` 恰好一条规则(C3 之后 10 条,丙③ 11 条,020 12 条,真机终局 13 条)", () => {
+describe("B1 · 规则表:每个 `TodoKind` 恰好一条规则(C3 之后 10 条,丙③ 11 条,020 12 条,真机终局 13 条,静默停摆 14 条)", () => {
   it("`TodoKind` 的每个取值**恰好**有一条规则产出它 —— 没有分支留在表外", () => {
     const kinds = RULES.map((r) => r.then.kind);
     // B1 落地时是 8/8;C3 补了流水线缺的两环(`integrate` / `handover`);
@@ -102,9 +102,13 @@ describe("B1 · 规则表:每个 `TodoKind` 恰好一条规则(C3 之后 10 条,
     // 规则认领这一条** ⇒ 答复落库即死信,真机 2026-10-06 09:09 现场);
     // 2026-10-06 的真机终局补上第 13 条 `close_finished_project`(所有工作项终结 +
     // 全部交付完成,而 `projects.status` 永远是 `active` —— **项目永远收不了口**)。
+    // 2026-10-06 22:35 的真机停摆补上第 14 条 `recover_failed_work`:一条 worker
+    // 工作项撞墙钟被记成 `failed` 之后,**没有任何规则认领 `failed`** ⇒ 整项目零待办,
+    // 而「零待办」与「组织已经把活干完了」在日志里长得一模一样
+    // (`collectTodos` 实测 `runnable: 0, exhausted: 0` —— 不是预算用尽,是压根没规则)。
     // 这几个数字**同时**改是对的:集合相等那条断言才是闭合性本身。
-    expect(RULES).toHaveLength(13);
-    expect(TODO_KINDS).toHaveLength(13);
+    expect(RULES).toHaveLength(14);
+    expect(TODO_KINDS).toHaveLength(14);
     // 集合相等 ⇒ 「表产出的 kind」与「闭集」是同一个集合
     expect([...kinds].sort()).toEqual([...TODO_KINDS].sort());
     // 且没有两条规则争同一个 kind(否则「谁负责这一条」没有答案)

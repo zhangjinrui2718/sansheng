@@ -890,6 +890,8 @@ export type TriggerTodoKind =
   | "review_change"
   | "fix_work_assignment"
   | "resolve_blocked_work"
+  /** 有工作项停在 `failed`,项目经理要重新划范围(2026-10-06 静默停摆补) */
+  | "recover_failed_work"
   | "decompose_project"
   | "execute_work"
   | "review_work"

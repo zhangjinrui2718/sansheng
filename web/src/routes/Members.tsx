@@ -184,6 +184,7 @@ const TODO_KIND_LABEL: Record<TriggerTodoKind, string> = {
   review_change: "评审变更",
   fix_work_assignment: "改派工作项",
   resolve_blocked_work: "处理被卡住的工作项",
+  recover_failed_work: "重新划失败的工作项",
   decompose_project: "拆解项目",
   execute_work: "执行工作项",
   review_work: "审查产出",

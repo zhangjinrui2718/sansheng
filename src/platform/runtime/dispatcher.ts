@@ -164,6 +164,17 @@ export const TODO_KINDS = [
    * 没有任何人会被叫醒。判据见 `RULES` 里 `resolve_blocked_work` 的 `why`。
    */
   "resolve_blocked_work",
+  /**
+   * 有工作项**停在 `failed`** 而没有任何人在处置它 —— 项目经理必须重新划范围。
+   *
+   * ⚠️ 这一条是 `resolve_blocked_work` 的**同构**兄弟,而它当时**没人写**。
+   * 同一个形态、同一个后果:那条待办不存在 ⇒ 整项目零待办 ⇒ 排空器每 10 秒空转,
+   * 而「零待办」与「组织已经把活干完了」在日志里长得**一模一样**。
+   *
+   * 差别只在**谁来处置**:被阻塞的活 PM 改派/登记阻塞就能继续,而
+   * **`failed` 的活 PM 重跑一次就会同样失败**(见 `RULES` 里的 `why`)。
+   */
+  "recover_failed_work",
   /** 项目里一个工作项都没有 —— 拆解 */
   "decompose_project",
   /** 分派给我、前置已满足的工作项 */
@@ -254,6 +265,9 @@ const PRIORITY: Readonly<Record<TodoKind, number>> = {
   // 而它们都挡着下面的执行 / 审查 / 整合。
   fix_work_assignment: 4,
   resolve_blocked_work: 5,
+  // 与 `resolve_blocked_work` 同构,但**更挡路**:`blocked` 改派一下就能继续,
+  // 而 `failed` 没人重新划范围就一直卡着下游(见 RULES 里的 `why`)。
+  recover_failed_work: 5,
   decompose_project: 6,
   execute_work: 7,
   review_work: 8,
@@ -865,6 +879,60 @@ export const RULES: readonly Rule[] = [
       " —— 平台不执行非 worker 的负责人,`needsDecomposition` 也不为真(项目里确实有工作项)," +
       "于是它谁也不叫醒。这条规则是**存量数据**的自愈路径(新数据由 `work_create` / " +
       "`work_assign` 的调用期门直接拒收)。",
+  },
+  {
+    id: "recover_failed_work",
+    // `failed` 是一次**状态迁移**(`work_update` → `work_status_changed`)——
+    // 与 `resolve_blocked_work` 同一条触发。处置掉的信号是同一个事件
+    // (PM 把它改成 `cancelled` / 拆成新工作项),所以不需要新增触发名。
+    on: ["work_status_changed", "tick"],
+    if: (q) => {
+      const pm = q.members.find((m) => m.role === "project_manager");
+      if (pm === undefined) return [];
+      // ── 唯一的判据:项目里有工作项停在 `failed` ────────────────────
+      //
+      // `failed` 是**终态**(`isTerminalWorkStatus` 含 done/failed/cancelled),
+      // 所以 `execute_work`(`pendingWork.myOpenWorks` 只要 `open|in_progress`)
+      // **永远不会**再捡起它 —— 也不该捡:重跑同一条只会同样失败(见 `why`)。
+      // 于是它连带把依赖它的下游全卡在 `myWaitingWorks`(`depsSatisfied=false`),
+      // 而**没有任何规则读 `works.status='failed'`** ⇒ 整项目**零待办**。
+      //
+      // ⚠️ **不判「项目是不是还有别的事可做」**:那要跨规则看别的规则的输出,
+      // 而 `collectTodos` 是纯查询、规则之间不能互相依赖。用「有 failed 就叫 PM」
+      // + 尝试预算限流,三条出路都正确(见 `why` 的最后一段)。
+      const ids = q.works.filter((w) => w.status === "failed").map((w) => w.id).sort();
+      if (ids.length === 0) return [];
+      return [{
+        agentId: pm.agentId, role: "project_manager", kind: "recover_failed_work",
+        // 集合谓词,与 `resolve_blocked_work` / `review_work` 同形:
+        // **进度 = key 变了** —— 处置掉一条,集合缩小 ⇒ 自动拿到新预算。
+        key: `recover_failed_work:${ids.join("+")}`,
+        target: null, refs: ids, targetState: null,
+        label: `重新划范围:${ids.length} 条失败的工作项`,
+      }];
+    },
+    then: { kind: "recover_failed_work", targetRole: "project_manager" },
+    why:
+      "**真机实测的静默停摆**(2026-10-06 22:35,项目「美股自动化交易平台方案设计·单报告" +
+      "合并版」):一条 worker 工作项在单回合读进去 **109,231 token** 之后撞上墙钟上界" +
+      "(10 分钟)被 `abort()` 打断,经 `updateWorkStatus` 这个唯一写口记成 `failed`。\n" +
+      "`work_failed` outbox 事件被消费了(业务经理 22:38:48 确实被叫醒、去向甲方交代)—— " +
+      "**然后就再也没有任何人被叫醒**。直接跑 `collectTodos`:`runnable: 0, exhausted: 0`。\n" +
+      "⚠️ **`exhausted` 也是 0**:不是「试够了所以放弃」,是**根本没有一条规则提到 " +
+      "`failed`**(`blocked` 有 `resolve_blocked_work`,`failed` 一条都没有)。" +
+      "而「零待办」与「组织已经把活干完了」在日志里长得**一模一样** —— " +
+      "项目页上那个数字就是「什么都没在干,但项目还在进行中」。\n" +
+      "**为什么叫 PM 而不是让 worker 重跑**:`execution.ts` 的 `disposeTimeout` 注释里" +
+      "已经写明「一次卡到墙钟的回合,自动重跑只是把同一段卡死行为再买一遍」。" +
+      "真机那条正是如此:目标太大(合并 7 份报告)⇒ 原样重跑会同样超时。" +
+      "**该做的是重新划范围**——而「怎么划」是业务判断,PM 有 `work_create` / " +
+      "`work_update` / `work_assign`(§2.11.3:不替模型判)。\n" +
+      "⚠️ **三条出路都正确,这是它敢用「有 failed 就叫」这个粗判据的原因**:\n" +
+      "  ① PM 把它关掉 / 拆掉 ⇒ `failed` 消失 ⇒ 判据不成立,规则安静下来;\n" +
+      "  ② PM 改写目标后重开 ⇒ 它不再是 `failed` ⇒ 同上;\n" +
+      "  ③ PM 什么都不做 ⇒ 尝试预算走完,`exhausted` 出现 ⇒ `announceDrain` " +
+      "落一条 `system` 消息报出「恢复尝试已用尽」(**不是静默停**)。\n" +
+      "终止判据落在 `works.status` 上(`failed` 集合清空),重启后自动补跑。",
   },
   {
     id: "resolve_blocked_work",
@@ -1582,6 +1650,37 @@ export function renderTask(db: Database.Database, todo: DriverTodo): string {
         "\n\n用 `work_assign` 把它们改派给 worker(或者用 `work_update` 关掉不该存在的)," +
         "然后在同一条回复里说明你怎么处置的。"
       );
+    case "recover_failed_work":
+      // ⚠️ 同 `resolve_blocked_work` 那一段的性质:判据只在 `RULES` 里有
+      // 一处,这里说的是「**重划范围**」时你有哪些动词可用。
+      return (
+        "# 现在轮到你了:有工作项失败了,需要重新划范围\n\n" +
+        "下面这些工作项**停在 `failed`**。`failed` 是**终态**,所以执行待办" +
+        "(`execute_work` 只看 `open|in_progress`)**永远不会再捡起它们** ——\n" +
+        "依赖它们的下游也一条都开不了工。**没有任何人会替你处理它们**,\n" +
+        "而「零待办」与「组织已经把活干完了」在日志里长得一模一样。\n\n" +
+        renderFailedWorks(db, todo) +
+        "\n\n⚠️ **不要原样重跑。** 一条工作项被打成 `failed` 通常是因为它**一次" +
+        "做不完**(真机现场:合并 7 份报告的那条,单回合读进去 10.9 万 token、" +
+        "撞上墙钟上界被打断)。原样复活再跑一次会**同样超时** —— 那不是恢复," +
+        "那是把同一段卡死再买一遍。\n\n" +
+        "**平台允许你走的只有这两条路**(`failed` 在迁移表里只有这两个出边," +
+        "别的会被 `work_update` 直接拒掉并回灌合法出边):\n\n" +
+        "**① 拆小(推荐,绝大多数情况该走这条)**\n" +
+        "- 用 `work_create` 建 2–4 条**更窄**的工作项,每条一个明确的子问题 —— " +
+        "判据是「一条能在一个回合里做完」,不是「一条听起来完整」。\n" +
+        "- 建完把这条**退役**:`work_update` 把它的 `status` 改成 `cancelled`" +
+        "(它已经被取代了,不是还要做)。\n" +
+        "- ⚠️ **不改掉它就是没做完**:`failed` 会一直停在那儿,系统会一遍遍" +
+        "来问你,而真正该干的活已经没人推了。\n\n" +
+        "**② 复活重试(只在失败原因确实是偶发时才用)**\n" +
+        "- `work_update` 把 `status` 改成 `in_progress`,它就回到执行待办里。\n" +
+        "- ⚠️ **平台不记录失败原因**,所以这个判断只能你来做:目标过大、" +
+        "一个回合做不完 ⇒ 走 ①;外部依赖抽风、偶发 ⇒ 走 ②。判错会再失败一次," +
+        "而系统只给有限的几次机会,之后会**公开报出「重新划范围的尝试已用尽」**," +
+        "不会静默停在那儿。\n\n" +
+        "**处置完要在回复里说清**:哪几条被拆成了什么、哪条被关掉了、为什么。"
+      );
     case "resolve_blocked_work":
       // ⚠️ **这一段是「`blocked` 该怎么处置」的第二次陈述吗?** 不是 ——
       // 它是**平台判据的引用**:下面列出的每条工作项都是平台从库里查出来的
@@ -2035,6 +2134,29 @@ function renderBlockedWorks(db: Database.Database, todo: DriverTodo): string {
           ? `;挂着 ${blockers.length} 个未解决阻塞:` +
             blockers.map((b) => `\`${b.id}\`[${b.severity}]`).join(" / ")
           : ";⚠️ **一条阻塞都没登记** —— 没人说得出它为什么 `blocked`"),
+    );
+  }
+  return lines.join("\n");
+}
+
+/**
+ * 失败工作项的现场(平台从库里查出来的,不是模型转述的)。
+ *
+ * ⚠️ **只列能查到的**:`works` 表上没有「为什么失败」那一列,也没有「谁在等它」。
+ * 刻意**不猜**:「它为什么失败」不可查(§2.11.3:判据与现场都只读结构化的列),
+ * 拿别的行的时间差去凑一个「停了多久」是**印一行看起来正常的错数字** ——
+ * 试过一版用「最后一条消息的时间」当「此刻」,而那可能偏几小时。
+ */
+function renderFailedWorks(db: Database.Database, todo: DriverTodo): string {
+  const lines: string[] = [];
+  for (const id of todo.refs) {
+    const w = getWork(db, id);
+    if (w === null) continue;
+    const a = getAgent(db, w.assigneeAgentId);
+    lines.push(
+      `- \`${w.id}\`「${w.title}」← 负责人 ` +
+        `${a === null ? w.assigneeAgentId : `${a.displayName}(${a.role})`}` +
+        `;状态 \`${w.status}\`、审查 \`${w.reviewState}\``,
     );
   }
   return lines.join("\n");
