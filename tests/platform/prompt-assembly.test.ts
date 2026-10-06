@@ -191,7 +191,13 @@ describe("出厂单元集 · 覆盖不变式(仓库 harness/system_prompts/)", (
     for (const u of shippedUnits()) {
       const body = readFileSync(join(DIR, `${u}.md`), "utf8");
       expect(body.trim().length, `${u} 内容为空`).toBeGreaterThan(200);
-      expect(body, `${u} 像是占位符`).not.toMatch(/TODO|TBD|待补/);
+      // ⚠️ **`TODO` 必须带边界**(2026-10-06 修的检查自身的洞)。
+      //
+      // 原来的 `/TODO|TBD|待补/` 会在 `CLIENT_FACING_TODO_KINDS` 上命中 ——
+      // 那是一个**真的标识符**,却让这条断言报出「这个单元像是占位符」,
+      // 而它长得像一次成功的检查(与 AGENTS.md「三类静默失败」第 3 条同形)。
+      // 收紧成**独立词**之后,`TODO:` / `TODO ` 这类真占位符仍然命中。
+      expect(body, `${u} 像是占位符`).not.toMatch(/\bTODO\b|\bTBD\b|待补/);
     }
   });
 

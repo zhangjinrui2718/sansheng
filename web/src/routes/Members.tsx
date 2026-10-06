@@ -171,6 +171,12 @@ const OTHER_KINDS: readonly SessionMessageKind[] = ["assistant", "thinking", "to
  * (`stores/chat.ts` 只读 `trigger.kind`,不读 `todoKind`)。本次改造把它第一次
  * 摆到用户面前,所以先随这一屏落地;真要第二次用到它,再搬进 vocab。
  * 与 vocab 同一纪律:**未知取值原样透出,不猜**(见下面的 `todoKindLabel`)。
+ *
+ * ⚠️ **2026-10-06(migration 022)修的一处静默降级**:这张表在 022 之前**一直
+ * 全部显示英文** —— 它读 `trigger.todoKind`,而那一维当时既不落库、也没进前端契约,
+ * 于是每一次都落到 `?? kind` 那条兜底。真机上成员页「正在做什么」写的是
+ * 「排空器按待办叫醒(execute_work)」而不是「执行工作项」。**一个没人看出来的
+ * 错读法**,因为它仍然显示了一个合理的英文 token。
  */
 const TODO_KIND_LABEL: Record<TriggerTodoKind, string> = {
   answer_ask: "回答提问",
@@ -185,10 +191,18 @@ const TODO_KIND_LABEL: Record<TriggerTodoKind, string> = {
   handover: "交付交接",
   report_downstream: "向甲方汇报下游结果",
   resume_client: "处置甲方的答复",
+  close_project: "判断项目是否收口",
 };
 
-/** 未知取值原样显示英文 —— 「显示英文」比「显示一个编的中文」诚实。 */
-function todoKindLabel(kind: string): string {
+/**
+ * 未知取值原样显示英文 —— 「显示英文」比「显示一个编的中文」诚实。
+ *
+ * ⚠️ **`undefined` 不走这里**:它表示「这一维没有落」(022 之前的存量行),
+ * 那要显示成「未记录」而不是 `undefined` —— 原样透出一个 `undefined` 字面量
+ * 在界面上比「未记录」更像故障。
+ */
+function todoKindLabel(kind: string | undefined): string {
+  if (kind === undefined) return "未记录是哪一类待办";
   return (TODO_KIND_LABEL as Record<string, string>)[kind] ?? kind;
 }
 

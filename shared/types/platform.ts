@@ -241,7 +241,21 @@ export type MessageOriginSource = "turn" | "broadcast";
  * 两跳,fail-open),并把这条路写在 `channelOf` 的注释里 —— 见设计 1 §2.10。
  */
 export type MessageOrigin =
-  | { source: "turn"; trigger: { kind: TurnTriggerKind } }
+  /**
+   * 回合封套。
+   *
+   * ⚠️ **`todoKind` 是可选的**(2026-10-06,migration 022)。它此前**不在这个类型
+   * 里**,而它的缺席不是「还没有读者」那么简单 —— 它让通道判据第二次出现「刷新之后
+   * 判据消失」:流式那一路从 WS 封套拿得到完整 `TurnTrigger`,刷新那一路只拿得到
+   * `trigger_kind='todo'` 分不清是哪一类。019 的文件头已经把这个坑写成教训了
+   * (「落库的是输入,判据怎么改都只是读侧的事」)。
+   *
+   * 可选而不是必填:`session_messages.todo_kind` 是**可空列**,022 之前的存量行
+   * 永远是 `null`。必填就等于逼读侧**编造**一个值(`migrations/022_todo_kind.sql`
+   * 记了为什么不能回填)。缺失时 `todoKindReachesClient` 返回 `false`,
+   * 方向是 fail-closed —— 那条消息留在内部通道,而不是本该给甲方的正文上屏。
+   */
+  | { source: "turn"; trigger: { kind: TurnTriggerKind; todoKind?: TriggerTodoKind } }
   | { source: "broadcast" }
   | { source: "unknown" };
 
@@ -832,7 +846,75 @@ export type TriggerTodoKind =
   | "handover"
   | "report_downstream"
   /** 甲方答复了业务经理的提问、而他还没处置(020 + `resume_client` 规则) */
-  | "resume_client";
+  | "resume_client"
+  /**
+   * 项目里**没有一件没做完的事**了,该业务经理判断要不要收口了(022 + 规则
+   * `close_finished_project`)。
+   *
+   * ⚠️ 它存在理由是一次**真机观察**(2026-10-06 17:2x,项目「美股自动化交易平台
+   * 方案设计」):11 条工作全部 `done` + `review_state='done'`、6 条 `review_verdict`
+   * 全部 `pass`、outbox 空、`openWorks=0` —— 而 `projects.status` 永远是 `active`。
+   * `project_close` 工具**一直有生产调用方**(`tools/project.ts`),但**没有任何规则
+   * 叫醒谁去调它**,于是「组织已经把活干完了」与「这个项目还没结束」在界面上
+   * 长得一模一样。
+   */
+  | "close_project";
+
+/**
+ * **这几类待办回合的正文,就是给甲方看的话** —— 与「是不是 `todo` 触发」无关。
+ *
+ * ── 它补的是什么 ─────────────────────────────────────────────────
+ *
+ * 真机现场(同一个项目,2026-10-06):业务经理在**24 次**平台叫醒的回合里
+ * `tell_client` 调用次数是 **0**。客户通道会话里他一共 33 条消息,按封套拆开是
+ * `broadcast 8` / `turn+todo 24` / `turn+user 1` —— 而 `turn+todo` 的那 24 条
+ * **甲方一条都没看到**(读面判据见 `web/src/lib/data.ts` 的 `channelOf` 第 4 步)。
+ *
+ * 后果不是「少了几条消息」。14:52:07 那一条 BM 写着:
+ *
+ * > 「这里有**一个关键张力**我必须当面说清:**live_aggressive 与 W3-Q2 已定的
+ * > Cash account + < $25k 账户不匹配** …… 按业务经理纪律:冲突要当面说清。」
+ *
+ * 那条正文被第 4 步整条滤掉。甲方从头到尾不知道自己的两个拍板互相打架。
+ *
+ * ── 为什么改判据而不是改提示词 ─────────────────────────────────────
+ *
+ * 提示词里**已经**写着「没播报就要留一行 `[未播报]`」,而业务经理 24 次都没留
+ * (其中 8 次留了 —— 恰恰说明他知道这条规矩,只是把「要交代」误当成了内部义务)。
+ * **靠模型自觉的约定已经被真机证伪过一次**,所以判据这一侧必须自己站得住。
+ *
+ * ── 为什么这三个取值不算「语义猜测」(§2.11.3)─────────────────────
+ *
+ * 它是 `TriggerTodoKind` 这个**闭合集**上的一个子集,每个取值的名字本身就是它的
+ * 定义:`handover` = 把交付物交付给甲方、`report_downstream` = 向下游/甲方交代、
+ * `resume_client` = 处置甲方的答复。**这三件事没有一件是「组织内部在动」** ——
+ * 它们按定义就是冲着甲方去的。规则仍然**不读任何正文**,判据全在闭合集上。
+ *
+ * ⚠️ **唯一真相在这里**:读面(`web/src/lib/data.ts`)与写面
+ * (`src/platform/host/serve.ts` 的 `detectUnannouncedTurn`)都从这里取,
+ * 两边各抄一份就是本项目付过好几次代价的「两份定义迟早漂」。
+ */
+export const CLIENT_FACING_TODO_KINDS: ReadonlySet<TriggerTodoKind> = new Set<TriggerTodoKind>([
+  "handover",
+  "report_downstream",
+  "resume_client",
+]);
+
+/**
+ * 这一类待办叫醒的回合,正文**自动**进甲方通道(说话人是 `clientFacing` 时)。
+ *
+ * ⚠️ **参数接受 `undefined`** —— 不是一个可以省的细节:`session_messages.todo_kind`
+ * 是可空列,migration 022 之前的存量行、以及任何**没落**这一列的行,读到的都是
+ * `undefined`。把 `undefined` 收进签名,就让「缺这一维」在**类型上**就是
+ * `false`(fail-closed:正文留在内部通道,不上屏),而不是让每个调用点自己写一遍
+ * `!== undefined` 判断 —— 漏一处就是一个静默的上屏。
+ *
+ * 说话人是不是 `clientFacing` **不由这个函数回答** —— 它只回答「这一轮为什么存在」。
+ * 两半都成立才进甲方通道,拼装在读面(`web/src/lib/data.ts` 的 `channelOf`)。
+ */
+export function todoKindReachesClient(kind: TriggerTodoKind | undefined): boolean {
+  return kind !== undefined && CLIENT_FACING_TODO_KINDS.has(kind);
+}
 
 /**
  * 这一轮**为什么存在**。判据只有两半(设计 1 §2.10 的通道分离):

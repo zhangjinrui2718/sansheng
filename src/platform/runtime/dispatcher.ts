@@ -111,7 +111,7 @@ import {
   listWorks, getWork, listWorksPendingReview, markWorkReviewed, updateWorkStatus,
   isTerminalWorkStatus, type WorkRow, type WorkStatus,
 } from "../storage/repo/works.js";
-import { blockersForWork } from "../storage/repo/blockers.js";
+import { blockersForWork, listBlockers } from "../storage/repo/blockers.js";
 import { latestReviewVerdict } from "../storage/repo/reviewVerdicts.js";
 import {
   listArtifacts, getArtifact, type ArtifactRow,
@@ -127,6 +127,7 @@ import {
 import { ROLE_SPECS, isProjectRole, type ProjectRole } from "../identity/role.js";
 import { openDeliverableSession } from "../storage/repo/sessions.js";
 import type { Capability } from "../harness/capability.js";
+import type { ProjectStatus } from "../harness/authorize.js";
 import type { ToolCallRecord } from "./turn.js";
 
 // ── 待办的形状 ──────────────────────────────────────────────────
@@ -205,6 +206,24 @@ export const TODO_KINDS = [
    * `client_question` 是**另一条通道** —— 同一个病,两条通道只治了一条。
    */
   "resume_client",
+  /**
+   * **这个项目没有一件没做完的事了,该业务经理判断要不要收口**(规则
+   * `close_finished_project`)。
+   *
+   * ⚠️ 它补的是「组织停在一个永远不会自己收尾的状态」这个洞。2026-10-06 的真机
+   * 终局:11 条工作全部 `done` + `review_state='done'`、6 条 `review_verdict` 全
+   * `pass`、outbox 空、`openWorks=0`、`pendingQuestions=0`、`runningTurns=0` ——
+   * 而 `projects.status` 仍是 `active`。用户看到的字面就是「项目还在进行中,
+   * 但没有任何人在干活」。
+   *
+   * `project_close` 工具一直有生产调用方(`tools/project.ts`),**零自动触发**:
+   * 11 条规则里没有一条提到项目收口,`NUDGE_CAPABILITIES` 里也没有
+   * `project.close`。**代码里写了逻辑 ≠ 它有读者**(7-E 的复发)。
+   *
+   * ⚠️ **判据成立时不自动关闭,而是叫醒业务经理去判断** —— 收不收口是业务判断,
+   * 不是平台能从库里推出来的结论(§2.11.3:规则不做语义猜测)。
+   */
+  "close_project",
 ] as const;
 
 export type TodoKind = (typeof TODO_KINDS)[number];
@@ -245,6 +264,9 @@ const PRIORITY: Readonly<Record<TodoKind, number>> = {
   integrate: 9,
   handover: 10,
   report_downstream: 11,
+  // 收口排**最后**:它成立的前提是「上面每一条都不成立」,所以它排在最后不是
+  // 优先级偏好,是**顺序依赖** —— 有任何一件没做完的事,这条就压根不成立。
+  close_project: 12,
 };
 
 export interface DriverTodo {
@@ -328,6 +350,14 @@ export const NUDGE_CAPABILITIES: readonly Capability[] = [
   // 的 `on` 里都有它(这一批里第一次真的有人用这个触发名)。纪律没变:门铃只是
   // 「去查一下」,判定仍然全部重新查库(它们读的是工件的 kind / work_id 这两列)。
   "blackboard.write",
+  /**
+   * 项目收口 → 叫醒一次「这个项目做完了没有」的重新评估。
+   *
+   * ⚠️ 加它是因为 `project_close` 那个工具**一直有生产调用方却零自动触发** ——
+   * 「代码里写了逻辑」不等于「它有读者」(7-E)。真机终局:所有工作项 done、所有审查
+   * pass、outbox 空,而 `projects.status` 永远是 `active`。
+   */
+  "project.close",
 ];
 
 // ── 判定:纯查询 ─────────────────────────────────────────────────
@@ -584,6 +614,46 @@ export interface RuleFacts {
   readonly deliveredArtifactIds: ReadonlySet<string>;
   readonly reportBatchSize: number;
   readonly reportMaxDelayMs: number;
+  // ── 2026-10-06 真机终局补的三条事实(`close_finished_project` + goal 对齐)──
+  /**
+   * `projects.status` —— 「这个项目结束了没有」在库里的**唯一答案**。
+   *
+   * 它是 `close_finished_project` 的**终止判据**:项目一进终态,规则立刻不成立。
+   * 落在一列上而不是宿主内存里,所以**重启后自动补跑**、不需要任何额外状态
+   * (批次 21 把「刚才发生了什么」从内存里赶出去之后,这是判据的默认形态)。
+   */
+  readonly projectStatus: ProjectStatus;
+  /**
+   * **非终态**工作项的条数(`status ∉ {done, failed, cancelled}`)。
+   *
+   * 规则算 `works.filter(w => !isTerminalWorkStatus(w.status)).length` 也行,
+   * 但那样同一条「什么算终态」的知识就散在规则里 —— 而 `isTerminalWorkStatus`
+   * 是 `works` 表的**唯一真相**。这里只搬数字,判据仍在同一处。
+   */
+  readonly nonTerminalWorkCount: number;
+  /**
+   * **项目级**未解决阻塞数(`status ∈ {open, acknowledged}`)。
+   *
+   * ⚠️ 它**不能**用 `blockedByBlockerWorks.size` 代替:那条边落在 `blocker_blocks`
+   * 上,而**阻塞可以先登记、后挂工作项**(真机里 `blockers` 表没有 `work_id` 列)。
+   * 只看挂上去的那条边,会漏掉「有人登记了一个阻塞但还没决定挂哪儿」——
+   * 而那恰恰是**最该拦住收口**的一种。
+   */
+  readonly unresolvedBlockerCount: number;
+  /**
+   * `projects.goal` —— **甲方立项时说的那句「要达成什么」**。
+   *
+   * ⚠️ 它今天**一个字都没被任何规则或提示词读过**(`grep -n goal dispatcher.ts`
+   * 在 2026-10-06 之前零命中)。后果是真机现场里:质检的任务正文问「目标达成了吗?」,
+   * 而**「目标」是什么压根不在那个回合的提示词里** —— `renderPendingReviews`
+   * 只渲染 `id` / `title` / `assigneeAgentId`。于是质检转头去读项目经理写的整改
+   * brief 当判据,对着 brief 判 `pass`,而甲方明确答复过的那句诉求(「我要一份,
+   * 不是七份」)没有任何一条机制携带到验收环节。
+   *
+   * 它是**数据**不是硬编码判据(旧 pi 的 `Blackboard.goal` 是同一个思路):
+   * 谁都可以改它,但**验收现场必须看得见它**。
+   */
+  readonly projectGoal: string;
 }
 
 /** 一条规则产出的待办(还没挂上库里的尝试预算)。 */
@@ -611,8 +681,10 @@ export interface Rule {
 }
 
 /**
- * **10 条**规则 —— 前 8 条是 B1 从原来那 8 个分支搬过来的(行为逐字不变),
- * 后 2 条是 C3 新增的 `integrate` / `handover`(§2.11.4 的下两行)。
+ * **12 条**规则 —— 前 8 条是 B1 从原来那 8 个分支搬过来的(行为逐字不变),
+ * 接着 2 条是 C3 新增的 `integrate` / `handover`(§2.11.4 的下两行),
+ * 再 1 条是 020 的 `resume_client`,最后 1 条是 2026-10-06 真机终局补的
+ * `close_finished_project`(项目永远停在 `active` 那一条)。
  *
  * ── ⚠️ 每条 `on` 都含 `tick`,这是刻意的、也是必须的 ─────────────
  *
@@ -1071,6 +1143,62 @@ export const RULES: readonly Rule[] = [
       "「有 open 的 client_question 就叫醒业务经理」的规则,而那是错的:球在甲方那边," +
       "每 10 秒叫醒他一次就是空转(与 `resolve_blocked_work` 的抑制条件同一条纪律的两面)。",
   },
+  {
+    id: "close_finished_project",
+    // 判据的每一半都只可能因为「新落了一件事」或「一件东西不再是那样」而变:
+    // 工作项状态迁移、交付物落库、答复被消费。而 `tick` 是**重启后补跑**的唯一载体
+    // —— 项目状态只在库里,不播撒(批次 21 的纪律:判定每次从库里重算)。
+    on: ["work_status_changed", "artifact_inserted", "tick"],
+    if: (q) => {
+      const bm = q.members.find((m) => m.role === "business_manager");
+      if (bm === undefined) return [];
+      // ── 终止判据:项目已经不是 active 了 ────────────────────────────
+      // 落在一列上(`projects.status`),所以项目一收口这条规则立刻不成立,
+      // **不需要任何额外状态**。这也是「收口不可逆」在机制上的体现:它不会被
+      // 第二次叫醒、不会把一个已关闭的项目重新叫活。
+      if (q.projectStatus !== "active") return [];
+      // ── 资格判据:八件事**同时**不成立,才谈得上「做完了」────────────
+      //
+      // 每一条都读**结构化列**,不读正文(§2.11.3)。少一条就会在不该收口的
+      // 时候收口 —— 而收口是**不可逆**的(`closeProject` 直接 `throw`),
+      // 所以这里宁可多列几条。
+      if (q.nonTerminalWorkCount > 0) return [];
+      if (q.pendingReview.length > 0) return [];          // 做完但还没审
+      if (q.events.length > 0) return [];                  // 下游结果还没交代
+      if (q.awaitingClient) return [];                     // 还有问题在等甲方
+      if (q.unconsumedClientAnswers.length > 0) return []; // 答复到了还没处置
+      if (q.unresolvedBlockerCount > 0) return [];          // 还有没解决的阻塞
+      // **还没有任何已验收的交付物** = 「做完了」没有交付物证明。
+      // ⚠️ 这一条挡住的是最难看的一种终局:工作项全 done、审全 pass,而**甲方
+      // 手上什么都没有**。真机上它就是靠这条形态出现的(交付物在,但根工作项
+      // 自己的产出只是 evidence)。
+      if (q.acceptedDeliverables.length === 0) return [];
+      // 有交付物却**还没交付给甲方** —— 那是 `handover` 的活,顺序在它后面。
+      if (q.acceptedDeliverables.some((a) => !q.deliveredArtifactIds.has(a.id))) return [];
+      // ── 到这里才成立 ────────────────────────────────────────────
+      return [{
+        agentId: bm.agentId, role: "business_manager", kind: "close_project",
+        // key 用项目 id:它就是这件事唯一的身份,变化只可能来自 status 变终态。
+        key: `close_project:${q.projectId}`,
+        target: q.projectId, refs: q.acceptedDeliverables.map((a) => a.id),
+        targetState: null,
+        label: `判断这个项目是不是做完了(已交付 ${q.acceptedDeliverables.length} 份)`,
+      }];
+    },
+    then: { kind: "close_project", targetRole: "business_manager" },
+    why:
+      "**真机终局**(2026-10-06 17:2x,项目「美股自动化交易平台方案设计」):11 条工作" +
+      "全部 `done` + `review_state='done'`、6 条 `review_verdict` 全部 `pass`、outbox 空、" +
+      "`openWorks=0` / `pendingQuestions=0` / `openBlockers=0` / `runningTurns=0` ——" +
+      "**而 `projects.status` 永远是 `active`**。用户看到的字面就是「什么都没在干," +
+      "但项目还在进行中」,而这两种状态在界面上的距离是**零像素**。" +
+      "`project_close` 工具一直有生产调用方(`tools/project.ts`),**零自动触发** ——" +
+      "11 条规则里没有一条提到收口,`NUDGE_CAPABILITIES` 里也没有 `project.close`。" +
+      "**「代码里写了逻辑」不等于「它有读者」**(7-E)。" +
+      "⚠️ **判据成立时不自动关闭,而是叫醒业务经理去判断**:「收不收口」是业务判断," +
+      "不是平台能从库里推出来的结论(§2.11.3)。终局那一次的正确行为是" +
+      "「业务经理看着交付物说一句『可以收了』」,不是「平台觉得活干完了就销号」。",
+  },
 ];
 
 /**
@@ -1365,6 +1493,10 @@ function collectRuleFacts(
     deliveredArtifactIds: deliveredArtifactIds(db, projectId),
     reportBatchSize: opts.reportBatchSize ?? DEFAULT_REPORT_BATCH_SIZE,
     reportMaxDelayMs: opts.reportMaxDelayMs ?? DEFAULT_REPORT_MAX_DELAY_MS,
+    projectStatus: getProjectRow(db, projectId)?.status ?? "draft",
+    nonTerminalWorkCount: works.filter((w) => !isTerminalWorkStatus(w.status)).length,
+    unresolvedBlockerCount: listBlockers(db, projectId, { unresolvedOnly: true }).length,
+    projectGoal: getProjectRow(db, projectId)?.goal ?? "",
   };
 }
 
@@ -1495,7 +1627,20 @@ export function renderTask(db: Database.Database, todo: DriverTodo): string {
       return (
         "# 现在轮到你了:审查刚完成的产出\n\n" +
         renderPendingReviews(db, todo) +
-        "\n\n用 `board_list` / `work_read` 核实:**目标达成了吗?依据能复核吗?边界越了吗?**\n" +
+        "\n\n用 `board_list` / `work_read` 核实:**目标达成了吗?依据能复核吗?边界越了吗?**\n\n" +
+        // ⚠️ **判据的优先级**(2026-10-06 真机事故的修复)。这段不是提醒,是**纠偏**:
+        // 上面那段渲染里现在摆着两层靶子(`projects.goal` 与 `works.goal`),而质检
+        // 此前拿到的是「一份 brief」—— 真机原文是「严格按整改 work_brief 的硬约束
+        // 执行,4 条判据全部满足」,而甲方明确否掉过「七份子文档」这个形态。
+        // **brief 可以定义「怎么做」,不能定义「做成什么」**。
+        "**判据按这个优先级来,不许倒过来**:\n\n" +
+        "1. **这条工作项的 `goal`**(上面已给)—— 它是这条产出的**靶子**\n" +
+        "2. **项目的 `goal`**(上面已给)—— 用来判「这一条是不是在为总靶子服务」\n" +
+        "3. work_brief / 整改要求 —— **只定义「怎么做」**\n\n" +
+        "⚠️ **若 3 与 1 或 2 冲突,以 1 / 2 为准,并把冲突原样写进 `review_finding`** —— " +
+        "不要拿 brief 覆盖 goal,也不要因为「brief 做到了」就判通过。" +
+        "2026-10-06 那次就是「brief 把『一份』定义成一份目录,于是甲方要的『一份』" +
+        "在验收环节凭空消失了」—— 那个洞就是这一条补的。\n\n" +
         "然后做两件**都必须**做的事:\n\n" +
         "1. 把结论写成 `review_finding` 工件 —— **通过也要写通过的依据**" +
         "(「我核对了 X、Y、Z」),「过了」两个字在事后没有任何价值\n" +
@@ -1565,6 +1710,21 @@ export function renderTask(db: Database.Database, todo: DriverTodo): string {
         "   - `status` 用 **`accepted`**:交付那一环的资格判据是「已验收的交付物」," +
         "写成 `open` 交付就不会被触发(而工件状态写完之后**改不了**,只能重写一条)\n" +
         "3. 子项里的细节**不要**抄进来:交付物给甲方看,用 `links` 把依据指回那几条产出\n\n" +
+        // ⚠️ **2026-10-06 真机补的一条**。它治的是「分章结论冒充最终交付」:
+        //
+        // 平台判「这条交付整合完了没有」只看**结构化事实**(根上有没有 `deliverable`),
+        // 而它**分不清**你交的是「七份分章结论」还是「一份整合后的总稿」—— 2026-10-06
+        // 的真机上,项目经理写了 7 份各 1–3KB 的分章结论挂到根上,平台立刻认为整合
+        // 完成、根工作项自动收口;而甲方明确答复过要的是「一份」。
+        // **这不是平台能推出来的结论,所以写成判据交给你。**
+        "4. ⚠️ **看上面那条根工作项的 `goal`**:如果它要的是**一份东西**" +
+        "(措辞含「整合 / 汇总 / 总稿 / 整体 / 最终交付 / 一份」),那么" +
+        "**几份分章结论不算交付** —— 7 份 W1..W7 的结论挂在根上,平台会认为" +
+        "「整合完了」,但甲方拿到的是 7 个文件而不是他要的那一个。\n" +
+        "   这时你必须**在根上另写一份引用全部子项的总稿**:正文里逐条列出它整合了" +
+        "哪几条、每一份的结论一句话,让甲方只读这一份就能做决定。\n" +
+        "   ⚠️ 反过来,如果 `goal` 就是要**分章节给**(措辞含「每章 / 分别 / 各自」)," +
+        "那就按分章交 —— **判据是这条 goal,不是这句提示词**。\n\n" +
         "**不要自己动手补做子项里的活** —— 你持 `work.update`(该关的关掉、该登记的阻塞登记)," +
         "但执行是 worker 的事。写完之后交付由业务经理接手,不需要你去催。"
       );
@@ -1598,6 +1758,31 @@ export function renderTask(db: Database.Database, todo: DriverTodo): string {
         "3. 它与你**先前告诉甲方的说法冲突**吗?冲突要当面说清,不要默默改口\n\n" +
         "**不要在没读答复正文的情况下凭标题作答** —— 甲方答的常常不是标题里那个问题。"
       );
+    case "close_project":
+      // 与 `resume_client` 同纪律:**摆事实、说你来判断**。
+      // ⚠️ 平台**不自动关闭项目**:收口不可逆(`closeProject` 直接 `throw`),
+      // 而「收不收口」是业务判断 —— §2.11.3 那条纪律在这里不是形式主义。
+      return (
+        "# 现在轮到你了:这个项目看起来做完了,该不该收?\n\n" +
+        renderClosureReview(db, todo) +
+        "\n\n**平台的判据已经全绿**:没有未完成的工作项、没有待审的产出、没有等你交代的" +
+        "下游结果、没有等甲方的提问、没有未处置的答复、没有未解决的阻塞,所有已验收的" +
+        "交付物也都交付过了。\n\n" +
+        "**但平台不知道该不该收** —— 那是你的判断,不是一行 `status` 能推出来的。\n\n" +
+        "**先回答自己一个问题:甲方要的东西,拿到了吗?** 对照上面那份 `goal` —— " +
+        "不是「工作项都 done 了」,而是**那份 goal 要的东西真的在那里**。\n\n" +
+        "然后二选一:\n\n" +
+        "1. **确实做完了** → 用 `project_close`(`outcome: \"done\"`)收掉," +
+        "并对甲方说清**最终交付物是哪几份**、它们在哪、怎么用。\n" +
+        "   ⚠️ 这一步之前,那些交付物**已经在交付会话里了** —— 你要做的不是重发一遍," +
+        "是给一个**收尾的结论**:做完了什么、依据是什么、接下来建议他做什么。\n" +
+        "2. **还差东西** → **不要关**。用 `work_create` 把缺的那部分立成工作项" +
+        "(能自己做的直接排上),或者用 `ask_client` 去问甲方要什么。" +
+        "   平台下一次 tick 会重新查库;只要还有一件事没做完,这条待办就不成立。\n\n" +
+        "⚠️ **关掉是不可逆的**:`closeProject` 对终态项目直接抛错,项目内能力随即全部失效" +
+        "(只剩记忆与代码工具)。**拿不准就别关** —— 代价只是下一次 tick 再问你一遍;" +
+        "关错的代价是整个项目作废。"
+      );
     case "execute_work":
       // worker 那条不走这里 —— `runWorkItem` 自己拼 `composeWorkPrompt`。
       // 留着这一支是为了穷尽性:新增 TodoKind 时这里会编译失败。
@@ -1626,6 +1811,11 @@ function renderSubtrees(db: Database.Database, todo: DriverTodo): string {
     blocks.push(
       [
         `### 交付 \`${root.id}\`「${root.title}」`,
+        "",
+        root.goal.trim() === ""
+          ? "⚠️ 这条根工作项的 `goal` 是空的 —— 你无从判断它要的是「几份子结论」还是「一份总稿」。"
+          : `**这条根工作项要达成什么**:${root.goal.slice(0, GOAL_HEAD_CHARS)}` +
+            `${root.goal.length > GOAL_HEAD_CHARS ? "…" : ""}`,
         "",
         ...subtree.map((w) => `- \`${w.id}\`「${w.title}」[${w.status} · 审查 ${w.reviewState}]`),
         "",
@@ -1702,16 +1892,111 @@ function renderDownstream(db: Database.Database, todo: DriverTodo): string {
   ].join("\n");
 }
 
+/** 目标正文的截断长度 —— 够判断「这条要达成什么」,又不把整个回合撑爆。 */
+const GOAL_HEAD_CHARS = 400;
+
+/**
+ * 「等审的产出」那段渲染。
+ *
+ * ⚠️ **2026-10-06 真机修的一处洞:这里原来只渲染 `id` / `title` / `assigneeAgentId`。**
+ *
+ * 而 `review_work` 的任务正文问的是「**目标达成了吗?**」—— 判据在提示词里,
+ * **达成目标的定义却不在这个回合的任何地方**。质检只能自己去翻,于是它翻到了
+ * **项目经理写的整改 brief**,拿 brief 当判据。真机原文(2026-10-06 16:2x):
+ *
+ * > 「W0-A 严格按整改 work_brief 的『目录式引用 + 严禁复述/改写』硬约束执行,
+ * > **4 条判据全部满足**」——
+ * > 而甲方在同一天明确答复过:选 A「wk 补做」,**否掉了**「接受 7 份子文档」。
+ *
+ * brief 把「一份」定义成「一份目录」,质检对着 brief 判 pass,业务经理据此宣布
+ * 「项目正式交付完成」。**甲方那句原始诉求没有任何一条机制携带到验收环节。**
+ *
+ * 现在渲染两层:
+ *   - `projects.goal` —— 甲方立项时说的「要达成什么」(整个项目的靶子)
+ *   - `works.goal`   —— 这一条工作项的靶子
+ *
+ * ⚠️ **两层都不能省**:只看 `works.goal`,一条「按 brief 写目录」的工作项照样能
+ * 自洽地通过;**只有把项目的靶子摆出来,「这一条是不是在为总靶子服务」才可判**。
+ * 两层都是**数据**(旧 pi 的 `Blackboard.goal` 是同一个思路),不是硬编码判据 ——
+ * 谁都可以改,但**验收现场必须看得见**。
+ */
+/**
+ * 「这个项目看起来做完了」那段渲染 —— 收口判定的**事实侧**。
+ *
+ * 只渲染**结构化的列**(`works.status` / `review_state` / 工件的 `kind`+`status`+
+ * `title`)+ 两条 goal 正文。**不渲染任何工件正文** —— 与规则的 `if` 同一条纪律:
+ * 「做完了没有」是业务经理的判断,平台只负责把「有哪些东西、都什么状态、
+ * 最初要的是什么」摆出来。
+ */
+function renderClosureReview(db: Database.Database, todo: DriverTodo): string {
+  const project = getProjectRow(db, todo.projectId);
+  const lines: string[] = [];
+  if (project !== null && project.goal.trim() !== "") {
+    lines.push(
+      "## 这个项目当初要达成什么",
+      "",
+      project.goal.trim(),
+      "",
+      "**这一句是收口与否的靶子** —— 下面那些工作项全 `done` 只是「过程收口」," +
+      "不等于这一句被满足了。",
+      "",
+    );
+  }
+  const deliverables = todo.refs
+    .map((id) => getArtifact(db, id))
+    .filter((a): a is NonNullable<typeof a> => a !== null);
+  if (deliverables.length > 0) {
+    lines.push(
+      "## 最终交付物(甲方手上就是这些)",
+      "",
+      ...deliverables.map(
+        (a) => `- \`${a.id}\`「${a.title}」[${a.kind} · ${a.status}]`,
+      ),
+      "",
+    );
+  }
+  const works = listWorks(db, todo.projectId);
+  if (works.length > 0) {
+    const byStatus = new Map<string, number>();
+    for (const w of works) byStatus.set(w.status, (byStatus.get(w.status) ?? 0) + 1);
+    lines.push(
+      `## 工作项(共 ${works.length} 条):` +
+        [...byStatus.entries()].sort().map(([s, n]) => `${s} ${n}`).join(" · "),
+      "",
+      "> 这些数字只说明**过程**收口了。它们**不能**代替上面那句 goal —— " +
+      "真机上一次正是「11 条全 done、6 条审查全 pass、而甲方要的那一份并不存在」。",
+      "",
+    );
+  }
+  return lines.join("\n");
+}
+
 function renderPendingReviews(db: Database.Database, todo: DriverTodo): string {
   const rows = todo.refs
     .map((id) => getWork(db, id))
     .filter((w): w is NonNullable<typeof w> => w !== null);
   if (rows.length === 0) return "";
-  return [
-    "## 等着审的产出(库里 `review_state = 'pending'`)",
-    "",
-    ...rows.map((w) => `- \`${w.id}\`「${w.title}」(${w.assigneeAgentId})`),
-  ].join("\n");
+  const project = getProjectRow(db, todo.projectId);
+  const lines: string[] = ["## 等着审的产出(库里 `review_state = 'pending'`)"];
+  if (project !== null && project.goal.trim() !== "") {
+    lines.push(
+      "",
+      `**这个项目要达成什么**(\`projects.goal\`,甲方立项时说的):`,
+      "",
+      project.goal.trim(),
+    );
+  }
+  lines.push("");
+  for (const w of rows) {
+    const goal = w.goal.trim();
+    lines.push(`- \`${w.id}\`「${w.title}」(${w.assigneeAgentId})`);
+    lines.push(
+      goal === ""
+        ? "  **要达成什么**:⚠️ 这条工作项的 `goal` 是空的 —— 那就没有判据。"
+        : `  **要达成什么**:${goal.slice(0, GOAL_HEAD_CHARS)}${goal.length > GOAL_HEAD_CHARS ? "…" : ""}`,
+    );
+  }
+  return lines.join("\n");
 }
 
 function renderStrandedWorks(db: Database.Database, todo: DriverTodo): string {

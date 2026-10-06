@@ -116,19 +116,64 @@ describe("A3 · 对话页的通道判据", () => {
   });
 
   // ── W2-④ 的**核心转向**:同一个作者(bm),换成待办触发 ⇒ 不进 ──────────
+  //
+  // ⚠️ 样本用的是 `close_project` 而不是 `report_downstream` —— 2026-10-06 之后
+  // `handover` / `report_downstream` / `resume_client` 三类的正文**自动进甲方通道**
+  // (`CLIENT_FACING_TODO_KINDS`),拿它们当「不进」的样本就成了一条假断言。
+  // 「作者不是判据」这条纪律要验的是**内部**待办回合,而 `close_project` 正是
+  // 业务经理自己的内部判断(关掉不可逆 ⇒ 拿不准就别关,那句话是给他的,不是给甲方的)。
   it("⚠️ **同一个业务经理**,被工件 / 待办叫醒的那一轮**不进**甲方通道", () => {
-    const todo = turn("m-todo", "assistant", "bm", "下游有结果,我记一下", todoOrigin("report_downstream"));
+    const todo = turn("m-todo", "assistant", "bm", "下游有结果,我记一下", todoOrigin("close_project"));
     const { timeline, hidden } = partitionTurns([todo], ctx());
     expect(timeline, "作者是 clientFacing 也不再是判据").toEqual([]);
     expect(hidden).toBe(1);
   });
 
   it("播报封套(`source:\"broadcast\"`)**无条件**进 —— 即使它是工件触发那轮里发生的事", () => {
-    // 同一条时间线上:工件触发的业务经理回合(不进)+ 它同轮的播报(进)
-    const todo = turn("m-todo", "assistant", "bm", "内部交代", todoOrigin("report_downstream"));
+    // 同一条时间线上:内部待办触发的业务经理回合(不进)+ 它同轮的播报(进)
+    const todo = turn("m-todo", "assistant", "bm", "内部交代", todoOrigin("close_project"));
     const broadcast: Turn = { ...turn("m-bc", "assistant", "bm", "对甲方说的话"), origin: { source: "broadcast" } };
     const { timeline, hidden } = partitionTurns([todo, broadcast], ctx());
     expect(timeline.map((x) => x.turn.id)).toEqual(["m-bc"]);
+    expect(hidden).toBe(1);
+  });
+
+  // ⚠️ 2026-10-06 真机修的一处(事故现场见 shared/types/platform.ts 的
+  // CLIENT_FACING_TODO_KINDS 定义):业务经理在 24 次平台叫醒的回合里
+  // `tell_client` 调用 0 次,而 14:52 那条「档位与 <$25k Cash account 不匹配」
+  // 被整条滤掉 —— **甲方从头到尾不知道自己的两个拍板互相打架**。
+  //
+  // 现在这三类待办的**正文直接上屏**,不需要模型自觉调 `tell_client`。
+  // 那个约定已经被真机证伪过一次(提示词里一直写着「没播报就要留一行」),
+  // 所以判据这一侧必须自己站得住。
+  it("这三类待办的正文**直接进甲方通道**(交付 / 交代下游 / 处置甲方的答复)", () => {
+    for (const todoKind of ["handover", "report_downstream", "resume_client"] as const) {
+      const t = turn(`m-${todoKind}`, "assistant", "bm", "档位与账户不匹配,必须当面说清。", todoOrigin(todoKind));
+      const { timeline, hidden } = partitionTurns([t], ctx());
+      expect(timeline.map((x) => x.turn.id), `${todoKind} 的正文甲方必须看得见`).toEqual([
+        `m-${todoKind}`,
+      ]);
+      expect(hidden, `${todoKind} 不该被摘掉`).toBe(0);
+    }
+  });
+
+  it("**两半都要成立**:待办在集合里、但说话人不是 clientFacing ⇒ 仍然不进", () => {
+    // 判据只有两半(`todoKind` 属于那个闭集 ∧ 说话人 clientFacing)。
+    // 少一半就 fail-closed —— 这里验的是「不是业务经理在用那三类待办」
+    // (今天它们只由 `handover` / `resume_client` / `report_downstream` 三条规则
+    // 产出,那些规则的角色条件写死在 `RULES` 里;但读面不该依赖这一点)。
+    const t = turn("m-pm", "assistant", "pm", "我拆完了", todoOrigin("report_downstream"));
+    const { timeline } = partitionTurns([t], ctx());
+    expect(timeline, "项目经理的回合不进甲方通道").toEqual([]);
+  });
+
+  it("**缺 `todoKind`(022 之前的存量行)⇒ 按旧的判据走,一律不进**", () => {
+    // fail-closed 的方向:宁可甲方少看一条,也不把一条内部推演永久上屏。
+    // 回填一个 `todoKind` 是编造,理由写在 migrations/022_todo_kind.sql。
+    const t = turn("m-legacy", "assistant", "bm", "这一轮的 todoKind 没落库",
+      { source: "turn", trigger: { kind: "todo" } });
+    const { timeline, hidden } = partitionTurns([t], ctx());
+    expect(timeline).toEqual([]);
     expect(hidden).toBe(1);
   });
 

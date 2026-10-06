@@ -163,13 +163,13 @@ describe("② `detectUnannouncedTurn`:工件触发 + 没播报 + 没留痕 ⇒ �
   it("命中:平台叫醒 + 没调 `tell_client` + 正文没有行首标记", () => {
     const hit = detectUnannouncedTurn({
       channel: "client",
-      trigger: todoTrigger("report_downstream"),
+      trigger: todoTrigger("close_project"),
       text: "我看了库里那三条,都没什么可说的。",
       toolCalls: [],
       pendingEventCount: 3,
     });
     expect(hit).not.toBeNull();
-    expect(hit!.todoKind).toBe("report_downstream");
+    expect(hit!.todoKind).toBe("close_project");
     expect(hit!.pendingEventCount).toBe(3);
     expect(hit!.tellClientCalls).toBe(0);
     expect(hit!.textHead).toBe("我看了库里那三条,都没什么可说的。");
@@ -188,7 +188,7 @@ describe("② `detectUnannouncedTurn`:工件触发 + 没播报 + 没留痕 ⇒ �
   it("负样本 ②:调过 `tell_client`(成功)⇒ 不命中", () => {
     expect(detectUnannouncedTurn({
       channel: "client",
-      trigger: todoTrigger("report_downstream"),
+      trigger: todoTrigger("close_project"),
       text: "播了。",
       toolCalls: [call("tell_client")],
       pendingEventCount: 3,
@@ -222,7 +222,7 @@ describe("② `detectUnannouncedTurn`:工件触发 + 没播报 + 没留痕 ⇒ �
   it("正样本:`tell_client` **调用失败** ⇒ 仍然命中(没播出去就还得留痕)", () => {
     const hit = detectUnannouncedTurn({
       channel: "client",
-      trigger: todoTrigger("handover"),
+      trigger: todoTrigger("close_project"),
       text: "我试着播报,但通道报错了。",
       toolCalls: [call("tell_client", true)],
       pendingEventCount: 1,
@@ -234,14 +234,14 @@ describe("② `detectUnannouncedTurn`:工件触发 + 没播报 + 没留痕 ⇒ �
   it("负样本 ③:正文有**行首** `[未播报]` ⇒ 不命中(含缩进与第二行)", () => {
     expect(detectUnannouncedTurn({
       channel: "client",
-      trigger: todoTrigger("report_downstream"),
+      trigger: todoTrigger("close_project"),
       text: "[未播报] 评估 2 条,都不必播。",
       toolCalls: [], pendingEventCount: 2,
     })).toBeNull();
     // 提示词示例写在代码块里 ⇒ 行首有缩进;平台按**行首**认它,空白不算破例
     expect(detectUnannouncedTurn({
       channel: "client",
-      trigger: todoTrigger("report_downstream"),
+      trigger: todoTrigger("close_project"),
       text: "先说明一下背景。\n  [未播报] 评估 1 条。",
       toolCalls: [], pendingEventCount: 1,
     })).toBeNull();
@@ -250,7 +250,7 @@ describe("② `detectUnannouncedTurn`:工件触发 + 没播报 + 没留痕 ⇒ �
   it("负样本 ④:正文**中段引述** `[未播报]` 不算留痕 ⇒ 仍然命中", () => {
     const hit = detectUnannouncedTurn({
       channel: "client",
-      trigger: todoTrigger("report_downstream"),
+      trigger: todoTrigger("close_project"),
       text: '你问的那行 "[未播报]" 是我自己的记录。',
       toolCalls: [], pendingEventCount: 1,
     });
@@ -258,7 +258,7 @@ describe("② `detectUnannouncedTurn`:工件触发 + 没播报 + 没留痕 ⇒ �
     // 破折号列表项同理:那已经是一条正文,不是提示词要求的那一行
     expect(detectUnannouncedTurn({
       channel: "client",
-      trigger: todoTrigger("report_downstream"),
+      trigger: todoTrigger("close_project"),
       text: "- [未播报] 评估 1 条。",
       toolCalls: [], pendingEventCount: 1,
     })).not.toBeNull();
@@ -267,7 +267,7 @@ describe("② `detectUnannouncedTurn`:工件触发 + 没播报 + 没留痕 ⇒ �
   it("正样本:正文**空**(什么都没写)⇒ 命中", () => {
     expect(detectUnannouncedTurn({
       channel: "client",
-      trigger: todoTrigger("report_downstream"),
+      trigger: todoTrigger("close_project"),
       text: "",
       toolCalls: [], pendingEventCount: 5,
     })).not.toBeNull();
@@ -277,7 +277,7 @@ describe("② `detectUnannouncedTurn`:工件触发 + 没播报 + 没留痕 ⇒ �
     const long = "字".repeat(500);
     const hit = detectUnannouncedTurn({
       channel: "client",
-      trigger: todoTrigger("report_downstream"),
+      trigger: todoTrigger("close_project"),
       text: long,
       toolCalls: [], pendingEventCount: 0,
     });
@@ -287,6 +287,41 @@ describe("② `detectUnannouncedTurn`:工件触发 + 没播报 + 没留痕 ⇒ �
     // 「这一回合属于哪条事件」在库里不存在(见 `detectUnannouncedTurn` 上方),
     // 所以项目级读数只作为现场进告警。
     expect(hit!.pendingEventCount).toBe(0);
+  });
+
+  // ⚠️ 2026-10-06 真机修的一处(判据见 `shared/types/platform.ts` 的
+  // `CLIENT_FACING_TODO_KINDS`)。
+  //
+  // 真机现场:业务经理在 24 次平台叫醒的回合里 `tell_client` 调用 **0 次**,而
+  // 14:52 那条「档位与 <$25k Cash account 不匹配」被读面整条滤掉 —— 甲方从头
+  // 到尾不知道自己的两个拍板互相打架。
+  //
+  // 修法是让这三类待办的**正文自动进甲方通道**(读面 `channelOf` 第 4 步),
+  // 于是对它们再要求「必须 tell_client 才算已播报」,就是要求他在**已经是
+  // 甲方通道的地方再广播一次** —— 那会把告警从真信号变成每 tick 一条的噪音,
+  // 而假告警比没有告警更糟(它让这条计数不再有证据力)。
+  it("例外:这三类待办的正文**自动进甲方通道** ⇒ 不再要求 tell_client,也不告警", () => {
+    for (const todoKind of ["handover", "report_downstream", "resume_client"] as const) {
+      expect(
+        detectUnannouncedTurn({
+          channel: "client",
+          trigger: todoTrigger(todoKind),
+          text: "甲方选了 A。这里有一个关键张力我必须当面说清。",
+          toolCalls: [],
+          pendingEventCount: 2,
+        }),
+        `${todoKind} 的正文已经到甲方眼前了,不该再报「没留工作记录」`,
+      ).toBeNull();
+    }
+    // ⚠️ 正样本自检:同一个 `channel`、同一段正文,换一个**不在那个集合里**的
+    // 待办类别就必须命中 —— 否则上面三条断言可能只是「判据恒为 null」。
+    expect(detectUnannouncedTurn({
+      channel: "client",
+      trigger: todoTrigger("close_project"),
+      text: "甲方选了 A。这里有一个关键张力我必须当面说清。",
+      toolCalls: [],
+      pendingEventCount: 2,
+    })).not.toBeNull();
   });
 });
 

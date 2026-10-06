@@ -102,7 +102,12 @@ const BM_TURN_TODO = toolTurn(
   "msg_bm_todo",
   "bm",
   ["blocker_read", "project_read", "board_write"],
-  todoOrigin("report_downstream"),
+  // ⚠️ 样本用 `close_project`(2026-10-06 之前这里是 `report_downstream`):
+  // `handover` / `report_downstream` / `resume_client` 三类的正文**现在自动进
+  // 甲方通道**(`CLIENT_FACING_TODO_KINDS`),拿它们当「整轮不进」的样本就是假断言。
+  // 这条用例验的是**内部**待办回合的块粒度,`close_project` 正是业务经理的
+  // 内部判断(关掉不可逆 ⇒ 拿不准就别关,那句话是给他的)。
+  todoOrigin("close_project"),
 );
 /** worker 的一轮(真转录 `2026-10-05T01-14-23-653Z_*.jsonl` 的同形)。 */
 const WK_TURN = toolTurn("msg_wk_1", "wk", ["project_read", "blocker_open", "board_write"], todoOrigin("execute_work"));

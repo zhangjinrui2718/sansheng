@@ -28,6 +28,7 @@ import {
   type ServerEvent,
   type SessionMessageView,
   type TurnTriggerKind,
+  type TriggerTodoKind,
   type WsToolInfo,
 } from "@shared/types/platform";
 import * as api from "../lib/api";
@@ -83,12 +84,17 @@ export type Block =
  * 「没有判据」静默当成某一侧 —— 而两条通道各错一次都要出人命(见 `channelOf`
  * 的说明)。第三个取值强制每一个读者显式表态。
  *
- * ── `trigger` 只有 `kind` 一维(不是 `TurnTrigger`)──────────────────
+ * ── `trigger` 带 `kind` + **可选的** `todoKind`(migration 022 之后)────
  *
- * `todoKind` 不参与通道判定、前端也没有第二个读者(见下面 `isTurnTriggerKind`
- * 的说明),所以共享类型把它收在 `TurnTriggerKind` 上 —— 落库的
- * (`trigger_kind`)与前端读的因此是**同一个形状**,不必再抄一份 11 个取值的
- * 闭合集到前端来。
+ * 019 只落 `trigger_kind`,`todoKind` 当时「不参与通道判定、也没有第二个读者」——
+ * 那个判断在 2026-10-06 之后**不再成立**:`CLIENT_FACING_TODO_KINDS` 那三类待办
+ * 的正文要进甲方通道,读面的判据就落在这条上。于是 022 把它落库,
+ * `MessageOrigin` 的 `trigger` 随之多出一个**可选**的 `todoKind`
+ * (可选而不是必填:`session_messages.todo_kind` 是可空列,022 之前的存量行是
+ * `null`,**回填是编造**)。
+ *
+ * 两条路因此仍产出**同一个形状**:流式从 WS 封套取,刷新从库里的两列合成;
+ * 两边缺 `todoKind` 时都退到「一律内部通道」(fail-closed)。
  */
 export type TurnOrigin = MessageOrigin;
 
@@ -380,10 +386,11 @@ function originOfMessageStart(e: { source?: unknown; trigger?: unknown }): TurnO
     // 带了也不影响判定 —— 播报无条件显示 —— 所以这里不把它当错误。
     return { source: "broadcast" };
   }
-  const kind =
+  const trigger =
     typeof e.trigger === "object" && e.trigger !== null
-      ? (e.trigger as { kind?: unknown }).kind
+      ? (e.trigger as { kind?: unknown; todoKind?: unknown })
       : undefined;
+  const kind = trigger?.kind;
   if (source !== "turn" || !isTurnTriggerKind(kind)) {
     throw new Error(
       "message_start 缺 source / trigger:契约里这两维是必填(shared/types/platform.ts 的 " +
@@ -391,9 +398,36 @@ function originOfMessageStart(e: { source?: unknown; trigger?: unknown }): TurnO
         "这条线按回退判据悄悄上屏,所以这里不降级。",
     );
   }
-  // **只取 `kind`**(见 `isTurnTriggerKind` 的说明):`todoKind` 不参与判定,
-  // 而落库那条路根本拿不到它 —— 两条路必须产出同一个形状。
-  return { source: "turn", trigger: { kind } };
+  // ⚠️ **`todoKind` 一路带过去**(migration 022):`kind === 'todo'` 时它是**必需**的,
+  // 而读面的通道判据(`web/src/lib/data.ts` 的 `channelOf` 第 4 步)按它分流 ——
+  // `handover` / `report_downstream` / `resume_client` 的正文要进甲方通道。
+  //
+  // 之前这里写死「只取 kind」,理由是「落库那条路根本拿不到它」。那个理由在 022
+  // 之后**不成立**了(那一列已经落库),而留着就等于让流式那一路与刷新那一路
+  // 给出**不同答案** —— W3-① 的原样复发。
+  //
+  // 拿不到 / 不是合法取值时**不带这个键**(而不是塞一个猜的值):`MessageOrigin`
+  // 的 `todoKind` 是可选的,缺它时 `todoKindReachesClient` 返回 `false`,
+  // 方向 fail-closed(留在内部通道,不上屏)。
+  if (kind !== "todo" || !isSessionTodoKind(trigger?.todoKind)) {
+    return { source: "turn", trigger: { kind } };
+  }
+  return { source: "turn", trigger: { kind, todoKind: trigger.todoKind } };
+}
+
+/**
+ * WS 封套上的 `todoKind` 形状校验。
+ *
+ * ⚠️ 它**只做形状判断,不枚举取值域** —— `TriggerTodoKind` 是 shared 的联合,
+ * 而增删它的地方是 `runtime/dispatcher.ts` 的 `TODO_KINDS`(server 侧禁 value
+ * import `@shared/*`,前端也拿不到那份数组)。枚举一份就是「两份定义迟早漂」。
+ *
+ * 一个不认识 / 拼错的取值落到这里会被**丢掉**(fail-closed):那条消息按「内部待办」
+ * 处理,留在内部通道。方向是安全的 —— **读面看不到一条本该给甲方的消息**,
+ * 而不是反过来把内部推演上屏。
+ */
+function isSessionTodoKind(value: unknown): value is TriggerTodoKind {
+  return typeof value === "string" && value !== "";
 }
 
 /**

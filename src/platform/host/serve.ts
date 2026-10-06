@@ -60,7 +60,10 @@ import { log } from "../../shared/log.js";
 import { applySettingsPatch, toPublicSettings } from "../infra/settingsApply.js";
 import { listProviders, resolveModel, syncActiveProviderApiKeyEnv } from "../infra/providers.js";
 import { listPendingDispatchEvents } from "../storage/repo/dispatch.js";
-import type { ServerEvent, TriggerTodoKind, TurnTrigger } from "@shared/types/platform.js";
+import {
+  todoKindReachesClient,
+  type ServerEvent, type TriggerTodoKind, type TurnTrigger,
+} from "@shared/types/platform.js";
 
 // ══ 检测器:工件触发的回合没留工作记录(W2-③)══════════════════════════
 //
@@ -168,11 +171,24 @@ export function detectUnannouncedTurn(input: {
   readonly pendingEventCount: number;
 }): UnannouncedTurn | null {
   // ⓪ 只有**对甲方说话**的那个角色有这条规矩(今天 = 业务经理)
+  //
+  // ⚠️ **2026-10-06 真机修的一处**:这三类待办的正文**自动进甲方通道**了
+  // (`CLIENT_FACING_TODO_KINDS`,读面 `web/src/lib/data.ts` 的 `channelOf`
+  // 第 4 步按同一个闭合集判定)。所以对它们再要求「必须调 `tell_client`
+  // 才算已播报」,就是**要求他在已经是甲方通道的地方再广播一次** ——
+  // 而那会把告警从「真信号」变成每 tick 一条的噪音,比没有告警更糟。
+  //
+  // 真机依据:同一个项目里业务经理 `tell_client` 调用 0 次 / 24 次 todo 回合,
+  // 而 `resume_client` 那一条里他写着「一个关键张力我必须当面说清」——
+  // 那条正文此前被读面整条滤掉,甲方从头到尾不知道自己的两个拍板互相打架。
+  // 判据这一侧改完之后,这类正文**不需要他做任何事**就到甲方眼前了。
   if (input.channel !== "client") return null;
   // ① 工件触发 = 平台叫醒的回合。甲方亲口触发的那一轮(`{ kind: "user" }`)
   //    不在提示词那条规矩的作用域里:它的正文**本来就是**对甲方说的话,
   //    不必再挂一个「我没播」的标记(见 `business_manager.core` 那处例外)。
   if (input.trigger.kind !== "todo") return null;
+  // ①-bis 正文已经自动进甲方通道的那三类 → 没有「没播报」这回事。
+  if (todoKindReachesClient(input.trigger.todoKind)) return null;
   // ③ 没把播报发出去
   if (tellClientDelivered(input.toolCalls)) return null;
   // ④ 正文留了行首标记
@@ -888,7 +904,13 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
           // 形参、且是**必填**的 —— 它同时喂给 `hub.emitMessageStart`(实时)
           // 与这里(落库),所以「流式判据」与「刷新后的判据」不可能分叉:
           // 业务经理被待办叫醒的那一轮,两处都是 `todo` ⇒ 都不进甲方通道。
+          //
+          // ⚠️ **`todoKind` 必须一起落**(migration 022)。`CLIENT_FACING_TODO_KINDS`
+          // 那三类(handover / report_downstream / resume_client)的正文**要**进甲方
+          // 通道,而读面的判据读的就是这一列 —— 不落的后果与 W3-① 同形:流式看得见、
+          // 刷新看不见,两条路给出不同答案。
           originSource: "turn", triggerKind: trigger.kind,
+          todoKind: trigger.kind === "todo" ? trigger.todoKind : null,
         });
       }
       hub.emitMessageEnd(projectId, messageId);
@@ -1040,7 +1062,11 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
           // 整合)今天全都是 `todo` 触发的 —— 正文是组织内部在动,不该进对话页;
           // 但它**照实落库**,而不是在这里写死:判据留在读侧一处
           // (`messageOriginOf` + `channelOf`),将来多一条触发维度时不用改这里。
+          // ⚠️ `todoKind` 同样落(migration 022),否则读面分不清是哪一类待办 ——
+          // 分不清就一律按「内部」处理,那对业务经理的 `close_project` 之类是对的,
+          // 但对将来任何「这一类要对甲方说」的待办都是错的。
           originSource: "turn", triggerKind: trigger.kind,
+          todoKind: trigger.kind === "todo" ? trigger.todoKind : null,
         });
       }
       hub.emitMessageEnd(projectId, messageId);

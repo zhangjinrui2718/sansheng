@@ -8,7 +8,7 @@
  * 所以 `artifacts.conversation_id` **刻意不加外键**:工件必须比对话活得久。
  */
 import type Database from "better-sqlite3";
-import type { TurnTriggerKind } from "@shared/types/platform.js";
+import type { TriggerTodoKind, TurnTriggerKind } from "@shared/types/platform.js";
 
 export type SessionMessageKind = "user" | "assistant" | "thinking" | "tool" | "system";
 
@@ -79,6 +79,35 @@ export function isSessionMessageTriggerKind(v: unknown): v is SessionMessageTrig
 }
 
 /**
+ * `todo_kind` 的**读侧**校验(migration 022)。
+ *
+ * ⚠️ **库里那一列没有 CHECK 约束**,而这里就是那个闭集(理由写在
+ * `migrations/022_todo_kind.sql`:它的取值域是 `TriggerTodoKind`,每加一种待办就要
+ * 写一条迁移,而增删它的地方是 `runtime/dispatcher.ts` 的 `TODO_KINDS`)。
+ * 所以闭集在代码里,由三条东西钉住,哪条漏了都会**当场红**而不是静默降级:
+ *   · 这里:读到一个不认识的取值 → **抛错**(与上面两个守卫逐字同形);
+ *   · `appendSessionMessage` 的入参类型:`TriggerTodoKind`,不是 `string`;
+ *   · `hub.ts` 的 `_TodoKindParity`:shared 的联合与 `TODO_KINDS` 双向互为子集。
+ *
+ * ⚠️ **`TriggerTodoKind` 是 type-only import**(server 侧禁 value import
+ * `@shared/*`),所以这里**枚举不出那份取值表** —— 与上面那两组闭集的做法不同,
+ * 只能拿 `TODO_KINDS` 的一份本地镜像。而那正是「两份定义迟早漂」的那一种。
+ *
+ * ⇒ 所以这里改为**不枚举**:`isSessionMessageTodoKind` 认的是
+ * `TriggerTodoKind` 这个类型,而运行时只做**形状**校验(非空 string)。
+ * 取值域的权威是 `appendSessionMessage` 的入参类型 + `_TodoKindParity`;
+ * 读到一个**形状上**就不对的值(不是 string / 空串)立刻抛错。
+ *
+ * ⚠️ **这个取舍是有代价的**:库里若真出现一个拼错的 `todo_kind`,这里**不会**在读侧
+ * 认出来(形状合法)。它落到 `MessageOrigin` 的 `todoKind` 上之后,
+ * `todoKindReachesClient` 对它返回 `false` —— 即 **fail-closed**(正文留在内部通道,
+ * 不上屏)。方向是安全的:读面**看不到**一条本该给甲方看的消息,而不是反过来。
+ */
+export function isSessionMessageTodoKind(v: unknown): v is TriggerTodoKind {
+  return typeof v === "string" && v !== "";
+}
+
+/**
  * 编译期对账:`A` 与 `B` 必须**互为子集**(多一个 / 少一个都红)。
  *
  * 为什么要它:上面那两组闭集是 shared 联合的**第二处**写法(第一处是协议类型)。
@@ -137,6 +166,15 @@ export interface SessionMessageRow {
   originSource: SessionMessageSource | null;
   /** 这一轮为什么存在(**只在 `originSource === "turn"` 时有值**)。 */
   triggerKind: SessionMessageTriggerKind | null;
+  /**
+   * **哪一类待办**叫醒了这一轮(`session_messages.todo_kind`,migration 022)。
+   *
+   * 只在 `originSource === "turn" AND triggerKind === "todo"` 时有值。
+   * ⚠️ **`null` 不等于「不是待办」** —— 022 之前的存量行(以及一切没有落过这一列的
+   * 行)都是 `null`,读侧如实合成 `{ kind: "todo" }`(**不带** `todoKind`)并继续走
+   * 「一律进内部通道」的旧判据。回填是编造,理由写在 `migrations/022_todo_kind.sql`。
+   */
+  todoKind: TriggerTodoKind | null;
 }
 
 interface RawConversation {
@@ -156,6 +194,7 @@ interface RawMessage {
   created_at: number;
   origin_source: string | null;
   trigger_kind: string | null;
+  todo_kind: string | null;
 }
 
 /**
@@ -333,7 +372,11 @@ export function openDeliverableSession(
  *     的维度;
  *   · `originSource === "broadcast"` 时 `triggerKind` 必须是 `null` —— 这是契约里
  *     `_BroadcastMustNotCarryTrigger` 的落库侧同一条纪律(播报无条件显示,
- *     不许被任何回合级判据连坐)。
+ *     不许被任何回合级判据连坐);
+ *   · `todoKind` 有值 ⟹ `triggerKind === "todo"`(migration 022)—— 甲方亲口发起的
+ *     那一轮与播报**都没有**「哪一类待办」,给了就是编造。
+ *     ⚠️ **反过来不设守卫**:`triggerKind === 'todo'` 而 `todoKind` 为 `null` 是
+ *     合法形状(022 之前的存量行全是),下面那条注释写了为什么。
  *
  * 违反时**抛**,不静默降级:一条错封套写进库之后,现场只剩下一个读不出来的
  * `unknown`(见 7-N)。
@@ -351,6 +394,8 @@ export function appendSessionMessage(
     originSource: SessionMessageSource | null;
     /** 见 {@link SessionMessageRow.triggerKind};`null` = 没有说话人之外的维度 */
     triggerKind: SessionMessageTriggerKind | null;
+    /** 见 {@link SessionMessageRow.todoKind};`null` = 不是待办叫醒的 / 022 之前的行 */
+    todoKind?: TriggerTodoKind | null;
   },
 ): void {
   const isTurn = row.originSource === "turn";
@@ -362,13 +407,35 @@ export function appendSessionMessage(
         `播报 / 系统通知必须写成 trigger_kind=null(id=${row.id})`,
     );
   }
+  const todoKind = row.todoKind ?? null;
+  // ⚠️ **单向不变式**,刻意不是双向。
+  //
+  //   有 `todoKind` ⟹ `triggerKind === "todo"`(「甲方亲口发起的、播报的、
+  //   系统通知的,都没有『哪一类待办』」—— 给了就是编造)
+  //
+  // 反过来**不成立**:`triggerKind === "todo"` 而 `todoKind === NULL` 是**合法形状**
+  // —— 022 之前的存量行**全是**这样(`session_messages.todo_kind` 可空,而回填是
+  // 编造,见 `migrations/022_todo_kind.sql`),而夹具与任何「只关心它是不是待办
+  // 回合」的调用点也**不必**知道是哪一类。
+  //
+  // 我第一版写成了双向(`(todoKind !== null) !== (triggerKind === 'todo')`),
+  // 结果它把上面那些**合法的**行全部拒绝掉 —— 一个守卫比它守的不变式更严,
+  // 就会在正确的输入上炸,而那种错误看起来像「代码坏了」而不是「守卫写错了」。
+  if (todoKind !== null && row.triggerKind !== "todo") {
+    throw new Error(
+      `appendSessionMessage: 封套形状不合法(trigger_kind=${String(row.triggerKind)}, ` +
+        `todo_kind=${String(todoKind)})—— ` +
+        `todo_kind 有值 ⟹ trigger_kind === "todo";` +
+        `甲方亲口发起的那一轮与播报都没有「哪一类待办」(id=${row.id})`,
+    );
+  }
   db.prepare(
     `INSERT INTO session_messages
-       (id, session_id, agent_id, kind, content, created_at, origin_source, trigger_kind)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+       (id, session_id, agent_id, kind, content, created_at, origin_source, trigger_kind, todo_kind)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     row.id, row.sessionId, row.agentId, row.kind, row.content, row.createdAt,
-    row.originSource, row.triggerKind,
+    row.originSource, row.triggerKind, todoKind,
   );
 }
 
@@ -444,6 +511,11 @@ export function listSessionMessages(
         `session_messages 表里出现未定义 trigger_kind「${r.trigger_kind}」(id=${r.id})`,
       );
     }
+    if (r.todo_kind !== null && !isSessionMessageTodoKind(r.todo_kind)) {
+      throw new Error(
+        `session_messages 表里出现非法的 todo_kind「${r.todo_kind}」(id=${r.id})`,
+      );
+    }
     return {
       id: r.id,
       sessionId: r.session_id,
@@ -453,6 +525,7 @@ export function listSessionMessages(
       createdAt: r.created_at,
       originSource: r.origin_source,
       triggerKind: r.trigger_kind,
+      todoKind: r.todo_kind,
     };
   });
 }

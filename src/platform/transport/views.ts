@@ -249,7 +249,13 @@ export function toChangeView(row: ChangeRequestRow): ChangeView {
 export function messageOriginOf(row: SessionMessageRow): MessageOrigin {
   if (row.originSource === "broadcast") return { source: "broadcast" };
   if (row.originSource === "turn" && row.triggerKind !== null) {
-    return { source: "turn", trigger: { kind: row.triggerKind } };
+    // ⚠️ `todoKind` **只在真的读到值时才带上**(migration 022):它是可空列,
+    // 022 之前的存量行永远是 `null`,而**回填是编造**(该迁移文件头记了为什么)。
+    // 缺它的那一批继续走「一律进内部通道」的旧判据 —— 方向是 fail-closed:
+    // 宁可甲方少看一条,也不把一条内部推演永久上屏。
+    return row.todoKind === null
+      ? { source: "turn", trigger: { kind: row.triggerKind } }
+      : { source: "turn", trigger: { kind: row.triggerKind, todoKind: row.todoKind } };
   }
   if (row.originSource === null && row.triggerKind === null) {
     return { source: "unknown" };

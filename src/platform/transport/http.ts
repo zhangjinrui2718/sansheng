@@ -52,7 +52,7 @@ import {
   aggregateProjectUsage, normalizeUsageDayLimit, normalizeUsageDays,
 } from "../storage/repo/usage.js";
 import {
-  isSessionMessageKind, isSessionMessageSource, isSessionMessageTriggerKind,
+  isSessionMessageKind, isSessionMessageSource, isSessionMessageTodoKind, isSessionMessageTriggerKind,
 } from "../storage/repo/sessions.js";
 import type { SessionMessageKind, SessionMessageRow } from "../storage/repo/sessions.js";
 import type {
@@ -732,7 +732,7 @@ export function memberConversations(
     // 全是 `unknown`,而这与「存量行」在类型上长得一模一样(见
     // `views.ts` 的 `messageOriginOf`)。
     `SELECT m.id, m.session_id, m.agent_id, m.kind, m.content, m.created_at,
-            m.origin_source, m.trigger_kind
+            m.origin_source, m.trigger_kind, m.todo_kind
        FROM session_messages m
        JOIN project_sessions s ON s.id = m.session_id
       WHERE s.project_id = ? AND m.agent_id IS ?
@@ -763,7 +763,7 @@ export function memberConversations(
     const rows = msgStmt.all(projectId, agentId, limit) as Array<{
       id: string; session_id: string; agent_id: string | null;
       kind: string; content: string; created_at: number;
-      origin_source: string | null; trigger_kind: string | null;
+      origin_source: string | null; trigger_kind: string | null; todo_kind: string | null;
     }>;
     const messages: SessionMessageView[] = rows.map((r) => {
       if (!isSessionMessageKind(r.kind)) {
@@ -782,11 +782,17 @@ export function memberConversations(
           `session_messages 表里出现未定义 trigger_kind「${r.trigger_kind}」(id=${r.id})`,
         );
       }
+      if (r.todo_kind !== null && !isSessionMessageTodoKind(r.todo_kind)) {
+        throw new Error(
+          `session_messages 表里出现非法的 todo_kind「${r.todo_kind}」(id=${r.id})`,
+        );
+      }
       const row: SessionMessageRow = {
         id: r.id, sessionId: r.session_id, agentId: r.agent_id,
         kind: r.kind, content: r.content, createdAt: r.created_at,
         originSource: r.origin_source,
         triggerKind: r.trigger_kind,
+        todoKind: r.todo_kind,
       };
       return toMessageView(row, nameOfGroup, projectId);
     });

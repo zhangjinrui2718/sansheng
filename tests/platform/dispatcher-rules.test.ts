@@ -92,17 +92,19 @@ function sync(r: Promise<ToolResult> | ToolResult): ToolResult {
 
 // ── ① 规则表是闭合的 ────────────────────────────────────────────
 
-describe("B1 · 规则表:每个 `TodoKind` 恰好一条规则(C3 之后是 10 条,丙③ 之后 11 条,020 之后 12 条)", () => {
+describe("B1 · 规则表:每个 `TodoKind` 恰好一条规则(C3 之后 10 条,丙③ 11 条,020 12 条,真机终局 13 条)", () => {
   it("`TodoKind` 的每个取值**恰好**有一条规则产出它 —— 没有分支留在表外", () => {
     const kinds = RULES.map((r) => r.then.kind);
     // B1 落地时是 8/8;C3 补了流水线缺的两环(`integrate` / `handover`);
     // 丙③ 补上第 11 条 `resolve_blocked_work`(一条 `blocked` 的工作项此前**没有
     // 任何驱动者** ⇒ 整个项目零待办的静默停摆);
     // 020 补上第 12 条 `resume_client`(甲方答复了业务经理的提问,而**没有任何
-    // 规则认领这一条** ⇒ 答复落库即死信,真机 2026-10-06 09:09 现场)。
+    // 规则认领这一条** ⇒ 答复落库即死信,真机 2026-10-06 09:09 现场);
+    // 2026-10-06 的真机终局补上第 13 条 `close_finished_project`(所有工作项终结 +
+    // 全部交付完成,而 `projects.status` 永远是 `active` —— **项目永远收不了口**)。
     // 这几个数字**同时**改是对的:集合相等那条断言才是闭合性本身。
-    expect(RULES).toHaveLength(12);
-    expect(TODO_KINDS).toHaveLength(12);
+    expect(RULES).toHaveLength(13);
+    expect(TODO_KINDS).toHaveLength(13);
     // 集合相等 ⇒ 「表产出的 kind」与「闭集」是同一个集合
     expect([...kinds].sort()).toEqual([...TODO_KINDS].sort());
     // 且没有两条规则争同一个 kind(否则「谁负责这一条」没有答案)
@@ -134,20 +136,24 @@ describe("B1 · 规则表:每个 `TodoKind` 恰好一条规则(C3 之后是 10 �
     }
   });
 
-  it("**`artifact_inserted` 只被下面三条规则用**(B2 的纪律:事件不是判据)", () => {
+  it("**`artifact_inserted` 只被下面四条规则用**(B2 的纪律:事件不是判据)", () => {
     // B2 让产出工件去敲门铃,而**没有**让任何规则开始读工件 —— 所以当时这条断言
     // 写的是「`artifact_inserted` 不在任何规则的 `on` 里」。C3 的 `integrate` /
     // `handover` 是**唯一**计划内合法打破它的地方(B2 的注释里就预告了这一刻);
     // 020 的 `resume_client` 是第二处 —— 甲方答复落成的那条 `decision` 工件就是
     // 「答复到了」这个状态变化的唯一可观测信号,而 `resolveClientQuestion` 是纯仓储
     // 写、**不持任何能力**,所以它不会敲门铃(那正是它今天静默的另一半原因)。
+    // 真机终局的 `close_finished_project` 是第三处:「有一份新的 `deliverable` 落库」
+    // 正是「这个项目可能刚干完」的那个可观测信号(而 `projects.status` 只在
+    // **关闭**时才变,不能当触发名 —— 那是一个结果不是一个事件)。
     // 所以这里改成钉**谁**用它:多一条规则都不许。
     //
     // 它守的仍然是同一条纪律:规则的 `if` 只许读工件的**结构化列**(kind /
     // `work_id` / status),不许读正文;而**判定永远重新查库** —— 门铃只是门铃。
     const usingArtifact = RULES.filter((r) => r.on.includes("artifact_inserted")).map((r) => r.id);
     expect(usingArtifact.sort()).toEqual([
-      "handover_deliverable", "integrate_reviewed_subtree", "resume_client",
+      "close_finished_project", "handover_deliverable", "integrate_reviewed_subtree",
+      "resume_client",
     ]);
     const used = new Set<string>(RULES.flatMap((r) => [...r.on]));
     expect([...used].sort()).toEqual([

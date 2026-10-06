@@ -427,8 +427,15 @@ describe("C3 · 排空:整合 → 交付", () => {
       runAgentTurn: async (agentId, task) => { pmWritesDeliverable(agentId, task); return okTurn; },
       runWork: async () => { throw new Error("这一串里没有工作项要执行"); },
     });
+    // ⚠️ 第三项 `bm:close_project` 是 2026-10-06 真机终局之后**预期**多出来的:
+    // 交付会话在 `bm:handover` 那个回合**成功结束后**才建出来(C4 的顺序),
+    // 于是「所有工作项终结 + 审过 + 有交付物 + 交付物已交付」在那一刻**同时成立**
+    // —— 这个项目真的做完了,而平台以前没有任何一条规则认领这件事。
+    //
+    // 它证明的正是新规则读的是**库里的状态**而不是「刚才发生了什么」:
+    // 交付会话一落库,下一次查库就看见了(批次 21 的纪律)。
     expect(r.visited.map((v) => `${v.agentId}:${v.kind}`)).toEqual([
-      "pm:integrate", "bm:handover",
+      "pm:integrate", "bm:handover", "bm:close_project",
     ]);
   });
 

@@ -1,0 +1,86 @@
+-- 022 · 把「哪一类待办叫醒了这一轮」也落库 —— 通道判据要第三次收窄
+--
+-- ── 它补的是什么 ────────────────────────────────────────────────
+--
+-- 真机现场(2026-10-06,项目「美股自动化交易平台方案设计」):业务经理在 **24 次**
+-- 平台叫醒的回合里 `tell_client` 调用次数是 **0**。客户通道会话里他一共 33 条消息,
+-- 按封套拆开是 `broadcast 8` / `turn+todo 24` / `turn+user 1` —— 而那 24 条
+-- `turn+todo` 的正文**甲方一条都没看到**。
+--
+-- 后果不是「少了几条消息」。14:52:07 那一条他写着:
+--
+--   「这里有**一个关键张力**我必须当面说清:**live_aggressive 与 W3-Q2 已定的
+--   Cash account + < $25k 账户不匹配** …… 按业务经理纪律:冲突要当面说清。」
+--
+-- 那条正文被 `web/src/lib/data.ts` 的 `channelOf` 第 4 步整条滤掉。甲方从头到尾
+-- 不知道自己的两个拍板互相打架。
+--
+-- ── 为什么 019 明明落了 `trigger_kind` 却还是不够 ──────────────────
+--
+-- 019 落了封套的两维(`origin_source` / `trigger_kind`),但**刻意不落
+-- `todoKind`**,理由写在那个文件的第 97–102 行:「前端对 `turn` 封套**只读
+-- `kind`** …… `todoKind` 既不参与通道判定、也没有任何一个读者」。
+--
+-- **那条判断今天不再成立**:`todoKind` 现在**参与**通道判据了 ——
+-- `handover` / `report_downstream` / `resume_client` 这三类待办的正文**按定义
+-- 就是冲着甲方去的**,它们进甲方通道,其余 todo 仍进内部(判据与事故现场写在
+-- `shared/types/platform.ts` 的 `CLIENT_FACING_TODO_KINDS`)。
+--
+-- 而**不落库的后果与 W3-① 一模一样**:判据只在流式那一路成立(WS 封套带着完整
+-- `TurnTrigger`),**刷新一次就没了** —— 前端 `messageOriginOf` 只读得到
+-- `trigger_kind='todo'`,拿不到是哪一类,于是又走回退。
+--
+-- ⚠️ **这正是 019 文件头写的那句:「落库的是输入,判据怎么改都只是读侧的事」。**
+-- 上一轮把 `todoKind` 当成「还没有读者的维度」省掉了,这一轮它长出了读者。
+-- 省掉一列永远是省掉的成本 —— 它会在判据第三次改动时以同样的形状回来。
+--
+-- ── 为什么这一列**不加 CHECK** ─────────────────────────────────────
+--
+-- 019 的两列各有自己的 CHECK(`'user'|'todo'`、`'turn'|'broadcast'`),那是对的:
+-- 那是两个**稳定的**闭集,加取值本身就要改 schema。
+--
+-- `todo_kind` **不是**那一类:它的取值域是 `TriggerTodoKind`(13 个),
+-- 而增删它的地方是 `src/platform/runtime/dispatcher.ts` 的 `TODO_KINDS` ——
+-- 每加一种待办就要写一条迁移,是**纯负担**(019 文件头第 97 行管这叫「在库里
+-- 多一份会漂的闭合集」,它当时拒绝 `todoKind` 有一半就是这个理由)。
+--
+-- 闭集改由**读写两侧的 TypeScript** 保证,那一侧不会漂:
+--   · 读:`src/platform/transport/http.ts` 与 `views.ts` 的 `messageOriginOf`
+--     拿 `isSessionMessageTodoKind` 校验,不认识的取值**抛错**(与同一段代码对
+--     `origin_source` / `trigger_kind` 的处置逐字同形 —— fail loud,不静默降级);
+--   · 写:`repo/sessions.ts` 的 `appendSessionMessage` 收的是 `TriggerTodoKind`
+--     类型,不是 `string`;
+--   · 编译期:`hub.ts` 的 `_TodoKindParity` 断言让 `TriggerTodoKind` 与
+--     `TODO_KINDS` **双向互相可赋值**,增删一个取值时 `tsc` 当场报错。
+--
+-- ⇒ **库里那一列是 TEXT,闭集在代码里。** 这与「外键一律指向 agent_id、
+-- 角色属性只有一处真相」是同一条纪律在本表上的形态。
+--
+-- ── 存量行的处置(如实写)──────────────────────────────────────────
+--
+-- 可空 ⇒ 022 之前写的行全是 `NULL`。读侧此时如实给
+-- `{ source: "turn", trigger: { kind: "todo" } }`(**不带** `todoKind`),
+-- 于是它们**继续走旧的判据**:一律 `internal`。
+--
+-- ⚠️ **这是有意的,而且方向是安全的**:那 24 条真机消息如果被判成
+-- 「三类之一」就会上屏,而它们**没有** `todo_kind` 可供判断 —— 回填一个值就是
+-- **编造**(019 文件头第 47 行那段的同一条纪律:「猜错的方向正好是这次要修的 bug」,
+-- 这里猜错的方向是「把该收进内部的一段永久上屏」)。
+--
+-- ── 本迁移只做加法 ──────────────────────────────────────────────
+--
+-- 一条 `ALTER TABLE ... ADD COLUMN`,**一行 DROP 都没有**,不改任何已有列、
+-- 不重建表、不改任何既有约束。
+-- `session_messages` **没有子表**(没有别的表 REFERENCES 它),所以这一列也不
+-- 需要登记进 016 / 020 文件头记的那个「第 N 张引用子表」的清单。
+-- ⇒ 022 **不是** `INTENTIONAL_REBUILDS` 的成员,`tests/platform/migrations.test.ts`
+-- 的重名守卫不会把它当成「同一张表被两个迁移创建」。
+
+-- ── ① 哪一类待办叫醒了这一轮 ──────────────────────────────────────
+--
+-- 只在 `origin_source = 'turn' AND trigger_kind = 'todo'` 的那一支上有值:
+-- 取值域见 `shared/types/platform.ts` 的 `TriggerTodoKind`,
+-- 真身是 `runtime/dispatcher.ts` 的 `TODO_KINDS`(两者由 `_TodoKindParity` 对账)。
+--
+-- NULL = 不是待办叫醒的(甲方亲口发起的那一轮)、或是 022 之前的存量行。
+ALTER TABLE session_messages ADD COLUMN todo_kind TEXT;

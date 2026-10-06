@@ -26,6 +26,7 @@
  * `pollMs` 只给右侧摘要栏做**慢速兜底**(WS 断流时它要能收敛),页面一律不轮询。
  */
 import { useCallback, useEffect, useState } from "react";
+import { todoKindReachesClient } from "@shared/types/platform";
 import type {
   ArtifactView,
   AskView,
@@ -586,7 +587,13 @@ export function channelContextOf(input: {
  *    「工件触发的那一轮」里的播报**不被连坐**(验收判据②的方向)。
  * 4. **回合封套**(`origin.source === "turn"`)⇒ 只有 `trigger.kind === "user"`
  *    的那一轮正文进;`todo`(排空器按待办叫醒的,`todoKind` 说清是哪条)
- *    **一律不进** —— 无论说话人是谁、是不是 `clientFacing`。
+ *    默认**一律不进** —— 无论说话人是谁、是不是 `clientFacing`。
+ *    **⚠️ 一条例外(2026-10-06 真机加的)**:`todoKind` 落在
+ *    `CLIENT_FACING_TODO_KINDS`(`handover` / `report_downstream` /
+ *    `resume_client`)且说话人 `clientFacing` 时,**正文进甲方通道** ——
+ *    事故现场与「为什么这三类不算语义猜测」写在 `shared/types/platform.ts`
+ *    那个集合的定义上,那里是**唯一真相**(本步与 `host/serve.ts` 的
+ *    `detectUnannouncedTurn` 都从那里取,不各抄一份)。
  * 5. **封套没到**(`origin.source === "unknown"`)⇒ **回退到角色的两跳判据**
  *    (`agentId → role → clientFacing`),映射缺失时 fail-closed。理由与缺口见上面
  *    那段「`ctx` 还在,但它的地位被降级了」。
@@ -605,9 +612,38 @@ export function channelOf(turn: Turn, ctx: ChannelContext): TurnChannel {
   const origin = turn.origin;
   if (origin.source === "broadcast") return "client";
   if (origin.source === "turn") {
-    return origin.trigger.kind === "user" ? "client" : "internal";
+    if (origin.trigger.kind === "user") return "client";
+    // ⚠️ 这三类待办按定义就是冲着甲方去的(交付 / 交代下游 / 处置甲方的答复)。
+    // 真机现场:业务经理 24 次 todo 回合、`tell_client` 调用 0 次,而 14:52 那条
+    // 「档位与 <$25k Cash account 不匹配」正文被这一步整条滤掉 —— 甲方从头到尾
+    // 不知道自己的两个拍板互相打架。
+    // **两半都要成立**:todoKind 在那个闭合集里(库内事实)、说话人 clientFacing。
+    // 少任何一半都回到 `internal`(fail-closed:宁可晚一拍,不可通道分离失效)。
+    if (origin.trigger.kind !== "todo") return "internal";
+    // ⚠️ 这三类待办按定义就是冲着甲方去的(交付 / 交代下游 / 处置甲方的答复)。
+    // 真机现场:业务经理 24 次 todo 回合、`tell_client` 调用 0 次,而 14:52 那条
+    // 「档位与 <$25k Cash account 不匹配」正文被这一步整条滤掉 —— 甲方从头到尾
+    // 不知道自己的两个拍板互相打架。
+    // **两半都要成立**:todoKind 在那个闭合集里(库内事实)、说话人 clientFacing。
+    // 少任何一半都回到 `internal`(fail-closed:宁可晚一拍,不可通道分离失效)。
+    if (todoKindReachesClient(origin.trigger.todoKind) && turn.agentId !== null) {
+      const role = roleOfTurn(turn, ctx);
+      if (role !== undefined && ctx.clientFacingRoles.has(role)) return "client";
+    }
+    return "internal";
   }
   return fallbackChannelOf(turn, ctx);
+}
+
+/**
+ * 这一轮说话人的 role —— 查不到时给 `undefined`(调用方 fail-closed)。
+ *
+ * 存在的理由:`channelOf` 第 4 步要判「说话人是不是 `clientFacing`」,而
+ * `fallbackChannelOf` 里已经有一份逐字同形的代码。**两份写法就是两份定义** ——
+ * 本项目为它付过代价,所以这里抽成一个函数,两条路共用。
+ */
+function roleOfTurn(turn: Turn, ctx: ChannelContext): ProjectRole | undefined {
+  return turn.agentId === null ? undefined : ctx.rolesByAgentId.get(turn.agentId);
 }
 
 /**

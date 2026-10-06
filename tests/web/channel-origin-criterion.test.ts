@@ -142,7 +142,7 @@ function renderTimeline(turns: readonly Turn[]): string {
 // ── ① 工件触发的业务经理回合:正文 + 工具卡 + 思考块,**都不进** ──────────
 describe("① 工件 / 待办触发的业务经理回合不进甲方时间线(作者不再是判据)", () => {
   it("**整轮被滤掉**:正文、工具卡、思考块一个都不上屏", () => {
-    runTurn("m-todo", BM, { source: "turn", trigger: { kind: "todo", todoKind: "report_downstream" } }, {
+    runTurn("m-todo", BM, { source: "turn", trigger: { kind: "todo", todoKind: "close_project" } }, {
       reasoning: REASONING, tool: TOOL_NAME, text: BODY,
     });
     s().applyEvent({ type: "agent_end", projectId: P, ts: 1 });
@@ -150,9 +150,11 @@ describe("① 工件 / 待办触发的业务经理回合不进甲方时间线(�
     const turns = landed();
     expect(turns).toHaveLength(1);
     // 轮确实建出来了(数据层不丢),判据把它挡在通道外
-    // ⚠️ **只带 `kind`**(W3-① 起前端那条 origin 收窄到 `TurnTriggerKind`):
-    // `todoKind` 不参与判定,落库那条路也拿不到它 —— 两条路必须同形。
-    expect(turns[0]?.origin).toEqual({ source: "turn", trigger: { kind: "todo" } });
+    // ⚠️ `todoKind` **一路带过来**(migration 022):它是**读面判据的一部分**
+    // (`CLIENT_FACING_TODO_KINDS`),不落库就等于「流式看得见、刷新看不见」。
+    expect(turns[0]?.origin).toEqual({
+      source: "turn", trigger: { kind: "todo", todoKind: "close_project" },
+    });
     const { timeline, hidden } = partitionTurns(turns, CTX);
     expect(timeline, "业务经理是 clientFacing,但这不是判据了").toEqual([]);
     expect(hidden).toBe(1);
@@ -179,7 +181,7 @@ describe("② `tell_client` 的播报无条件进(负样本方向:不许一刀�
   it("工件触发回合**内部**的播报照常进甲方时间线", () => {
     // 真机形状:业务经理被 report_downstream 叫醒,回合**内部** await 了一次
     // `tell_client` ⇒ 播报是**另一条**封套(`hub.ts` 的 clientChannel.tell)。
-    runTurn("m-todo", BM, { source: "turn", trigger: { kind: "todo", todoKind: "report_downstream" } }, {
+    runTurn("m-todo", BM, { source: "turn", trigger: { kind: "todo", todoKind: "close_project" } }, {
       reasoning: REASONING, tool: TOOL_NAME, text: "内部交代",
     });
     runTurn("m-broadcast", BM, { source: "broadcast" }, { text: "这次新增 2 个阻塞,预计晚 1 天。" });
@@ -269,7 +271,7 @@ describe("⑤ `surfaceStatusOf` / 输入框禁用不许给出第二个答案", (
   }
 
   it("工件触发的业务经理在跑 ⇒ 顶部 `internal`(输入框可用),而它在屏幕上也不显示", () => {
-    runTurn("m-todo", BM, { source: "turn", trigger: { kind: "todo", todoKind: "report_downstream" } }, { text: BODY });
+    runTurn("m-todo", BM, { source: "turn", trigger: { kind: "todo", todoKind: "close_project" } }, { text: BODY });
     assertSameCriterion();
     const act = channelActivityOf(inFlightTurns(s()), CTX, P);
     expect(surfaceStatusOf(s().status, act)).toBe("internal");
@@ -287,7 +289,7 @@ describe("⑤ `surfaceStatusOf` / 输入框禁用不许给出第二个答案", (
   });
 
   it("播报在跑(工件触发那一轮的内部)⇒ `streaming`,而屏幕上就是那条播报", () => {
-    runTurn("m-todo", BM, { source: "turn", trigger: { kind: "todo", todoKind: "report_downstream" } }, { text: "内部交代不许出现" });
+    runTurn("m-todo", BM, { source: "turn", trigger: { kind: "todo", todoKind: "close_project" } }, { text: "内部交代不许出现" });
     runTurn("m-bc", BM, { source: "broadcast" }, { text: "对甲方说的话" });
     assertSameCriterion();
     const act = channelActivityOf(inFlightTurns(s()), CTX, P);
@@ -301,7 +303,7 @@ describe("⑤ `surfaceStatusOf` / 输入框禁用不许给出第二个答案", (
   it("别的项目里在跑的业务经理不许锁住这里的输入框(上下文仍然是恒等比较)", () => {
     s().applyEvent({
       type: "message_start", projectId: "p-other", messageId: "x", role: "assistant", agentId: BM,
-      source: "turn", trigger: { kind: "todo", todoKind: "report_downstream" },
+      source: "turn", trigger: { kind: "todo", todoKind: "close_project" },
     });
     const act = channelActivityOf(inFlightTurns(s()), CTX, P);
     expect(act.client).toEqual([]);

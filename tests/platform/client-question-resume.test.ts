@@ -194,7 +194,13 @@ describe("③ 终止判据:处置完就不再有(靠 `consumed_at`,不靠预算)
       runWork: async () => { throw new Error("这一串里没有工作项要执行"); },
     };
     const first = await drainProject(deps);
-    expect(first.visited.map((v) => `${v.agentId}:${v.kind}`)).toEqual(["bm:resume_client"]);
+    // ⚠️ 这里**只按被测的 kind 过滤**,不再断言整张 `visited`:
+    // 2026-10-06 之后这个夹具**同时**满足 `close_finished_project`(它就是一个
+    // 「全做完 + 已交付」的项目),而那条待办的次数取决于尝试预算 —— 把它写进
+    // 逐字比对里,本文件每换一个 `maxAttemptsPerTodo` 就要改一次断言,而它测的
+    // 根本不是收口。「收口也成立」由下面那条独立用例钉住。
+    expect(first.visited.filter((v) => v.kind === "resume_client").map((v) => v.agentId))
+      .toEqual(["bm"]);
     const second = await drainProject(deps);
     expect(second.visited.some((v) => v.kind === "resume_client"), "消费了就不该再叫").toBe(false);
     expect(getClientQuestions(db, [q1]).get(q1)?.consumedAt).toBe(T0);
@@ -234,9 +240,9 @@ describe("④ at-least-once:回合失败/被中断**不消费**", () => {
     // ⚠️ **3 次而不是 1 次**,而且这是**正确**行为:不消费 ⇒ 下一轮查库时待办
     // 仍然成立 ⇒ 又会被派出去。at-least-once 的代价就是「宁可多看几次」。
     // 写成 1 次反而会把「失败不消费」这条纪律悄悄改成「失败即放弃」。
-    expect(failed.visited.map((v) => v.kind)).toEqual([
-      "resume_client", "resume_client", "resume_client",
-    ]);
+    // 只看被测的那一类(理由同上面那条:整张表会把别的规则的预算次数也绑进来)
+    expect(failed.visited.filter((v) => v.kind === "resume_client").map((v) => v.kind))
+      .toEqual(["resume_client", "resume_client", "resume_client"]);
     expect(getClientQuestions(db, [q1]).get(q1)?.consumedAt, "失败不消费").toBeNull();
     expect(failed.newlyExhausted.map((t) => t.kind)).toContain("resume_client");
     expect(failed.stopDetail).toContain("尝试预算");
@@ -267,7 +273,8 @@ describe("④ at-least-once:回合失败/被中断**不消费**", () => {
       runAgentTurn: async (): Promise<DrainTurnReport> => okTurn,
       runWork: async () => { throw new Error("不该被调用"); },
     });
-    expect(ok.visited.map((v) => v.kind)).toEqual(["resume_client"]);
+    expect(ok.visited.filter((v) => v.kind === "resume_client").map((v) => v.kind))
+      .toEqual(["resume_client"]);
     expect(getClientQuestions(db, [q1]).get(q1)?.consumedAt).toBe(T0);
   });
 });

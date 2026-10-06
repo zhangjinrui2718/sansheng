@@ -226,8 +226,28 @@ const sessionsOf = (db: Database.Database) =>
   }>;
 
 const messagesOf = (db: Database.Database, sessionId: string) =>
-  db.prepare(`SELECT agent_id, kind, content FROM session_messages WHERE session_id = ? ORDER BY created_at`)
-    .all(sessionId) as Array<{ agent_id: string | null; kind: string; content: string }>;
+  db.prepare(
+    `SELECT agent_id, kind, content, origin_source, trigger_kind, todo_kind
+       FROM session_messages WHERE session_id = ? ORDER BY created_at`,
+  )
+    .all(sessionId) as Array<{
+      agent_id: string | null; kind: string; content: string;
+      origin_source: string | null; trigger_kind: string | null; todo_kind: string | null;
+    }>;
+
+/**
+ * **甲方在交付对话里真正看得见的那几条** —— 与读面 `web/src/lib/data.ts` 的
+ * `channelOf` 同一判据:播报封套无条件进,回合封套只有 `user` 触发的那一轮进。
+ *
+ * ⚠️ 为什么需要它:2026-10-06 之后,业务经理被 `close_finished_project` 之类待办
+ * 叫醒的回合**正文会落进交付会话**(会话通道由 `channelForAgent` 决定,那是
+ * 既有设计),但读面按封套把它们摘掉 —— 所以「库里有哪些行」与「甲方看到什么」
+ * 从此**不是同一件事**。本文件的验收一直是后者。
+ */
+const clientVisibleOf = (rows: ReturnType<typeof messagesOf>) =>
+  rows
+    .filter((m) => m.origin_source === "broadcast" || m.trigger_kind === "user")
+    .map((m) => `${m.kind}:${m.agent_id ?? "user"}`);
 
 const attemptsOf = (db: Database.Database, key: string) =>
   (db.prepare(`SELECT COUNT(*) AS n FROM dispatch_attempts WHERE project_id = 'p1' AND todo_key = ?`)
@@ -278,7 +298,18 @@ describe("C4 真机 · 交付物 → 甲方对话(临时目录 · 真宿主 · �
     // 所以交付那一刻说的话还在旧会话里 —— 这是设计的先后顺序,不是漏接线。
     expect(messagesOf(db, main).some((m) => m.agent_id === "bm" && m.content.includes("交付物到了")))
       .toBe(true);
-    expect(messagesOf(db, "s_deliv_d1"), "新开的交付对话里还没有消息").toEqual([]);
+    // ⚠️ 2026-10-06 之前这里断言的是「交付对话**一条消息都没有**」。
+    // 现在不再成立 —— 真机终局那条 `close_finished_project` 规则会在交付完成的
+    // **下一个 tick** 叫醒业务经理判断收不收口,而他的回合按 `channelForAgent`
+    // 落进 client 通道的会话(此时交付对话已经是那一条)。
+    //
+    // 所以这里改成断言**原来那条真正要验的东西**:交付那一刻说的话**不在**交付
+    // 对话里 —— 交付对话是那个回合**成功结束后**才开的。写成「对话里没有那句话」
+    // 比「对话为空」准,也不会被下一条规则的多一个回合推翻。
+    expect(
+      messagesOf(db, "s_deliv_d1").some((m) => m.content.includes("交付物到了")),
+      "交付那一刻说的话落在旧会话,不是交付对话(顺序,不是漏接线)",
+    ).toBe(false);
 
     // ── 断言 2:甲方连追两句(两次门铃 ⇒ 两次排空),`handover` 不再被叫醒 ──
     //
@@ -305,8 +336,8 @@ describe("C4 真机 · 交付物 → 甲方对话(临时目录 · 真宿主 · �
     expect(sessionsOf(db).filter((s) => s.channel === "client"), "也没有开出第二条交付对话")
       .toHaveLength(1);
     expect(
-      messagesOf(db, "s_deliv_d1").map((m) => `${m.kind}:${m.agent_id ?? "user"}`),
-      "交付对话 = 甲方 ↔ 业务经理(两句追问 + 两次回话)",
+      clientVisibleOf(messagesOf(db, "s_deliv_d1")),
+      "甲方在交付对话里看到的 = 两句追问 + 两次回话(待办回合的正文按封套摘掉)",
     ).toEqual(["user:user", "assistant:bm", "user:user", "assistant:bm"]);
 
     // ── 断言 3:交付之后**再跑一个 worker**,它的消息不得落进交付对话 ──
