@@ -236,9 +236,9 @@ const renderScreen = (over: Partial<ScreenProps> = {}): string =>
  */
 function dagRange(html: string): { start: number; end: number } {
   // 锚用「标题单元格 + 下一块标题」,两端都是纯文本 —— 不依赖区块内部的结构。
-  const start = html.indexOf(">依赖关系图<");
+  const start = html.indexOf(">工件关系图<");
   const end = html.indexOf(">推进图<");
-  expect(start, "① 依赖关系图那一段不见了").toBeGreaterThan(-1);
+  expect(start, "① 工件关系图那一段不见了").toBeGreaterThan(-1);
   expect(end, "① 之后没有 ② 推进图 —— 顺序可能被改动了").toBeGreaterThan(start);
   return { start, end };
 }
@@ -412,17 +412,17 @@ describe("④ 运行态 `unavailable` / `live === null` ⇒ ② 推进图一个 
     expect(on).toContain("读不到");
     expect(on).toContain("一条都没点亮");
     expect(off).not.toContain("读不到");
-    expect(off).toContain("横轴 = 时间");
+    expect(off).toContain("横轴 = 距项目起点的耗时");
     // 图例本身不许放点(旧 DAG 图例里那个点是它自己的事)
     expect(countOf(off, /ss-live-dot/g)).toBe(0);
   });
 
-  it("整页:读不到运行态时,`.ss-live-dot` **只允许**出现在 ① 依赖关系图那一块", () => {
+  it("整页:读不到运行态时,`.ss-live-dot` 一个都不许有(① 工件图不读运行态)", () => {
     const html = renderScreen({ live: UNAVAILABLE });
     const { start, end } = dagRange(html);
     // ① 排在 ② 之前(用户要求的第一条顺序)—— 这一条只钉相对位置,不钉它是不是字节 0
     // (`ArtifactsScreen` 外面还包着一层 `div.grid`,锚不该依赖那层壳)
-    expect(start, "依赖关系图跑到推进图后面去了").toBeLessThan(end);
+    expect(start, "工件关系图跑到推进图后面去了").toBeLessThan(end);
     // ① 之外(它前面 + 它后面 = ② 主视图 / 图例 / ③ 面板 / ④⑤)一个点都不许有
     expect(
       html
@@ -431,8 +431,14 @@ describe("④ 运行态 `unavailable` / `live === null` ⇒ ② 推进图一个 
         .match(/ss-live-dot/g) ?? [],
       "新主视图 / 图例 / 面板里出现了点(它们一个都不许有)",
     ).toHaveLength(0);
-    // ① 里那些点是它自己的既有信息(图例 + 灰的 unknown 点),一个都没删
-    expect(countOf(html.slice(start, end), /ss-live-dot/g)).toBeGreaterThan(0);
+    // ①(工件关系图)**不读运行态**,所以它一个点都不该有 ——
+    // 「谁此刻在跑」是环节的属性,不是工件的属性。2026-10-06 换图时顺带去掉了。
+    expect(
+      countOf(html.slice(start, end), /ss-live-dot/g),
+      "工件关系图里出现了运行态的点(它压根不读运行态)",
+    ).toBe(0);
+    // 于是整页一个点都没有 —— 读不到运行时,不许任何地方点亮
+    expect(countOf(html, /ss-live-dot/g), "读不到运行态时整页仍有亮着的点").toBe(0);
   });
 
   it("可点元素键盘可达:每条条、每个点都是 role=button + tabindex=0", () => {
@@ -477,45 +483,64 @@ describe("⑥ 刻度渲染出来了;「此刻」线只在读得到运行态且�
 // (2026-10-07 加,对应这条要求:「工作项中,依赖关系图不要默认收起,放在最上面,
 //  这个页面的信息依次是:依赖关系图、推进图、选中的环节详情」。)
 
-describe("⑨ ① 依赖关系图:排在最上面,而且不再默认收起", () => {
-  it("顺序:依赖关系图 < 推进图 < 选中的环节(负样本:反过来说不成立)", () => {
+describe("⑨ ① 工件关系图:排在最上面,而且不再默认收起(取代旧的工作项 DAG)", () => {
+  it("顺序:工件关系图 < 推进图 < 选中的环节(负样本:反过来说不成立)", () => {
     const html = renderScreen();
-    const graph = html.indexOf("依赖关系图");
+    const graph = html.indexOf("工件关系图");
     const timeline = html.indexOf("推进图");
     const panel = html.indexOf("选中的环节");
     // 三个锚都必须真的找到 —— 否则下面的大小比较会因为 -1 而「恰好」成立
-    expect(graph, "页面上没有「依赖关系图」").toBeGreaterThan(-1);
+    expect(graph, "页面上没有「工件关系图」").toBeGreaterThan(-1);
     expect(timeline, "页面上没有「推进图」").toBeGreaterThan(-1);
     expect(panel, "页面上没有「选中的环节」").toBeGreaterThan(-1);
-    expect(graph, "依赖关系图不在推进图之前").toBeLessThan(timeline);
-    expect(timeline, "推进图不在选中的环节之前").toBeLessThan(panel);
-    // 负样本:反过来一律不成立(证明上面两条不是恒真)
-    expect(graph, "顺序被读反了").not.toBeGreaterThan(timeline);
+    expect(graph, "工件关系图不在推进图之前").toBeLessThan(timeline);
+    expect(timeline, "推进图不在选中的环节之前").toBeLessThan(timeline === -1 ? -2 : panel);
     expect(timeline, "顺序被读反了").not.toBeGreaterThan(panel);
   });
 
-  it("`class=\"ss-dag-node\"` 的数量仍对得上(展开 ≠ 换了渲染)", () => {
+  it("**负样本:旧那张「节点 = 环节」的 DAG 不在页面上了**(用户 2026-10-06 裁决)", () => {
     const html = renderScreen();
-    expect(countOf(html, /class="ss-dag-node"/g), "旧 DAG 的节点被弄丢了").toBe(WORKS.length);
-    // ① 的标题还在。**它现在带自己的计数**(works.length),不再是 `<summary>` 里
-    // 那句「依赖关系图(分层排布,可能较宽)」—— 那句话随 `<Disclosure>` 一起没了。
-    expect(html).toContain(">依赖关系图<");
-    expect(html, "折叠的那层壳又回来了").not.toContain("依赖关系图(分层排布,可能较宽)");
+    // 旧图用 `ss-dag-node` 标节点;新图用 `data-artifact-node`。
+    expect(countOf(html, /class="ss-dag-node"/g), "旧的工作项 DAG 还在").toBe(0);
+    expect(countOf(html, /data-artifact-node=/g), "新的工件图一个节点都没有").toBe(ARTS.length);
+    expect(html).not.toContain(">依赖关系图<");
   });
 
   it("不再默认收起:标题与画布节点在**同一个 Section 块**里,且节点真的渲染出来了", () => {
     const html = renderScreen();
     const { start, end } = dagRange(html);
     const block = html.slice(start, end);
-    // ① 这一块里有画布节点 —— 说明标题与内容并排渲染,中间没有折叠层拦着
-    expect(block, "① 那一块里一个画布节点都没有(内容被折起来了?)").toContain(
-      'class="ss-dag-node"',
-    );
+    expect(block, "① 那一块里一个画布节点都没有(内容被折起来了?)").toContain("data-artifact-node=");
     // 负样本:① 这块里没有 `<details>` / `<summary>` / `<Disclosure`
     expect(block, "① 又被包进 <details> 了").not.toContain("<details");
     expect(block, "① 又被包进 <summary> 了").not.toContain("<summary");
-    // 并且节点在**整页** HTML 里出现(不是只在某个折叠容器的内部 markup 里)
-    expect(html).toContain('class="ss-dag-node"');
+  });
+
+  it("图例**逐类报实数**,含 0 条的(不假装它是个正常关系)", () => {
+    const html = renderScreen();
+    expect(html).toContain("任务依赖(0 条)");
+    expect(html).toContain("触发顺序(0 条)");
+    // 父工件:契约闭集里的死值(全仓零写入侧)—— 如实报 0 并说明
+    expect(html).toContain("父工件(0 条)");
+    expect(html).toContain("全仓零写入侧");
+    // 逻辑关系:用户要的、而库里还没有的那一类 —— 说明必须出现在页面上
+    expect(html).toContain("逻辑关系");
+    expect(html).toContain("当前 0 条");
+    // 夹具的 `links` 全是空的,但「质检所审」是**派生**的(来自 014 的 work_id),
+    // 而夹具里 review_finding 都挂在环节上 ⇒ 这一版有连线,不是全孤点。
+    // 所以这里**不能**断言「一件都没连线」—— 那条只在 `links` 与 work_id 同时为空时成立。
+    // 钉它的那条在 `artifact-graph.test.ts` 的「全图零边时 isIsolated 为真」。
+    expect(html).toContain("派生");
+    expect(html).toContain("集合");
+  });
+
+  it("不挂任何工作项的工件(决策 / 甲方问答)**在图上有节点** —— 旧图把它们全漏了", () => {
+    const html = renderScreen();
+    // 这是换图的**首要理由**:真机库里 8 条 decision + 3 条 client_question
+    // 没有 work_id,在「节点 = 环节」的图上一个节点都没有。
+    for (const d of DECISION_IDS) {
+      expect(html, `决策 ${d} 在工件关系图上消失了`).toContain(`data-artifact-node="${d}"`);
+    }
   });
 
   it("负样本:整页里没有任何 `<details>` 是展开的(夹具无长 body / 无 goal)", () => {

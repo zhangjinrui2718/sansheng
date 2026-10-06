@@ -1,5 +1,5 @@
 /**
- * 工作项屏 —— **推进图(横轴 = 时间,纵轴 = 泳道)+ 选中环节挂着的工件**
+ * 工作项屏 —— **① 工件关系图 + ② 推进图(横轴 = 耗时,纵轴 = 泳道)+ ③④⑤**
  *
  * ── 这一版为什么把「工件」页与「工作项」页合并成一个 tab ──────────
  *
@@ -131,6 +131,16 @@ import { useArtifacts, useProjectLive, useWorks } from "@/lib/data";
 import { useChatStore } from "@/stores/chat";
 import { errorMessage, getArtifact } from "@/lib/api";
 import {
+  AG_NODE_H,
+  AG_NODE_W,
+  LOGICAL_RELATION_NOTE,
+  RELATIONS,
+  isIsolated,
+  layoutArtifactGraph,
+  type ArtifactGraphLayout,
+  type ArtifactRelation,
+} from "@/lib/artifactGraph";
+import {
   DAG_NODE_H,
   DAG_NODE_W,
   layoutWorkDag,
@@ -186,7 +196,7 @@ export interface DagLive {
   readonly agents: ReadonlyArray<{ readonly agentId: string; readonly turn: unknown | null }>;
 }
 
-// ── ② 推进图:横轴 = 时间,纵轴 = 泳道 ───────────────────────────
+// ── ② 推进图:横轴 = 耗时(T+0),纵轴 = 泳道 ─────────────────────
 
 /**
  * 运行态「读不到」= 还没拿到快照(`live === null`)或宿主没接上运行期快照
@@ -210,7 +220,7 @@ function runtimeUnreadable(live: DagLive | null): boolean {
 export function TimelineLegend({ runtimeUnknown }: { runtimeUnknown: boolean }) {
   return (
     <div className="ss-note" style={{ marginTop: 6 }}>
-      {"横轴 = 时间 · 每条工作项一道(条 = 创建→收口,刻度 = 它产出的工件)· " +
+      {"横轴 = 距项目起点的耗时(T+0 起)· 每条工作项一道(条 = 创建→收口,刻度 = 它产出的工件)· " +
         "每种工件一道(点 = 一件工件)· 开口端 = 未收口"}
       {runtimeUnknown && (
         <span style={{ color: "var(--amber)" }}>
@@ -222,7 +232,7 @@ export function TimelineLegend({ runtimeUnknown }: { runtimeUnknown: boolean }) 
 }
 
 /**
- * ② 推进图本体 —— 一张 SVG,横轴 = 时间,纵轴 = 泳道。
+ * ② 推进图本体 —— 一张 SVG,横轴 = 耗时,纵轴 = 泳道。
  *
  * **不自己算布局**:坐标全由 `layoutTimeline`(纯函数)给,这里只消费 —— 于是
  * 「每条工作项恰好一道 / 每件工件恰好一点 / 终态封口、未终态开口」这些判据能在
@@ -327,7 +337,7 @@ export function ProgressTimeline({
             // ⚠️ **不用 `role="img"`**:那会把整棵子树从可访问性树里摘掉,里面的
             // `role="button"` 就再也报不出来了。用 group + aria-label。
             role="group"
-            aria-label="推进图:横轴是时间;上区每条工作项一道,下区每种工件一道"
+            aria-label="推进图:横轴是距项目起点的耗时;上区每条工作项一道,下区每种工件一道"
           >
             {/* ── 左侧泳道名栏(x < TL_GUTTER)──
                 右对齐;工作项那道在**固定左边距**加一个 3×10 的竖条当「环节」标记
@@ -426,7 +436,7 @@ export function ProgressTimeline({
               stroke="var(--ink-3)"
               strokeWidth={1}
             >
-              <title>绘图区:横轴 = 时间</title>
+              <title>绘图区:横轴 = 距项目起点的耗时(T+0 起)</title>
             </rect>
 
             {/* ── 工作项 = 跨度条(条上的刻度 = 它产出的工件)── */}
@@ -916,6 +926,202 @@ export function WorkDag({
  * ⚠️ 选中态在这里也要解析一次(`resolveSelectedWorkId`)—— 与 ②(推进图)和
  * ③(面板)用的是同一个纯函数、同一份 `picked`,所以三处必然指向同一条工作项。
  */
+/** 贝塞尔:从源卡右缘到目标卡左缘,水平出入(层与层之间有 `AG_COL_GAP` 的空间)。 */
+function edgePath(fromX: number, fromY: number, toX: number, toY: number): string {
+  const dx = Math.max(24, (toX - fromX) / 2);
+  return `M ${fromX} ${fromY} C ${fromX + dx} ${fromY}, ${toX - dx} ${toY}, ${toX} ${toY}`;
+}
+
+/**
+ * **工件关系图整块** = `Section` + `ArtifactRelationGraph`(展开,没有 `<Disclosure>`)。
+ *
+ * 它**取代**了原先那块工作项依赖关系图(2026-10-06 用户裁决:「我之前说的 dag,
+ * 其实是想要工件的 dag」)。为什么旧的那块非换不可 —— 真机库那一版最能说明:
+ * 美股项目 39 件工件里,**8 条 `decision` + 3 条 `client_question` 没有
+ * `work_id`**,在「节点 = 环节」的图上**一个节点都没有**。甲方视角里最重要的
+ * 那一半(拍板与问答)在旧图上完全不可见。
+ *
+ * 交互:点一个工件节点 ⇒ 展开它的详情,与推进图上「点一个圆点」走**同一条**通路
+ * (`onOpenArtifact`)。刻意**不**新增一个「选中工件」状态:旧的 `picked` 是
+ * **工作项** id(推进图的绿条选中 + 下面③的面板),而这张图的节点是工件 ——
+ * 两种节点塞进同一个状态,必然出现「在图上选中了 A、面板显示 B」。
+ * 两个状态各自管各自那一块,判据不混。
+ */
+export function ArtifactRelationGraph({
+  artifacts,
+  works,
+  openId,
+  onOpenArtifact,
+}: {
+  artifacts: readonly ArtifactView[];
+  works: readonly WorkView[];
+  /** 已展开详情的那条工件 id(null = 都没展开) */
+  openId: string | null;
+  onOpenArtifact: (artifactId: string) => void;
+}) {
+  const layout = layoutArtifactGraph(artifacts, works);
+  return (
+    <Section
+      title="工件关系图"
+      count={artifacts.length}
+      hint="节点 = 工件,三种边;从左到右读先后"
+      hintTitle={
+        "节点是**工件** —— 你的决策、质检的产出、交付物都在上面,而不挂在任何工作项上的" +
+        "决策与甲方问答**也**在(旧那张「节点 = 环节」的图把它们整个漏掉了)。" +
+        `实线 = ${RELATIONS.depends_on.label}(交付物 → 它的依据),` +
+        `虚线 = ${RELATIONS.answers.label}(提问 → 答复),` +
+        `点线 = ${RELATIONS.parent.label};「质检所审」是派生出来的(库里的边只到工作项粒度)。` +
+        `各边的方向**都是先后**(因 → 果),` +
+        "所以从左到右读就是「先有什么、后有什么」;这条性质是被检查的,反向边不画、只点名。" +
+        ` ${LOGICAL_RELATION_NOTE}`
+      }
+    >
+      {artifacts.length === 0 ? (
+        <EmptyState>这个项目还没有工件 —— 关系图要等第一件产出落库才有节点。</EmptyState>
+      ) : (
+        <div className="flex flex-col">
+          <div className="ss-dag" style={{ maxHeight: 620 }}>
+            <div style={{ position: "relative", width: layout.width, height: layout.height }}>
+              <svg
+                className="ss-dag-edges"
+                width={layout.width}
+                height={layout.height}
+                aria-hidden="true"
+              >
+                {layout.edges.map((e) => (
+                  <path
+                    key={`${e.rel}:${e.from}->${e.to}`}
+                    d={edgePath(e.fromX, e.fromY, e.toX, e.toY)}
+                    fill="none"
+                    stroke="var(--bone-mute)"
+                    strokeWidth={1}
+                    {...(RELATIONS[e.rel].dash !== undefined
+                      ? { strokeDasharray: RELATIONS[e.rel].dash }
+                      : {})}
+                  />
+                ))}
+              </svg>
+              {layout.nodes.map((n) => {
+                const a = n.artifact;
+                const on = openId === a.id;
+                return (
+                  <button
+                    key={a.id}
+                    type="button"
+                    data-artifact-node={a.id}
+                    data-artifact-depth={n.depth}
+                    data-artifact-isolated={n.inDegree === 0 && n.outDegree === 0}
+                    onClick={() => onOpenArtifact(a.id)}
+                    title={`${a.title || "(无标题)"}\n${artifactKindLabel(a.kind)} · ${a.authorName || a.authorAgentId}\n${formatClock(a.createdAt, true)}\n` +
+                      `入 ${n.inDegree} · 出 ${n.outDegree}` +
+                      (n.workTitle !== null ? `\n产出于「${n.workTitle}」` : "\n不挂任何工作项(决策 / 甲方问答)") +
+                      (n.unlayered ? "\n⚠️ 先后算不出来(在关系环上或环的下游)" : "")}
+                    style={{
+                      position: "absolute",
+                      left: n.x,
+                      top: n.y,
+                      width: AG_NODE_W,
+                      height: AG_NODE_H,
+                      textAlign: "left",
+                      border: `1px solid ${on ? "var(--bone)" : "var(--line)"}`,
+                      background: "var(--panel)",
+                      borderRadius: 6,
+                      padding: "5px 7px",
+                      display: "flex",
+                      flexDirection: "column",
+                      gap: 2,
+                      overflow: "hidden",
+                    }}
+                  >
+                    <span style={{ display: "flex", alignItems: "center", gap: 5 }}>
+                      <span
+                        style={{
+                          width: 6, height: 6, borderRadius: 2, flex: "0 0 auto",
+                          background: toneColor(artifactKindTone(a.kind)),
+                        }}
+                      />
+                      <span className="ss-meta" style={{ color: "var(--bone-mute)" }}>
+                        {artifactKindLabel(a.kind)}
+                      </span>
+                    </span>
+                    <span
+                      className="ss-body"
+                      style={{ color: "var(--bone)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+                    >
+                      {clipLabel(a.title || a.id, AG_NODE_W - 20)}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+          <ArtifactRelationLegend layout={layout} />
+        </div>
+      )}
+    </Section>
+  );
+}
+
+/** 图例。**三类边逐类报实数** —— 0 条就写 0,不假装它是个正常关系。 */
+export function ArtifactRelationLegend({ layout }: { layout: ArtifactGraphLayout }) {
+  const rels: ArtifactRelation[] = ["depends_on", "review_about", "answers", "parent"];
+  return (
+    <div className="ss-note" style={{ marginTop: 6 }}>
+      <div style={{ display: "flex", gap: 14, flexWrap: "wrap" }}>
+        {rels.map((r) => (
+          // `title` = 这一类到底是什么、方向为什么是那样、为什么它是 0 条。
+          // 放在悬停里而不是摊在图下方:三段说明加起来有五行,而其中最该被读到的
+          // 是**为什么某类是 0** —— 那一行已经在下面常显了。
+          <span
+            key={r}
+            title={RELATIONS[r].why}
+            style={{ display: "inline-flex", alignItems: "center", gap: 5 }}
+          >
+            <svg width={22} height={8} aria-hidden="true">
+              <line
+                x1={0} y1={4} x2={22} y2={4} stroke="var(--bone-mute)" strokeWidth={1}
+                {...(RELATIONS[r].dash !== undefined ? { strokeDasharray: RELATIONS[r].dash } : {})}
+              />
+            </svg>
+            {`${RELATIONS[r].label}(${layout.stats[r]} 条)`}
+          </span>
+        ))}
+      </div>
+      <div style={{ marginTop: 3 }}>
+        {`「质检所审」是**派生**关系(库里没有这一条边,来自 014 的 work_id 的「关于」语义):` +
+          `它是**集合**关系 —— 一条工作项有几份产出就画几条,每条都成立,但没有一条能说` +
+          `「它审的就是这一份」。${layout.multiTargetReviews > 0
+            ? `本图里有 ${layout.multiTargetReviews} 件审查产出指向了不止一件产出。`
+            : "本图里没有一件审查产出指向多份(所以每条边都是一对一)。"}`}
+      </div>
+      <div style={{ marginTop: 3 }}>{LOGICAL_RELATION_NOTE}</div>
+      {isIsolated(layout) && (
+        <div style={{ marginTop: 3, color: "var(--amber)" }}>
+          {"这一版一件工件都没有连线 —— 卡片仍在,只是它们之间没有**已记录**的关系。" +
+            "这是数据没记,不是图画不出来。"}
+        </div>
+      )}
+      {layout.backwardEdges.length > 0 && (
+        <div style={{ marginTop: 3, color: "var(--amber)" }}>
+          {`⚠️ 有 ${layout.backwardEdges.length} 条边的因果方向反了(源比目标晚),已**不画**:` +
+            "「从左到右读先后」这句话在有它们时不成立,所以宁可少画也不画错。"}
+        </div>
+      )}
+      {layout.dangling.length > 0 && (
+        <div style={{ marginTop: 3 }}>
+          {`另有 ${layout.dangling.length} 条边指向本次没读到的工件,未画。`}
+        </div>
+      )}
+      {layout.unlayeredIds.length > 0 && (
+        <div style={{ marginTop: 3, color: "var(--amber)" }}>
+          {`有 ${layout.unlayeredIds.length} 件工件的先后算不出来(在关系环上或环的下游):` +
+            `${layout.unlayeredIds.join(" · ")} —— 它们被排在第 0 列,别按左右位置读先后。`}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function DependencyGraph({
   works,
   artifacts,
@@ -1458,19 +1664,20 @@ export function ArtifactsScreen({
   const selectedId = resolveSelectedWorkId(layoutWorkDag(works, artifacts), picked);
   return (
     <div className="grid gap-4">
-      {/* ① 依赖关系图 —— **第一块,而且是展开的**(用户原话见上)。 */}
-      <DependencyGraph
-        works={works}
+      {/* ① 工件关系图 —— **第一块,而且是展开的**。
+          2026-10-06 用户裁决:「我之前说的 dag,其实是想要工件的 dag」,
+          所以它**取代**了原先那块「节点 = 环节」的依赖关系图。 */}
+      <ArtifactRelationGraph
         artifacts={artifacts}
-        live={live}
-        picked={picked}
-        onPick={onPick}
+        works={works}
+        openId={openId}
+        onOpenArtifact={onToggleDetail}
       />
 
       <Section
         title="推进图"
         hint={`${works.length} 条工作项 · ${artifacts.length} 件工件 · 点一条工作项(绿色条)⇒ 下面显示它挂着的工件`}
-        hintTitle="点一条工作项(绿色条)⇒ 下面(③「选中的环节」)显示它挂着的工件。横轴 = 时间(x 是时间的线性映射,位置不需要解 —— 所以不存在分层 DAG 那种边交叉);上区每条工作项一道(条 = 创建→收口,刻度 = 它产出的工件),下区每种工件一道(点 = 一件工件,含不挂任何环节的决策 / 会议 / 变更 / 甲方问答)。点条选中环节(与下面的面板联动),点圆点看那件工件。上面那张图回答「谁在等谁」,这张回答「什么时候发生的」。"
+        hintTitle="点一条工作项(绿色条)⇒ 下面(③「选中的环节」)显示它挂着的工件。横轴 = 距项目起点的耗时(T+0 起;x 是线性的,位置不需要解 —— 所以不存在边交叉);上区每条工作项一道(条 = 创建→收口,刻度 = 它产出的工件),下区每种工件一道(点 = 一件工件,含不挂任何环节的决策 / 会议 / 变更 / 甲方问答)。点条选中环节(与下面的面板联动),点圆点看那件工件。上面那张图回答「它们之间是什么关系」,这张回答「什么时候发生的」。"
       >
         <ProgressTimeline
           works={works}
