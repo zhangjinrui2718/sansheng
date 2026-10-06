@@ -6,7 +6,7 @@
  *  1. **路由表换成新模型的页面**:旧的是「对话 / Agent / 总线 / 记忆 / 工件 /
  *     目标 / Harness / 设置」。其中「总线」在新架构里已删除(MessageBus 没了),
  *     「目标」是计划时代的投影(已换成工作项),「Agent」的主体变成了项目成员。
- *     新的:`chat / project / works / inbox / members / memory / settings`。
+ *     新的:`chat / project / works / members / memory / settings`。
  *     **「工件」页签已并入「工作项」**(用户要求:推进图上本来
  *     就同时画着工作项与工件,点绿色条 ⇒ 下面显示它挂着的工件),所以 `Route` 里
  *     没有工件这个成员 —— 合并后的唯一页面是 `routes/Works.tsx` 的 `WorksPage`。
@@ -15,6 +15,11 @@
  *     —— 角色 harness 现在是成员面板里的一块(`components/members/RoleHarness.tsx`
  *     的 `RoleHarnessSection`),所以 `Route` 里也没有 `harness` 这个成员,
  *     顶层不再有那个页面。
+ *     **「待办」页签已并入「对话」**(同日,用户原话:「把待办放到对话这个页面的
+ *     右下角」)—— 它是**唯一需要甲方动手**的数据,而甲方 90% 的时间在对话页,
+ *     而一个不带计数的页签等于「有事在等你」这件事没人知道(真机第一条
+ *     `client_question` 落地时它就是这么被漏掉的)。现在它是
+ *     `components/client/ClientQuestionDock.tsx`,长在对话页右下角。
  *  2. **`POST /api/kernel/reset` 已不存在**,「重置 Kernel」按钮删除;相关的
  *     `vecLoaded` 降级提示也删除 —— 新契约的 `HealthResponse` 里没有 `vecLoaded`,
  *     旧 `/api/health` 的 `d.ts`(服务器时间)同样不在契约里,所以顶栏改为显示
@@ -33,9 +38,9 @@ import { ChatSurface } from "./components/chat/ChatSurface";
 import { SettingsPanel } from "./components/settings/SettingsPanel";
 import { ProjectDetailPage } from "./routes/ProjectDetail";
 import { WorksPage } from "./routes/Works";
-import { InboxPage } from "./routes/Inbox";
 import { MembersPage } from "./routes/Members";
 import { MemoryPage } from "./routes/Memory";
+import { ClientQuestionDock } from "./components/client/ClientQuestionDock";
 import { useSettingsStore, activeProviderOf } from "./stores/settings";
 import { useChatStore } from "./stores/chat";
 import { initAppSocket } from "./lib/appSocket";
@@ -49,7 +54,6 @@ export type Route =
   | "chat"
   | "project"
   | "works"
-  | "inbox"
   | "members"
   | "memory"
   | "settings";
@@ -143,13 +147,16 @@ export function App() {
           <HistoryRail />
           {needsSetup ? <SetupHint onGo={() => setRoute("settings")} /> : <ChatSurface />}
           <AgentPanel />
+          {/* 待答停靠位:原「待办」页的新落点 —— 提问是打断,长在对话页右下角。
+              数据与答案路径一个字没变(`GET /api/client-questions` →
+              `POST /api/client-questions/:id/answer`),换的只是「你在哪能看到它」。
+              详见 `components/client/ClientQuestionDock.tsx` 的文件头。 */}
+          <ClientQuestionDock />
         </main>
       ) : route === "project" ? (
         page(<ProjectDetailPage />)
       ) : route === "works" ? (
         page(<WorksPage />)
-      ) : route === "inbox" ? (
-        page(<InboxPage />)
       ) : route === "members" ? (
         page(<MembersPage />)
       ) : route === "memory" ? (

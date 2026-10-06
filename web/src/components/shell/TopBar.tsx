@@ -12,6 +12,11 @@
  *     可以放在成员的 tab 下面,可以把「成员」「harness」这两个 tab 也合并了」)
  *     —— 角色 harness 现在是成员面板里的一块,一个项目的 harness 属于那个项目的
  *     成员,不该是顶层平级的一站。
+ *     ⚠️ **「待办」页签已删除**(同日,用户原话:「把待办放到对话这个页面的右下角」)
+ *     —— 它是**唯一需要甲方动手**的数据,而甲方 90% 的时间在「对话」页;一个
+ *     不带计数的页签等于「有事在等你」没人知道(真机第一条 `client_question` 就
+ *     是这么被漏掉的)。现在它是 `components/client/ClientQuestionDock.tsx`,
+ *     长在对话页右下角,新提问落地时自己展开。数据与答案路径一个字没变。
  *  2. **右侧运行态不再有「服务器时间」**:它读的是旧 `/api/health` 的 `d.ts`,
  *     而新契约的 `HealthResponse` 里**没有 `ts`**,也没有 `vecLoaded`
  *     (`ok/version/modelId/provider/cwd/dataDir`)。继续显示一个本地编造的时间
@@ -37,7 +42,6 @@ const TABS: ReadonlyArray<{ route: Route; label: string }> = [
   { route: "chat", label: "对话" },
   { route: "project", label: "项目" },
   { route: "works", label: "工作项" },
-  { route: "inbox", label: "待办" },
   { route: "members", label: "成员" },
   { route: "memory", label: "记忆" },
   { route: "settings", label: "设置" },
