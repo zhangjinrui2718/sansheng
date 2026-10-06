@@ -28,7 +28,7 @@ import {
   TL_PLOT_W,
   TL_WORK_LANE_H,
   formatClock,
-  formatTick,
+  formatElapsed,
   layoutTimeline,
   timelineDomain,
   timelineTicks,
@@ -343,8 +343,11 @@ describe("⑤ 时间域与刻度:覆盖全部时间戳,步长自适应", () => {
   });
 
   it("刻度步长随跨度变大而变大,而且标签不会挤在一起(密度 ≤ 目标)", () => {
-    const span30m = timelineTicks(T0, T0 + 30 * 60_000);
-    const span3d = timelineTicks(T0, T0 + 3 * 24 * 60 * 60_000);
+    // ⚠️ 三参数是硬约定(见 timeline.ts 的 `timelineTicks`):origin / from / to。
+    // 写成两参在 JS 里**不报错**,只是让 `t <= undefined` 恒假 ⇒ 0 根刻度。
+    // 而 `tests/**` 不在任何 tsconfig 的 include 里,所以 tsc 也抓不到(2026-10-06 实测)。
+    const span30m = timelineTicks(T0, T0, T0 + 30 * 60_000);
+    const span3d = timelineTicks(T0, T0, T0 + 3 * 24 * 60 * 60_000);
     expect(span30m.length).toBeGreaterThanOrEqual(2);
     expect(span30m.length).toBeLessThanOrEqual(9);
     expect(span3d.length).toBeLessThanOrEqual(9);
@@ -358,21 +361,57 @@ describe("⑤ 时间域与刻度:覆盖全部时间戳,步长自适应", () => {
     expect(span3d.length).toBeLessThan(span30m.length * 60);
   });
 
-  it("刻度对齐到整步长,而且同一份数据两次算的刻度完全相同", () => {
-    const first = timelineTicks(T0 + 61_000, T0 + 30 * 60_000);
-    const second = timelineTicks(T0 + 61_000, T0 + 30 * 60_000);
+  it("刻度从**域起点**起每整步长一个,同一份数据两次算完全相同", () => {
+    const from = T0 - 5_000;
+    const first = timelineTicks(T0 + 61_000, from, T0 + 30 * 60_000);
+    const second = timelineTicks(T0 + 61_000, from, T0 + 30 * 60_000);
     expect(second).toEqual(first);
-    const minutes = new Set(first.map((t) => new Date(t.at).getMinutes()));
-    // 5 分钟的步长落在 0/5/10… 上(整点对齐)—— 允许 15/30 分钟的更大步长
-    for (const m of minutes) expect([0, 5, 10, 15, 20, 25, 30, 45].includes(m)).toBe(true);
+    // ⚠️ **不再对齐墙钟整点**:耗时轴上「整点」没有意义,而对齐会把第一个刻度
+    // 推到域内很深的位置,左边留一段没有刻度的空白。第一个刻度恒在 T+0。
+    expect(first[0]!.label).toBe("T+0");
+    for (let i = 1; i < first.length; i += 1) {
+      const dt = first[i]!.at - first[i - 1]!.at;
+      expect(dt).toBe(first[1]!.at - first[0]!.at); // 等步长
+    }
   });
 
-  it("同一天只写 `HH:MM`;跨天补上日期(否则 30 分钟里全是重复前缀)", () => {
-    const sameDay = timelineTicks(T0, T0 + 30 * 60_000);
-    expect(sameDay.every((t) => /^\d\d:\d\d$/.test(t.label))).toBe(true);
-    expect(formatTick(T0, true)).toMatch(/^\d\d-\d\d \d\d:\d\d$/);
-    expect(formatClock(T0)).toMatch(/^\d\d:\d\d$/);
-    expect(formatClock(T0, true)).toMatch(/^\d\d-\d\d \d\d:\d\d$/);
+  it("刻度标签是**耗时**不是墙钟(用户 2026-10-06 原话:「x 轴不要用自然时间」)", () => {
+    const ticks = timelineTicks(T0, T0, T0 + 30 * 60_000);
+    expect(ticks.every((t) => /^T\+/.test(t.label))).toBe(true);
+    // 负样本:一个墙钟形态都不许出现在刻度标签里
+    expect(ticks.some((t) => /\d\d:\d\d/.test(t.label))).toBe(false);
+    expect(ticks.some((t) => /\d\d-\d\d/.test(t.label))).toBe(false);
+  });
+
+  it("耗时格式:`T+0` / `T+30s` / `T+18m` / `T+2h05m` / `T+3d04h`", () => {
+    expect(formatElapsed(0)).toBe("T+0");
+    expect(formatElapsed(30_000)).toBe("T+30s");
+    expect(formatElapsed(18 * 60_000)).toBe("T+18m");
+    expect(formatElapsed((2 * 60 + 5) * 60_000)).toBe("T+2h05m");
+    expect(formatElapsed((3 * 24 + 4) * 60 * 60_000)).toBe("T+3d04h");
+    // 负样本:负数不许出现(减法写错时的自检)
+    expect(formatElapsed(-5_000)).toBe("T+0");
+  });
+
+  it("刻度 x 与布局的比例尺一致(`scaleTo` 用错会让刻度与条/点错位)", () => {
+    const origin = T0 + 61_000;
+    const from = origin - 5_000;
+    const to = T0 + 30 * 60_000;
+    const ticks = timelineTicks(origin, from, to);
+    // makeScale(from, to) 的映射:GUTTER + (t-from)/(to-from)*PLOT_W
+    const expectX = (t: number): number =>
+      TL_GUTTER + ((t - from) / (to - from)) * TL_PLOT_W;
+    for (const t of ticks) expect(t.x).toBeCloseTo(expectX(t.at), 6);
+  });
+
+  it("**T+0 落在未留白的起点,不是画布左沿**(否则零点指向一个没有事件的地方)", () => {
+    const { origin, from } = timelineDomain({
+      works: [work("w1", { createdAt: T0, updatedAt: T0 + 60_000 })],
+      artifacts: [art("a1", "evidence", T0)],
+      now: T0 + 60_000, live: null,
+    });
+    expect(origin).toBe(T0);
+    expect(from, "from 是留白后的左沿,必然 < origin").toBeLessThan(origin);
   });
 });
 

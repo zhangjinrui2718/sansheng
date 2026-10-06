@@ -13,7 +13,7 @@
  *
  * ── 图表的三层语义(每条都对应一句用户要的话)────────────────────
  *
- *   ① **横轴 = 时间**(线性刻度 + 自适应刻度步长);
+ *   ① **横轴 = 距项目最早事件的耗时**(线性刻度 + 自适应步长,刻度写 `T+0` / `T+18m`);
  *   ② **纵轴 = 泳道**:上半区**一条工作项一道**(工作项 4 条 ⇒ 4 道),下半区
  *      **一种工件 kind 一道**(数据里有几种就几道,**空 kind 不占道**);
  *   ③ **标记**:
@@ -167,7 +167,8 @@ export interface TimelineLayout {
   ticks: TimelineTick[];
   /** 绘图区几何(渲染层用它画边框 / 网格) */
   plot: { x0: number; x1: number; width: number; height: number };
-  domain: { from: number; to: number };
+  /** 时间域。`origin` = **未留白的起点**,即 T+0(与 `from` 差一段留白) */
+  domain: { from: number; to: number; origin: number };
   /** 「此刻」线的 x;`null` = 读不到时间域里没有它 */
   nowX: number | null;
   /** 画布总高(含底部刻度行) */
@@ -233,6 +234,9 @@ function makeScale(from: number, to: number): (t: number) => number {
 
 /** 候选步长(ms),从小到大。挑第一个「刻度数 ≤ 目标」的。 */
 const TICK_STEPS: readonly number[] = [
+  // 秒级在前:耗时轴上「30 分钟的域只有两根刻度」是可接受的,
+  // 「2 分钟的域只有一根」不是 —— 补上这一段,`formatElapsed` 的 `T+30s` 才有读者。
+  5_000, 10_000, 15_000, 30_000,
   60_000, 2 * 60_000, 5 * 60_000, 10 * 60_000, 15 * 60_000, 30 * 60_000,
   60 * 60_000, 2 * 60 * 60_000, 3 * 60 * 60_000, 6 * 60 * 60_000, 12 * 60 * 60_000,
   24 * 60 * 60_000, 2 * 24 * 60 * 60_000, 7 * 24 * 60 * 60_000, 30 * 24 * 60 * 60_000,
@@ -240,37 +244,76 @@ const TICK_STEPS: readonly number[] = [
 
 /** 目标刻度数(含两端)。超过它横轴标签会互相压住 —— 这条是「可读性」的机器表达。 */
 const TICK_TARGET = 8;
+/**
+ * 刻度数的**硬上界**。正常情况下 `span / step <= TICK_TARGET`,所以实际永远是 9 根;
+ * 这个数只在输入非有限时兜住循环(见 `timelineTicks` 里那段注释)。
+ * 取 200 而不是 8:它要能**装下**正常情况(9 根)又**拦得住**失控(几百 MB)。
+ */
+export const TICK_HARD_CAP = 200;
 
 function pad2(n: number): string {
   return n < 10 ? `0${n}` : String(n);
 }
 
 /**
- * 刻度标签。`crossDay` 为真(域跨过一天)时带上日期,否则只给 `HH:MM` ——
- * 一次 30 分钟的推进里全是 `10-05 17:05` 那样的重复前缀,是噪音。
+ * 刻度标签 = **距项目最早事件的耗时**,不是墙钟。
+ *
+ * 2026-10-06 用户原话:「x 轴不要用自然时间,用耗时吧」。真机那份数据的形状
+ * 正是这么要求的:7 条子项的 `created_at` 全是 08:40:35、`updated_at` 全是
+ * 08:54:25 —— 墙钟轴上它们**长度完全相同**,什么差异都读不出来;而甲方在
+ * 14:08 回的那次答复把工件域从 18 分钟撑到 **326 分钟**,于是真正有活动的
+ * 14 分钟只占 **4.3%** 的宽度。
+ *
+ * ⚠️ **如实记下它没有解决什么**:刻度换成人读格式,**不改变域的跨度**,
+ * 所以那 4.3% 的占宽照旧(这是用户在被告知之后选的读法)。真正消掉它要
+ * 「每条泳道各自从 0 起算」—— 那会让跨泳道的绝对先后不再靠 x 读,
+ * 是一次独立的取舍,不在本次范围里。改回去只需换回 `formatTick`。
+ *
+ * 格式:`T+0` / `T+18m` / `T+2h05m` / `T+3d04h`。**不带日期前缀** ——
+ * 耗时本身已经跨天了,再缀一个 `10-06` 是噪音。
  */
-export function formatTick(at: number, crossDay: boolean): string {
-  const d = new Date(at);
-  const hm = `${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
-  if (!crossDay) return hm;
-  return `${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} ${hm}`;
+export function formatElapsed(ms: number): string {
+  const total = Math.max(0, Math.round(ms / 1000));
+  // 零点是一个**原点标记**,不是时长读数 —— 写 `T+0` 而不是 `T+0s`
+  // (工程记法里 `T+0` 才是起点,`T+0s` 读起来像「零秒的时长」)。
+  if (total === 0) return "T+0";
+  if (total < 60) return `T+${total}s`;
+  const mins = Math.floor(total / 60);
+  if (mins < 60) return `T+${mins}m`;
+  const hours = Math.floor(mins / 60);
+  const restMin = mins % 60;
+  if (hours < 24) return `T+${hours}h${pad2(restMin)}m`;
+  const days = Math.floor(hours / 24);
+  return `T+${days}d${pad2(hours % 24)}h`;
 }
 
 /**
- * 刻度。从**整步长对齐**的第一个位置开始(17:03 起每 5 分钟 ⇒ 17:05 才是第一个刻度),
- * 这样同一份数据两次渲染的刻度位置一致,而且时间读起来是整的。
+ * 刻度。**从域起点起每 `step` 一个**,标签是 `T+<耗时>`。
+ *
+ * ⚠️ 起点是 `origin`(域的**未留白**起点,见 `timelineDomain` 的 pad),不是画布左沿
+ * —— 左沿是留白之后的边界,拿它当 T+0 会让「T+0」指向一个没有事件的地方。
+ * 刻度不再对齐墙钟整点:耗时轴上「整点」没有意义,而对齐会把第一个刻度推到
+ * 域内很深的位置,左边留一段没有刻度的空白。
  */
-export function timelineTicks(from: number, to: number): TimelineTick[] {
+export function timelineTicks(origin: number, from: number, to: number): TimelineTick[] {
+  // ⚠️ **三参数的分工是硬约定**,写错任何一个都只表现为「刻度错位」而不报错:
+  //   - `origin`:**T+0 所在的那一刻**(最早的真实事件),决定刻度从哪起、标签是多少;
+  //   - `from` / `to`:**布局那条比例尺**的两端(留白之后),决定 x 画在哪。
+  // 上一版只给了 `origin` + 一个可选的 `scaleTo`,于是「零点自己算 x」——
+  // 那让 T+0 落在画布左沿而不是它该在的位置(域有留白时差一整段),
+  // 而类型是对的、刻度只是静默地偏了。所以这里**要求**三份都传进来。
   const span = Math.max(1, to - from);
   const step = TICK_STEPS.find((s) => span / s <= TICK_TARGET) ?? TICK_STEPS[TICK_STEPS.length - 1]!;
   const scale = makeScale(from, to);
-  const crossDay = new Date(from).getDate() !== new Date(to).getDate() || to - from > 24 * 60 * 60_000;
-  // UTC 对齐会把本地时区的整点算错(东八区会落在 :00 上差 8 小时)—— 用本地时间偏移对齐
-  const offset = new Date(from).getTimezoneOffset() * 60_000;
-  const first = Math.ceil((from + offset) / step) * step - offset;
   const ticks: TimelineTick[] = [];
-  for (let t = first; t <= to; t += step) {
-    ticks.push({ at: t, x: scale(t), label: formatTick(t, crossDay) });
+  // ⚠️ **循环有硬上界,而且这个上界不是装饰。** 上一版是 `for(;;) + if (t > to) break`,
+  // 于是任何一个非有限的 `to`(NaN / Infinity,来自一个坏掉的夹具或一次算错的域)
+  // 都让 `t > to` 恒为假 —— 数组一直涨,进程 OOM。
+  // 症状与「测试卡住」完全一样,病因却在数据里:**边界必须由计数兜住,不能只靠比较。**
+  for (let i = 0; i < TICK_HARD_CAP; i += 1) {
+    const t = origin + i * step;
+    if (!(t <= to)) break; // `!(t <= to)` 而不是 `t > to`:NaN 两种写法都成立吗?不 —— 这里要的是
+    ticks.push({ at: t, x: scale(t), label: formatElapsed(t - origin) });
   }
   return ticks;
 }
@@ -285,7 +328,7 @@ export function timelineTicks(from: number, to: number): TimelineTick[] {
  */
 export function timelineDomain(
   input: TimelineInput,
-): { from: number; to: number } {
+): { from: number; to: number; origin: number } {
   const stamps: number[] = [];
   for (const w of input.works) {
     stamps.push(w.createdAt, w.updatedAt);
@@ -297,17 +340,27 @@ export function timelineDomain(
   if (running) stamps.push(input.now, input.now + 1);
   if (stamps.length === 0) {
     // 空项目:给一个「以此刻为中心」的窗口,免得除零
-    return { from: input.now - TL_MIN_SPAN_MS / 2, to: input.now + TL_MIN_SPAN_MS / 2 };
+    const mid = input.now;
+    return {
+      from: mid - TL_MIN_SPAN_MS / 2, to: mid + TL_MIN_SPAN_MS / 2, origin: mid,
+    };
   }
-  let from = Math.min(...stamps);
-  let to = Math.max(...stamps);
+  const earliest = Math.min(...stamps);
+  const latest = Math.max(...stamps);
+  // ⚠️ **T+0 = 最早的那次真实事件,而不是任何留白之后的位置。**
+  // 这里就是上一版的洞:先把域撑到 `TL_MIN_SPAN_MS` 再取起点,于是「只有 1 分钟
+  // 活动」的项目零点落在**活动开始之前 30 秒**的空处 —— 一条轴上最不该骗人的
+  // 就是零点。所以 `origin` 在任何撑开/留白**之前**就钉住。
+  const origin = earliest;
+  let from = earliest;
+  let to = latest;
   if (to - from < TL_MIN_SPAN_MS) {
     const mid = (from + to) / 2;
     from = mid - TL_MIN_SPAN_MS / 2;
     to = mid + TL_MIN_SPAN_MS / 2;
   }
   const pad = Math.round((to - from) * TL_DOMAIN_PAD_RATIO);
-  return { from: from - pad, to: to + pad };
+  return { from: from - pad, to: to + pad, origin };
 }
 
 /** 这个项目此刻有没有回合在跑(`live` 读不到 ⇒ 没有 —— 见文件头纪律③)。 */
@@ -323,7 +376,7 @@ function hasRunningTurn(input: TimelineInput): boolean {
  * 那由 `tl` 之外的词表去讲,不由空道讲。
  */
 export function layoutTimeline(input: TimelineInput): TimelineLayout {
-  const { from, to } = timelineDomain(input);
+  const { from, to, origin } = timelineDomain(input);
   const x = makeScale(from, to);
   const scaleFor = (t: number): number =>
     Math.max(TL_GUTTER, Math.min(TL_GUTTER + TL_PLOT_W, x(t)));
@@ -417,9 +470,9 @@ export function layoutTimeline(input: TimelineInput): TimelineLayout {
     lanes,
     marks,
     spans,
-    ticks: timelineTicks(from, to),
+    ticks: timelineTicks(origin, from, to),
     plot: { x0: TL_GUTTER, x1: TL_GUTTER + TL_PLOT_W, width: TL_PLOT_W, height: plotHeight },
-    domain: { from, to },
+    domain: { from, to, origin },
     // 「此刻」线只在**读得到运行态且它落在域内**时画 —— 一个凭空出现的竖线会被
     // 读成「有事情正在发生」
     nowX: liveOk && input.now >= from && input.now <= to ? scaleFor(input.now) : null,
