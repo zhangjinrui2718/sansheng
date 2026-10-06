@@ -154,7 +154,6 @@ export function ChatSurface() {
             {provider && modelId ? `${provider} / ${modelId}` : "未连接"}
           </span>
         </div>
-        <SessionPicker />
         <div className="flex items-center gap-2 flex-none ss-meta">
           <SurfaceStatusIndicator status={surface} />
           {/* 中断按钮的可见性跟「有没有在飞的轮」走,不跟输入框的可用性走 ——
@@ -172,6 +171,12 @@ export function ChatSurface() {
           )}
         </div>
       </div>
+
+      {/* ⚠️ **独占第二行**(2026-10-06 修)。第一版把它塞进上面那一行的中间,
+          与「项目名」「运行态」抢宽度 —— 真机上 9 条线把那一行撑爆,按钮被
+          卡片的 `overflow-hidden` 裁在可视区之外(点不到),而且没有 nowrap 时
+          CJK 会被压成「一个字一行」(看起来像样式没加载)。 */}
+      <SessionPicker />
 
       <MessageList />
 
