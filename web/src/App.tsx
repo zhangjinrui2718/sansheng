@@ -146,12 +146,16 @@ export function App() {
         <main className="grid grid-cols-app gap-3 px-4 pb-4" style={{ minHeight: 0 }}>
           <HistoryRail />
           {needsSetup ? <SetupHint onGo={() => setRoute("settings")} /> : <ChatSurface />}
-          <AgentPanel />
-          {/* 待答停靠位:原「待办」页的新落点 —— 提问是打断,长在对话页右下角。
-              数据与答案路径一个字没变(`GET /api/client-questions` →
-              `POST /api/client-questions/:id/answer`),换的只是「你在哪能看到它」。
+          {/* 右栏 = 两块上下并列:**「本项目」(上面,答「现在怎么样」)与
+              **「待答」**(下面,答「有什么在等我」)。它们读的是同一件事的两个面,
+              所以并排放在一栏里 —— 原先是顶栏第 4 个不带计数的页签,而提问发生了
+              用户根本不知道(真机第一条 `client_question` 就这么被漏掉的)。
+              配比:上面 `flex-1`(它在内部滚),下面 `flex-none` + `maxHeight` 封顶。
               详见 `components/client/ClientQuestionDock.tsx` 的文件头。 */}
-          <ClientQuestionDock />
+          <div className="flex flex-col gap-3" style={{ minHeight: 0 }}>
+            <AgentPanel />
+            <ClientQuestionDock />
+          </div>
         </main>
       ) : route === "project" ? (
         page(<ProjectDetailPage />)

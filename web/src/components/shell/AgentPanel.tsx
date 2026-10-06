@@ -34,7 +34,10 @@ export function AgentPanel() {
   const openWorks = detail?.works.filter((w) => WORK_ALIVE.has(w.status)) ?? [];
 
   return (
-    <aside className="sansheng-card overflow-hidden flex flex-col" style={{ minHeight: 0 }}>
+    /* `flex-1`:右栏现在有**两块**上下并列(「本项目」+「待答」,见 `App.tsx`
+       那一层 flex),这一块要占满剩余高度、内部自己滚,不然两块会各按内容高度
+       挤在一起 —— 内容少的时候下半栏会塌掉。 */
+    <aside className="sansheng-card overflow-hidden flex flex-col flex-1" style={{ minHeight: 0 }}>
       <div
         className="px-3 py-2 flex items-center justify-between gap-2 flex-none"
         style={{ borderBottom: "1px solid var(--ink-3)" }}

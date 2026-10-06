@@ -1,5 +1,5 @@
 /**
- * 待答停靠位(右下角)—— 原「待办」页的新落点
+ * 待答面板 —— 原「待办」页的新落点(对话页右栏,「本项目」下方)
  *
  * ── 为什么它不再是第四个 tab(2026-10-06)───────────────────────────
  *
@@ -11,8 +11,14 @@
  * 真机上这件事发生过:第一条 `client_question` 落库(2026-10-06 08:59「W1 数据源
  * 组合,您倾向哪种?」)时,页签还是那个不带计数的页签。
  *
- * ⇒ 所以它现在**长在对话页的右下角**:提问是打断,不打断当前阅读;
- * 收起时是一枚角标(0 件时是灰的,不假装有事),展开就能当场答。
+ * ⇒ 所以它现在**常驻在右栏**,与「本项目」并列(**用户裁决**:「放到『本项目』下方
+ * 并列的位置,**不要**做点击收起这种方式」)。它与右栏那一块读的是同一件事的
+ * 两个面:上面那块答「本项目现在怎么样」,这一块答「本项目有什么在等我」。
+ *
+ * ⚠️ **常驻是有代价的,所以它不能占满右栏**:右栏高度有限,「本项目」要能滚。
+ * 两块的配比写死在 `App.tsx` 的那层 `flex` 上 —— 上面 `flex-1`,这一块 `flex-none`
+ * 且 `maxHeight` 封顶、内部自己滚。**不做折叠**是因为它平时就是空的(绝大多数时候
+ * 0 件),折叠按钮会变成一个永远点得着却永远没用的控件。
  *
  * ── 承载的东西一个字都没重写 ─────────────────────────────────────
  *
@@ -23,157 +29,111 @@
  * `answers` 审计边的一端(见 `src/platform/tools/client.ts:19` 与
  * `src/platform/runtime/dispatcher.ts:1270`)。本页换的是**入口**,不是**记录**。
  *
- * ── 为什么是「右下角浮层」而不是消息流里的一张卡 ────────────────────
+ * ── 为什么不是「插进消息流里的一张卡」 ────────────────────────────
  *
  * 提问是**状态**(open → accepted),不是消息。插进消息流意味着答完之后要从
- * 历史里**删掉一条已经发生过的话** —— 而历史消息不该被追溯删除。做成浮层就
- * 自然:答完即消失、刷新还在、不会因为滚动位置找不到。
+ * 历史里**删掉一条已经发生过的话** —— 而历史消息不该被追溯删除。放在面板里就
+ * 自然:答完即从这一块消失、刷新还在、不会因为滚动位置找不到。
+ *
+ * ── 跨项目:显示,但不假装它属于当前项目 ──────────────────────────
+ *
+ * 这一块长在「本项目」下面,但它的数据是**全局**的(`GET /api/client-questions`
+ * 跨所有项目)。若只显示当前项目,别的项目的提问就又变成没人知道 —— 那正是这个
+ * 页签当初存在的理由。所以:**当前项目的不标项目名**(它在「本项目」底下,归属
+ * 不言自明),别的项目的那条上面带一行暗色项目名。跨项目的事实如实显示,不藏。
  *
  * ── 数据来源与刷新 ────────────────────────────────────────────────
  *
  * `GET /api/client-questions`(经 `useClientQuestions`),按 `projectsRevision` 重拉 ——
  * WS 的 `client_question` 事件会 bump 那个戳([stores/chat.ts:875]),所以新提问
- * 落地后这一页会自己刷新,不靠轮询。
+ * 落地后这一块会自己刷新,不靠轮询。
  */
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useMemo } from "react";
 import { ClientQuestionCard } from "./ClientQuestionCard";
+import { Pill } from "@/components/ui/primitives";
 import { useClientQuestions } from "@/lib/data";
 import { useChatStore } from "@/stores/chat";
 import type { ClientQuestionView } from "@shared/types/platform";
 
 export function ClientQuestionDock() {
   const { data: questions, loading, error } = useClientQuestions();
-  /** 当前上下文 —— 只用来把「当前项目的那条」高亮出来(见 `DockCard`)。 */
+  /** 当前上下文 —— 只用来决定「要不要给这条标项目名」(见 `DockCard`)。 */
   const projectId = useChatStore((s) => s.projectId);
-  const [open, setOpen] = useState(false);
-
-  /**
-   * 新提问落地时**自动展开一次**。
-   *
-   * 为什么需要:这个停靠位替代的是一个**从不提醒**的页签 —— 若仍然只在角标上
-   * 加一个数字,用户还是得自己注意到右下角变了,那就等于把「去另一个 tab 看」
-   * 换成了「去角落里看」。而提问是**唯一打断式的**数据(其余工件都不打断),
-   * 所以它值得自己把面板打开。判据是**新出现的 id**,不是「数量变了」——
-   * 答掉一条也会让数量变,那不该把刚答完的面板重新弹开。
-   */
-  const seen = useRef<ReadonlySet<string> | null>(null);
-  useEffect(() => {
-    if (loading) return;
-    const ids = new Set(questions.map((q) => q.id));
-    const prev = seen.current;
-    seen.current = ids;
-    // 首帧不算「新」(`prev === null`):那会把每个用户开场都弹一次面板。
-    if (prev === null) return;
-    if (ids.size > prev.size) setOpen(true);
-  }, [questions, loading]);
 
   // 早问的先答(FIFO)—— 队列的公平性比「最新的先看」重要。
-  // ⚠️ 不再按项目分组(原先「待办」页是分组标题):浮层是全局的,分组标题会把
-  //   面板撑得很长,而项目归属已经由 `DockCard` 那一行小字给出了。
+  // ⚠️ 不按项目分组(原先「待办」页是分组标题):这一块要陪「本项目」一起滚,
+  //   分组标题会把可答的区域压得太窄,而项目归属由 `DockCard` 那一行小字给出了。
   const items = useMemo(
     () => [...questions].sort((a, b) => a.createdAt - b.createdAt),
     [questions],
   );
-
   const count = items.length;
 
   return (
-    <div
-      style={{ position: "fixed", right: 18, bottom: 18, zIndex: 40, width: open ? 420 : "auto" }}
+    <section
+      className="sansheng-card overflow-hidden flex flex-col flex-none"
+      style={{ maxHeight: "45%" }}
     >
-      {open ? (
-        <section
-          className="sansheng-card overflow-hidden flex flex-col"
-          style={{ boxShadow: "0 12px 40px rgba(0,0,0,0.45)" }}
-        >
-          <header
-            className="px-3 py-2 flex items-center gap-2 flex-none"
-            style={{ borderBottom: "1px solid var(--ink-3)" }}
-          >
-            <span style={{ fontSize: 12, color: "var(--bone)" }}>待答</span>
-            <span className="ss-meta">
-              {count > 0 ? `${count} 件等你回答` : "没有等你回答的问题"}
-            </span>
-            <button
-              type="button"
-              className="sansheng-button ml-auto"
-              style={{ padding: "2px 8px", fontSize: 11 }}
-              onClick={() => setOpen(false)}
-            >
-              收起
-            </button>
-          </header>
+      <div
+        className="px-3 py-2 flex items-center gap-2 flex-none"
+        style={{ borderBottom: "1px solid var(--ink-3)" }}
+      >
+        <span style={{ fontSize: 12, color: "var(--bone-dim)" }}>待答</span>
+        {count > 0 ? (
+          <Pill tone="amber">{count} 件等你回答</Pill>
+        ) : (
+          <span className="ss-meta">没有等你回答的问题</span>
+        )}
+      </div>
 
-          <div className="overflow-y-auto p-2 flex flex-col gap-2" style={{ maxHeight: "60vh" }}>
-            {error !== null ? (
-              <div className="ss-meta" style={{ color: "var(--cinnabar)" }}>
-                加载失败:{error}
-              </div>
-            ) : loading && count === 0 ? (
-              <div className="ss-meta">加载中…</div>
-            ) : count === 0 ? (
-              <div className="ss-meta">
-                没有等你回答的问题 —— 各项目的业务经理都没卡在甲方这里。
-              </div>
-            ) : (
-              items.map((q) => <DockCard key={q.id} q={q} currentProjectId={projectId} />)
-            )}
+      <div className="flex-1 overflow-y-auto p-2 flex flex-col gap-2">
+        {error !== null ? (
+          <div className="ss-meta" style={{ color: "var(--cinnabar)" }}>
+            加载失败:{error}
           </div>
+        ) : loading && count === 0 ? (
+          /* 「还没查过」与「查过了是空」在 hooks 里已分开(loading 初值 true),
+             走到空态就真的是空队列。 */
+          <div className="ss-meta">加载中…</div>
+        ) : count === 0 ? (
+          <div className="ss-meta">
+            没有等你回答的问题 —— 各项目的业务经理都没卡在甲方这里。
+          </div>
+        ) : (
+          items.map((q) => <DockCard key={q.id} q={q} currentProjectId={projectId} />)
+        )}
+      </div>
 
-          <footer
-            className="px-3 py-1.5 flex-none"
-            style={{ borderTop: "1px solid var(--ink-3)" }}
-          >
-            <span
-              className="ss-meta"
-              title="数据来源:GET /api/client-questions。回答走 POST /api/client-questions/:id/answer,落成 decision 工件。"
-            >
-              答案会落成 decision 工件,项目上留得下
-            </span>
-          </footer>
-        </section>
-      ) : (
-        <button
-          type="button"
-          className="sansheng-button"
-          onClick={() => setOpen(true)}
-          title={
-            count > 0
-              ? `${count} 件等你回答的问题 —— 数据来源:GET /api/client-questions`
-              : "没有等你回答的问题 —— 数据来源:GET /api/client-questions"
-          }
-          style={{
-            padding: "6px 12px",
-            fontSize: 12,
-            color: count > 0 ? "var(--amber)" : "var(--bone-dim)",
-            borderColor: count > 0 ? "var(--amber)" : "var(--ink-4)",
-            background: "var(--ink-1)",
-            boxShadow: "0 6px 20px rgba(0,0,0,0.35)",
-          }}
+      {count > 0 && (
+        <div
+          className="px-3 py-1.5 flex-none"
+          style={{ borderTop: "1px solid var(--ink-3)" }}
         >
-          {count > 0 ? `待答 ${count}` : "待答"}
-        </button>
+          <span
+            className="ss-meta"
+            title="数据来源:GET /api/client-questions。回答走 POST /api/client-questions/:id/answer,落成 decision 工件。"
+          >
+            答案会落成 decision 工件,项目上留得下
+          </span>
+        </div>
       )}
-    </div>
+    </section>
   );
 }
 
 /**
- * 一条提问。**跨项目的也要能答** —— 所以项目名在浮层里不能省(原先它在页面上
- * 是分组标题,这里只剩一行)。当前项目的那条用琥珀色标出:停靠位是**全局**的
- * (它长在窗口角上,不管你在哪个项目),而回答多半是给当前项目那条的。
+ * 一条提问。**当前项目的不标项目名** —— 它就在「本项目」下面,标出来是噪音;
+ * 别的项目的那条必须标,否则它在右栏里会被读成当前项目欠你的活。
  */
 function DockCard({ q, currentProjectId }: { q: ClientQuestionView; currentProjectId: string | null }) {
   const mine = q.projectId === currentProjectId;
   return (
     <div className="flex flex-col gap-1">
-      <span
-        className="ss-meta"
-        style={{ color: mine ? "var(--amber)" : "var(--bone-dim)" }}
-        title={mine ? "当前项目" : "别的项目的问题"}
-      >
-        {q.projectName}
-      </span>
+      {!mine && (
+        <span className="ss-meta" style={{ color: "var(--ochre)" }} title="别的项目的问题">
+          {q.projectName}
+        </span>
+      )}
       <ClientQuestionCard q={q} />
     </div>
   );
