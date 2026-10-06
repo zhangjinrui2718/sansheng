@@ -2,7 +2,87 @@
 
 ---
 
-# ⚡ 最新一轮 · W11(2026-10-05 晚)· 平台记录:对话页一个字不留 + 项目页按状态说人话
+# ⚡ 最新一轮 · W12(2026-10-06 晚)· 真机终局暴露的四个机制缺口
+
+> W11(平台记录怎么呈现)仍然有效。这一轮是**从真机库里读出来的四个机制缺口**,
+> 触发点是一次端到端用例(项目「美股自动化交易平台方案设计」)跑完之后的状态:
+>
+> ```
+> 11 条工作全 done + 全 review_state='done' · 6 条 review_verdict 全 pass
+> dispatch_events 无未消费 · dispatch_attempts 无残留 · client_questions 15 条全 consumed
+> openWorks 0 / pendingQuestions 0 / openBlockers 0 / runningTurns 0
+> projects.status = 'active'          ← 没人在干活,但项目永远「进行中」
+> ```
+>
+> ## 状态
+>
+> ```
+> W12 356376a fix(mechanism): P1 通道判据 / P2 项目收口 / P3 goal 对齐 / P4 整合判据
+> 1502 passed / 71 files · 两条 typecheck 0 · npm run build 绿 · check:design E1–E14 绿
+> ```
+>
+> ## ① P1 · 待办回合正文被通道判据整体丢弃
+>
+> `channelOf` 第 4 步按「是不是 todo」一刀切,而业务经理在 **24 次**平台叫醒的回合里
+> `tell_client` 调用 **0 次**(客户会话里 33 条消息 = `broadcast 8` / `turn+todo 24` /
+> `turn+user 1`)。后果不是「少几条消息」:14:52 那条写着
+> 「**一个关键张力我必须当面说清**:`live_aggressive` 与 `< $25k Cash account` 不匹配」
+> —— **甲方从头到尾不知道自己的两个拍板互相打架**。
+>
+> 判据改成两半(`shared/types/platform.ts` 的 `CLIENT_FACING_TODO_KINDS` ∧ 说话人
+> `clientFacing`),缺任一半 fail-closed。配套 **migration 022** 落
+> `session_messages.todo_kind` —— **019 当初刻意不落它**(理由:「不参与判定也没有
+> 读者」),那个判断在它长出读者之后失效;不落库的后果是 W3-① 的原样复发。
+> 这一列**不建 CHECK**:取值域随 `TODO_KINDS` 变,建了就是库里第二份会漂的闭集。
+> 同步修 `detectUnannouncedTurn`(这三类正文自动到甲方眼前,再要求 `tell_client`
+> 就是要求他在已是甲方通道的地方再广播一次 —— 告警会从真信号退化成噪音)。
+> **顺手修掉一处既有静默降级**:成员页 `TODO_KIND_LABEL` 一直在显示英文,
+> 因为它读的 `todoKind` 从来没到过前端。
+>
+> ## ② P2 · 项目永远 `active`(第 13 条规则 `close_finished_project`)
+>
+> 11 条规则里没有一条管收口,`NUDGE_CAPABILITIES` 里也没有 `project.close` ——
+> `project_close` 工具一直有生产调用方却**零自动触发**(7-E 的复发)。判据是八件事
+> 同时不成立,全部只读结构化的列;**成立时叫醒业务经理去判断,不自动关闭**
+> (收口不可逆,而「收不收口」不是一行 `status` 能推出来的结论)。终止判据 =
+> `projects.status` 变终态 ⇒ 重启自动补跑、不把已关闭的项目重新叫活。
+> 业务经理提示词新增「最后一步」一节:**最终交付物是什么** + 对照 `projects.goal`
+> 判断 + 不可逆警告。
+>
+> ## ③ P3 · 质检现场看不见「要达成什么」
+>
+> `renderPendingReviews` 只渲染 `id` / 标题 / 负责人,而 `review_work` 的任务正文问
+> 「目标达成了吗?」—— 判据在提示词里、达成目标的定义不在。质检于是去读 PM 的整改
+> brief 当判据(真机原文:「严格按整改 work_brief 的硬约束执行,4 条判据全部满足」),
+> 而甲方明确答复过要的是「一份」。现在渲染 `projects.goal` + `works.goal` **两层**,
+> 并写死优先级(goal > 项目 goal > brief,冲突以 goal 为准并写进 `review_finding`)。
+> **goal 是数据不是硬编码**(旧 pi 的 `Blackboard.goal` 同一个思路)。
+>
+> ## ④ P4 · 分章结论冒充最终交付
+>
+> `integrate` 的终止判据是「根上有 `deliverable`」,而它分不清 7 份分章结论和一份
+> 总稿 —— 结构上没有这个字段。改为在 `integrate` 回合把根的 `goal` 摆出来,并写明
+> 「要一份时几份分章结论不算交付」,同时给反向出口(goal 说要分章节就分章交)。
+>
+> ## ⑤ 顺带修两处「检查自身的洞」
+>
+> - `prompt-assembly` 的占位符守卫 `/TODO|TBD|待补/` 会在真标识符
+>   `CLIENT_FACING_TODO_KINDS` 上命中,报出一个**自信的错误答案**;收紧成 `\bTODO\b`,
+>   并用 5 个正样本 + 4 个负样本自检过。
+> - `appendSessionMessage` 的封套守卫第一版写成**双向**,把「todo 回合但不知道是
+>   哪一类」这个**合法**形状(022 之前的存量行全是)全拒了。**守卫比它守的不变式
+>   更严,就会在正确的输入上炸** —— 改成单向。
+>
+> ## ⑥ 真机验证
+>
+> `.probe/2026-10-06-close-rule.mts` 跑在真机库的 `VACUUM INTO` 副本上:迁移
+> 21 → 22 纯加法 ✅ · 八格判据在真库形状下逐条读数全为零/空 ✅ · `close_project`
+> 成立并叫醒 `bm` ✅ · 189 字的 `projects.goal` 真的进了那个回合的提示词 ✅ ·
+> 存量行 `todo_kind` 全为 `NULL`、fail-closed 方向正确 ✅。
+>
+> ---
+
+# 上一轮 · W11(2026-10-05 晚)· 平台记录:对话页一个字不留 + 项目页按状态说人话
 
 > W10(告警口径 rounds/turns)仍然有效。这一轮改的是**这两类记录怎么呈现给用户**。
 
@@ -18,7 +98,7 @@
 ```
 W11 20f92c0 feat(web): 对话页不再留平台通知半截 + 项目页「组织推进」带派生状态 / 「合规记录」不派生
     feat(web): 对话页不再留平台通知半截 + 项目页「组织推进」带派生状态 / 「合规记录」不派生
-1429 passed / 67 files · 两条 typecheck 0 · npm run build 绿 · check:design E1–E14 绿 · as any 0
+1502 passed / 71 files · 两条 typecheck 0 · npm run build 绿 · check:design E1–E14 绿 · as any 0
 ```
 
 ## ① 对话页:平台通知**一个字都不留**
@@ -85,7 +165,7 @@ W11 20f92c0 feat(web): 对话页不再留平台通知半截 + 项目页「组织
 ```
 npx tsc -p tsconfig.server.json --noEmit   # 0
 npx tsc -p tsconfig.web.json --noEmit      # 0
-npm test                                   # 1429 passed / 67 files
+npm test                                   # 1502 passed / 71 files
 npm run build                              # 绿(index-CfaR0pZk.js)
 npm run check:design                       # ✓ E1–E14
 grep -rn 'as any' src/ web/src/            # 0

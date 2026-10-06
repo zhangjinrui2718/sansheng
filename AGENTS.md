@@ -40,7 +40,7 @@
   判据的一部分:同一对节点上两类边**方向一致**时不是环(真机那份数据就是这样),方向相反
   才是环(`mutualPairs` 会点名是哪两条边)。写反会让「交付」跑到最左、并且把一个不存在的
   环报出来(`web/src/lib/workGraph.ts` 的 `collectEdges`)。
-- 基线:**1429 passed / 67 test files** · 两条 typecheck 0 error · `check:design` E1–E14 全绿。
+- 基线:**1502 passed / 71 test files** · 两条 typecheck 0 error · `check:design` E1–E14 全绿。
 - **角色中文名只有一处**:`src/platform/runtime/org.ts` 的 `ORG`(播种 + `RoleHarnessView.displayName`
   共用);前端兜底表 `web/src/lib/vocab.ts` 的 `ROLE_LABEL` 必须逐项相同,由
   `tests/web/role-names.test.ts` 跨边界对照。**不许在某个页面里再写一张名字表**
@@ -123,7 +123,7 @@ shared/types/            跨端协议类型(platform.ts / settings.ts)
 
 | 角色 | 待办判据 | 判据从哪来 |
 |---|---|---|
-| `business_manager` | 有人问它 / **有下游结果还没向甲方交代**(**且过了合并窗口**:攒够 N 条或最老的一条等到 T;失败与高危阻塞**绕过**窗口) | 库里的 `open` ask + **`dispatch_events`(outbox)里未消费的行** |
+| `business_manager` | 有人问它 / **有下游结果还没向甲方交代**(**且过了合并窗口**:攒够 N 条或最老的一条等到 T;失败与高危阻塞**绕过**窗口) / **甲方答复到了还没处置**(`resume_client`) / **有已验收交付物还没交付**(`handover`) / **这个项目没有一件没做完的事了**(`close_project`) | 库里的 `open` ask + **`dispatch_events`(outbox)里未消费的行** + `client_questions.consumed_at` + `project_sessions.deliverable_artifact_id` + `projects.status` |
 | `project_manager` | 有人问它 / 有变更待评 / **项目零工作项** / **有工作项被派给了非 worker** | `pendingWork.ts` + `works` |
 | `worker` | **分派给它、前置已满足、还没终态**的工作项 | `pendingWork.ts` 的 `myOpenWorks` |
 | `quality_reviewer` | 有人问它 / 有变更待评 / **有做完但没审的产出** | `works.status='done' AND review_state='pending'` |
@@ -164,10 +164,31 @@ shared/types/            跨端协议类型(platform.ts / settings.ts)
 
 > 会话池的键是 `(上下文, agent)` 而不是上下文 —— 一个项目里四个角色各要一条自己的会话(工具面不同)。原先 BM 独占,键是 `string | null`。
 
+### 第 13 条规则 `close_finished_project`(2026-10-06 真机终局补)
+
+真机现场(项目「美股自动化交易平台方案设计」跑完之后):11 条工作全 `done` +
+全 `review_state='done'`、6 条 `review_verdict` 全 `pass`、outbox 空、
+`openWorks/pendingQuestions/openBlockers/runningTurns` 全 0 —— **而 `projects.status`
+永远是 `active`**。`project_close` 工具一直有生产调用方(`tools/project.ts`)却
+**零自动触发**:11 条规则里没有一条管收口,`NUDGE_CAPABILITIES` 里也没有
+`project.close`。**「代码里写了逻辑」不等于「它有读者」**(7-E 的复发)。
+
+判据是**八件事同时不成立**(`runtime/dispatcher.ts` 的 `close_finished_project`):
+非终态工作项 0 · 待审产出 0 · 未消费 outbox 0 · 等甲方的提问 0 · 未处置的答复 0 ·
+未解决阻塞 0 · **已验收交付物 ≥ 1**(否则「工作项全 done 而甲方手上什么都没有」
+不算完成) · 且**全部已交付**。全部只读结构化的列。
+
+> ⚠️ **判据成立时不自动关闭,而是叫醒 `business_manager` 去判断** —— 收口不可逆
+> (`closeProject` 对终态项目直接抛错、项目内能力随即失效),而「收不收口」是业务判断,
+> 不是一行 `status` 能推出来的结论(§2.11.3)。终止判据 = `projects.status` 变终态
+> ⇒ 落在一列上,重启后自动补跑、且**不会把已关闭的项目重新叫活**。
+> 业务经理提示词(`business_manager.core.md`「最后一步」那一节)配套讲清
+> **最终交付物是什么** —— 真机上「11 条全 done 而甲方要的那一份并不存在」过一次。
+
 
 ## 数据与存储
 
-- 迁移在 `migrations/`:**007–010 建平台表**,**011 把旧系统的 7 张表 DROP**(`blackboards` / `conversations` / `messages` / `fragments` / `user_profile` / `agent_states` / `fragments_vec`),**012 接待会话**(重建 `project_sessions` 放宽 `project_id` 可空,已登记进 `INTENTIONAL_REBUILDS`),**013 排空器状态**(`works.review_state` + `dispatch_events` + `dispatch_attempts`,纯加法),**014 产出边**(`artifacts.work_id` + 一条部分索引,纯加法),**015 放宽 `dispatch_events.kind`**(加 `work_cancelled`;闭集**只能靠重建表**放宽,已登记进 `INTENTIONAL_REBUILDS`),**016 交付物 kind**(重建 `artifacts`),**017 交付会话**(`project_sessions.deliverable_artifact_id` + `channel`,纯加法),**018 `turn_usage` 表**(纯加法),**019 会话消息的封套**(`session_messages.origin_source` + `trigger_kind`,纯加法;两列各有自己的 CHECK)。
+- 迁移在 `migrations/`:**007–010 建平台表**,**011 把旧系统的 7 张表 DROP**(`blackboards` / `conversations` / `messages` / `fragments` / `user_profile` / `agent_states` / `fragments_vec`),**012 接待会话**(重建 `project_sessions` 放宽 `project_id` 可空,已登记进 `INTENTIONAL_REBUILDS`),**013 排空器状态**(`works.review_state` + `dispatch_events` + `dispatch_attempts`,纯加法),**014 产出边**(`artifacts.work_id` + 一条部分索引,纯加法),**015 放宽 `dispatch_events.kind`**(加 `work_cancelled`;闭集**只能靠重建表**放宽,已登记进 `INTENTIONAL_REBUILDS`),**016 交付物 kind**(重建 `artifacts`),**017 交付会话**(`project_sessions.deliverable_artifact_id` + `channel`,纯加法),**018 `turn_usage` 表**(纯加法),**019 会话消息的封套**(`session_messages.origin_source` + `trigger_kind`,纯加法;两列各有自己的 CHECK),**020 `client_questions` 台账**,**021 `review_verdicts`**,**022 `session_messages.todo_kind`**(纯加法、**不建 CHECK** —— 取值域随 `TODO_KINDS` 变,闭集在读写两侧的 TS 里,理由见该迁移文件头)。
 - ⚠️ **`artifacts.work_id` 一条边承载两个语义**(「产出」∪「关于」,migration 014):worker 写 `evidence` 是产出,质检把 `review_finding` 挂到**被审的那条**上是「关于」。取「这条工作项交付了什么」必须自己区分(`runtime/execution.ts` 用 `work_id` + 作者 + `kind ∉ ABOUT_ONLY_ARTIFACT_KINDS` 三条判据);**不要删那些边** —— 它是 `review_finding` 唯一能表达「审的是哪一条」的地方。
 - `artifacts` 直接挂项目 —— **没有 blackboard 容器层**。记忆在 `memory_fragments` / `memory_profile`,不是 `fragments`:`fragments` 是旧名字,001 已占用。
 - 平台表**不得复用旧表名**:`CREATE TABLE IF NOT EXISTS` 撞名时静默无操作,新表根本建不出来(见下 §三类静默失败)。加表前先 `ls migrations/` 查名。
@@ -213,7 +234,7 @@ help
 ```
 npx tsc -p tsconfig.server.json --noEmit
 npx tsc -p tsconfig.web.json --noEmit
-npm test                  # 1429 passed / 67 files
+npm test                  # 1502 passed / 71 files
 npm run build
 npm run check:design      # 设计一致性 E1–E14
 ```

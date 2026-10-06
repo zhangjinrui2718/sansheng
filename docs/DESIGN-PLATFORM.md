@@ -1821,7 +1821,7 @@ AgentRuntime
 
 | 角色 | 「可执行的待办」 | 判据来源 |
 |---|---|---|
-| `business_manager` | **有下游结果还没向甲方交代**(且过了**合并窗口**:攒够 N 条 / 最老的一条等到 T)**或**有立刻可播的(失败 / 高危阻塞) | `dispatch_events`(outbox)里未消费的行 |
+| `business_manager` | **有下游结果还没向甲方交代**(且过了**合并窗口**:攒够 N 条 / 最老的一条等到 T)**或**有立刻可播的(失败 / 高危阻塞);**甲方答复到了还没处置**(`resume_client`,020);**有已验收交付物还没交付**(`handover`);**这个项目没有一件没做完的事了**(`close_project`,第 13 条 —— 2026-10-06 真机终局补) | `dispatch_events`(outbox)里未消费的行 / `client_questions.consumed_at` / `project_sessions.deliverable_artifact_id` / `projects.status` |
 | `project_manager` | 有人问它;有变更待评;**项目一个工作项都没有**(还没拆解);**有工作项被派给了非 worker**;**有工作项停在 `blocked` 而没有驱动者**(第 11 条规则 `resolve_blocked_work` —— 2026-10-06 补记,此前本表漏了它) | `pendingWork.ts` + `works` |
 | `worker` | **分派给它、前置已满足、还没到终态**的工作项 | `pendingWork.ts` 的 `myOpenWorks` |
 | `quality_reviewer` | 有人问它;有变更待评;**有做完但没审的产出** | `works.status='done' AND review_state='pending'` |
@@ -1833,6 +1833,12 @@ AgentRuntime
 - 于是质检的待办就是**一条查询**,重启之后照样查得出来。批次 20 的形态(判据是级联观察到的内存事件,不持久、重启不补跑)随之消失。
 
 **下游结果同理落进 outbox**(`dispatch_events`):工作项迁入 `done` / `failed` / `blocked`、或登记了新阻塞时写一行。业务经理的汇报待办 = 「这个项目还有没被交代的事件吗」。它因此**不会因为撞上排空上界而消失** —— 批次 20 真机跑出来过「工作项做完了而没有人向甲方汇报」。
+
+**收口是「判断」而不是「推导」(第 13 条 `close_finished_project`,2026-10-06 补)。** 真机终局:11 条工作全 `done` + 全审过、outbox 空、四类计数全 0 —— 而 `projects.status` 永远是 `active`;`project_close` 工具一直有生产调用方却**零自动触发**。规则读八件事(非终态工作项 / 待审产出 / 未消费事件 / 等甲方的提问 / 未处置的答复 / 未解决阻塞 / 已验收交付物是否 ≥1 / 是否全部已交付),**全部只读结构化的列**;判据成立时**叫醒业务经理去判断**,不自动关闭 —— 收口不可逆,而「收不收口」不是一行 `status` 能推出来的结论。终止判据 = `projects.status` 变终态。
+
+**「要达成什么」必须出现在验收现场(2026-10-06 补)。** `renderPendingReviews` 此前只渲染 `id` / 标题 / 负责人,而 `review_work` 的任务正文问的是「目标达成了吗?」—— **判据在提示词里,达成目标的定义不在**。质检于是去读项目经理的整改 brief 当判据,真机现场是「严格按 work_brief 的『目录式引用 + 严禁复述/改写』执行,4 条判据全部满足」,而甲方明确答复过要的是「一份」。现在渲染 `projects.goal` 与 `works.goal` **两层**,并写死优先级(工作项 goal > 项目 goal > brief,冲突以 goal 为准并写进 `review_finding`)。goal 是**数据**不是硬编码判据 —— 与旧 pi 的 `Blackboard.goal` 同一个思路:**谁都可以改,但验收现场必须看得见它**。
+
+**通道判据第三次收窄(2026-10-06 补)。** `handover` / `report_downstream` / `resume_client` 三类待办的**正文直接进甲方通道**(说话人是 `clientFacing` 时),其余 todo 仍进内部。真机依据:业务经理被叫醒 24 次、`tell_client` 调用 0 次,而它写下的「档位与 <$25k Cash account 不匹配,必须当面说清」**甲方从头到尾没看到**。判据落成 `shared/types/platform.ts` 的 `CLIENT_FACING_TODO_KINDS`(闭集枚举,不是对正文做语义猜测),读面 `channelOf` 与写面 `detectUnannouncedTurn` 都从那里取。⚠️ 由此 `todo_kind` 必须落库(migration 022)—— **019 当初刻意不落它,理由是「不参与判定也没有读者」;那时是对的,现在它长出了读者**,而省掉一列的代价会在判据第三次改动时以「流式看得见、刷新看不见」的形状回来(W3-① 的原样复发)。存量行是 `NULL`,读面一律按旧判据走(fail-closed),**不回填** —— 回填是编造。
 
 **触发有两个入口,两者都不携带任何状态**:
 

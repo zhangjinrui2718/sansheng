@@ -60,9 +60,21 @@ import { log } from "../../shared/log.js";
 import { applySettingsPatch, toPublicSettings } from "../infra/settingsApply.js";
 import { listProviders, resolveModel, syncActiveProviderApiKeyEnv } from "../infra/providers.js";
 import { listPendingDispatchEvents } from "../storage/repo/dispatch.js";
-import {
-  todoKindReachesClient,
-  type ServerEvent, type TriggerTodoKind, type TurnTrigger,
+// ⚠️ **`todoKindReachesClient` 是**值**导入,所以走相对路径而不是 `@shared/*`** ——
+// 2026-10-06 撞过一次:`import { todoKindReachesClient } from "@shared/types/platform.js"`
+// 在 `tsc` 下类型全对、`npm test` 全绿、`npm run build` 也绿,而**真机启动直接
+// `ERR_MODULE_NOT_FOUND`**:tsc 的 `paths` 只在编译期解析,发到 dist 的 JS 里留下的是
+// 裸包名 `@shared/types`,Node 解析不了。type-only import 不会暴露这个问题(整条被擦除),
+// 所以平时看不出来 —— 而 AGENTS.md 那条「server 侧禁 value import `@shared/*`」正是
+// 在说它,只是没写清「改成相对路径就行」。
+//
+// 相对路径是**有先例**的,而且不止一处:`shared/log.js` 的 `log` 同样是函数,
+// `src/platform/infra/*.ts` 与 `runtime/*.ts` 全都这么引(`dist/shared/` 里确实
+// 编译出了 `log.js`)。⇒ **规则禁的是那个别名,不是「server 不能用 shared 的值」。**
+// 同一份定义因此仍然是**唯一真相**,读写两侧不会漂。
+import { todoKindReachesClient } from "../../../shared/types/platform.js";
+import type {
+  ServerEvent, TriggerTodoKind, TurnTrigger,
 } from "@shared/types/platform.js";
 
 // ══ 检测器:工件触发的回合没留工作记录(W2-③)══════════════════════════
