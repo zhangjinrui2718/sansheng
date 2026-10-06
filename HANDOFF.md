@@ -2,7 +2,78 @@
 
 ---
 
-# ⚡ 最新一轮 · W12(2026-10-06 晚)· 真机终局暴露的四个机制缺口
+# ⚡ 最新一轮 · W13(2026-10-06 夜)· 收口之后还能说话 + 多对话 + 版本链
+
+> 用户原话(这一批的验收标准):
+>
+> > 「项目交付之后,是否需要重新打开,或者有新的版本,我觉得可以在原对话中继续
+> > 对话的,如果有必要,可以新开一个版本,否则就是纯和业务经理交流」
+> >
+> > 「一个对话只能对应一个项目吗,你看我在接待谈新项目里面的对话,他显然不知道
+> > 之前已经做过的项目,我们需要支撑多对话对应一个项目的某个版本」
+>
+> 范围经 jev 闸门裁决后由用户定为**全做 A+B+C**(先只解症状 / 加会话一等实体 / 再加
+> 版本链 三档里的最大一档)。
+>
+> ## 状态
+>
+> ```
+> W13 13ed698 fix(session): 交付会话按交付物命名;开线标题的接线修好
+>     6c1cf36 feat(platform): 收口之后还能说话 + 下一个版本 + 接待看得见历史项目
+>     f9ea209 feat(platform): 对话是一等实体 —— 一个项目下面可以有多条对话线
+> 1532 passed / 72 files · 两条 typecheck 0 · npm run build 绿 · check:design E1–E14 绿
+> ```
+>
+> ## ① 「对话」不是「项目内能力」
+>
+> 上一批把项目收口之后,`serve.ts` 的 `code: "project_closed"` 让甲方**连一句都发不
+> 出去** —— 项目成了只读墓碑,而交付物全在库里。改成授权层分层
+> (`DIALOGUE_SURVIVES_CLOSURE`):`project.read` / `project.open` / `project.close` /
+> `client.*` / `memory.*` 活下来,`project.update` 与 `work.*` 那几族仍被挡。
+> **豁免的是「说话」,不是「改」。**
+>
+> ## ② 接待会话里业务经理看得见历史
+>
+> `renderProjectContext(null)` 从**空串**改成列清单 —— 原来那条「没有项目就返回空串」
+> 在第一个项目之前成立,之后变成一个洞。配套新增 `project_list` 工具:业务经理此前
+> **没有任何一条路**能知道库里有哪些项目(`project_read` 要一个已知的 projectId,
+> 而那个 id 从哪来?)。清单只读结构化的列。
+>
+> ## ③ 版本链(migration 023)
+>
+> `projects.version` + `parent_project_id`(`ON DELETE SET NULL`)。`project_open(
+> parentProjectId?)` 记下「这是上一个的下一版」。⚠️ **边由业务经理建**(「这是同一
+> 个交付物」平台推不出来)、**不做回填**、**版本不是继承**。
+>
+> ## ④ 对话是一等实体(migration 024)
+>
+> ⚠️ **存储层早就支持多会话** —— 唯一索引只约束接待会话。真正把模型钉死在 1:1 的
+> 是四层:WS `send` 不带 `sessionId` / `ensureSession` 复用最新一条 / 会话池键是
+> `(项目, 角色)` / 前端单指针。四层一次换完(见 AGENTS.md 那张对照表)。
+>
+> **一场交付 = 一条独立对话线**(`kind='thread'` + 名字取交付物标题)。真机上那个
+> 跑完的项目底下有 **8 条**会话(7 场交付 + 1 条内部)—— 全叫「主对话」时页签上是
+> 8 个一样的标签。**存量行不重写 title**,读面用 `deliverable_artifact_id → 工件标题`
+> 兜底。
+>
+> ## ⑤ 顺带记下三处「看起来正常、实际不工作」
+>
+> - `getOrCreateSession` 的位置参数写反了(`agentId` ↔ `sessionId`),**tsc 没抓到**
+>   (三个形参都是 `string`)。后果是一句 `找不到 agent s_muwpz...` —— 那个 `s_` 是
+>   会话 id。改成**对象参数**。
+> - `NewThreadForm` 第一版写成 `value={propsTitleValue()}` 的占位:看起来能输入,实际
+>   一个字都留不住,**界面表现完全正常**。
+> - 开线的 `title` 前端发 query、后端读 body ⇒ **永远没有名字**,而界面上只是显示
+>   「没起名」,不像接线断了。后端两种都收,前端改发 body。
+>
+> ## ⑥ 真机验证
+>
+> 迁移 22 → 24 纯加法、存量 11 条会话一行没丢 · 接待注入列出两个已收口项目 ·
+> 收口项目读消息 200 · 越权取别的项目的线 **404** · 九条会话全部有名字。
+>
+> ---
+
+# 上一轮 · W12(2026-10-06 晚)· 真机终局暴露的四个机制缺口
 
 > W11(平台记录怎么呈现)仍然有效。这一轮是**从真机库里读出来的四个机制缺口**,
 > 触发点是一次端到端用例(项目「美股自动化交易平台方案设计」)跑完之后的状态:
@@ -98,7 +169,7 @@
 ```
 W11 20f92c0 feat(web): 对话页不再留平台通知半截 + 项目页「组织推进」带派生状态 / 「合规记录」不派生
     feat(web): 对话页不再留平台通知半截 + 项目页「组织推进」带派生状态 / 「合规记录」不派生
-1502 passed / 71 files · 两条 typecheck 0 · npm run build 绿 · check:design E1–E14 绿 · as any 0
+1532 passed / 72 files · 两条 typecheck 0 · npm run build 绿 · check:design E1–E14 绿 · as any 0
 ```
 
 ## ① 对话页:平台通知**一个字都不留**
@@ -165,7 +236,7 @@ W11 20f92c0 feat(web): 对话页不再留平台通知半截 + 项目页「组织
 ```
 npx tsc -p tsconfig.server.json --noEmit   # 0
 npx tsc -p tsconfig.web.json --noEmit      # 0
-npm test                                   # 1502 passed / 71 files
+npm test                                   # 1532 passed / 72 files
 npm run build                              # 绿(index-CfaR0pZk.js)
 npm run check:design                       # ✓ E1–E14
 grep -rn 'as any' src/ web/src/            # 0

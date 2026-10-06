@@ -40,7 +40,7 @@
   判据的一部分:同一对节点上两类边**方向一致**时不是环(真机那份数据就是这样),方向相反
   才是环(`mutualPairs` 会点名是哪两条边)。写反会让「交付」跑到最左、并且把一个不存在的
   环报出来(`web/src/lib/workGraph.ts` 的 `collectEdges`)。
-- 基线:**1502 passed / 71 test files** · 两条 typecheck 0 error · `check:design` E1–E14 全绿。
+- 基线:**1532 passed / 72 test files** · 两条 typecheck 0 error · `check:design` E1–E14 全绿。
 - **角色中文名只有一处**:`src/platform/runtime/org.ts` 的 `ORG`(播种 + `RoleHarnessView.displayName`
   共用);前端兜底表 `web/src/lib/vocab.ts` 的 `ROLE_LABEL` 必须逐项相同,由
   `tests/web/role-names.test.ts` 跨边界对照。**不许在某个页面里再写一张名字表**
@@ -164,6 +164,38 @@ shared/types/            跨端协议类型(platform.ts / settings.ts)
 
 > 会话池的键是 `(上下文, agent)` 而不是上下文 —— 一个项目里四个角色各要一条自己的会话(工具面不同)。原先 BM 独占,键是 `string | null`。
 
+### 对话是一等实体(2026-10-06,migration 024)
+
+**用户原话**：「一个对话只能对应一个项目吗…… 我们需要支撑多对话对应一个项目的某个版本」
+
+⚠️ **存储层早就支持多会话** —— `project_sessions` 上只有一条唯一索引,而它只约束接待会话。真正把模型钉死在 1:1 的是**上面四层**,024 只换了它们:
+
+| 层 | 之前 | 现在 |
+|---|---|---|
+| WS `send` | 只带 `projectId`,前端**无法指定**发到哪条 | 带 `sessionId`(**可省** = 主对话) |
+| 会话池键 | `(项目, 角色)` ⇒ 两条线共用一个 SDK 会话 | `(项目, **会话**, 角色)` |
+| WS 事件 | 不带会话维 | 七条消息类事件**必填** `sessionId` |
+| 前端 | 单指针,没有列表 | `SessionPicker` 页签 + 「另开一条」 |
+
+**两条纪律**:
+- **事件上的 `sessionId` 必填,`send` 上的可省** —— 事件漏传是「模型在 A 线说的话显示在 B 线面板」(**看不出来**);`send` 漏传是「落到主对话」(**看得见**)。
+- **排空器触发的回合一律落主对话** —— 待办是**项目级**的,不属于任何一条甲方开的线。
+
+⚠️ **一场交付 = 一条独立对话线**(`kind='thread'` + 名字取交付物标题)。真机上那个跑完的项目底下有 **8 条**会话(7 场交付 + 1 条内部)—— 全叫「主对话」时页签上是 8 个一样的标签。**存量行不重写 title**,读面用 `deliverable_artifact_id → 工件标题` 兜底(改存量 title 等于「为了好看去改事实」)。
+
+## 收口之后还能说话(2026-10-06)
+
+⚠️ **`serve.ts` 里那条 `code: "project_closed"` 硬拒已删**。它让项目收口之后甲方**连一句都发不出去**,项目成了只读墓碑 —— 而交付物全在库里,「这个项目到底做成了什么」恰恰是验收时要问的第一句。
+
+现在分两层(`harness/authorize.ts` 的 `DIALOGUE_SURVIVES_CLOSURE`):
+
+| 收口后 | 能力 |
+|---|---|
+| ✅ 仍然可用 | `project.read` / `project.open`(开下一个版本)/ `project.close` / `client.*` / `memory.*` |
+| ❌ 被挡 | `project.update` 与 `work.*` / `collab.*` / `blackboard.*` / `change.*` / `blocker.*` |
+
+**豁免的是「说话」,不是「改」。** 另:接待会话的 `renderProjectContext(null)` 从**空串**改成**列清单** + 新增 `project_list` 工具 —— 业务经理此前**没有任何一条路**能知道库里有哪些项目(`project_read` 要一个已知的 projectId,而那个 id 从哪来?)。
+
 ### 第 13 条规则 `close_finished_project`(2026-10-06 真机终局补)
 
 真机现场(项目「美股自动化交易平台方案设计」跑完之后):11 条工作全 `done` +
@@ -188,7 +220,7 @@ shared/types/            跨端协议类型(platform.ts / settings.ts)
 
 ## 数据与存储
 
-- 迁移在 `migrations/`:**007–010 建平台表**,**011 把旧系统的 7 张表 DROP**(`blackboards` / `conversations` / `messages` / `fragments` / `user_profile` / `agent_states` / `fragments_vec`),**012 接待会话**(重建 `project_sessions` 放宽 `project_id` 可空,已登记进 `INTENTIONAL_REBUILDS`),**013 排空器状态**(`works.review_state` + `dispatch_events` + `dispatch_attempts`,纯加法),**014 产出边**(`artifacts.work_id` + 一条部分索引,纯加法),**015 放宽 `dispatch_events.kind`**(加 `work_cancelled`;闭集**只能靠重建表**放宽,已登记进 `INTENTIONAL_REBUILDS`),**016 交付物 kind**(重建 `artifacts`),**017 交付会话**(`project_sessions.deliverable_artifact_id` + `channel`,纯加法),**018 `turn_usage` 表**(纯加法),**019 会话消息的封套**(`session_messages.origin_source` + `trigger_kind`,纯加法;两列各有自己的 CHECK),**020 `client_questions` 台账**,**021 `review_verdicts`**,**022 `session_messages.todo_kind`**(纯加法、**不建 CHECK** —— 取值域随 `TODO_KINDS` 变,闭集在读写两侧的 TS 里,理由见该迁移文件头)。
+- 迁移在 `migrations/`:**007–010 建平台表**,**011 把旧系统的 7 张表 DROP**(`blackboards` / `conversations` / `messages` / `fragments` / `user_profile` / `agent_states` / `fragments_vec`),**012 接待会话**(重建 `project_sessions` 放宽 `project_id` 可空,已登记进 `INTENTIONAL_REBUILDS`),**013 排空器状态**(`works.review_state` + `dispatch_events` + `dispatch_attempts`,纯加法),**014 产出边**(`artifacts.work_id` + 一条部分索引,纯加法),**015 放宽 `dispatch_events.kind`**(加 `work_cancelled`;闭集**只能靠重建表**放宽,已登记进 `INTENTIONAL_REBUILDS`),**016 交付物 kind**(重建 `artifacts`),**017 交付会话**(`project_sessions.deliverable_artifact_id` + `channel`,纯加法),**018 `turn_usage` 表**(纯加法),**019 会话消息的封套**(`session_messages.origin_source` + `trigger_kind`,纯加法;两列各有自己的 CHECK),**020 `client_questions` 台账**,**021 `review_verdicts`**,**022 `session_messages.todo_kind`**(纯加法、**不建 CHECK** —— 取值域随 `TODO_KINDS` 变,闭集在读写两侧的 TS 里),**023 项目版本链**(`projects.version` + `parent_project_id`,`ON DELETE SET NULL`),**024 对话一等实体**(`project_sessions.kind` + `title`;`kind` **有** CHECK —— 两值闭集,与 022 相反)。
 - ⚠️ **`artifacts.work_id` 一条边承载两个语义**(「产出」∪「关于」,migration 014):worker 写 `evidence` 是产出,质检把 `review_finding` 挂到**被审的那条**上是「关于」。取「这条工作项交付了什么」必须自己区分(`runtime/execution.ts` 用 `work_id` + 作者 + `kind ∉ ABOUT_ONLY_ARTIFACT_KINDS` 三条判据);**不要删那些边** —— 它是 `review_finding` 唯一能表达「审的是哪一条」的地方。
 - `artifacts` 直接挂项目 —— **没有 blackboard 容器层**。记忆在 `memory_fragments` / `memory_profile`,不是 `fragments`:`fragments` 是旧名字,001 已占用。
 - 平台表**不得复用旧表名**:`CREATE TABLE IF NOT EXISTS` 撞名时静默无操作,新表根本建不出来(见下 §三类静默失败)。加表前先 `ls migrations/` 查名。
@@ -234,7 +266,7 @@ help
 ```
 npx tsc -p tsconfig.server.json --noEmit
 npx tsc -p tsconfig.web.json --noEmit
-npm test                  # 1502 passed / 71 files
+npm test                  # 1532 passed / 72 files
 npm run build
 npm run check:design      # 设计一致性 E1–E14
 ```
