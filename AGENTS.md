@@ -40,7 +40,7 @@
   判据的一部分:同一对节点上两类边**方向一致**时不是环(真机那份数据就是这样),方向相反
   才是环(`mutualPairs` 会点名是哪两条边)。写反会让「交付」跑到最左、并且把一个不存在的
   环报出来(`web/src/lib/workGraph.ts` 的 `collectEdges`)。
-- 基线:**1532 passed / 72 test files** · 两条 typecheck 0 error · `check:design` E1–E14 全绿。
+- 基线:**1547 passed / 75 test files** · 两条 typecheck 0 error · `check:design` E1–E14 全绿。
 - **角色中文名只有一处**:`src/platform/runtime/org.ts` 的 `ORG`(播种 + `RoleHarnessView.displayName`
   共用);前端兜底表 `web/src/lib/vocab.ts` 的 `ROLE_LABEL` 必须逐项相同,由
   `tests/web/role-names.test.ts` 跨边界对照。**不许在某个页面里再写一张名字表**
@@ -124,7 +124,7 @@ shared/types/            跨端协议类型(platform.ts / settings.ts)
 | 角色 | 待办判据 | 判据从哪来 |
 |---|---|---|
 | `business_manager` | 有人问它 / **有下游结果还没向甲方交代**(**且过了合并窗口**:攒够 N 条或最老的一条等到 T;失败与高危阻塞**绕过**窗口) / **甲方答复到了还没处置**(`resume_client`) / **有已验收交付物还没交付**(`handover`) / **这个项目没有一件没做完的事了**(`close_project`) | 库里的 `open` ask + **`dispatch_events`(outbox)里未消费的行** + `client_questions.consumed_at` + `project_sessions.deliverable_artifact_id` + `projects.status` |
-| `project_manager` | 有人问它 / 有变更待评 / **项目零工作项** / **有工作项被派给了非 worker** | `pendingWork.ts` + `works` |
+| `project_manager` | 有人问它 / 有变更待评 / **项目零工作项** / **有工作项被派给了非 worker** / **有工作项停在 `failed`** → 重新划范围(`recover_failed_work`) | `pendingWork.ts` + `works` + `works.status='failed'` |
 | `worker` | **分派给它、前置已满足、还没终态**的工作项 | `pendingWork.ts` 的 `myOpenWorks` |
 | `quality_reviewer` | 有人问它 / 有变更待评 / **有做完但没审的产出** | `works.status='done' AND review_state='pending'` |
 
@@ -196,6 +196,33 @@ shared/types/            跨端协议类型(platform.ts / settings.ts)
 
 **豁免的是「说话」,不是「改」。** 另:接待会话的 `renderProjectContext(null)` 从**空串**改成**列清单** + 新增 `project_list` 工具 —— 业务经理此前**没有任何一条路**能知道库里有哪些项目(`project_read` 要一个已知的 projectId,而那个 id 从哪来?)。
 
+### 第 14 条规则 `recover_failed_work`(2026-10-06 真机停摆补)
+
+真机现场(项目「美股自动化交易平台方案设计·单报告合并版」):一条 worker 工作项单回合读进
+**109,231 token** 后撞上墙钟上界(10 分钟)被 `abort()` 打断,记成 `failed`。
+`work_failed` outbox 被消费了(业务经理确实被叫醒、去向甲方交代)——**然后再没有任何人
+被叫醒**。直接跑 `collectTodos`:`runnable: 0, exhausted: 0`。
+
+⚠️ **`exhausted` 也是 0**:不是「试够了所以放弃」,是**没有任何一条规则提到 `failed`**
+(`blocked` 有 `resolve_blocked_work`,`failed` 一条都没有)。而「零待办」与「组织已经把活
+干完了」在日志里长得**一模一样**。
+
+**为什么叫 PM 而不是让 worker 重跑**:`execution.ts` 的 `disposeTimeout` 注释已经写明
+「一次卡到墙钟的回合,自动重跑只是把同一段卡死行为再买一遍」。真机那条正是如此:
+目标太大(合并 7 份报告)⇒ 原样重跑会同样超时。**该做的是重新划范围**。
+
+> ⚠️ **迁移表加了一条边**:`failed: ["in_progress", "cancelled"]`。
+> 写完任务正文后查证发现**它让 PM 做的第一件事平台会直接拒** —— `failed` 原来只有
+> `in_progress` 一个出边。而只留复活那条边会形成一个真实的坑:PM 拆完、活干完了,
+> **旧的 `failed` 出不来** ⇒ 它永远停在那儿 ⇒ 规则一直叫到预算用尽,
+> **而 PM 做完了正事却收不了尾**。
+> 这与 `cancelled: []` 不冲突:后者说的是「`cancelled` 自己没有出边」(真终态、
+> 不可复活),这里是「**可以走进来**」。判据不是「终态不许出去」,是
+> 「**终态不许被复活**」。
+
+真机复跑已验证:PM 22:58 把失败那条**退役成 `cancelled`**、按报告章节**拆成 4 条**
+新工作项,worker 随即开跑第一条。
+
 ### 第 13 条规则 `close_finished_project`(2026-10-06 真机终局补)
 
 真机现场(项目「美股自动化交易平台方案设计」跑完之后):11 条工作全 `done` +
@@ -266,7 +293,7 @@ help
 ```
 npx tsc -p tsconfig.server.json --noEmit
 npx tsc -p tsconfig.web.json --noEmit
-npm test                  # 1532 passed / 72 files
+npm test                  # 1547 passed / 75 files
 npm run build
 npm run check:design      # 设计一致性 E1–E14
 ```

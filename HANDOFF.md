@@ -2,7 +2,45 @@
 
 ---
 
-# ⚡ 最新一轮 · W13(2026-10-06 夜)· 收口之后还能说话 + 多对话 + 版本链
+# ⚡ 最新一轮 · W14(2026-10-06 夜)· 失败的工作项不再让项目永久停住
+
+> 用户现场:「美股自动化交易平台方案设计·单报告合并版」**有工作项失败了,现在就停下来**。
+
+`collectTodos` 直接跑在真机库副本上:`runnable: 0, exhausted: 0`。
+⚠️ **`exhausted` 也是 0** —— 不是「试够了所以放弃」,是**没有任何一条规则提到
+`failed`**(`blocked` 有 `resolve_blocked_work`,`failed` 一条都没有)。而「零待办」
+与「组织已经把活干完了」在日志里长得**一模一样**。
+
+失败本身有据可查:那一轮单回合读进 **109,231 token**、跑满 10 分钟墙钟上界被
+`abort()` 打断 ⇒ `updateWorkStatus(…, "failed")`。
+
+```
+48b37fc feat(dispatcher): 第 14 条规则 recover_failed_work
+1547 passed / 75 files · 两条 typecheck 0 · npm run build 绿 · check:design E1–E14 绿
+```
+
+### ① 叫 **PM 重新划范围**,不是让 worker 重跑
+
+`execution.ts` 的 `disposeTimeout` 注释已经写明「一次卡到墙钟的回合,自动重跑只是把
+同一段卡死行为再买一遍」。真机那条正是如此:目标太大(合并 7 份报告)⇒ 原样重跑会同样
+超时。「怎么划」是业务判断 ⇒ PM(`work_create` / `work_update` / `work_assign`)。
+
+### ② 顺带改判:`failed → cancelled` 现在允许
+
+写完任务正文后**查证**发现它让 PM 做的第一件事平台会直接拒(`failed` 原来只有
+`in_progress` 一个出边)。而只留复活那条边会形成一个真实的坑:PM 拆完、活干完了,
+**旧的 `failed` 出不来** ⇒ 规则一直叫到预算用尽,**而 PM 做完了正事却收不了尾**。
+这与 `cancelled: []` 不冲突 —— 后者说的是「`cancelled` 没有出边」(不可复活),
+这里是「**可以走进来**」。
+
+### ③ 真机复跑已验证
+
+PM 22:58 把失败那条**退役成 `cancelled`**、按报告章节**拆成 4 条**新工作项,
+worker 随即开跑第一条。判据成立 → 叫醒 → 处置 → 判据不成立 → 规则安静。
+
+---
+
+# 上一轮 · W13(2026-10-06 夜)· 收口之后还能说话 + 多对话 + 版本链
 
 > 用户原话(这一批的验收标准):
 >
@@ -21,7 +59,7 @@
 > W13 13ed698 fix(session): 交付会话按交付物命名;开线标题的接线修好
 >     6c1cf36 feat(platform): 收口之后还能说话 + 下一个版本 + 接待看得见历史项目
 >     f9ea209 feat(platform): 对话是一等实体 —— 一个项目下面可以有多条对话线
-> 1532 passed / 72 files · 两条 typecheck 0 · npm run build 绿 · check:design E1–E14 绿
+> 1547 passed / 75 files · 两条 typecheck 0 · npm run build 绿 · check:design E1–E14 绿
 > ```
 >
 > ## ① 「对话」不是「项目内能力」
@@ -169,7 +207,7 @@
 ```
 W11 20f92c0 feat(web): 对话页不再留平台通知半截 + 项目页「组织推进」带派生状态 / 「合规记录」不派生
     feat(web): 对话页不再留平台通知半截 + 项目页「组织推进」带派生状态 / 「合规记录」不派生
-1532 passed / 72 files · 两条 typecheck 0 · npm run build 绿 · check:design E1–E14 绿 · as any 0
+1547 passed / 75 files · 两条 typecheck 0 · npm run build 绿 · check:design E1–E14 绿 · as any 0
 ```
 
 ## ① 对话页:平台通知**一个字都不留**
@@ -236,7 +274,7 @@ W11 20f92c0 feat(web): 对话页不再留平台通知半截 + 项目页「组织
 ```
 npx tsc -p tsconfig.server.json --noEmit   # 0
 npx tsc -p tsconfig.web.json --noEmit      # 0
-npm test                                   # 1532 passed / 72 files
+npm test                                   # 1547 passed / 75 files
 npm run build                              # 绿(index-CfaR0pZk.js)
 npm run check:design                       # ✓ E1–E14
 grep -rn 'as any' src/ web/src/            # 0
