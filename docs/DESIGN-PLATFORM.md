@@ -1217,8 +1217,8 @@ export type Capability =
 
 | Capability | 工具名 | 参数 | 返回 |
 |---|---|---|---|
-| `project.open` | `project_open` | name, client, goal | project 摘要 |
-| `project.read` | `project_read` | projectId | 项目全貌(成员/工作/变更/阻塞计数) |
+| `project.open` | `project_open` | name, client, goal, parentProjectId? | project 摘要(含版本号与上一版) |
+| `project.read` | `project_list`, `project_read` | `project_list`: status? · `project_read`: projectId | 清单(名字/状态/交付物份数/版本链)/ 项目全貌(成员/工作/变更/阻塞计数) |
 | `project.update` | `project_update` | projectId, name?, goal?, status? | 更新后摘要 |
 | `project.close` | `project_close` | projectId, outcome: done\|abandoned, reason? | 终态确认 |
 | `work.create` | `work_create` | projectId, title, goal, assignee{role, spec?}, dependsOn[], parentWorkId? | work id |
@@ -1252,7 +1252,7 @@ export type Capability =
 | `work.report` | `report` | workId, status, summary, artifacts? |
 | `work.review_verdict` | `review_verdict` | workId, verdict(pass\|fail), severity, findingArtifactId?, note? | 质检的结论 | |
 
-**34 条 capability 展开成 42 个工具。**
+**34 条 capability 展开成 43 个工具。**
 
 `work.assign` 与 `work.create` 共用同一套 `assignee{role, spec?}` 解析(见 §3.3)—— 改派和分派走同一条路径,避免「改派绕过了歧义检查」这种不一致。
 

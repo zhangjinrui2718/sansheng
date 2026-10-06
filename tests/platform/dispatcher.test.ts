@@ -738,11 +738,45 @@ describe("renderTask · 每个待办给 agent 的那一段", () => {
 // ── 现场:项目上下文 ────────────────────────────────────────────
 
 describe("renderProjectContext · A(项目上下文)", () => {
-  it("接待会话返回空串 —— 那条路径保持原样", () => {
+  // ⚠️ **这里原来断言「接待会话返回空串」,2026-10-06 推翻了**(真机现场)。
+  //
+  // 甲方在接待会话里谈新诉求,业务经理**对已经做过的项目一无所知** —— 它问
+  // 「你想做什么」,而不是「你要的这个和上次那个是什么关系」。根因有两层:
+  //   ① 这里返回空串,项目清单一个字都不进;
+  //   ② 它**没有任何一条路**能自己去查(`project_read` 要一个已知的 id,
+  //      那个 id 从哪来?改前连 `project_list` 工具都没有)。
+  //
+  // ⇒ 现在这一段**列清单**。判据只读结构化的列,不抄工件正文(§2.11.3)。
+  it("接待会话**列出甲方已经和你做过的项目** —— 它此前对历史完全失明", () => {
     const c = renderProjectContext(db, "bm", null);
-    expect(c.text).toBe("");
     expect(c.projectId).toBeNull();
     expect(c.summary).toContain("接待会话");
+    expect(c.text).toContain("甲方已经和你做过这些项目");
+    expect(c.text, "项目名与 id 必须在场").toContain("语音机器人调研");
+    expect(c.text).toContain("p1");
+    // **来源要说清**:它是平台从库里查的,不是甲方这句话里说的
+    expect(c.text).toContain("平台从库里查出来的");
+  });
+
+  it("清单为空时如实说是空的 —— 不写每回合都会出现的废话", () => {
+    const empty = openPlatformMemoryDb();
+    try {
+      const c = renderProjectContext(empty, "bm", null);
+      expect(c.text).toContain("还没有任何项目");
+      expect(c.text, "别注入项目清单的标题 —— 没有项目时那行是骗人的").not.toContain(
+        "甲方已经和你做过这些项目",
+      );
+    } finally {
+      empty.close();
+    }
+  });
+
+  it("**不替它判断**「这次和上一次像不像同一个事」—— 那是业务经理的活", () => {
+    // 版本链由业务经理建(平台从库里推不出「同一个交付物」,§2.11.3)。
+    // 注入段只摆事实 + 给出工具入口。
+    const c = renderProjectContext(db, "bm", null);
+    expect(c.text).toContain("那是你的判断");
+    expect(c.text, "要给它一条查的路径").toContain("project_read");
   });
 
   it("项目会话里带出项目名 / 目标 / 我的角色 / 成员", () => {

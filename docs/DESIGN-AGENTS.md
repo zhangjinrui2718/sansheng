@@ -97,7 +97,7 @@
 ```json
 {
   "allow": [
-    "project_open", "project_read", "project_update", "project_close",
+    "project_open", "project_list", "project_read", "project_update", "project_close",
     "ask_role", "answer", "ask_list", "ask_read",
     "convene", "meeting_read", "meeting_respond", "meeting_conclude",
     "board_list", "board_read", "board_write",
@@ -166,7 +166,7 @@
 ```json
 {
   "allow": [
-    "project_read",
+    "project_list", "project_read",
     "work_create", "work_update", "work_assign", "work_list", "work_read", "report",
     "ask_role", "escalate", "answer", "ask_list", "ask_read",
     "convene", "meeting_read", "meeting_respond", "meeting_conclude",
@@ -240,7 +240,7 @@
 ```json
 {
   "allow": [
-    "project_read",
+    "project_list", "project_read",
     "work_create", "work_update", "work_list", "work_read", "report",
     "ask_role", "escalate", "answer", "ask_list", "ask_read",
     "meeting_read", "meeting_respond",
@@ -314,7 +314,7 @@
 ```json
 {
   "allow": [
-    "project_read",
+    "project_list", "project_read",
     "work_list", "work_read",
     "ask_role", "escalate", "answer", "ask_list", "ask_read",
     "meeting_read", "meeting_respond",

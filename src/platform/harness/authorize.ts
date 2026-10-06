@@ -135,7 +135,37 @@ const PROJECT_SCOPED_PREFIXES = [
   "blocker.",
 ] as const;
 
+/**
+ * ⚠️ **`project.` 这一族里要挖掉三个**(2026-10-06 补,真机现场)。
+ *
+ * 原来 `needsActiveProject` 是纯前缀匹配 ⇒ 项目一收口(`done`/`abandoned`),
+ * **连「读」和「开下一个」都被挡掉**。而这挡掉的是**甲方与业务经理之间
+ * 唯一还开着的通道**:
+ *
+ * 真机:两个项目收口之后,再发消息拿到的是 `serve.ts` 里的
+ * `code: "project_closed"` —— 用户想问一句「W3 那个券商结论现在还成立吗?」
+ * 都发不出去。**项目里该冻结的是「干活」,不是「说话」。**
+ *
+ * 这三个留在 `active` 之外:
+ *   · `project.read`  —— 收口之后**恰恰最该能读**:交付物、结论、依据都在那里,
+ *     而「这个项目到底做成了什么」是甲方验收时要问的第一句。
+ *   · `project.open`  —— 从一个已收口的项目**开下一个版本 / 新项目**就是 BM 的
+ *     职责。它本来就是 project-scoped(要在一个具体项目上下文里开),但它
+ *     **不修改那个项目**,所以不该被那个项目的状态挡住。
+ *   · `project.close` —— 让它可达是为了拿到工具自己的那句「已是终态」报错,
+ *     而不是被一道 scope 门拦成另一种说法。
+ *
+ * ⚠️ **`project.update` 不在列** —— 收口的项目**不许再改**(名字、目标、状态)。
+ * 那正是「收口」这个词的语义。
+ */
+const DIALOGUE_SURVIVES_CLOSURE: ReadonlySet<Capability> = new Set<Capability>([
+  "project.read",
+  "project.open",
+  "project.close",
+]);
+
 function needsActiveProject(cap: Capability): boolean {
+  if (DIALOGUE_SURVIVES_CLOSURE.has(cap)) return false;
   return PROJECT_SCOPED_PREFIXES.some((p) => cap.startsWith(p));
 }
 

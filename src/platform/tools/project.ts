@@ -6,8 +6,8 @@
  */
 import { Type } from "@sinclair/typebox";
 import {
-  insertProject, getProjectRow, updateProject, closeProject,
-  addMember, loadProjectRoster,
+  insertProject, getProjectRow, listProjects, updateProject, closeProject,
+  addMember, loadProjectRoster, isProjectStatus,
 } from "../storage/repo/projects.js";
 import {
   insertWork, getWork, listWorks, updateWorkStatus, assignWork,
@@ -55,11 +55,19 @@ const projectOpen: PlatformTool = {
   name: "project_open",
   capability: "project.open",
   description:
-    "立项。把一个已与甲方对齐的目标落成正式项目,产出项目根工件。**这是甲方诉求进入系统的唯一入口** —— 立项之后的一切都发生在项目内,不再需要甲方在场。**接待会话(还没有项目)里也带着它** —— 与甲方谈拢之后就用它,不要要求甲方去填任何表单。",
+    "立项。把一个已与甲方对齐的目标落成正式项目,产出项目根工件。**这是甲方诉求进入系统的唯一入口** —— 立项之后的一切都发生在项目内,不再需要甲方在场。**接待会话(还没有项目)里也带着它** —— 与甲方谈拢之后就用它,不要要求甲方去填任何表单。" +
+    "\n\n**`parentProjectId` = 同一个交付物的下一个版本**(migration 023):甲方说「上一个那个还要加东西」、" +
+    "而你判断**那是同一个交付物的演进**(不是另一件事)时,填上一个版本的 id —— 版本号自动 +1," +
+    "库里会记下这条祖先边。**不给它填 = 一个全新的项目**,与以前那些没有任何关系。" +
+    "⚠️ 版本链**不是继承**:新版本不会自动带上上一版的工作项与工件,那些东西要用 `project_read` 自己去读。",
   parameters: Type.Object({
     name: Type.String({ description: "项目名(简短可辨识)" }),
     client: Type.String({ description: "甲方标识" }),
     goal: Type.String({ description: "要达成的目标(与甲方对齐后的结论,不是原始诉求)" }),
+    parentProjectId: Type.Optional(Type.String({
+      description:
+        "上一个版本的 project id —— **仅当这次是同一个交付物的演进**。留空 = 一个全新的项目。",
+    })),
   }),
   run(args, ctx): ToolResult {
     const name = requireString(args, "name");
@@ -71,9 +79,20 @@ const projectOpen: PlatformTool = {
 
     const id = ctx.newId("pj");
     const at = ctx.now();
+    // ── 版本链(migration 023)──────────────────────────────────────
+    // ⚠️ **上一版必须是已存在的项目,且它自己不是「别人的下一版」时会怎样** ——
+    // 这里**刻意不判**。理由:版本链允许分叉(v3 既可以是 v2 的下一版、也可以
+    // 直接挂在 v1 下),而「这条边合不合理」是**业务判断**(§2.11.3:平台不做语义
+    // 猜测)。平台只保证那条边**指向一个真实存在的项目** —— 那一条是数据完整性。
+    const parentId = readString(args, "parentProjectId") ?? null;
+    if (parentId !== null && getProjectRow(ctx.db, parentId) === null) {
+      return fail("not_found", `parentProjectId「${parentId}」在库里不存在 —— 拿它当上一版会让这条边指向空气`);
+    }
+    // ⚠️ **自引用**:不能把项目指向自己(它还没建出来,id 是新的,所以结构上不可能)。
+    const version = parentId === null ? 1 : (getProjectRow(ctx.db, parentId)?.version ?? 0) + 1;
     insertProject(ctx.db, {
       id, name: name.value, client: client.value, goal: goal.value,
-      status: "active", createdAt: at,
+      status: "active", createdAt: at, version, parentProjectId: parentId,
     });
     // 立项人自动成为项目成员 —— 否则业务经理建完项目反而不在里面。
     addMember(ctx.db, id, ctx.agent.id, at);
@@ -90,12 +109,82 @@ const projectOpen: PlatformTool = {
     // `ToolResult.data` → SDK `details` → `runTurn` 的既有结构化通道
     // (判工具成败本来就是读 details,见 runtime/turn.ts)。
     // 文本仍以 id 开头,人读日志时第一眼也能看到它。
-    return ok(`已立项 ${id}「${name.value}」(甲方:${client.value})\n目标:${goal.value}`, {
-      projectId: id,
-      name: name.value,
-      client: client.value,
-      goal: goal.value,
+    const versionNote = parentId === null
+      ? ""
+      : `\n这是上一个项目的 **v${version}**(parent = ${parentId})—— ` +
+        "⚠️ 新版本**没有**自动继承上一版的工作项与工件,要用 project_read 去读。";
+    return ok(
+      `已立项 ${id}「${name.value}」(甲方:${client.value})\n目标:${goal.value}${versionNote}`,
+      {
+        projectId: id,
+        name: name.value,
+        client: client.value,
+        goal: goal.value,
+        version,
+        parentProjectId: parentId,
+      },
+    );
+  },
+};
+
+/**
+ * `project_list` —— 业务经理**唯一**一条「库里有哪些项目」的通路。
+ *
+ * ── 为什么它之前不存在(2026-10-06 补)──────────────────────────────
+ *
+ * 真机现场:甲方在接待会话里谈一个新诉求,业务经理**对已经做过的项目一无所知**
+ * —— 它问「你想做什么」,而不是「你要的这个和上次那个美股平台方案是什么关系」。
+ *
+ * 根因不是提示词,是**它没有任何一条路能查**:`project_read` 要一个**已知的**
+ * projectId,而那个 id 从哪来? `project_open` 只管新建。所以这不是「它忘了用」,
+ * 是**工具面里缺一条腿**。
+ *
+ * ⚠️ 归属 `project.read` 而不是新开一个能力:`CAPABILITY_TOOLS` 的闭集与
+ * `check:design` 的能力↔工具表是一一对应的,为一个「读」的动作新增能力要动
+ * 三处设计文档 —— 而 `project.read` 的语义**正是**「读项目」。
+ */
+const projectList: PlatformTool = {
+  name: "project_list",
+  capability: "project.read",
+  description:
+    "列出你已经和甲方做过的所有项目:名字、状态、交付物份数、版本号与上一版是谁。" +
+    "**甲方带着新诉求来的时候先用它** —— 你要能说出「你之前做过什么」," +
+    "而不是每次都从零问起。要细节用 `project_read`。",
+  parameters: Type.Object({
+    status: Type.Optional(Type.String({
+      description: "只列某个状态:active / paused / done / abandoned。缺省 = 全部",
+    })),
+  }),
+  run(args, ctx): ToolResult {
+    const want = readString(args, "status");
+    if (want !== undefined && !isProjectStatus(want)) {
+      return fail("invalid_args", `status 只能是 active|paused|done|abandoned(收到「${want}」)`, [
+        "active", "paused", "done", "abandoned",
+      ]);
+    }
+    const rows = listProjects(ctx.db, want as Parameters<typeof listProjects>[1]);
+    if (rows.length === 0) {
+      return ok(want === undefined ? "还没有任何项目。" : `没有状态为 ${want} 的项目。`);
+    }
+    const countOf = (id: string, kind: string): number =>
+      (ctx.db.prepare(
+        `SELECT COUNT(*) AS n FROM artifacts WHERE project_id = ? AND kind = ?`,
+      ).get(id, kind) as { n: number }).n;
+
+    const lines = rows.map((p) => {
+      const parts = [
+        `- \`${p.id}\`「${p.name}」· v${p.version} · ${p.status}`,
+        `    甲方:${p.client} · 交付物 ${countOf(p.id, "deliverable")} 份`,
+        `    目标:${p.goal.length > 120 ? `${p.goal.slice(0, 120)}…` : p.goal}`,
+      ];
+      if (p.parentProjectId !== null) parts.push(`    ↳ 上一版:${p.parentProjectId}`);
+      return parts.join("\n");
     });
+    return ok(
+      `共 ${rows.length} 个项目:\n${lines.join("\n")}\n\n` +
+      "**接着做哪一个、要不要开下一个版本,是你的判断** —— " +
+      "甲方说的是新诉求,它和上面哪一个有关只有你知道。",
+    );
   },
 };
 
@@ -631,6 +720,6 @@ const report: PlatformTool = {
 };
 
 export const PROJECT_WORK_TOOLS: readonly PlatformTool[] = [
-  projectOpen, projectRead, projectUpdate, projectClose,
+  projectOpen, projectList, projectRead, projectUpdate, projectClose,
   workCreate, workUpdate, workAssign, workList, workRead, report,
 ];

@@ -16,6 +16,18 @@ export interface ProjectRow {
   status: ProjectStatus;
   createdAt: number;
   closedAt: number | null;
+  /**
+   * 这是第几版(migration 023)。**从 1 开始**;存量项目一律 1 —— 在版本链存在
+   * 之前存在的每一个项目**确实**是第一版,那不是编造的值。
+   */
+  version: number;
+  /**
+   * 上一个版本的 id;`null` = **没有前身**(用户做的第一件事)。
+   *
+   * ⚠️ 不做回填:库里没有任何一行能证明某个项目是另一个的下一版,回填等于
+   * 编造一条祖先关系(理由写在 `migrations/023_project_versions.sql`)。
+   */
+  parentProjectId: string | null;
 }
 
 const PROJECT_STATUSES: readonly ProjectStatus[] = [
@@ -38,6 +50,8 @@ interface RawProject {
   status: string;
   created_at: number;
   closed_at: number | null;
+  version: number;
+  parent_project_id: string | null;
 }
 
 function rowToProject(raw: RawProject): ProjectRow {
@@ -52,6 +66,12 @@ function rowToProject(raw: RawProject): ProjectRow {
     status: raw.status,
     createdAt: raw.created_at,
     closedAt: raw.closed_at,
+    // ⚠️ 两列各有自己的兜底,**不是**「迁移没跑」的补救 —— 023 加的是
+    // `NOT NULL DEFAULT 1` 与一个可空列,真机跑过 023 的库里它们一定在。
+    // 兜底只是为了让**迁移之前**的库副本(`.probe/` 的历史现场)读得出来,
+    // 而那两份读出来的值与 023 之后写进去的**完全一致**(1 / NULL)。
+    version: raw.version ?? 1,
+    parentProjectId: raw.parent_project_id ?? null,
   };
 }
 
@@ -59,12 +79,21 @@ function rowToProject(raw: RawProject): ProjectRow {
 
 export function insertProject(
   db: Database.Database,
-  row: Omit<ProjectRow, "closedAt"> & { closedAt?: number | null },
+  row: Omit<ProjectRow, "closedAt" | "version" | "parentProjectId"> & {
+    closedAt?: number | null;
+    /** 缺省 1。**不给它编一个「上一版」** —— 没有前身是合法状态 */
+    version?: number;
+    parentProjectId?: string | null;
+  },
 ): void {
   db.prepare(
-    `INSERT INTO projects (id, name, client, goal, status, created_at, closed_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?)`,
-  ).run(row.id, row.name, row.client, row.goal, row.status, row.createdAt, row.closedAt ?? null);
+    `INSERT INTO projects
+       (id, name, client, goal, status, created_at, closed_at, version, parent_project_id)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(
+    row.id, row.name, row.client, row.goal, row.status, row.createdAt,
+    row.closedAt ?? null, row.version ?? 1, row.parentProjectId ?? null,
+  );
 }
 
 export function getProjectRow(db: Database.Database, id: string): ProjectRow | null {
@@ -90,6 +119,26 @@ export function updateProject(
   id: string,
   fields: { name?: string; goal?: string; status?: "active" | "paused" },
 ): void {
+  // ⚠️ **这一段是 2026-10-06 补上的**,而函数头注释**早就写着**「终态走
+  // `closeProject`」—— 也就是说:不变式**写在注释里四年,没人在代码里执行它**。
+  //
+  // 抓到它的是一条新写的验收测试(`tests/platform/project-version-and-dialogue.test.ts`),
+  // 那条测试想钉「收口的项目不许再改」。它红了,因为真正拦住的只有
+  // `harness/authorize.ts` 的 scope 门 —— 而**仓储层是这个字段的唯一写面**。
+  //
+  // 为什么要在这一层也判:scope 门是**授权**,会随 ceiling / 工具集 / 角色变;
+  // 「收口 = 不可逆」是**数据事实**,不依赖任何一条配置。多一道门不是冗余 ——
+  // 它挡的是「scope 门哪天被改宽了」这条路径。
+  //
+  // 抛出而不是静默跳过:静默跳过会让调用方以为改成功了,而库里一个字没动
+  // (AGENTS.md「三类静默失败」第 2 条的同款形态)。
+  const cur = getProjectRow(db, id);
+  if (cur === null) throw new Error(`项目 ${id} 不存在`);
+  if (cur.status === "done" || cur.status === "abandoned") {
+    throw new Error(
+      `项目 ${id} 已是终态(${cur.status}),不能修改 —— 收口是不可逆的`,
+    );
+  }
   const sets: string[] = [];
   const vals: unknown[] = [];
   if (fields.name !== undefined) { sets.push("name = ?"); vals.push(fields.name); }

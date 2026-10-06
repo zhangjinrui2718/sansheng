@@ -142,23 +142,70 @@ describe("求解期 · ceiling 门(集合文件越权必须可见)", () => {
 
 // ── 求解期:scope 门 ─────────────────────────────────────────────
 
-describe("求解期 · scope 规则 3(项目须 active)", () => {
+/**
+ * ⚠️ **「项目内能力」不再等于「全部 project.*」**(2026-10-06 补)。
+ *
+ * 原来这条断言是「非 active 项目下,项目内工具一个都不剩」。真机把它证伪了:
+ * 项目一收口,甲方**连问一句都发不出去**(`serve.ts` 里的 `code: "project_closed"`),
+ * 项目变成只读墓碑 —— 而「这个项目到底做成了什么」恰恰是验收时要问的第一句。
+ *
+ * 于是 `needsActiveProject` 挖掉三个:`project.read`(收口之后最该能读)、
+ * `project.open`(从一个已收口的项目**开下一个版本**就是业务经理的职责)、
+ * `project.close`(可达才能拿到工具自己那句「已是终态」的报错)。
+ *
+ * **留在门后的**才是真正要冻结的:`project.update` 与 `work.*` / `collab.*` /
+ * `blackboard.*` / `change.*` / `blocker.*` —— **收口的项目不许再改、也不许再派活**。
+ */
+const SURVIVES_CLOSURE: ReadonlySet<string> = new Set([
+  "project.read", "project.open", "project.close",
+  // 项目无关的两族(它们本来就不在门后,列在这里只为让下面那句「全部」读得顺)
+  "memory.read", "memory.write", "code.read", "code.write", "code.exec",
+]);
+
+describe("求解期 · scope 规则 3(项目须 active,但对话类能力活下来)", () => {
   for (const status of ["draft", "paused", "done", "abandoned"] as ProjectStatus[]) {
-    it(`项目 ${status} → 项目内能力全部被 scope 挡下`, () => {
+    it(`项目 ${status} → 该冻结的能力被 scope 挡下,该活着的活下来`, () => {
       const r = solveToolset(PM, project(status, ALL));
-      expect(r.blockedByScope.length).toBeGreaterThan(0);
+      expect(r.blockedByScope.length, `项目 ${status} 必须真的挡下一些东西`).toBeGreaterThan(0);
       for (const d of r.blockedByScope) {
         expect(d.code).toBe("scope");
         expect(d.reason).toContain(status);
       }
-      // 项目内工具一个都不该剩下
+      // 剩下的项目内工具**只允许**是那三个对话类的
       const projectTools = r.tools.filter((t) => {
         const c = capabilityOfTool(t);
-        return c !== undefined && !c.startsWith("memory.") && !c.startsWith("code.");
+        return c !== undefined && !SURVIVES_CLOSURE.has(c);
       });
-      expect(projectTools, `项目 ${status} 时不该留下项目内工具`).toEqual([]);
+      expect(projectTools, `项目 ${status} 时不该留下「要冻结」的工具`).toEqual([]);
+      // ⚠️ 正样本自检:「该活着的真的活着」—— 只断言「该挡的挡住了」的话,
+      // 一道把所有东西都挡掉的门也能全绿。
+      expect(r.tools, `项目 ${status} 时业务经理仍要能读`).toContain("project_read");
+      expect(r.tools).toContain("project_list");
     });
   }
+
+  it("⚠️ 业务经理在已收口的项目里仍能 `project_open` —— 开下一个版本是它的职责", () => {
+    // ⚠️ 这条**只能用业务经理验**:`project.open` 是 clientFacing 能力,
+    // 项目经理的 ceiling 里根本没有它 —— 换成 PM 验会得到一个「豁免没生效」的
+    // 假结论(它压根没被授予过,与 scope 门无关)。
+    const r = solveToolset(BM, project("done", ALL));
+    expect(r.tools).toContain("project_open");
+    expect(r.tools).toContain("project_read");
+    expect(r.tools, "业务经理在收口项目里仍要能向甲方说话").toContain("ask_client");
+  });
+
+  it("⚠️ `project.update` 仍然被挡 —— 收口的项目不许再改", () => {
+    // 这一条是上面那个豁免的**边界**:豁免的是「说话」,不是「改」。
+    const r = solveToolset(BM, project("done", ALL));
+    expect(r.tools).not.toContain("project_update");
+    expect(r.blockedByScope.map((d) => d.subject)).toContain("project.update");
+  });
+
+  it("⚠️ `work.*` 仍然被挡 —— 收口的项目不许再派活", () => {
+    const r = solveToolset(PM, project("done", ALL));
+    expect(r.tools).not.toContain("work_create");
+    expect(r.blockedByScope.map((d) => d.subject)).toContain("work.create");
+  });
 
   it("memory.* 与 code.* 是项目无关的,非 active 项目下仍可用", () => {
     const r = solveToolset(WK, DRAFT);

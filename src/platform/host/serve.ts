@@ -557,13 +557,21 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
         hub.broadcast({ type: "error", projectId, error: { code: "not_found", message: "项目不存在" } });
         return;
       }
-      if (project.status === "done" || project.status === "abandoned") {
-        hub.broadcast({
-          type: "error", projectId,
-          error: { code: "project_closed", message: `项目已${project.status === "done" ? "完成" : "废弃"},不能再对话` },
-        });
-        return;
-      }
+      // ⚠️ **这里原来硬拒 `done` / `abandoned`**(`code: "project_closed"`)—— 2026-10-06 删掉。
+      //
+      // 真机现场:两个项目被业务经理收口之后,甲方在对话页**发不出任何消息**。
+      // 而收口要冻结的是「项目内的活」(`work.*` / `blackboard.write` /
+      // `project.update`,那条门在 `harness/authorize.ts` 的 `needsActiveProject`),
+      // **不是「甲方与业务经理说话」** —— 那条通道一关,项目就成了只读墓碑:
+      // 交付物在那里,而验收它唯一的方式被堵死了。
+      //
+      // 现在:收口项目**照常能聊**。业务经理的 `project.read` / `client.*` /
+      // `memory.*` 仍然可用(`DIALOGUE_SURVIVES_CLOSURE`),而 `work.*` 那几族
+      // 在**授权层**被拒 —— 用户看到的是「这件事被拒:项目已收口」,
+      // 而不是整段对话发不出去。
+      //
+      // ⚠️ 所以这里**什么都不做**就是正确行为。项目不存在仍然是硬错误 ——
+      // 往不存在的项目里写消息会让那条对话永远读不出来(7-N 的现场要留)。
     }
 
     ensureOrg(db, now());

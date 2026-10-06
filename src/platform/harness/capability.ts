@@ -110,7 +110,7 @@ export const CAPABILITIES = [
 export type SdkToolName = "read" | "grep" | "find" | "ls" | "edit" | "write" | "bash";
 
 export type PlatformToolName =
-  | "project_open" | "project_read" | "project_update" | "project_close"
+  | "project_open" | "project_list" | "project_read" | "project_update" | "project_close"
   | "work_create" | "work_update" | "work_assign" | "work_list" | "work_read"
   | "ask_role" | "answer" | "ask_list" | "ask_read"
   | "convene" | "meeting_read" | "meeting_respond" | "meeting_conclude" | "escalate"
@@ -134,7 +134,13 @@ export type ToolName = SdkToolName | PlatformToolName;
 export const CAPABILITY_TOOLS: Readonly<Record<Capability, readonly ToolName[]>> = {
   // BC1
   "project.open": ["project_open"],
-  "project.read": ["project_read"],
+  // ⚠️ `project_list` 归属 `project.read`(2026-06 补):它是「读项目」这个动作的
+  // 一条腿,不是一个新能力 —— 为它新增能力要动 `Capability` 联合、
+  // 角色 ceiling、以及 `check:design` 的能力↔工具表三处,而语义上它就是读。
+  // 它存在的理由:业务经理此前**没有任何一条路**能知道库里有哪些项目
+  // (`project_read` 要一个已知的 projectId,而那个 id 从哪来?),
+  // 真机上因此对「甲方已经做过的项目」完全失明。
+  "project.read": ["project_list", "project_read"],
   "project.update": ["project_update"],
   "project.close": ["project_close"],
   "work.create": ["work_create"],

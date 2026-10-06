@@ -30,16 +30,30 @@
  *      分层。项目上下文进那一层,模型看到的就是
  *      **我在哪(项目) → 我手上有什么(待办) → 这回合干什么(任务)**。
  *
- * ── 接待会话:这里如实返回空串 ────────────────────────────────────
+ * ── 接待会话:这里注入「你以前做过什么」(2026-10-06 补)────────────
  *
- * `projectId === null`(第一个项目之前)没有项目可注入,**保持原样**:空串,
- * 调用方无脑拼接即可。不给它编一段「你还没有项目」的废话 —— 那段话在接待会话
- * 里每回合都会出现,而接待模式的提示词单元已经写清了那一段的规则。
+ * 原来 `projectId === null` 返回**空串**,理由是「没有项目可注入,不给它编废话」。
+ * 那条理由在**第一个项目之前**成立,但它在**有项目之后**变成了一个洞:
+ *
+ * 真机现场:甲方在接待会话里谈一个新项目,业务经理**对已经做过的项目一无所知**
+ * —— 它问「你想做什么」而不是「你要的这个和上次那个美股平台方案是什么关系」。
+ * 根因有两层,都不在提示词:
+ *   ① 这里返回空串,项目清单**一个字都不进**;
+ *   ② **它没有任何一条路能自己去查** —— `project_read` 要一个已知的 projectId,
+ *      而它无从得到那个 id(改前 BM 连 `project_list` 工具都没有)。
+ *
+ * ⇒ 所以这一段现在**列清单**。三条纪律:
+ *   · **只列结构化的列**(id / 名字 / 甲方 / 状态 / 目标的前若干字),不抄工件正文
+ *     —— 与规则的 `if` 同一条(§2.11.3):上下文注入不做语义猜测;
+ *   · **不替它判断**「这次和上次像不像同一个事」—— 那是它的活,提示词里写了
+ *     「必要时开下一个版本」,那是**它**的判断;
+ *   · 清单为空时**如实说是空的**,不写「你还没有任何项目」这类每回合都会出现的废话。
  */
 import type Database from "better-sqlite3";
-import { getProjectRow, loadProjectRoster } from "../storage/repo/projects.js";
+import { getProjectRow, listProjects, loadProjectRoster } from "../storage/repo/projects.js";
 import { getAgent } from "../storage/repo/agents.js";
 import { isProjectRole, type ProjectRole } from "../identity/role.js";
+import type { ProjectStatus } from "../harness/authorize.js";
 
 const ROLE_NAME: Readonly<Record<ProjectRole, string>> = {
   business_manager: "业务经理",
@@ -72,13 +86,66 @@ export interface ProjectContext {
  * 在模型那边长得一模一样。这里返回一段明说问题的文本 —— 一个 agent 在
  * 指名道姓要它干活的项目里读不到项目,必须看得见。
  */
+/**
+ * 接待会话注入的那一段:「你已经和甲方做过这些」。
+ *
+ * ⚠️ **只读结构化的列**:`projects` 表自己的 `id / name / client / status / goal`,
+ * 外加每个项目的工件计数。**不读任何工件正文** —— 那要么是 `board_read` 的活,
+ * 要么根本不该在每回合都进来。
+ *
+ * 排序:先按 `status` 分组(`active` 在前,因为那是**还有活**的),组内按 `created_at`
+ * 倒序(最近做的在前)。⚠️ **这是呈现顺序,不是优先级判断** —— 业务经理该不该接着
+ * 上一次那个项目继续,是它的判断,不是排序能替它做的。
+ */
+function renderKnownProjects(db: Database.Database): string {
+  const projects = listProjects(db);
+  if (projects.length === 0) {
+    return "## 平台记录:你目前还没有任何项目\n\n" +
+      "甲方正在跟你谈第一个诉求。谈拢之后用 `project_open` 立项。";
+  }
+  const countOf = (id: string, kind: string): number =>
+    (db.prepare(
+      `SELECT COUNT(*) AS n FROM artifacts WHERE project_id = ? AND kind = ?`,
+    ).get(id, kind) as { n: number }).n;
+
+  const rank = (s: ProjectStatus): number => (s === "active" ? 0 : s === "paused" ? 1 : s === "done" ? 2 : 3);
+  const lines: string[] = [
+    "## 平台记录:甲方已经和你做过这些项目",
+    "",
+    "**这是平台从库里查出来的,不是甲方这句话里说的。** 甲方现在跟你说的是**新的诉求**——",
+    "它可能和下面某一个有关(续做、加需求、彻底换一件事),**那是你的判断**,不要替他假设。",
+    "",
+  ];
+  for (const p of [...projects].sort(
+    (a, b) => rank(a.status) - rank(b.status) || b.createdAt - a.createdAt,
+  )) {
+    const deliverables = countOf(p.id, "deliverable");
+    lines.push(
+      `- \`${p.id}\`「**${p.name}**」· 状态 ${STATUS_NAME[p.status] ?? p.status}(${p.status})` +
+        ` · 交付物 ${deliverables} 份`,
+      `    甲方:${p.client}`,
+      `    目标:${p.goal.length > 160 ? `${p.goal.slice(0, 160)}…` : p.goal}`,
+    );
+    // 「下一个版本」那条通道:同一个交付物的第二次演进**是新项目**,把 parent 指回去。
+    if (p.parentProjectId !== null) {
+      lines.push(`    ↳ 这是上一个项目的下一个版本(parent = \`${p.parentProjectId}\`)`);
+    }
+    lines.push(`    要细节用 \`project_read\`(\`${p.id}\`);要接着做就用 \`project_open\` 开下一个。`);
+  }
+  return lines.join("\n");
+}
+
 export function renderProjectContext(
   db: Database.Database,
   agentId: string,
   projectId: string | null,
 ): ProjectContext {
   if (projectId === null) {
-    return { text: "", summary: "(接待会话:还没有项目)", projectId: null };
+    return {
+      text: renderKnownProjects(db),
+      summary: "(接待会话:列出已知的项目)",
+      projectId: null,
+    };
   }
 
   const project = getProjectRow(db, projectId);
