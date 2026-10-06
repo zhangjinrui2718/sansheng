@@ -23,6 +23,7 @@ import {
   insertArtifact, getArtifact, setArtifactStatus, addArtifactLink,
   listArtifacts, type ArtifactStatus,
 } from "../storage/repo/artifacts.js";
+import { recordClientQuestion, markClientQuestionAnswered } from "../storage/repo/clientQuestions.js";
 import type { ClientChannel } from "../client/port.js";
 import { fail, ok, requireProject, requireString, readString, readStringArray,
   type PlatformTool, type ToolResult, type ToolRunContext } from "./types.js";
@@ -84,6 +85,15 @@ const askClient: PlatformTool = {
         }),
         createdAt: at,
         updatedAt: at,
+      });
+      // 台账行与工件**同一个 try 块**:缺了它,这次提问就没有 `consumed_at` 的起点,
+      // 而 `resume_client` 规则的判据正是那一列(见 repo/clientQuestions.ts 文件头)。
+      // ⚠️ 工件落库失败**不**回滚台账 —— 反过来才是错的:工件是现场,台账只是它的索引。
+      recordClientQuestion(ctx.db, {
+        questionArtifactId: id,
+        projectId: proj.project.id,
+        askedBy: ctx.agent.id,
+        askedAt: at,
       });
     } catch (err) {
       return fail("internal", `落提问工件失败,已中止:${err instanceof Error ? err.message : String(err)}`);
@@ -193,6 +203,11 @@ export function resolveClientQuestion(
   });
   addArtifactLink(db, decisionId, "answers", q.id);
   setArtifactStatus(db, q.id, ACCEPTED, at);
+  // ⚠️ **与上面三句同一个 try 块** —— 7-L 纪律的另一半:「落 decision + 恢复
+  // 执行者必须共用一条路径」。真机事故(2026-10-06 09:09)就是少了这一句:
+  // decision 工件落了、提问转 accepted 了,而**没有任何一行记下「答复到了、
+  // 业务经理还没看」**,于是 `resume_client` 规则无从判据、答复成了死信。
+  markClientQuestionAnswered(db, q.id, decisionId, at);
   return { ok: true, decisionArtifactId: decisionId };
 }
 

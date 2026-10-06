@@ -184,6 +184,7 @@ const TODO_KIND_LABEL: Record<TriggerTodoKind, string> = {
   integrate: "整合成果",
   handover: "交付交接",
   report_downstream: "向甲方汇报下游结果",
+  resume_client: "处置甲方的答复",
 };
 
 /** 未知取值原样显示英文 —— 「显示英文」比「显示一个编的中文」诚实。 */

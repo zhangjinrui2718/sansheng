@@ -60,6 +60,11 @@ export const PLATFORM_DATA_TABLES: readonly string[] = [
   "dispatch_events",
   "dispatch_attempts",
   "turn_usage",
+  // BC-020 甲方提问台账
+  //
+  // ⚠️ 它同时引 `artifacts` 与 `projects` ⇒ 必须排在**两者之前**(外键安全顺序:
+  // 子先于父)。漏登记的后果与上面那三张同形:「重置」在有提问记录的库上直接 500。
+  "client_questions",
   // BC1 项目与工作
   "work_deps",
   "works",

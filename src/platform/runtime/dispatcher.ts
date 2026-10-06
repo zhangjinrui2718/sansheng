@@ -120,6 +120,9 @@ import {
   listPendingDispatchEvents, markAttemptNotified, pruneAttempts,
   type DispatchEventRow,
 } from "../storage/repo/dispatch.js";
+import {
+  consumeClientAnswers, getClientQuestions, listUnconsumedClientAnswers, type ClientQuestionRow,
+} from "../storage/repo/clientQuestions.js";
 import { ROLE_SPECS, isProjectRole, type ProjectRole } from "../identity/role.js";
 import { openDeliverableSession } from "../storage/repo/sessions.js";
 import type { Capability } from "../harness/capability.js";
@@ -185,6 +188,22 @@ export const TODO_KINDS = [
   "handover",
   /** 下游出了结果,该由我向甲方交代(未消费的 outbox 事件) */
   "report_downstream",
+  /**
+   * **我提的问题被甲方答复了,而我还没处置**(020 的 `client_questions`:
+   * `answered_at IS NOT NULL AND consumed_at IS NULL`)。
+   *
+   * ⚠️ 这一条的存在理由是一次**真机事故**(2026-10-06 09:09,项目「美股自动化
+   * 交易平台方案设计」):甲方在待答面板点了答复,后端写了 decision 工件、
+   * 建了 `answers` 审计边、提问转 `accepted` —— 而**没有任何一行记下「答复到了、
+   * 业务经理还没看」**。排空器每 10 秒查一次库,查到的是「四个角色零待办」。
+   * 之后系统再没有产生过一条消息,而业务经理在 08:59 亲口宣布过的那条队列
+   * (「等您回完 W1,我会按 W2→…→W7 逐项问」)永远不会自动开始。
+   *
+   * 它是 7-L 那条修复的**漏网之鱼**:「提问者进 blocked、但对方不会主动知道」
+   * 当时只治了 agent↔agent 的 `asks` 表(`answer_pending_ask`),而
+   * `client_question` 是**另一条通道** —— 同一个病,两条通道只治了一条。
+   */
+  "resume_client",
 ] as const;
 
 export type TodoKind = (typeof TODO_KINDS)[number];
@@ -194,6 +213,10 @@ export type TodoKind = (typeof TODO_KINDS)[number];
  *
  * 次序的理由:
  *   - `answer_ask` 最前 —— 有人处于 blocked,不答它整条链停摆(设计 §5.1)
+ *   - `resume_client` 紧随 —— **有人刚对你说话**(甲方答了你的问题)。与上一条
+ *     同族,只是对面不是 agent 而是用户:他刚在界面上点了一下,却在屏上什么
+ *     都看不到。让它排第二是为了「答复与回应之间不隔一整轮」—— 排在最后
+ *     的话,一次汇报待办会把它的回应推到下一轮,而那正是这次事故的形态。
  *   - 其余按流程顺序:对齐(会议/变更)→ 修派活 → 拆解 → 执行 → 审查 → 整合 → 交付 → 汇报
  *   - `report_downstream` 最后 —— 它汇报的正是前面那些动作的结果
  *
@@ -204,22 +227,23 @@ export type TodoKind = (typeof TODO_KINDS)[number];
  */
 const PRIORITY: Readonly<Record<TodoKind, number>> = {
   answer_ask: 0,
-  attend_meeting: 1,
-  review_change: 2,
+  resume_client: 1,
+  attend_meeting: 2,
+  review_change: 3,
   // 两条「修」的待办挨着:派活错了与活被卡住都是**项目经理的存量修复**,
   // 而它们都挡着下面的执行 / 审查 / 整合。
-  fix_work_assignment: 3,
-  resolve_blocked_work: 4,
-  decompose_project: 5,
-  execute_work: 6,
-  review_work: 7,
+  fix_work_assignment: 4,
+  resolve_blocked_work: 5,
+  decompose_project: 6,
+  execute_work: 7,
+  review_work: 8,
   // 整合与交付接在**审查之后**(C3,§2.11.4):子树收口 → 整合 → 交付。
   // `integrate` 排在 `review_work` 之后是刻意的:容器自己也可能 `done` 而没审,
   // 那种情况下先让质检把 `review_work` 跑掉,再叫项目经理整合(否则会在
   // 「还有一条 done 没审」时提前整合 —— 而 ② 那一条判据正是禁止这个的)。
-  integrate: 8,
-  handover: 9,
-  report_downstream: 10,
+  integrate: 9,
+  handover: 10,
+  report_downstream: 11,
 };
 
 export interface DriverTodo {
@@ -515,6 +539,21 @@ export interface RuleFacts {
    * `resolve_blocked_work` 的 `why`(那里如实写了它的失效方向)。
    */
   readonly awaitingClient: boolean;
+  /**
+   * **我提的问题被甲方答复了、而我还没处置**的那些提问
+   * (020:`answered_at IS NOT NULL AND consumed_at IS NULL`)。
+   *
+   * ⚠️ 它与上面那个 `awaitingClient` 是**同一件事的两端**,但方向相反:
+   * `awaitingClient` = 「球在甲方那边」(还没答),本字段 = 「球回到我这边了」
+   * (答了、我没看)。`awaitingClient` 今天**只被当抑制条件用**
+   * (`resolve_blocked_work`:别叫 PM,它等的是外部输入)——
+   * **它从来没有被当成触发条件**,于是真机上出现了「答复落库 → 零待办 →
+   * 永远不动」(2026-10-06 09:09,见 `resume_client` 的 `why`)。
+   *
+   * 只读 id 与时间戳,**不读问题正文**(§2.11.3:规则的 `if` 不读正文 ——
+   * 规则一旦开始做语义猜测,「不需要大模型判断」就失效了)。
+   */
+  readonly unconsumedClientAnswers: readonly ClientQuestionRow[];
   /**
    * **挂着至少一个未解决阻塞**(`status ∈ {open, acknowledged}`)的工作项 id。
    *
@@ -990,6 +1029,47 @@ export const RULES: readonly Rule[] = [
       "**如实**返回空集(还没有任何交付会话),而不是假装已经交付过 —— C4 一落地,这条" +
       "判据自动开始成立,规则自己就停了。",
   },
+  {
+    id: "resume_client",
+    // 「答复落库」唯一可能的形态就是「新落了一条工件」—— `decision` 工件由
+    // `resolveClientQuestion` 原子创建(tools/client.ts),而它不持任何能力,
+    // 所以不会敲门铃;`artifact_inserted` 这条触发名仍然由那条工件满足
+    // (与 `integrate_reviewed_subtree` / `handover_deliverable` 同一条通道)。
+    // `tick` 不是装饰:它是**重启后补跑**的唯一载体(见 `RULES` 的说明)——
+    // 答复落在库里的那一刻进程正好重启,那条工件已经不会被「插入」第二次。
+    on: ["artifact_inserted", "tick"],
+    if: (q) => {
+      const bm = q.members.find((m) => m.role === "business_manager");
+      if (bm === undefined || q.unconsumedClientAnswers.length === 0) return [];
+      // 集合谓词,与 `answer_ask` / `review_work` 同形:**进度 = key 变了** ——
+      // 处置掉一条,集合缩小 ⇒ 自动拿到新预算。不需要额外机制。
+      const ids = q.unconsumedClientAnswers.map((a) => a.questionArtifactId).sort();
+      return [{
+        agentId: bm.agentId, role: "business_manager", kind: "resume_client",
+        key: `resume_client:${ids.join("+")}`, target: null, refs: ids, targetState: null,
+        label: `处置甲方对 ${ids.length} 个问题的答复`,
+      }];
+    },
+    then: { kind: "resume_client", targetRole: "business_manager" },
+    why:
+      "**真机事故**(2026-10-06 09:09,项目「美股自动化交易平台方案设计」):甲方在待答" +
+      "面板点了答复,`POST /api/client-questions/:id/answer` 写了 decision 工件、建了" +
+      "`answers` 审计边、把提问转 `accepted` —— 三件事全对,答复也**确实在库里**。" +
+      "而 3 分钟后的 `GET /live` 是:`四个角色 todos 全空` / `openWorks: 0` / " +
+      "`runningTurns: 0`。之后系统再没有产生过一条消息,而业务经理 20 分钟前亲口" +
+      "宣布的队列(「等您回完 W1,我会按 W2→…→W7 逐项问」)永远不会自动开始。" +
+      "**根因不是答复没记下来,是没有任何一行记下「答复到了、他还没看」** —— " +
+      "于是排空器每 10 秒查库,每次都读到「无事可做」。" +
+      "⚠️ 它是 7-L 那次修复的漏网之鱼:「提问者进 blocked、但对方不会主动知道」" +
+      "当时只治了 agent↔agent 的 `asks` 表(`answer_pending_ask` 读 `asksToAnswer`)," +
+      "而 `client_question` 是**另一条载体** —— 同一个病,两条通道只治了一条。" +
+      "**判据必须是库里的终止判据**:答复是过去式,「他答过」不会自己消失,所以" +
+      "`consumed_at` 必须是一列而不是内存里的一个 Set(020);拿尝试预算兜一条每 10 秒" +
+      "都成立的规则,等于让流水线静默停在一个「看起来跑过很多次」的地方(§2.11.4 末)。" +
+      "⚠️ **本规则只认「答复到了」,绝不认「提问还没答复」** —— 后者要一条" +
+      "「有 open 的 client_question 就叫醒业务经理」的规则,而那是错的:球在甲方那边," +
+      "每 10 秒叫醒他一次就是空转(与 `resolve_blocked_work` 的抑制条件同一条纪律的两面)。",
+  },
 ];
 
 /**
@@ -1274,6 +1354,7 @@ function collectRuleFacts(
       // 「没人在等」⇒ 多叫醒一次;或把「没人在等」读成「在等」⇒ 静默少叫一次)。
       limit: 500,
     }).length > 0,
+    unconsumedClientAnswers: listUnconsumedClientAnswers(db, projectId),
     blockedByBlockerWorks: worksWithUnresolvedBlocker(db, projectId),
     acceptedDeliverables: listArtifacts(db, projectId, {
       kind: "deliverable",
@@ -1491,6 +1572,20 @@ export function renderTask(db: Database.Database, todo: DriverTodo): string {
         "**不要在这里重新整合或改写它**,也不要替项目经理补做子项里的活。" +
         "你的价值在于**让甲方听懂这份交付**,不在于再写一份。"
       );
+    case "resume_client":
+      // 与 `report_downstream` 同纪律:**只把事实摆出来、说「你来判断」**。
+      // 平台不下「现在去问下一项」这种命令 —— 那要么是判据的第二次陈述
+      // (会与提示词单元里的规则漂),要么是在替模型做决定。
+      return (
+        "# 现在轮到你了:甲方答复了你的问题\n\n" +
+        renderAnsweredQuestions(db, todo) +
+        "\n\n甲方**已经答了**,而这些答复**还没有被你处置**。用 `board_read` 读每一条" +
+        "答复的正文(`answers` 边指向它问的那条问题),然后:\n\n" +
+        "1. 这个答复**改变了什么**?落成 `decision` 工件(有取舍的),别让它只活在对话里\n" +
+        "2. 它**解开了**什么、又**新开了**什么?该往下走的往下走(下一次提问用 `ask_client`)\n" +
+        "3. 它与你**先前告诉甲方的说法冲突**吗?冲突要当面说清,不要默默改口\n\n" +
+        "**不要在没读答复正文的情况下凭标题作答** —— 甲方答的常常不是标题里那个问题。"
+      );
     case "execute_work":
       // worker 那条不走这里 —— `runWorkItem` 自己拼 `composeWorkPrompt`。
       // 留着这一支是为了穷尽性:新增 TodoKind 时这里会编译失败。
@@ -1532,6 +1627,34 @@ function renderSubtrees(db: Database.Database, todo: DriverTodo): string {
   }
   if (blocks.length === 0) return "";
   return ["## 这回合要整合的交付(库里查出来的,不是猜的)", ...blocks].join("\n\n");
+}
+
+/**
+ * 甲方刚答复完的那几个问题(查出来的现场:`id` / 标题 / 答复工件 id)。
+ *
+ * 只渲染**结构化的列**,不渲染答复正文 —— 与规则的 `if` 同一条纪律(§2.11.3)。
+ * 答复正文必须由模型自己 `board_read`:平台把它摆出来,是为了让它知道
+ * 「有几条、等了多久」,不是为了替它读。
+ */
+function renderAnsweredQuestions(db: Database.Database, todo: DriverTodo): string {
+  const ledgers = getClientQuestions(db, todo.refs);
+  const blocks: string[] = [];
+  for (const id of todo.refs) {
+    const q = getArtifact(db, id);
+    if (q === null) continue;
+    const row = ledgers.get(id);
+    blocks.push(
+      [
+        `- \`${q.id}\`「${q.title}」` +
+          (row?.answerArtifactId != null
+            ? ` → 答复 \`${row.answerArtifactId}\``
+            : " → **(库里没有答复工件 —— 这条要人工看一眼)**"),
+        `  - 提问 ${q.createdAt} · 答复 ${row?.answeredAt ?? "?"} · 提问状态 ${q.status}`,
+      ].join("\n"),
+    );
+  }
+  if (blocks.length === 0) return "## 甲方答复了这些问题(库里查出来的)";
+  return ["## 甲方答复了这些问题(库里查出来的,不是猜的)", ...blocks].join("\n");
 }
 
 /** 等着交付的那条工件(结构化列;正文由模型自己 `board_read`)。 */
@@ -1994,6 +2117,14 @@ export async function drainProject(deps: DrainDeps): Promise<DrainResult> {
       if (todo.kind === "report_downstream") {
         consumePendingDispatchEvents(deps.db, deps.projectId, todo.agentId, deps.now());
         reportedToClient = true;
+      }
+      // ── 第四支(020):甲方答复的**终点** ────────────────────────────
+      //
+      // 与上面三支同一条纪律:回合**成功结束**才记「这件事办过了」,失败/被中断
+      // 就不消费、下一次排空重来(at-least-once)。宁可多处置一次,不能静默漏掉
+      // 甲方的一次答复 —— 那正是这次事故的形态(答复在库里,永远没人看)。
+      if (todo.kind === "resume_client") {
+        consumeClientAnswers(deps.db, deps.projectId, todo.agentId, deps.now());
       }
       // ── 第三支(C4):交付那一环的**终点** ────────────────────────
       //

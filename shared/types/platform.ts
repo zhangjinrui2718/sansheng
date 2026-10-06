@@ -830,7 +830,9 @@ export type TriggerTodoKind =
   | "review_work"
   | "integrate"
   | "handover"
-  | "report_downstream";
+  | "report_downstream"
+  /** 甲方答复了业务经理的提问、而他还没处置(020 + `resume_client` 规则) */
+  | "resume_client";
 
 /**
  * 这一轮**为什么存在**。判据只有两半(设计 1 §2.10 的通道分离):

@@ -39,6 +39,7 @@ import { insertAgent, listAgents } from "../../src/platform/storage/repo/agents.
 import { insertProject, addMember } from "../../src/platform/storage/repo/projects.js";
 import { insertWork } from "../../src/platform/storage/repo/works.js";
 import { insertArtifact } from "../../src/platform/storage/repo/artifacts.js";
+import { recordClientQuestion } from "../../src/platform/storage/repo/clientQuestions.js";
 import { insertSession, appendSessionMessage } from "../../src/platform/storage/repo/sessions.js";
 import { insertDispatchEvent, bumpAttempt } from "../../src/platform/storage/repo/dispatch.js";
 import { insertTurnUsage } from "../../src/platform/storage/repo/usage.js";
@@ -152,6 +153,21 @@ async function seedEverything(): Promise<{ project: string; work: string; agent:
   });
   const link = addArtifactLink(db, "art_test", "depends_on", "art_test2");
   if (!link.ok) throw new Error(`夹具的 artifact_links 没写进去:${link.reason}`);
+
+  // 提问工件 + 它的台账行(020)。`question_artifact_id` 有外键指向 `artifacts`,
+  // 所以工件必须先在 —— 顺序反了这里会撞 FOREIGN KEY(而那正是本测试要防的那类
+  // 「外键安全顺序」问题,自己先犯一次很愚蠢)。
+  insertArtifact(db, {
+    id: "q_test", projectId: project, conversationId: null, kind: "client_question",
+    status: "open", authorAgentId: agent, title: "问甲方", body: "问什么",
+    metadataJson: null, createdAt: NOW, updatedAt: NOW, workId: null,
+  });
+  // ⚠️ 只登记提问、**不**写答复:答复行带 `answer_artifact_id`(外键指 `artifacts`),
+  // 而这张夹具要防的是「`client_questions` 整张表漏登记」—— 那会让「重置」在
+  // 有提问记录的库上直接 500。走仓储而不是裸 SQL:它是这条记录唯一的生产写口。
+  recordClientQuestion(db, {
+    questionArtifactId: "q_test", projectId: project, askedBy: agent, askedAt: NOW,
+  });
 
   insertSession(db, { id: "s_test", projectId: project, createdAt: NOW });
   appendSessionMessage(db, {
