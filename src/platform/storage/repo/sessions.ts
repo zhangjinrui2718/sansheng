@@ -371,6 +371,14 @@ export function deliverableSessionId(deliverableArtifactId: string): string {
  * ⚠️ 它**不校验**交付物存在:那条外键(`REFERENCES artifacts(id)`,NO ACTION)
  * 会替我们拒掉悬空引用,而且是**响亮**的。在这里再查一遍只会多一处会漂的真相。
  */
+/** 这条交付物的标题;读不到就 `null`(**不编一个**)。 */
+function deliverableTitleOf(db: Database.Database, artifactId: string): string | null {
+  const row = db.prepare(`SELECT title FROM artifacts WHERE id = ?`).get(artifactId) as
+    | { title: string }
+    | undefined;
+  return row === undefined ? null : row.title;
+}
+
 export function openDeliverableSession(
   db: Database.Database,
   input: {
@@ -394,6 +402,18 @@ export function openDeliverableSession(
     createdAt: input.createdAt,
     channel: input.channel,
     deliverableArtifactId: input.deliverableArtifactId,
+    // ⚠️ **`kind='thread'` 而不是缺省的 `main`**(migration 024)。
+    //
+    // 一场交付 = 一条**独立的对话线**(C4 原本就是为这个设计的),它不是「项目的
+    // 那条主对话」。而真机实测证明了差别:一个跑完的项目底下有 8 条会话
+    // (7 场交付 + 1 条内部),全叫 `main` 时页签上是 **8 个一模一样的「主对话」**。
+    //
+    // ⚠️ **存量行不重写**:024 之前开出来的那些仍然是 `main`,读面靠
+    // `deliverable_artifact_id → 工件标题` 兜底命名(见 `http.ts` 的 sessions
+    // 端点)。改存量 title 等于「为了好看去改事实」。
+    kind: "thread",
+    // 交付物的标题是**真数据**(工件自己的 title),不是编的名字。
+    title: deliverableTitleOf(db, input.deliverableArtifactId),
   });
   return { created: true, sessionId };
 }

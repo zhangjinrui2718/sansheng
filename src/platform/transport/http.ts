@@ -284,10 +284,22 @@ export function createPlatformApp(deps: HttpDeps): Hono {
       .map((s) => {
         const last = listSessionMessages(db, s.id, 1);
         const lastAt = last.length > 0 ? last[0]!.createdAt : s.createdAt;
+        // ⚠️ **交付会话的名字来自它交付的那份工件**(`handover` 开出来的那条)。
+        //
+        // 真机实测:一个跑完的项目底下有 **8 条**会话 —— 7 场交付各一条 + 1 条
+        // 项目内部会话(C4 的设计:交付一条线,不让「哪条对话是哪场交付开的」
+        // 变成猜的)。024 之后它们都叫 `main` 且没有 title,于是页签上会是
+        // **8 个一模一样的「主对话」** —— 那不是信息,是噪音。
+        //
+        // 这里**不重写库里的 title**,只在读面兜底:工件的标题是**真数据**
+        // (不是编的),而存量行改写 title 属于「为了好看去改事实」。
+        const deliverable = s.deliverableArtifactId === null
+          ? null
+          : getArtifact(db, s.deliverableArtifactId);
         return {
           id: s.id,
           kind: s.kind,
-          title: s.title,
+          title: s.title ?? deliverable?.title ?? null,
           channel: s.channel,
           deliverableArtifactId: s.deliverableArtifactId,
           createdAt: s.createdAt,
@@ -319,6 +331,12 @@ export function createPlatformApp(deps: HttpDeps): Hono {
     } catch {
       body = {};
     }
+    // ⚠️ **query 也认**(两种传法都试过,body 优先)。写这一行是因为**实测踩过**:
+    // 前端 `createProjectSession` 当时把 title 放在 query 上,而这里只读 body ——
+    // 开出来的线**永远没有名字**,而界面上它看起来只是「没起名」,不像接线断了。
+    // 两种都收的成本是一行,而漏一种的代价是「功能看起来正常、实际不工作」。
+    const qTitle = c.req.query("title");
+    if (body.title === undefined && qTitle !== undefined) body.title = qTitle;
     if (body.title !== undefined && typeof body.title !== "string") {
       return c.json(err("invalid_args", "title 必须是字符串", 400).body, 400);
     }

@@ -191,9 +191,12 @@ describe("C4 · `openDeliverableSession`(平台在 `handover` 回合成功后开
     expect(getSession(db, r.sessionId)).toEqual({
       id: "s_deliv_d1", projectId: "p1", createdAt: T0 + 1000,
       channel: "client", deliverableArtifactId: "d1",
-      // migration 024:交付对话是**主对话**(`kind='main'`,不是甲方另开的线),
-      // `title` 没人起过 ⇒ `null`(**不编一个「对话 1」出来**)。
-      kind: "main", title: null,
+      // migration 024:一场交付 = **一条独立的对话线**(`kind='thread'`),
+      // 名字取**交付物自己的标题**(那是真数据,不是编的)。
+      //
+      // ⚠️ 为什么不是 `main`:真机实测一个跑完的项目底下有 **8 条**会话
+      // (7 场交付 + 1 条内部),全叫 `main` 且没名字 ⇒ 页签上 8 个一样的「主对话」。
+      kind: "thread", title: "交付物 d1",
     });
     // 它是**没有消息**的一条空对话:正文由业务经理随后的回合说,平台不替它叙事
     expect(listSessionMessages(db, r.sessionId)).toEqual([]);

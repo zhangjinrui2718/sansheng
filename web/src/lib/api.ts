@@ -227,10 +227,14 @@ export function createProjectSession(
   id: string,
   title?: string,
 ): Promise<{ sessionId: string; projectId: string; kind: "thread"; title: string | null }> {
-  const q = title !== undefined && title.trim() !== ""
-    ? `?title=${encodeURIComponent(title.trim())}`
-    : "";
-  return request(`/projects/${encodeURIComponent(id)}/sessions${q}`);
+  const trimmed = title !== undefined && title.trim() !== "" ? title.trim() : null;
+  // ⚠️ 走 **body**,不是 query:`request` 只在 `init.body` 存在时才自己加
+  // Content-Type(见它上面那几行),而 query 上的 title 后端也要认 ——
+  // 两边都收是为了「写错一种也不会静默失效」。
+  return request(`/projects/${encodeURIComponent(id)}/sessions`, {
+    method: "POST",
+    body: JSON.stringify(trimmed === null ? {} : { title: trimmed }),
+  });
 }
 
 /**
