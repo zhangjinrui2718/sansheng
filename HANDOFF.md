@@ -2,7 +2,92 @@
 
 ---
 
-# ⚡ 最新一轮 · W16(2026-10-08)· 执行角色一分为二 + 交付物类型加 **代码服务**
+# ⚡ 最新一轮 · W17(2026-10-08)· 工作区:**每项目一个 git 仓** + 工件正文**索引化**
+
+> 用户五条裁决(逐条原话见 `docs/DESIGN-WORKSPACE.md` §0):
+> ① 按**项目**分文件系统,不按角色;② **不做归档动作**,用 git 管这个目录;
+> ③ **数据库不存真实内容,只存索引**;④ `code_service` 直接**复用项目仓**;
+> ⑤ 交付口径 = 交付物是 `services/<name>/` 这个构建上下文,**整仓对甲方可见**(透明交付)。
+> 外加一条约束:**老数据可以完全不要**(随后 reset)⇒ **不做迁移、不做回填、一步到位**。
+
+**方案**:[`docs/DESIGN-WORKSPACE.md`](docs/DESIGN-WORKSPACE.md)(含四组本机实测探针)。
+
+## 落成什么
+
+```
+<工作根>/projects/<projectId>/     ← 一个项目 = 一个 git 仓库
+├── .gitignore / README.md         ← project_open 时平台写 + 首次提交
+├── artifacts/<id>-<slug>.<ext>    ← 工件正文(索引 body_path 指向这里)
+├── work/<workId>/                 ← 派发工作项时建,绝对路径进任务提示词
+└── services/<name>/               ← 代码服务(Dockerfile 在这里)
+```
+
+- **迁移 027** 重建 `artifacts`:`body TEXT` → `body_path` / `body_sha256` / `body_bytes`
+  (三列 NOT NULL)+ `commit_sha`。⚠️ 它**故意不走**「建 _new → 拷 → 改名」:
+  没有数据要拷,而改名法会让「`artifacts` 被多个迁移创建」这条 `INTENTIONAL_REBUILDS` 登记
+  **当场过期**;数据安全改由一条**会响的前置检查** `CHECK (n = 0)` 承担 —— 非空库上响亮失败
+  并整体回滚,而不是静默清空。
+- **`WorkspacePort`**(`src/platform/workspace/port.ts` 冻结契约 + `git.ts` 真实现 712 行):
+  `resolveInside` / `writeAtomic` / `read` / `show` / `initRepo` / `commit` / `stat` / `sha256`。
+  逃逸路径 realpath 之后拒;`commit` 撞 `index.lock` 退避重试,用尽才可见失败;
+  三条闸门(秘密 / 超 10 MB / 服务目录忽略文件)**不静默**。
+- **写面**:`tools/artifactBody.ts` 是「**先写文件、后插行**」的**唯一**实现,
+  五处调用点共用(`board_write` / `ask_client` / `answer` / `meeting_conclude` / `resolveClientQuestion`)。
+  反过来的顺序会得到「有索引无内容」;现在最坏只留一个**可检测的孤儿文件**。
+- **读面**:列表给 `bodyPath`/`bodyBytes`/`commitSha`;正文走
+  `GET /api/artifacts/:id/content?at=<sha>` **现读**,三态都不是空正文 ——
+  `unavailable`(文件不在 HEAD / sha 不可达)、`drifted`(人工改过,下一次提交重建索引收回一致)、
+  `RepoCommitsView.runtime === "unreachable"`(交付提交被 `reset --hard` 抹掉;
+  与 `unavailable` **处置相反**)。新增 `GET /api/projects/:id/workspace`:
+  **根不存在 ⇒ `runtime:"unavailable"` + `problem`,不是空目录**。
+- **提交协议**:agent 自己提交代码(**先 commit 再 `board_write`**,否则第 ⑦ 条拒);
+  平台在回合边界做 housekeeping(成功/失败/超时/被中断**四条路都做**,author = 角色中文名),
+  次序 = 索引向盘收敛 → 提交 → 回填 `commit_sha`。提交失败/有文件没进版本库 ⇒
+  一条 `system` 平台通知(前缀 `⚠️ 工作区`,**同一条只播一次**)。
+- **`code_service` 契约**:5 项坐标 → **6 项**(加 `servicePath`),核对 6 条 → **7 条**
+  (新增「服务目录里至少有一条被提交的文件」);新增 `deliverableCommit`(按路径算的交付版本)、
+  `ignoredFiles`。编码工提示词删掉「先 `git init`」。
+- **`isolateProjectCwd` 整个删掉**,`sessionCwd` 无条件按项目。
+
+## 证据
+
+```
+npx tsc -p tsconfig.server.json --noEmit   → 0 error
+npx tsc -p tsconfig.web.json --noEmit      → 0 error
+npm test                                   → 88 files / 1805 passed(基线 82 / 1672)
+npm run build                              → ✓
+npm run check:design                       → E1–E14 全绿
+grep -rn 'as any' src/ web/src/            → 0
+```
+真机:临时 `--data` + `--cwd` 起服务 → 空库 001→027 成功、`/api/health` 正常、
+`workspace` 读面在根不存在时**如实报 unavailable**。
+
+## 两处真机发现(都已修/已收)
+
+1. **经 `POST /api/projects` 建的项目没有工作区目录** ⇒ 它**永远跑不起来**,唯一迹象是一条
+   `session_failed`。两个入口造出两种项目 = 本项目最忌的分叉(**T10/T11** 修)。
+2. **`c4` 测试不给 `cwd`** ⇒ 自「立项建仓」起会**在真实家目录里 `mkdir + git init`**。
+   本批最容易漏的测试卫生问题,由 T6 的 owner 自己发现。
+
+## 一条值得留的教训(工具错了,不是代码错了)
+
+对抗复核时用裸 `grep '<iframe[^>]*src='` 扫 `web/src`,得到 **3 处「同源加载模型写的 HTML」**——
+**全是假阳性**(命中注释里的反面教材)。剥掉注释后是 **0**。
+**错的是仪器,不是代码** —— 这正是本项目列在案的第 3 类静默失败:
+一个坏掉的检查会返回一个看起来正常的错误答案。
+
+## 明确没做(如实)
+
+- **不发 WS「工作区变了」事件**:`ServerEvent` 里没有这个类型,新增要改 `shared/types` + `hub.ts`。
+  改成了**结构性替代**:housekeeping 是同步的,回合结束事件触发的前端刷新必然看到提交后的状态。
+- **`excluded`(被闸门挡下的文件)没有读面字段**,只能落成 `system` 通知;
+  要显示在项目页需要新任务(shared/types + transport + web)。
+- **项目根建不出来时**回合在 `try/finally` 之前返回 ⇒ 那条路没有工作区通知
+  (可见性由 `session_failed` 广播 + error 日志承载)。
+
+---
+
+# W16(2026-10-08)· 执行角色一分为二 + 交付物类型加 **代码服务**
 
 > 用户原话:「我现在想加一个新的交付物类型,叫做**代码服务**,这个是一个 git 仓库,然后
 > 这个仓库可以**独立部署到 docker 上面**。新增一种 worker 类型叫做 **coding worker**,
