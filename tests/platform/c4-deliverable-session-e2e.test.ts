@@ -315,18 +315,21 @@ describe("C4 真机 · 交付物 → 甲方对话(临时目录 · 真宿主 · �
     // 所以交付那一刻说的话还在旧会话里 —— 这是设计的先后顺序,不是漏接线。
     expect(messagesOf(db, main).some((m) => m.agent_id === "bm" && m.content.includes("交付物到了")))
       .toBe(true);
-    // ⚠️ 2026-10-06 之前这里断言的是「交付对话**一条消息都没有**」。
-    // 现在不再成立 —— 真机终局那条 `close_finished_project` 规则会在交付完成的
-    // **下一个 tick** 叫醒业务经理判断收不收口,而他的回合按 `channelForAgent`
-    // 落进 client 通道的会话(此时交付对话已经是那一条)。
+    // ⚠️ **2026-10-07 改了落点,这条断言也跟着变强了。**
     //
-    // 所以这里改成断言**原来那条真正要验的东西**:交付那一刻说的话**不在**交付
-    // 对话里 —— 交付对话是那个回合**成功结束后**才开的。写成「对话里没有那句话」
-    // 比「对话为空」准,也不会被下一条规则的多一个回合推翻。
+    // 旧行为:平台驱动的回合与播报按 `channelForAgent` 落进 **client 通道最新那条**
+    // 会话 —— 交付线一建出来,业务经理之后的每一句话都掉进交付线,而甲方在界面上
+    // 读的是**主对话**(`stores/chat.ts` 默认取 `kind === 'main'`)⇒ 真机上甲方那条
+    // 对话从 14:35:59 起 3.5 小时一个字都没有,而项目其实交付了(用户报的现象:
+    // 「项目都交付了,业务经理不给甲方回复」)。
+    //
+    // 现在「甲方看得到的那条对话」只有一处定义(`ensureMainSession`,按 `kind` 认),
+    // 于是交付线**是交付物的容器、不是对话** —— 它一条消息都不会有,除非甲方
+    // 自己显式点进去说话。
     expect(
-      messagesOf(db, "s_deliv_d1").some((m) => m.content.includes("交付物到了")),
-      "交付那一刻说的话落在旧会话,不是交付对话(顺序,不是漏接线)",
-    ).toBe(false);
+      messagesOf(db, "s_deliv_d1"),
+      "交付线 = 交付物的容器(挂 deliverable_artifact_id),消息为 0;台账在下一行独立断言",
+    ).toEqual([]);
 
     // ── 断言 2:甲方连追两句(两次门铃 ⇒ 两次排空),`handover` 不再被叫醒 ──
     //
@@ -334,11 +337,18 @@ describe("C4 真机 · 交付物 → 甲方对话(临时目录 · 真宿主 · �
     // 叫醒」完全由这两次门铃决定;而那条待办的尝试预算是 3 —— 终止判据坏掉的话
     // 这里会看到 2~3 条播报(`tellCount` 会把它们分开数),而不是 1 条。
     for (const q of ["这份交付里第三条路线的依据是什么?", "成本那部分还能再细一点吗?"]) {
-      const before = messagesOf(db, "s_deliv_d1").length;
+      const before = messagesOf(db, main).length;
       h.send({ type: "send", projectId: "p1", content: q });
+      // ⚠️ **判据是「甲方的话与业务经理的回话在同一条线」** —— 2026-10-07 真机就是
+      // 在这里劈的叉(甲方的话落主对话、回话落交付线)。所以这里不只看「有消息」,
+      // 而是看**这一轮新落的行里既有甲方那句、也有业务经理那句**。
       expect(
-        await until(() => messagesOf(db, "s_deliv_d1").length > before),
-        "甲方通道的消息必须落进交付对话(而不是又开一条)",
+        await until(() => {
+          const fresh = messagesOf(db, main).slice(before);
+          return fresh.some((m) => m.kind === "user" && m.content === q)
+            && fresh.some((m) => m.agent_id === "bm" && m.kind === "assistant");
+        }),
+        "甲方的话与业务经理的回话必须落在**同一条线**(主对话)上",
       ).toBe(true);
       // 给「门铃 → 排空」这条 fire-and-forget 的路留出犯错的时间(纯查询,很快)
       await sleep(500);
@@ -352,10 +362,16 @@ describe("C4 真机 · 交付物 → 甲方对话(临时目录 · 真宿主 · �
       .toBe(0);
     expect(sessionsOf(db).filter((s) => s.channel === "client"), "也没有开出第二条交付对话")
       .toHaveLength(1);
+    // 甲方在**主对话**里看到的:3 句自己的话(首发 + 两句追问)各有回话 ——
+    // 其中「首发」那次是两行(业务经理的回合正文 + 他调 `tell_client` 的播报),
+    // 所以业务经理那侧是 4 条。**逐项列出来**是为了让「劈叉」无处可藏:任何一条
+    // 掉进别的线,这里的计数当场对不上。
+    const visibleMain = clientVisibleOf(messagesOf(db, main));
+    expect(visibleMain.filter((x) => x === "user:user"), "甲方的话都在主对话里").toHaveLength(3);
     expect(
-      clientVisibleOf(messagesOf(db, "s_deliv_d1")),
-      "甲方在交付对话里看到的 = 两句追问 + 两次回话(待办回合的正文按封套摘掉)",
-    ).toEqual(["user:user", "assistant:bm", "user:user", "assistant:bm"]);
+      visibleMain.filter((x) => x === "assistant:bm"),
+      "业务经理的回话也在主对话里(含那条播报)",
+    ).toHaveLength(4);
 
     // ── 断言 3:交付之后**再跑一个 worker**,它的消息不得落进交付对话 ──
     insertWork(db, {

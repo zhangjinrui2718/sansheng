@@ -565,12 +565,16 @@ export class PlatformHub {
         // **作者是调用方给的真实 agent id** —— 从前这里写死成业务经理的 id,
         // 今天恰好对(只有它会播报),但组织表换 id 的那一刻就**静默归错人**。
         const at = this.deps.now();
-        // **通道 = `client`(调用点显式声明)**:`tell_client` 就是「业务经理对
-        // 甲方说话」,它属于**甲方通道**。交付对话开出来之后(C4),播报落在
-        // 那场交付的对话里;开出来之前,`ensureSession` 明确回退到项目内部会话
-        // (那条会话此刻就是甲方看得到的对话)—— 见 `ensureSession` 的注释。
-        const sessionId = ensureSession(
-          this.deps.db, projectId, at, this.deps.newId, "client",
+        // **落点是「甲方看得到的那条对话」= 主对话**(`ensureMainSession`)。
+        //
+        // ⚠️ **这里原来是 `ensureSession(..., 'client')`**,注释写着「交付对话开出来
+        // 之后,播报落在**那场交付的对话**里」—— 2026-10-07 真机上那个假设是错的:
+        // 甲方在界面上读的是**主对话**(前端 `stores/chat.ts` 默认取 `kind === 'main'`),
+        // 而交付线有 7 条(每份已验收交付物一条)⇒ 播报掉进最后一条交付线,
+        // 甲方在他的对话里看到的字面就是「业务经理不给回复」。
+        // 「甲方看得到的那条对话」现在只有一处定义,见 `ensureMainSession` 的注释。
+        const sessionId = ensureMainSession(
+          this.deps.db, projectId, at, this.deps.newId,
         );
         appendSessionMessage(this.deps.db, {
           id: this.deps.newId("m"),
@@ -637,10 +641,19 @@ export function clientFacingAgentId(db: Database.Database): string | null {
  * 甲方通道,库里的判据是 `(project_id, channel)`。
  *
  * **`client` 有一条明确回退(不是「挑最新的」)**:这条项目**还没有**交付对话时,
- * 落回项目内部会话。理由是可查的 —— 交付之前**不存在第二条对话**,那条内部会话
- * 就是甲方此刻能看到的对话。回退目标是唯一的(每个项目至多一条 `internal`),
- * 与旧写法那种「谁最新是谁」的含糊有本质区别。没有这条回退,任何一个 `client`
- * 调用点都会给项目**凭空造出**一条会话,于是「拆地雷不改行为」当场为假。
+ * 落回项目内部会话。没有这条回退,任何一个 `client` 调用点都会给项目**凭空造出**
+ * 一条会话,于是「拆地雷不改行为」当场为假。
+ *
+ * ⚠️ **下面两句在 2026-10-07 被真机证伪,别再照着它们推「主对话」**:
+ *
+ *   1. 「回退目标是唯一的(每个项目至多一条 `internal`)」——**假**。甲方在对话页
+ *      「另开一条」建的就是 `kind='thread'` + `channel='internal'`(真机
+ *      `s_muxqbr6lpm924kbh`,标题「问一下进度」)。于是「取最新」会把回退目标
+ *      从主对话挪到那条线程上。
+ *   2. 「那条内部会话就是甲方此刻能看到的对话」——**只在项目里没有别的会话时成立**。
+ *      前端默认展示的是 `kind='main'` 那条(`web/src/stores/chat.ts`)。
+ *
+ * ⇒ **「甲方看得到的那条对话」请用 `ensureMainSession`**(按 `kind` 认)。
  *
  * ⚠️ 惰性建出来的会话**一律是 `internal`**:`client` 通道的会话只由平台在
  * `handover` 回合成功后开(`repo/sessions.ts` 的 `openDeliverableSession`)。
@@ -650,6 +663,61 @@ export function clientFacingAgentId(db: Database.Database): string | null {
  * ⚠️ 接待会话**不校验项目存在**(没有项目可校验);项目会话必须校验 —— 往不存在的
  * 项目里写消息会让那条对话永远读不出来。
  */
+/**
+ * **项目的主对话**(`kind = 'main'`)—— **「甲方看得到的那条对话」只有这一处定义**。
+ *
+ * ── 为什么不能拿 `ensureSession(..., channel)` 代替它(2026-10-07 真机事故)──
+ *
+ * `ensureSession` 的判据是 `(project_id, channel)` 且**取最新**那条。于是「主对话」
+ * 被实现成了「某通道下最新的一条会话」,而项目里一旦出现别的会话,它就漂:
+ *
+ *   - `channel='client'`:每份**已验收交付物**都由 `handover` 开一条交付线
+ *     (`openDeliverableSession`)。真机这个项目开了 **7 条**(6 份子稿 + 1 份整合稿)
+ *     ⇒ `ensureSession(..., 'client')` 返回的是**最后一条交付线**;
+ *   - `channel='internal'`:甲方在对话页「另开一条」会建一条 **`kind='thread'`** 的
+ *     内部会话 ⇒ `ensureSession(..., 'internal')` 返回**最新的那条线程**,不是主对话。
+ *     ⚠️ `ensureSession` 的注释里写着「每个项目至多一条 `internal`」——**那句是假的**
+ *     (真机 `s_muxqbr6lpm924kbh` 就是一条 `internal` 线程,标题「问一下进度」)。
+ *
+ * 真机后果(用户报的现象是「项目都交付了,业务经理不给甲方回复」):
+ *
+ * | 写入面 | 落到了 | 应该落 |
+ * |---|---|---|
+ * | 甲方在界面上发消息(显式带 sessionId) | 主对话 ✅ | 主对话 |
+ * | 平台驱动的回合(`mainSessionOf`) | 最新一条交付线 ❌ | 主对话 |
+ * | `tell_client` 播报 | 最新一条交付线 ❌ | 主对话 |
+ * | 未指定 `sessionId` 的甲方消息 | 最新一条交付线 ❌ | 主对话 |
+ * | **前端默认展示** | **主对话**(`stores/chat.ts` 取 `kind === "main"`) | 一致 |
+ *
+ * ⇒ 甲方那条对话从 `14:35:59` 起**一个字都没有**(3.5 小时示范到项目收口),而
+ * 「已交付完成」那条播报躺在第 7 条交付线里 —— 屏幕上就是「业务经理不给甲方回复」。
+ *
+ * **判据因此按 `kind` 认,不按 `channel` 认**:`kind='main'` 是会话自己的身份,
+ * 与「谁最新」无关。`channel` 说的是「这条线是谁的」(甲方 / 内部),
+ * 两者本来就不是一回事 —— 主对话的 `channel` 是 `internal`,而它里面的
+ * **逐条消息**仍按封套判通道(`web/src/lib/data.ts` 的 `channelOf`),
+ * 所以业务经理在主对话里向甲方交代照样渲染成甲方通道 ✅。
+ */
+export function ensureMainSession(
+  db: Database.Database,
+  projectId: string | null,
+  at: number,
+  newId: (p: string) => string,
+): string {
+  // 接待会话(第一个项目之前):全局只有那一条,`kind` 就是 `main`。
+  if (projectId === null) return ensureSession(db, null, at, newId, "internal");
+  if (getProjectRow(db, projectId) === null) {
+    throw new Error(`项目 ${projectId} 不存在 —— 不能往不存在的项目里写消息`);
+  }
+  const main = listSessions(db, projectId).find((s) => s.kind === "main");
+  if (main !== undefined) return main.id;
+  // 惰性建:排空器第一次叫醒某个角色时,项目里可能还没有任何会话行。
+  // `channel='internal'` 与 `kind='main'` 是两个维度,后者才是「主对话」的身份。
+  const id = newId("s");
+  insertSession(db, { id, projectId, createdAt: at, channel: "internal", kind: "main" });
+  return id;
+}
+
 export function ensureSession(
   db: Database.Database,
   projectId: string | null,
@@ -657,6 +725,14 @@ export function ensureSession(
   newId: (p: string) => string,
   channel: SessionChannel,
 ): string {
+  // ⚠️ **这不是「主对话」的判据。** 它按 `(project_id, channel)` **取最新**那条,
+  // 而 2026-10-07 真机证明「最新」不等于「甲方看得到的那条」:两条漂移路径都踩过 ——
+  // ① `channel='client'`:每份已验收交付物开一条交付线(`handover`)⇒ 拿到**最后一条
+  // 交付线**;② `channel='internal'`:甲方在对话页「另开一条」建的是
+  // `kind='thread'` + `channel='internal'`(真机 `s_muxqbr6lpm924kbh`)⇒ 拿到**最新
+  // 那条线程**。要主对话请用 `ensureMainSession`(按 `kind` 认)。
+  // 这里保留 `(project_id, channel)` 是为了**别的**用途(例如「这场交付的对话是哪条」)。
+  //
   // 接待会话:通道对它没有意义(它既不是项目主会话,也不是交付对话)。
   // schema 的 `DEFAULT 'internal'` 就是它的通道。
   if (projectId === null) {

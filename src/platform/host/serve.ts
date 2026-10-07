@@ -50,7 +50,9 @@ import {
   type DrainResult, type DrainTurnReport, type DrainWorkReport,
 } from "../runtime/dispatcher.js";
 import { createPlatformApp } from "../transport/http.js";
-import { attachHub, clientFacingAgentId, ensureSession, PlatformHub } from "../transport/hub.js";
+import {
+  attachHub, clientFacingAgentId, ensureMainSession, ensureSession, PlatformHub,
+} from "../transport/hub.js";
 import { startFixedDelay, startScheduler, type FixedDelayLoop, type Scheduler } from "./scheduler.js";
 import { resetPlatformData } from "./reset.js";
 import {
@@ -843,8 +845,15 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
    * 这件事不属于某一条对话),而甲方开的线是**他自己的**。让排空器去动某一条
    * 线,会让那条线里出现一句甲方没问过的话。
    */
-  function mainSessionOf(projectId: string | null, agentId: string): string {
-    return ensureSession(db, projectId, now(), newId, channelForAgent(db, agentId));
+  function mainSessionOf(projectId: string | null, _agentId: string): string {
+    // ⚠️ **这里原来是 `ensureSession(..., channelForAgent(db, agentId))`** —— 看
+    // `agentId` 的通道去挑一条会话,而那个函数的判据是 `(project_id, channel)` **取最新**。
+    // 对业务经理(通道 `client`)于是拿到**最新一条交付线**;对内部角色(通道 `internal`)
+    // 拿到**最新的那条内部线程**(甲方「另开一条」建出来的)。两条都不是主对话 ——
+    // 而前端默认展示、甲方发消息默认落的,恰恰是 `kind='main'` 那条。
+    // 真机后果:甲方那条对话从 14:35:59 起 3.5 小时没有一个字,而项目其实交付了。
+    // 判据现在只有一处(`ensureMainSession`),`agentId` 不再参与选线。
+    return ensureMainSession(db, projectId, now(), newId);
   }
 
   /**
@@ -1065,9 +1074,13 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
         return;
       }
     } else {
-      // **通道 = `client`(调用点显式声明)**:这是**甲方说的话**,它属于甲方通道。
-      // 交付对话开出来之后它落在那场交付的对话里;开出来之前明确回退到项目内部会话。
-      target = ensureSession(db, projectId, at, newId, "client");
+      // **未指定线 = 主对话**(`ensureMainSession`)—— 与「甲方在界面上发消息」那条路
+      // 一致:前端总是把当前选中的线带上(`line ?? undefined`),而它默认选中的就是
+      // `kind='main'`。⚠️ 这里原来是 `ensureSession(..., 'client')`,注释写着「交付
+      // 对话开出来之后它落在那场交付的对话里」—— 那条规矩让**同一个甲方的两句话
+      // 落在两条不同的线**上(界面发的落主对话、API 发的落交付线),见
+      // `ensureMainSession` 的注释里那张对照表。
+      target = ensureMainSession(db, projectId, at, newId);
     }
     const sessionId = target;
 

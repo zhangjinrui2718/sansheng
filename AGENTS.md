@@ -48,7 +48,7 @@
   判据的一部分:同一对节点上两类边**方向一致**时不是环(真机那份数据就是这样),方向相反
   才是环(`mutualPairs` 会点名是哪两条边)。写反会让「交付」跑到最左、并且把一个不存在的
   环报出来(`web/src/lib/workGraph.ts` 的 `collectEdges`)。
-- 基线:**1908 passed / 94 test files** · 两条 typecheck 0 error · `check:design` E1–E14 全绿(5 角色)。
+- 基线:**1913 passed / 95 test files** · 两条 typecheck 0 error · `check:design` E1–E14 全绿(5 角色)。
 - **角色中文名只有一处**:`src/platform/runtime/org.ts` 的 `ORG`(播种 + `RoleHarnessView.displayName`
   共用);前端兜底表 `web/src/lib/vocab.ts` 的 `ROLE_LABEL` 必须逐项相同,由
   `tests/web/role-names.test.ts` 跨边界对照。**不许在某个页面里再写一张名字表**
@@ -261,8 +261,12 @@ dev/prod + CI/CD」,09:54 业务经理只回了一句「我先看下你之前留
 **两条纪律**:
 - **事件上的 `sessionId` 必填,`send` 上的可省** —— 事件漏传是「模型在 A 线说的话显示在 B 线面板」(**看不出来**);`send` 漏传是「落到主对话」(**看得见**)。
 - **排空器触发的回合一律落主对话** —— 待办是**项目级**的,不属于任何一条甲方开的线。
+  ⚠️ **「主对话」= `kind='main'` 那条**(`ensureMainSession`):按 `kind` 认,不按 `channel`、
+  更不按「谁最新」—— 2026-10-07「已交付却业务经理不给甲方回复」就是这里漂了。
 
 ⚠️ **一场交付 = 一条独立对话线**(`kind='thread'` + 名字取交付物标题)。真机上那个跑完的项目底下有 **8 条**会话(7 场交付 + 1 条内部)—— 全叫「主对话」时页签上是 8 个一样的标签。**存量行不重写 title**,读面用 `deliverable_artifact_id → 工件标题` 兜底(改存量 title 等于「为了好看去改事实」)。
+⚠️ **交付线是「交付物的容器」,不是业务经理说话的地方**(2026-10-07):平台回合、播报、
+未指定线的甲方消息都落主对话,否则第一条交付线一开出来甲方那条对话就再没人说话。
 
 ## 收口之后还能说话(2026-10-06)
 
@@ -584,7 +588,7 @@ help
 ```
 npx tsc -p tsconfig.server.json --noEmit
 npx tsc -p tsconfig.web.json --noEmit
-npm test                  # 1908 passed / 94 files
+npm test                  # 1913 passed / 95 files
 npm run build
 npm run check:design      # 设计一致性 E1–E14
 ```

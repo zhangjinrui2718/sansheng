@@ -2350,3 +2350,83 @@ insertWork(db, { id: "W0", parentWorkId: null, title: "整合与最终交付", �
 回归因此刻意反过来写:`tests/platform/rework.test.ts` 的**每个用例都建在有子项的容器形状上**,
 `tests/platform/stalled-project.test.ts` 的 17 条里有两个专门钉**负样本**方向(不许乱响),
 两个文件都做了变异自检(把修复逐条撤掉,对应用例必须变红,恢复后 sha256 逐字相同)。
+
+---
+
+## 「甲方看得到的那条对话」只有一处定义(2026-10-07 真机事故)
+
+> 用户报的现象:**「催收语音机器人技术方案这个项目都交付了,但是业务经理不给甲方回复;
+> 项目完成后需要把交付物提供给甲方」**。查下来交付物**早就给了**(`handover` 为最后一份
+> 已验收交付物开了第 7 条交付线,业务经理也在里面播报过「已交付完成」)—— 问题在**落点**:
+> 甲方自己那条对话从 `14:35:59` 起**3.5 小时一个字都没有**。
+
+### 一、四个写入面对「甲方那条对话」给了两个答案
+
+| 写入面 | 实现 | 落到了 | 前端默认展示 |
+|---|---|---|---|
+| 甲方在界面上发消息 | 前端带 `sessionId = 当前选中的线`(`stores/chat.ts` 的 `line ?? undefined`) | **主对话** `kind='main'` ✅ | — |
+| 平台驱动的回合 | `mainSessionOf` → `ensureSession(..., channelForAgent(agent))` | **该通道最新一条会话** ❌ | — |
+| `tell_client` 播报 | `hub.clientChannel.tell` → `ensureSession(..., 'client')` | **该通道最新一条会话** ❌ | — |
+| 未指定 `sessionId` 的甲方消息 | `handleUserMessage` 的 else 分支 → `ensureSession(..., 'client')` | **该通道最新一条会话** ❌ | — |
+| (读面)对话页 | `sessions.find(s => s.kind === "main")` | — | **`kind='main'`** |
+
+`ensureSession` 的判据是 `(project_id, channel)` + `ORDER BY created_at DESC LIMIT 1`,于是
+「主对话」被实现成了「某通道下**最新**的一条会话」。项目里一旦出现别的会话,它就漂,而
+**两条漂移路径真机都踩到了**:
+
+1. **`channel='client'`**:`handover` 为**每一份已验收交付物**开一条交付线
+   (`openDeliverableSession`,`kind='thread'` + 名字取交付物标题)。这个项目有 **7 份**
+   已验收交付物(6 份子模块设计 + 1 份整合稿)⇒ 拿到的是**第 7 条交付线**。
+2. **`channel='internal'`**:甲方在对话页点「另开一条」建的是 **`kind='thread'` +
+   `channel='internal'`**(真机 `s_muxqbr6lpm924kbh`,标题「问一下进度」)⇒ 拿到的是
+   **最新那条线程**。⚠️ 这一条更早生效:平台回合在**第一条交付线出现之前**就已经不在主对话上了
+   (业务经理 `15:03:41` 那条落进了那条线程)。
+
+### 二、根因是一句**被写进注释的假前提**
+
+`ensureSession` 的注释写着「**回退目标是唯一的(每个项目至多一条 `internal`)**」——
+正是它让「取最新」看起来无害。而**甲方自己就能建出第二条 `internal` 会话**(上面第 2 条),
+所以那句是假的;它保护的不变量(「不要凭空造交付线」)与「主对话是哪条」是**两件事**,
+被一个函数一起承担了。
+
+⇒ 修法:**按 `kind` 认**(`ensureMainSession`)。`kind='main'` 是会话自己的身份,与「谁最新」
+无关;`channel` 说的是「这条线是谁的」(甲方 / 内部)—— 主对话的 `channel` 本来就是 `internal`,
+而它里面的**逐条消息**仍按封套判通道(`web/src/lib/data.ts` 的 `channelOf`:todoKind 在
+`CLIENT_FACING_TODO_KINDS` 里 + 说话人 `clientFacing`),所以业务经理在主对话里向甲方交代
+**照样渲染成甲方通道** ✅。四个写入面现在共用这一个判据:
+
+| 写入面 | 现在 |
+|---|---|
+| 甲方发消息(显式带 `sessionId`) | 照旧落他选的那条线(显式选择必须被尊重) |
+| 平台驱动的回合(`mainSessionOf`) | `ensureMainSession` |
+| `tell_client` 播报(`hub.clientChannel.tell`) | `ensureMainSession` |
+| 未指定 `sessionId` 的甲方消息 | `ensureMainSession` |
+
+**交付线因此变成「交付物的容器」**:它挂 `deliverable_artifact_id` + 标题(甲方点进去读正文),
+而**消息为 0** —— 除非甲方自己显式点进去说话。这不是倒退:「一场交付 = 一条独立对话线」
+说的是**交付物有自己的入口**,不是「业务经理只在那条线里说话」。
+
+### 三、真机的两个次生事实(顺带记下)
+
+- **`tell` 的落点本来是「那场交付的对话」**(旧注释明写)。这条规矩在「甲方看的是主对话」
+  这个前提下**从来不成立** —— 它只是恰好让播报与交付物挨着。判据统一之后,播报与它那一轮的
+  正文落在同一条线。
+- **对话里点不开工件**:甲方在对话页读到的是 `art_xxx` 这样的**纯文本 id**(`web/src/components/chat/`
+  里没有任何把 `art_*` 渲染成链接的代码)。交付线页签是他的入口,而页签名字就是交付物标题。
+
+### 四、残余缺口(已知、未修,别当成已修)
+
+⚠️ **`tell` 还不知道自己那一轮跑在哪条线上。** `ClientChannel.tell` 的入参只有
+`{projectId, message, agentId}`(端口 `src/platform/client/port.ts`),`ToolRunContext` 里也没有
+`sessionId`,所以现在的规则是「播报落主对话」。于是有一个**窄**的劈叉:甲方**显式点进交付线**
+问一句 ⇒ 那一轮在交付线里跑,而业务经理在那一轮里调 `tell_client` 时,播报会落**主对话**。
+
+修法方向是明确的、也是唯一的:**把会话 id 穿到工具上下文**(`PlatformSessionOptions` →
+`buildToolContext` → `ToolRunContext.sessionId` → `tell_client` → `Port.tell`),播报就落
+**本回合所在的那条线**。没在这批做,是因为它动的是**每次工具调用都要装配**的那条路径
+(`runtime/session.ts` 的 `toSdkTools` 回调),而这一批要修的现象在主对话那条路上已经闭合;
+拿一个更敏感的改动去顺带做它,不划算。**回归**:
+`tests/platform/main-session-routing.test.ts`(5 条,含 `tell` 的接线与负样本)+
+`tests/platform/c4-deliverable-session-e2e.test.ts`(真宿主,断言「甲方的话与业务经理的回话
+在**同一条线**」)。三个变异自检都实跑过:把 `ensureMainSession` / `mainSessionOf` / `tell`
+逐条改回旧规则,对应用例当场变红,恢复后逐字一致。
