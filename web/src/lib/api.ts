@@ -56,6 +56,7 @@ import type {
   ProjectUsageResponse,
   RepoCommitsView,
   WorkView,
+  WorkspaceView,
 } from "@shared/types/platform";
 import type { ProviderInfo, SettingsPublic } from "@shared/types/settings";
 
@@ -388,6 +389,21 @@ export function getRepoCommits(id: string, limit = 20): Promise<RepoCommitsView>
 /** 本项目成员(四个固定职能)。`ProjectDetail` 里也带 members,这一条给成员页单独用。 */
 export function listMembers(projectId: string): Promise<{ members: MemberView[] }> {
   return request<{ members: MemberView[] }>(`/projects/${encodeURIComponent(projectId)}/members`);
+}
+
+/**
+ * **项目工作区 · 只读观测面**(设计 `docs/DESIGN-WORKSPACE.md` §4.4,P0)。
+ *
+ * 「盘上有什么 + 索引引用了什么 + 两边对不对得上」。两个字段是**状态**,不是
+ * 空态,页面必须分开渲染:
+ *   - `workspace.runtime === "unavailable"` ⇒ **读不到根目录**(不是「空目录」);
+ *   - `workspace.index.runtime === "not_migrated"` ⇒ 索引化还没落地(P2 才加
+ *     `body_path` 列),**不是**「索引里一条都没有」。
+ */
+export function getProjectWorkspace(projectId: string): Promise<{ workspace: WorkspaceView }> {
+  return request<{ workspace: WorkspaceView }>(
+    `/projects/${encodeURIComponent(projectId)}/workspace`,
+  );
 }
 
 /**

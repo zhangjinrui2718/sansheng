@@ -37,10 +37,12 @@
  * 关联目标只显示 id —— 契约 `ArtifactView.links` / `AskView.parentAskId` 都只有 id,
  * 没有目标标题,不编一个出来。
  */
+import { useCallback, useState } from "react";
 import { PageHeader, Pill, Section, StatStrip, EmptyState, KV, Flag } from "@/components/ui/primitives";
 import { ClientQuestionCard } from "@/components/client/ClientQuestionCard";
 import {
   useProjectAsks, useProjectChanges, useProjectDetail, useProjectLive, useProjectMessages,
+  useProjectWorkspace,
 } from "@/lib/data";
 import { platformNoticeLabel, type PlatformNoticeKind } from "@/lib/platformNotices";
 import { liveHeadline, orgRuntime } from "@/lib/orgState";
@@ -74,6 +76,64 @@ const NOTICE_TITLE: Record<PlatformNoticeKind, string> = {
   other: "平台自己落的通知:作者不是任何角色,也不是甲方",
 };
 
+/**
+ * 字节数的读法。**没有**引入任何格式化库 —— 这里只需要「一眼看出量级」,
+ * 而多一个依赖换来的千分位/单位智能在磁盘观测这件事上零信息量。
+ * 目录(`bytes === null`)由调用点渲染成「—」,不走这里(不编一个 0)。
+ */
+function fmtBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KiB`;
+  return `${(n / (1024 * 1024)).toFixed(1)} MiB`;
+}
+
+/**
+ * 可复制的绝对路径。**复制成功要说出来** —— 静默成功的按钮等于没做
+ * (与 `deliverable/CodeService.tsx` 的 `Command` 同一条纪律,只是这里
+ * 复制的是一个路径而不是一条命令)。
+ */
+function CopyPath({ text }: { text: string }) {
+  const [copied, setCopied] = useState(false);
+  const copy = useCallback(() => {
+    void navigator.clipboard?.writeText(text).then(
+      () => {
+        setCopied(true);
+        setTimeout(() => setCopied(false), 1500);
+      },
+      () => setCopied(false),
+    );
+  }, [text]);
+  return (
+    <div className="flex items-center gap-2">
+      <code
+        style={{
+          flex: 1,
+          fontSize: 12,
+          padding: "4px 6px",
+          background: "var(--ink-1)",
+          border: "1px solid var(--ink-3)",
+          borderRadius: 6,
+          color: "var(--bone)",
+          overflowX: "auto",
+          whiteSpace: "nowrap",
+        }}
+        title={text}
+      >
+        {text}
+      </code>
+      <button
+        type="button"
+        className="sansheng-button"
+        style={{ padding: "1px 8px", fontSize: 11 }}
+        onClick={copy}
+        title="复制这个绝对路径"
+      >
+        {copied ? "已复制" : "复制"}
+      </button>
+    </div>
+  );
+}
+
 export function ProjectDetailPage() {
   const projectId = useChatStore((s) => s.projectId);
   const { detail, blockers, loading, error } = useProjectDetail(projectId);
@@ -88,6 +148,13 @@ export function ProjectDetailPage() {
   // 「打开/事件后刷新」而不是每 2.5 秒重画一次(WS 事件会推 `activityRevision`,见
   // `useProjectLive`)。
   const live = useProjectLive(projectId, { pollMs: 0 });
+  // 文件系统观测面(设计 §4.4,P0)。与这一页其余读面一样:**不轮询** ——
+  // 盘上的形状只在用户主动看时取一次,WS 事件会推 `projectRevision` 让它重查。
+  const {
+    data: workspace,
+    loading: workspaceLoading,
+    error: workspaceError,
+  } = useProjectWorkspace(projectId);
   // 两类平台记录的**分类**(platformNotices.ts)与**状态派生**(orgState.ts)都是纯函数 ——
   // 页面只渲染结果,不自己认字符串、也不自己编状态。
   const runtime = orgRuntime({ messages, live: live.data });
@@ -282,6 +349,119 @@ export function ProjectDetailPage() {
                     </div>
                   </article>
                 ))}
+              </div>
+            )}
+          </Section>
+
+          {/*
+            文件系统:项目目录的**只读观测面**(设计 docs/DESIGN-WORKSPACE.md §4.4,P0)。
+            放在「组织推进」「合规记录」两段之后 —— 那两段回答「组织在不在动、
+            动得规不规矩」,这一段回答「它到底在盘上留下了什么」。
+
+            两条反造假纪律在这里的落法(与 ProjectLiveView.runtime 同源):
+              · `runtime === "unavailable"` ⇒ 显示 problem 那一行,**绝不**渲染成空目录;
+              · `index.runtime === "not_migrated"` ⇒ 如实写「索引化尚未落地」,
+                而不是让 `indexed` 全 false 看起来像「这些文件全是孤儿」。
+          */}
+          <Section
+            title="文件系统"
+            count={workspace?.runtime === "ok" ? workspace.counts.entries : undefined}
+            hint="只读:盘上有什么 + 索引引用了什么"
+            hintTitle="来源:GET /api/projects/:id/workspace(设计 docs/DESIGN-WORKSPACE.md §4.4,P0)。这条读面**只读** —— 它不建目录、不写文件。扫描深度上限 3 层、条目上限 500;到界或有内容读不出来时 truncated = true(不静默少列)。"
+          >
+            {workspaceError !== null ? (
+              <div className="sansheng-card p-3 text-xs" style={{ color: "var(--cinnabar)" }}>
+                加载失败:{workspaceError}
+              </div>
+            ) : workspace === null ? (
+              <EmptyState>{workspaceLoading ? "加载中…" : "读不到工作区。"}</EmptyState>
+            ) : (
+              <div className="grid gap-2">
+                {/* root 的绝对路径(可复制)—— 「读不到」时它更要显示:用户要拿着它去盘上核对 */}
+                <CopyPath text={workspace.root} />
+
+                {workspace.index.runtime === "not_migrated" && (
+                  <div
+                    className="ss-note"
+                    title="artifacts.body_path 这一列由 P2 的 migration 027 加上。在那之前索引里一条正文路径都没有 —— 这不是「盘上的文件都是孤儿」,是「索引这件事还没落地」。"
+                  >
+                    索引化尚未落地,盘上文件暂未与工件建立边(artifacts.body_path 列还不存在)。
+                  </div>
+                )}
+
+                {workspace.runtime === "unavailable" ? (
+                  // 「读不到」**不是**「空目录」—— 这一行是两者的分界线,不许被空态替代。
+                  <Flag tone="cinnabar">
+                    读不到这个项目的工作目录(这不是「空目录」,是「没读到」):{workspace.problem}
+                  </Flag>
+                ) : (
+                  <>
+                    <div className="flex items-center gap-2 flex-wrap ss-meta">
+                      <span>条目 {workspace.counts.entries}</span>
+                      <span>已索引 {workspace.counts.indexed}</span>
+                      <span>孤儿文件 {workspace.counts.orphanFile}</span>
+                      <span>库里有盘上无 {workspace.missing.length}</span>
+                      {workspace.truncated && (
+                        <Pill tone="amber" title="到深度 / 条目上限,或有内容读不出来 —— 下面这份列表不全">
+                          已截断 · 列表不全
+                        </Pill>
+                      )}
+                    </div>
+
+                    {workspace.entries.length === 0 ? (
+                      <EmptyState>
+                        这个项目的目录是空的 —— 这一次确实「读到了」(runtime ok),里面一个条目都没有。
+                      </EmptyState>
+                    ) : (
+                      <div className="grid gap-1">
+                        {workspace.entries.map((e) => (
+                          <div
+                            key={e.path}
+                            className="sansheng-card p-1.5 flex items-center gap-2 flex-wrap"
+                            title={e.path}
+                          >
+                            <Pill tone={e.kind === "dir" ? "mute" : "bone"}>
+                              {e.kind === "dir" ? "目录" : "文件"}
+                            </Pill>
+                            <code style={{ fontSize: 12, color: "var(--bone)", wordBreak: "break-all" }}>
+                              {e.path}
+                            </code>
+                            {e.indexed && (
+                              <Pill tone="cyan" title="artifacts.body_path 里有这条路径">
+                                已索引
+                              </Pill>
+                            )}
+                            <span className="ss-meta ml-auto">
+                              {e.bytes === null ? "— 目录" : fmtBytes(e.bytes)} · {fmtTime(e.mtimeMs)}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+
+                    {workspace.missing.length > 0 && (
+                      <div className="grid gap-1">
+                        <div className="ss-note">库里有、盘上没有(索引指向的文件在盘上找不到):</div>
+                        {workspace.missing.map((m) => (
+                          <div
+                            key={m.path}
+                            className="sansheng-card p-1.5 flex items-center gap-2 flex-wrap"
+                            style={{ borderLeft: "2px solid var(--cinnabar)" }}
+                            title={m.path}
+                          >
+                            <code style={{ fontSize: 12, color: "var(--bone)", wordBreak: "break-all" }}>
+                              {m.path}
+                            </code>
+                            <span className="ss-meta ml-auto">
+                              {m.title || "(无标题)"}
+                              {m.artifactId !== "" && ` · ${m.artifactId}`}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </>
+                )}
               </div>
             )}
           </Section>

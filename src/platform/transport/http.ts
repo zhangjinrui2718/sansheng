@@ -29,7 +29,13 @@ import {
   listProjects, getProjectRow, insertProject,
 } from "../storage/repo/projects.js";
 import { getWork } from "../storage/repo/works.js";
-import { getArtifact } from "../storage/repo/artifacts.js";
+import {
+  getArtifact,
+  listIndexedBodyPaths,
+  type IndexedBodyPathList,
+} from "../storage/repo/artifacts.js";
+import { projectWorkspaceRoot } from "../workspace/root.js";
+import { scanWorkspace, type WorkspaceScan } from "../workspace/scan.js";
 import type { CodeServicePort } from "../codeservice/port.js";
 import { resolveClientQuestion } from "../tools/client.js";
 import { ensureOrg, ensureProjectOrg, orgReady, roleDisplayName } from "../runtime/org.js";
@@ -61,7 +67,7 @@ import {
 import type { SessionMessageKind, SessionMessageRow } from "../storage/repo/sessions.js";
 import type {
   HarnessView, MemberConversationView, MemberConversationsResponse,
-  PromptUnitView, RoleHarnessView, SessionMessageView,
+  PromptUnitView, RoleHarnessView, SessionMessageView, WorkspaceView,
 } from "@shared/types/platform.js";
 import type { ResetReport } from "../host/reset.js";
 import {
@@ -128,6 +134,56 @@ const err = (code: string, message: string, status: 400 | 404 | 409 | 500 = 400)
   body: { error: { code, message } },
   status,
 });
+
+/**
+ * 把「一次扫描 + 索引侧状态」装配成 `WorkspaceView`(设计 §4.4)。
+ *
+ * 抽成**纯函数**而不是写在路由里:三件容易做错的事都发生在这几行 ——
+ *   ① `indexed` 标记必须来自**这次扫描**的对账结果,不是「索引里有这条路径」
+ *      (索引里有、盘上无的那种是 `missing`,不是 `indexed`);
+ *   ② `counts` 与三个数组必须同源(各算一遍迟早会出现「计数说 3、列表两条」);
+ *   ③ `missing` 要带回工件身份(只给路径的话,用户还得自己去库里找是哪件工件)。
+ *
+ * ⚠️ `index.runtime === "not_migrated"` 时 `missing` **必然是空** —— 不是
+ * 「没有不一致」,是「没有索引可以比」。所以 `runtime` 是那个必须被渲染出来的
+ * 字段,而空数组不能替它说话。
+ */
+function toWorkspaceView(opts: {
+  projectId: string;
+  root: string;
+  scan: WorkspaceScan;
+  index: IndexedBodyPathList;
+}): WorkspaceView {
+  const { projectId, root, scan, index } = opts;
+  const indexedPaths = new Set(scan.indexed.map((e) => e.path));
+  const byPath = new Map(index.paths.map((p) => [p.path, p]));
+  return {
+    projectId,
+    root,
+    runtime: scan.runtime,
+    problem: scan.problem,
+    entries: scan.entries.map((e) => ({
+      path: e.path,
+      kind: e.kind,
+      bytes: e.bytes,
+      mtimeMs: e.mtimeMs,
+      indexed: indexedPaths.has(e.path),
+    })),
+    truncated: scan.truncated,
+    counts: {
+      entries: scan.entries.length,
+      indexed: scan.indexed.length,
+      orphanFile: scan.orphanFile.length,
+    },
+    missing: scan.missing.map((path) => {
+      const hit = byPath.get(path);
+      // `scan.missing` 是按索引路径算出来的,所以这里必然命中;命中不了说明两处
+      // 对账用的是两份输入 —— 那时**照实报空 title**,不编一个(7-D)。
+      return { path, artifactId: hit?.artifactId ?? "", title: hit?.title ?? "" };
+    }),
+    index: { runtime: index.runtime, paths: index.paths.length },
+  };
+}
 
 export function createPlatformApp(deps: HttpDeps): Hono {
   const app = new Hono();
@@ -242,6 +298,32 @@ export function createPlatformApp(deps: HttpDeps): Hono {
     if (row === null) return c.json(err("not_found", "项目不存在", 404).body, 404);
     const detail = toProjectDetail(db, row);
     return c.json({ works: detail?.works ?? [] });
+  });
+
+  /**
+   * **项目工作区 · 只读观测面**(设计 `docs/DESIGN-WORKSPACE.md` §4.4,**P0**)。
+   *
+   * 三块事实一次端出来:盘上有什么(`scanWorkspace` 的 entries)、索引引用了什么
+   * (此刻 `body_path` 列还不存在 ⇒ `index.runtime: "not_migrated"`),以及两边
+   * 的不一致(`missing` / `orphanFile`)。
+   *
+   * ⚠️ **`root` 现在与 `sessionCwd()` 无关。** `sessionCwd` 只在
+   * `--isolate-project-cwd` 打开时才把会话放到项目目录里(P1 才动它),而这条
+   * 读面问的是「这个项目的目录里有什么」—— 两件事今天可以指向同一个路径,
+   * 但**判据不同**,所以这里走 `projectWorkspaceRoot` 而不是去复用会话那一个。
+   *
+   * ⚠️ **它不建目录**(`sessionCwd` 会 `mkdirSync`)。一个 GET 不该在盘上留东西
+   * —— 目录不存在是**读不到**,由 `runtime: "unavailable"` 如实承载。
+   */
+  app.get("/api/projects/:id/workspace", (c) => {
+    const id = c.req.param("id");
+    if (getProjectRow(db, id) === null) {
+      return c.json(err("not_found", "项目不存在", 404).body, 404);
+    }
+    const root = projectWorkspaceRoot(deps.cwd, id);
+    const index = listIndexedBodyPaths(db, id);
+    const scan = scanWorkspace({ root, indexedPaths: index.paths.map((p) => p.path) });
+    return c.json({ workspace: toWorkspaceView({ projectId: id, root, scan, index }) });
   });
 
   app.get("/api/projects/:id/artifacts", (c) => {

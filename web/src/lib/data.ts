@@ -45,6 +45,7 @@ import type {
   RoleHarnessView,
   SessionMessageView,
   WorkView,
+  WorkspaceView,
 } from "@shared/types/platform";
 import * as api from "./api";
 import { errorMessage } from "./api";
@@ -323,6 +324,26 @@ export function useProjectAsks(projectId: string | null): Loaded<AskView[]> {
     [projectId, revision],
   );
   return { data: r.data?.asks ?? [], loading: r.loading, error: r.error };
+}
+
+/**
+ * 项目工作区 · 只读观测面(设计 `docs/DESIGN-WORKSPACE.md` §4.4,P0)。
+ *
+ * ⚠️ `data === null` 是「**还没拿到过**」,不是「工作区是空的」—— 与
+ * `useProjectLive` 同一条理由:`WorkspaceView` 自己带 `runtime` / `index.runtime`
+ * 两个状态字段,调用方**只有在拿到 data 之后**才有资格判断「有没有文件」。
+ * 把 `null` 渲染成空目录,就是把「还没查」说成「查过了,是空的」。
+ */
+export function useProjectWorkspace(projectId: string | null): Loaded<WorkspaceView | null> {
+  const revision = useChatStore((s) => s.projectRevision);
+  const r = useLoad<WorkspaceView | null>(
+    () =>
+      projectId === null
+        ? Promise.resolve(null)
+        : api.getProjectWorkspace(projectId).then((x) => x.workspace),
+    [projectId, revision],
+  );
+  return { data: r.data, loading: r.loading, error: r.error };
 }
 
 /** 本项目的变更记录(提议 → 评审 → 接受/实施)。 */

@@ -579,6 +579,83 @@ export interface IntakeLiveView {
   turns: Array<{ agentId: string; elapsedMs: number; trigger: TurnTrigger }>;
 }
 
+/**
+ * **项目工作区的一条盘上条目**(设计 `docs/DESIGN-WORKSPACE.md` §4.4,P0)。
+ *
+ * 它是「盘上有什么」的投影,不是一件工件 —— `path` 就足以复现(相对 `root`)。
+ * 目录以 `/` 结尾,路径本身携带类型;目录的 `bytes` 恒为 `null`
+ * (不做递归求和,那是另一个问题,不是这个读面的义务)。
+ */
+export interface WorkspaceEntryView {
+  /** 相对 `WorkspaceView.root` 的路径;目录以 `/` 结尾 */
+  path: string;
+  kind: "file" | "dir";
+  /** 文件给字节数;目录给 `null` */
+  bytes: number | null;
+  mtimeMs: number;
+  /**
+   * 这条**被索引引用**了吗(`artifacts.body_path` 里有它)。
+   *
+   * ⚠️ 索引还没落地时(P0 的真实状态)这里是 `false`,而 `false` 的含义是
+   * 「**没有一条边指向它**」,不是「它不重要」—— 见 `WorkspaceView.index.runtime`:
+   * 读面必须把这两件事分开说,否则「索引机制缺一半」会被读成「这些文件都是孤儿」。
+   */
+  indexed: boolean;
+}
+
+/**
+ * **项目工作区的只读观测面**(`GET /api/projects/:id/workspace`)。
+ *
+ * ── 为什么它必须存在(§4.4 原话)───────────────────────────────────
+ *
+ * 「盘对整个 UI 是黑盒」。索引化(P1–P3)把工件正文从库搬到每项目一个仓之后,
+ * 「库与盘对不对得上」必须**两端可见** —— 否则一次丢文件、一次孤儿写入,
+ * 在界面上都只会表现为「某个工件读不到正文」,而看不出是哪一端出的问题。
+ *
+ * ── 三条纪律(与整套读面同源)────────────────────────────────────
+ *
+ *   · `runtime: "unavailable"` 是**读不到**(根目录不存在 / 权限 / 根不是一个
+ *     目录),**不是**「这个项目还没有文件」。前端不许把它渲染成空目录 ——
+ *     两者在屏幕上长得一模一样,而处置完全相反。
+ *   · `problem` 在 `unavailable` 时**必须**非空,且写明**绝对路径**与原因:
+ *     用户要能拿着它去磁盘上核对,而不是只知道「读不到」。
+ *   · `index.runtime: "not_migrated"` 说的是「平台这边**还没有**索引化这件事」
+ *     (`body_path` 列还不存在,P2 才加)。它不是「索引是空的」,所以前端要
+ *     **如实写出来**,不能让用户以为这些文件就该是孤儿。
+ */
+export interface WorkspaceView {
+  projectId: string;
+  /** 绝对路径:`<工作根>/projects/<projectId>` */
+  root: string;
+  runtime: "ok" | "unavailable";
+  /** `unavailable` 时非空,写明绝对路径与原因(可执行:用户能照着去盘上看) */
+  problem: string | null;
+  entries: WorkspaceEntryView[];
+  /**
+   * 列出被**上限**截断(深度 3 层 / 500 条,或有内容读不出来)——
+   * 到界不静默:屏幕上必须说明列表不全,否则「少列」看起来像「没有」。
+   */
+  truncated: boolean;
+  counts: {
+    /** `entries` 的条数(本次真的列出来的) */
+    entries: number;
+    /** 被索引引用且在盘上的条数 */
+    indexed: number;
+    /** 盘上有、索引里没有的文件数 */
+    orphanFile: number;
+  };
+  /** 索引里有、盘上没有(库与盘的**不一致处**,逐条带工件身份) */
+  missing: Array<{ path: string; artifactId: string; title: string }>;
+  /**
+   * 索引侧的能力状态:
+   *   - `runtime`: `"ok"` = `body_path` 可读;`"not_migrated"` = 这一列还不存在
+   *     (P0 的**真实状态**),读面照实说,不假装索引是空的;
+   *   - `paths`: 索引里正文路径的**总条数**(即使 `not_migrated` 也会如实给出条数
+   *     —— 那时它必然是 0,但 `runtime` 才是原因)。
+   */
+  index: { runtime: "ok" | "not_migrated"; paths: number };
+}
+
 /** 项目内的提问(角色之间,或对角色的)。**甲方看不到横向沟通**,只看发给自己那部分。 */
 export interface AskView {
   id: string;
@@ -1501,6 +1578,17 @@ export function eventProjectId(ev: ServerEvent): string | null {
 //                                                宿主内存,接不上时 `runtime:
 //                                                "unavailable"` —— 那时 `turn`
 //                                                一律 null 且**不是**「没在跑」。
+//   GET    /api/projects/:id/workspace        → { workspace: WorkspaceView }
+//                                                **只读**的「项目文件系统」观测面
+//                                                (设计 `docs/DESIGN-WORKSPACE.md`
+//                                                §4.4,**P0**):盘上有什么 + 索引
+//                                                引用了什么 + 两边对不对得上。
+//                                                `runtime: "unavailable"` 是
+//                                                **读不到根目录**,不是「空目录」;
+//                                                `index.runtime: "not_migrated"`
+//                                                是**索引化还没落地**(P2 才加
+//                                                `body_path`),不是「索引是空的」。
+//                                                项目不存在 → 404。
 //   ── 接待会话(第一个项目之前)──
 //   GET    /api/intake/messages               → IntakeMessagesResponse
 //                                                无需先建项目就能拉到与业务经理的

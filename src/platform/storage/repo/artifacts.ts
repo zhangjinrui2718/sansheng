@@ -383,6 +383,62 @@ export function updateArtifactBody(
   db.prepare(`UPDATE artifacts SET body = ?, updated_at = ? WHERE id = ?`).run(body, at, id);
 }
 
+// ── 索引化的读面(设计 `docs/DESIGN-WORKSPACE.md` §4.1 / §4.4)──────
+//
+// ⚠️ **今天 `body_path` 这一列还不存在** —— 它由 **P2** 的 migration 027 加上
+// (与 `body_sha256` / `body_bytes` / `commit_sha` 一起)。P0 只是**读面**,
+// 所以这里必须先问 schema 再查(`PRAGMA table_info`),读法与
+// `runtime/dispatcher.ts` 的 `deliveredArtifactIds` 逐字同源:
+//
+//   - 列不在 → `runtime: "not_migrated"` + 空 paths —— **如实报**「索引还没落地」;
+//   - 列在   → 查出这个项目里 `body_path` 非空的行。
+//
+// 为什么**不**返回一个空数组假装索引是空的:那会与「迁移已跑、但这个项目一件
+// 工件都还没落盘」**在结果上完全一样**,而前者是「机制缺一半」、后者是「项目还
+// 没干活」—— 本项目最贵的失败形态就是把这两种混成一种(7-E)。
+//
+// 为什么不是 `try { … } catch { return [] }`:一条 SQL 报错被吞掉之后,
+// 「列还没迁移」与「查询写错了」长得一模一样。`PRAGMA table_info` 是一次
+// **问得出答案**的检查,不需要靠异常区分。
+//
+// 为什么不在模块作用域缓存表结构:那是跨调用的进程内状态,而这条读面的纪律是
+// 「每次从库里重算」;`table_info` 是常数级开销。
+//
+// ⚠️ **P2 落地后这条读面自动点亮** —— 扫描模块与 UI 一行都不用改。
+
+/** 索引里的一条正文路径。`title` 随行带上,让「库里有、盘上无」能报出是哪件工件。 */
+export interface IndexedBodyPath {
+  /** 项目根相对路径(平台生成的 `artifacts/<id>-<slug>.<ext>`) */
+  path: string;
+  artifactId: string;
+  title: string;
+}
+
+export interface IndexedBodyPathList {
+  /** `not_migrated` = `body_path` 列还不存在(P0 的真实状态),不是「索引是空的」 */
+  runtime: "ok" | "not_migrated";
+  paths: IndexedBodyPath[];
+}
+
+export function listIndexedBodyPaths(
+  db: Database.Database,
+  projectId: string,
+): IndexedBodyPathList {
+  const columns = db.pragma("table_info(artifacts)") as ReadonlyArray<{ name: string }>;
+  if (!columns.some((c) => c.name === "body_path")) {
+    return { runtime: "not_migrated", paths: [] };
+  }
+  const rows = db
+    .prepare(
+      `SELECT id AS artifactId, title AS title, body_path AS path
+       FROM artifacts
+       WHERE project_id = ? AND body_path IS NOT NULL
+       ORDER BY body_path`,
+    )
+    .all(projectId) as ReadonlyArray<{ artifactId: string; title: string; path: string }>;
+  return { runtime: "ok", paths: rows.map((r) => ({ path: r.path, artifactId: r.artifactId, title: r.title })) };
+}
+
 /** 按 kind 计数 —— 「未解决阻塞/待审意见有多少」这类汇总读法。 */
 export function countArtifactsByKind(db: Database.Database, projectId: string): Record<string, number> {
   const rows = db
