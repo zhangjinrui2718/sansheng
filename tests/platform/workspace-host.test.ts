@@ -393,3 +393,46 @@ describe("③ 工作区坏掉 ⇒ 可见的失败(不是静默)", () => {
     expect(existsSync(join(resolve(workRoot), "projects", "pA", ".git"))).toBe(true);
   });
 });
+
+// ── ④ `POST /api/projects` 也要建工作区(真机死项目的回归)──────────
+
+describe("④ 经 HTTP 立项 ⇒ 同样建工作区", () => {
+  it("POST /api/projects 之后:目录 + .git + 两个文件 + 首次提交,workspace 路由是 ok", async () => {
+    const started = await startHost();
+
+    // ⚠️ 这条用例的由来(T7 真机冒烟):建仓此前只挂在 `project_open` **工具**那条路
+    // 上,于是经这个 API 建出来的项目没有目录也没有仓 —— `GET …/workspace` 一直回
+    // `runtime: "unavailable"`(ENOENT),而屏幕上看起来只是「这个项目还没有文件」。
+    // 它只有真机跑才看得出来,所以必须在这里钉一条回归。
+    const res = await started.app.request("/api/projects", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "HTTP 立项", client: "甲方", goal: "工作区要建出来" }),
+    });
+    expect(res.status).toBe(201); // 立项成功 = 201(实测;写 200 会当场红)
+    const body = (await res.json()) as {
+      project: { id: string };
+      workspaceBootstrapped?: boolean;
+    };
+    const pid = body.project.id;
+    const root = join(resolve(workRoot), "projects", pid);
+
+    // 响应里就有「建没建成」这个事实(不许把「调了个 void 函数」当成「建好了」)
+    expect(body.workspaceBootstrapped).toBe(true);
+    expect(existsSync(join(root, ".git"))).toBe(true);
+    expect(readFileSync(join(root, ".gitignore"), "utf8")).toContain("secrets/");
+    const readme = readFileSync(join(root, "README.md"), "utf8");
+    expect(readme).toContain("# HTTP 立项");
+    expect(readme).toContain("工作区要建出来");
+    expect(git(root, "log", "-1", "--format=%an <%ae>")).toBe("三生平台 <platform@sansheng.local>");
+    expect(git(root, "log", "-1", "--format=%s")).toContain("初始化项目工作区");
+    expect(git(root, "ls-files").split("\n").sort()).toEqual([".gitignore", "README.md"]);
+
+    // ⭐ 判据:读面从 `unavailable` 变成 `ok`(真机现场就是它一直 unavailable)
+    const ws = await started.app.request(`/api/projects/${pid}/workspace`);
+    const view = (await ws.json()) as { workspace: { runtime: string; root: string; problem: string | null } };
+    expect(view.workspace.runtime).toBe("ok");
+    expect(view.workspace.problem).toBeNull();
+    expect(view.workspace.root).toBe(root);
+  });
+});

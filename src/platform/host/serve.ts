@@ -374,8 +374,9 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
   // ══ 工作区:一个项目 = 一个 git 仓库(设计 `docs/DESIGN-WORKSPACE.md` §2/§3)══
   //
   // 三件事在这里接线,顺序就是它们的依赖顺序:
-  //   ① **建仓** —— 立项时(`ensureProjectWorkspace`),以及回合边界的兜底
-  //      (`ensureProjectRepo`:库里的项目可能比这次改动更老,那些项目没有仓);
+  //   ① **建仓** —— 立项时与 `POST /api/projects` 时(`ensureWorkspace`,一份实现),
+  //      以及回合边界的兜底(`ensureProjectRepo`:库里的项目可能比这次改动更老,
+  //      那些项目没有仓);
   //   ② **提交** —— 每个回合边界做一次 housekeeping(成功/失败/超时都做,7-N);
   //   ③ **索引向 git 收敛** —— 提交前重算工件正文的 sha/bytes,提交后回填
   //      `commit_sha`(设计 §3.4 的第 1、4 步)。
@@ -490,8 +491,22 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
    *
    * **幂等**:`initRepo` 只补缺的文件、已有仓时不重置任何东西。
    * 失败**必须可见**(项目行已经进了库,收不回来;能做的只有把现场说出来)。
+   *
+   * ⚠️ **这是「建工作区」的唯一一份实现,两个调用点共用**:
+   *   ① `project_open` 工具那条路(`handleUserMessage` 的回合收口,下面的调用点);
+   *   ② `POST /api/projects` 那条路(`createPlatformApp` 的 `ensureWorkspace` 注入)。
+   * 真机冒烟抓到过只接 ① 的后果:经 HTTP 建的项目**没有目录也没有仓**,
+   * `GET …/workspace` 一直回 `runtime: "unavailable"`(ENOENT)—— 一个死项目。
+   * 复制 README / `.gitignore` 文案就是漂移的开始,所以签名统一成**按 id 查行**。
    */
-  function ensureProjectWorkspace(projectId: string, row: { name: string; goal: string }): void {
+  function ensureWorkspace(projectId: string): void {
+    const row = getProjectRow(db, projectId);
+    if (row === null) {
+      // 项目行不在(被重置 / 删除)⇒ 没有「项目名 / 目标」可以写进 README。
+      // 不建一个没人认领的目录:工作区路由会把它列成孤儿,而没有任何人会去收拾。
+      log.warn(`platform: 建工作区失败 —— 库里找不到项目 ${projectId}(不建目录)`);
+      return;
+    }
     const root = projectRoot(projectId);
     try {
       mkdirSync(root, { recursive: true });
@@ -521,14 +536,15 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
   /**
    * 回合边界的兜底建仓:仓**在**就只花一次 `existsSync`。
    *
-   * 为什么需要它:仓本该在 `project_open` 建好,而**库里的项目可能比这次改动更老**
-   * (真实数据目录里的存量项目、测试里直接 INSERT 的项目行)。那些项目没有仓,
-   * 于是每个回合边界的提交都会失败 —— 一次 `existsSync` 换掉每回合一条可见失败。
+   * 为什么需要它:仓本该在 `project_open` / `POST /api/projects` 建好,而**库里的项目
+   * 可能比这次改动更老**(真实数据目录里的存量项目、测试里直接 INSERT 的项目行)。
+   * 那些项目没有仓,于是每个回合边界的提交都会失败 —— 一次 `existsSync` 换掉每回合
+   * 一条可见失败。
    */
-  function ensureProjectRepo(projectId: string, row: { name: string; goal: string }): boolean {
+  function ensureProjectRepo(projectId: string): boolean {
     const root = projectRoot(projectId);
     if (existsSync(join(root, ".git"))) return true;
-    ensureProjectWorkspace(projectId, row);
+    ensureWorkspace(projectId);
     return existsSync(join(root, ".git"));
   }
 
@@ -654,7 +670,7 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
     if (projectId === null) return; // 接待会话不建仓(设计 §2)
     const row = getProjectRow(db, projectId);
     if (row === null) return; // 项目已经不在库里(重置/删除):没有仓可提交
-    if (!ensureProjectRepo(projectId, row)) return; // 失败已在 reportWorkspaceProblem 里可见
+    if (!ensureProjectRepo(projectId)) return; // 失败已在 reportWorkspaceProblem 里可见
     const member = ORG.find((m) => m.id === agentId);
     const name = member?.name ?? getAgent(db, agentId)?.displayName ?? agentId;
     const ws = workspacePort();
@@ -1058,7 +1074,7 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
           // 拉工作区与项目页,而那一刻目录可能还不存在 —— 读面会如实报
           // `runtime: "unavailable"`,用户看到的是「这个项目没有工作区」。
           // 建仓失败**不阻止切换**(项目行已经在库里了,收不回来),但必须可见。
-          ensureProjectWorkspace(newProjectId, row);
+          ensureWorkspace(newProjectId);
           if (fromIntake) {
             // 顺序有讲究:**先迁消息,再广播,最后才丢会话**。
             //   迁 → 前端收到事件后立刻拉新项目的 messages,那时消息必须已经在了
@@ -2175,6 +2191,14 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
     // 不接的话读面会如实回 `unavailable`(不会假装空正文),但正文就都读不出来 ——
     // 所以这里给的是端口本身,拿不到时给一个明确拒绝的实现(不是 `undefined`)。
     workspace: workspacePort(),
+    // 建工作区:**`POST /api/projects` 那条路也要建仓**。
+    //
+    // 真机冒烟抓到的死项目:建仓此前只挂在 `project_open` 那条工具路径上,于是经
+    // HTTP 建出来的项目**没有目录也没有仓**,`GET …/workspace` 永远回
+    // `runtime: "unavailable"`(ENOENT)—— 而且屏幕上看起来只是「这个项目还没有文件」。
+    // ⚠️ 传的是**同一份实现**(`ensureWorkspace`):README / `.gitignore` 文案只有一处,
+    // 复制一份就是漂移的开始。
+    ensureWorkspace,
     live: {
       turns: () => hub.runningTurns(),
       dispatch: () => ({
