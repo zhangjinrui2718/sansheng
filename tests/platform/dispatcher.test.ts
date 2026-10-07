@@ -119,6 +119,29 @@ const board = (
  */
 const NO_COALESCE = { reportBatchSize: 1 } as const;
 
+/**
+ * **把兜底规则按住**(`review_undelivered_project`)—— 与上面的 `NO_COALESCE` 同一条理由。
+ *
+ * 这些用例测的是**别的机制**(消费语义 / 尝试预算 / 重启补跑),而它们的夹具都停在
+ * 「工作项全终结 + 有一条 `deliverable` 但**没验收**」—— 在新判据下那**正是**兜底要管的
+ * 死尾(`open` 的交付物永远变不成 `accepted`,`handover` 与收口因此永不成立),
+ * 于是业务经理会被反复叫醒:红的是**噪声**,不是被测性质。
+ *
+ * ⚠️ 按住它的判据必须是**结构化**的 —— 一条与工作项无关的未解决阻塞
+ * (`review_undelivered_project` 要求项目**真的安静**,含「没有未解决阻塞」)。
+ * 它不挂 `blocker_blocks`,所以 `resolve_blocked_work` 也不会被它点亮;
+ * severity 用 `low`,因此也不写 outbox(`blocker_opened` 只对 high|critical 写)。
+ *
+ * 兜底规则本身的行为由 `tests/platform/stalled-project.test.ts` 专门钉住。
+ */
+function silenceUndeliveredFallback(database: Database.Database = db): void {
+  insertBlocker(database, {
+    id: newId("b"), projectId: "p1", raisedByAgentId: "wk",
+    title: "夹具:把「没交付」兜底按住", detail: "见本函数注释",
+    severity: "low", status: "open", createdAt: T0,
+  });
+}
+
 const okTurn: DrainTurnReport = {
   aborted: false, timedOut: false, text: "好了", toolCalls: [],
 };
@@ -328,6 +351,7 @@ describe("collectTodos · 谁此刻能动手(纯查询,不接收任何「上次�
 
 describe("drainProject · 没有待办就什么都不做", () => {
   it("拆过、没有指派、没有提问 → 0 回合 exhausted", async () => {
+    silenceUndeliveredFallback();
     const w = mkWork({ status: "done" });
     // 把 review 也消掉(否则质检那条是待办)
     db.prepare(`UPDATE works SET review_state = 'done'`).run();
@@ -386,6 +410,7 @@ describe("drainProject · 尝试预算(库里的账本,取代内存 stallStore)"
   });
 
   it("目标真的动了就重新给预算 —— 不会把正在推进的事掐死", async () => {
+    silenceUndeliveredFallback();
     let n = 0;
     const r = await drainProject({
       db, projectId: "p1", now: () => T0, log: () => {}, maxAttemptsPerTodo: 1,
@@ -552,6 +577,7 @@ describe("drainProject · 硬上界(烧 token 的闸)", () => {
 
 describe("drainProject · 消费语义(at-least-once)", () => {
   it("工作项 done → 质检审 → 业务经理汇报一次,且两边都被消费掉", async () => {
+    silenceUndeliveredFallback();
     const w = mkWork();
     const r = await drainProject({
       db, projectId: "p1", now: () => T0, log: () => {}, ...NO_COALESCE,
@@ -596,6 +622,7 @@ describe("drainProject · 消费语义(at-least-once)", () => {
   });
 
   it("业务经理回合失败就不消费事件 —— 做完了不会没人汇报", async () => {
+    silenceUndeliveredFallback();
     const w = mkWork();
     await drainProject({
       db, projectId: "p1", now: () => T0, log: () => {}, maxRounds: 1, ...NO_COALESCE,
@@ -646,6 +673,7 @@ describe("排空器 · 重启后补跑(状态在库里)", () => {
       id: "w1", projectId: "p1", parentWorkId: null, title: "调研", goal: "g",
       status: "open", assigneeAgentId: "wk", createdAt: T0, updatedAt: T0,
     });
+    silenceUndeliveredFallback(db1);
     const first = await drainProject({
       db: db1, projectId: "p1", now: () => T0, log: () => {}, maxRounds: 1,
       runAgentTurn: async () => okTurn,

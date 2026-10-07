@@ -40,6 +40,7 @@ import { listProviders } from "../../src/platform/infra/providers.js";
 import { ensureOrg, ensureProjectOrg } from "../../src/platform/runtime/org.js";
 import { insertProject } from "../../src/platform/storage/repo/projects.js";
 import { insertWork } from "../../src/platform/storage/repo/works.js";
+import { insertBlocker } from "../../src/platform/storage/repo/blockers.js";
 import type { CreateSessionFn } from "../../src/platform/runtime/session.js";
 
 // ── 夹具 ────────────────────────────────────────────────────────
@@ -486,6 +487,16 @@ describe("③ D3:A 排空期间 B 敲门 → B 立刻被处理(不等下一个 t
     }); // A 有两条 ⇒ maxRounds=1 时**必定**故意停下
     seedProject(db, "pB", null, 2);
     seedTerminalWork(db, "pB", "wkB_terminal", 2); // B 起手没有可执行待办(不是「零工作项」)
+    // ⚠️ 本用例测的是 D3(敲门不被吞),**不是**兜底规则 —— 而「一条 cancelled 工作项 +
+    // 没有交付物」在新判据下正是 `review_undelivered_project` 要管的形态(全终结 +
+    // 零已验收交付物 + 安静),于是 B 起手就**会有**待办,断言的前提(「B 在这一趟里
+    // 已经被扫过、那会儿确实没有待办」)当场作废。用一条**结构化的**未解决阻塞把它
+    // 按住:它不挂工作项,所以 `resolve_blocked_work` 不会被点亮;severity=low 也不写 outbox。
+    insertBlocker(db, {
+      id: "b_fixture", projectId: "pB", raisedByAgentId: "wk",
+      title: "夹具:按住「没交付」兜底", detail: "见注释",
+      severity: "low", status: "open", createdAt: 2,
+    });
     // A 的回合慢、B 的聊天回合快 —— 这样「敲门落在 A 那一趟之内」是**结构保证**,
     // 不是靠 sleep 赌(第一版用固定 blocked + 立刻 release,敲门落在了那一趟**之后**,
     // 于是旧实现也会绿 —— 一条没有牙的测试,已实跑确认)。

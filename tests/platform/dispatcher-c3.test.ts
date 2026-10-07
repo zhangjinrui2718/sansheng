@@ -513,6 +513,18 @@ describe("C3 · 排空:整合 → 交付", () => {
       runAgentTurn: async () => okTurn,
       runWork: async () => { throw new Error("不该被调用"); },
     });
-    expect(second.visited, "第二次 tick 谁都不该被叫醒").toEqual([]);
+    // ⚠️ 这一条原先是 `toEqual([])`(「有终点」= 安静)。2026-10-07 加了兜底之后
+    // 它不再成立,而且**不成立是对的**:夹具里那个假业务经理从不真的收口,
+    // 于是 `close_project` 被叫到上限 ⇒ 平台**已经放弃**它 —— 那正是
+    // `escalate_abandoned_todo` 要如实报出来的事(「零待办」与「组织干完了」
+    // 在库里长得一模一样,这一批拆的就是这个假设)。
+    expect(
+      second.visited.filter((v) => v.kind === "handover"),
+      "交付那一环仍然不许被重复叫醒(本用例真正要钉的性质)",
+    ).toEqual([]);
+    expect(
+      second.visited.map((v) => v.kind),
+      "被叫醒的是**兜底**:平台放弃过一条待办,这件事必须有人接手",
+    ).toContain("escalate_stalled_work");
   });
 });

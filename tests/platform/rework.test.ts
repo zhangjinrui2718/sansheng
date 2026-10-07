@@ -41,6 +41,7 @@ import {
 import { insertArtifact } from "../../src/platform/storage/repo/artifacts.js";
 import { insertReviewVerdict } from "../../src/platform/storage/repo/reviewVerdicts.js";
 import { bumpAttempt } from "../../src/platform/storage/repo/dispatch.js";
+import { insertBlocker } from "../../src/platform/storage/repo/blockers.js";
 import {
   collectTodos, drainProject, renderTask, RULES,
   type DrainTurnReport, type DriverTodo,
@@ -325,6 +326,14 @@ describe("④ 排空器不再把刚退回的容器立刻又收口成 `done`", ()
 
 describe("⑤ `pass` 的消费与「哪个回合办成的」解耦(真机静默死锁的回归)", () => {
   it("**预算已用尽、那个回合永远不会再来 ⇒ pass 仍然要被消费掉**", async () => {
+    // ⚠️ 本用例测的是**消费**,不是兜底规则 —— 夹具停在「全终结 + 一条 `open` 交付物」
+    // (`open` 永远变不成 `accepted`),那正是 `review_undelivered_project`(见
+    // stalled-project.test.ts)要管的死尾。插一条未解决阻塞把它按住,否则红的是噪声。
+    insertBlocker(db, {
+      id: "b_fixture", projectId: "p1", raisedByAgentId: "wk",
+      title: "夹具:按住「没交付」兜底", detail: "见注释",
+      severity: "low", status: "open", createdAt: T0,
+    });
     // 真机现场:质检在 `answer_ask` 回合里判了「通过」(17:09:18),而这条
     // `review_work` 的尝试预算已经 3/3 用尽 ⇒ 那个回合再也不会发生 ⇒
     // `review_state` 永远是 `pending` ⇒ `close_finished_project` 要求

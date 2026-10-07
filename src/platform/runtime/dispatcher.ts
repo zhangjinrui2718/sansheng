@@ -245,6 +245,42 @@ export const TODO_KINDS = [
    */
   "resume_client",
   /**
+   * **平台已经不再叫醒某条待办了 —— 换个人来处置**(2026-10-07 补)。
+   *
+   * 用户原话:「如果项目没有交付,且一段时间内没有任何角色在干活,系统去问问 PM 现在进度」。
+   * ⚠️ **判据不是「一段时间没人在干活」,而是「库里写着平台已经对它放弃」** ——
+   * `dispatch_attempts` 到顶那一行。理由与这个项目**两次删掉内存 watchdog** 同源:
+   * 墙钟启发式要在「真的干完了」与「卡住了」之间猜,而那条边界上真机踩过坑
+   * (批次 20 的 `stallStore`:指纹漏一类状态 ⇒ 把真实进展读成无进展 ⇒ 掐死整条链)。
+   * 库里的账本**不需要猜**:它记的是「这条待办被叫醒过 N 次而目标一动不动」,
+   * 而「干完了」的待办**根本没有那一行**(待办消失 ⇒ 账本作废)。
+   *
+   * ⚠️ **它是「换人」,不是「再叫一次」**:判据里排除了本来就是项目经理的活
+   * (机械读 `RULES` 的 `then.targetRole`,不另写一份名单)—— 同一个模型被同一件事
+   * 叫过三次都不动,叫第四次不会有不同的结果。真机那次被放弃的是**质检**的
+   * `review_work`,换手到 PM 才有意义(事实也证明是 PM 写下了那份缺的交付物)。
+   *
+   * ⚠️ **升级链不许自噬**:被放弃的 `escalate_stalled_work` 自己**不再**触发升级
+   * (见 `collectRuleFacts` 里那条过滤)—— 否则 PM 不动 ⇒ 升级待办也耗尽 ⇒ 又升级,无限。
+   * 到 PM 为止:它再不动,就只剩读面那条「不会自愈」由人决定。
+   */
+  "escalate_stalled_work",
+  /**
+   * **所有工作项都真终结了,而项目一份已验收交付物都没有 —— 业务经理判断这是怎么了**
+   * (2026-10-07 补)。
+   *
+   * 这一格此前**没有任何规则**:`close_finished_project` 的资格判据里写着
+   * 「已验收交付物 ≥ 1」(否则「工作项全 done 而甲方手上什么都没有」不算完成),
+   * 而 `handover` 的资格判据是「有一份 **已验收** 的 deliverable」——
+   * 于是「全终结 + 0 交付物」时**两条都不成立**,项目永远是 `active` 且无人被叫醒。
+   * 真机形态见 AGENTS 那句「11 条全 done 而甲方要的那一份并不存在」。
+   *
+   * 它同时盖住另一种死尾:**交付物存在但永远是 `open`** —— 平台今天没有任何地方
+   * 会把 `open` 改成 `accepted`(`applyArtifactStatus` 全仓零生产调用方)⇒
+   * `handover` 与收口**永远**不成立。交给业务经理判断(它是唯一能对甲方开口的人)。
+   */
+  "review_undelivered_project",
+  /**
    * **这个项目没有一件没做完的事了,该业务经理判断要不要收口**(规则
    * `close_finished_project`)。
    *
@@ -311,6 +347,11 @@ const PRIORITY: Readonly<Record<TodoKind, number>> = {
   // 收口排**最后**:它成立的前提是「上面每一条都不成立」,所以它排在最后不是
   // 优先级偏好,是**顺序依赖** —— 有任何一件没做完的事,这条就压根不成立。
   close_project: 13,
+  // 两条**兜底**排在收口之后:它们的判据都是「上面那些都没能让项目继续动」
+  // (`escalate_stalled_work` 要账本到顶、`review_undelivered_project` 要全终结)
+  // —— 顺序本身就是它们与常规规则的分工,不是偏好。
+  escalate_stalled_work: 14,
+  review_undelivered_project: 15,
 };
 
 export interface DriverTodo {
@@ -721,6 +762,41 @@ export interface RuleFacts {
    * 真机上就是这样审了三遍)。
    */
   readonly reworkPending: readonly ReworkPending[];
+  /**
+   * **平台已经不再叫醒**的待办(`dispatch_attempts` 到顶的那些)—— 兜底规则的判据。
+   *
+   * 它是用户那句「一段时间内没有任何角色在干活」在**库里的机械形态**:
+   * 平台确实不再叫醒它了,而且这件事有记录(账本行 + `notified_at`),
+   * 不需要用墙钟去猜「安静了多久」。判据见 `collectRuleFacts` 的 `abandonedTodos`,
+   * 那里同时解释了**为什么排除项目经理自己的活**(换人才有意义)与
+   * **为什么升级待办自己不再触发升级**(不然是无限链)。
+   */
+  readonly abandonedTodos: readonly AbandonedTodo[];
+  /**
+   * **还可以被项目经理整合的根**的条数(`deliveryCollected` 且子树里还没有交付物)。
+   *
+   * 它复用 `integrate` 那条规则的**同一对函数**(不另写一份判据)—— 存在的理由见
+   * `review_undelivered_project` 的 `if`:那条兜底判的是**安静**,而「PM 此刻正要
+   * 去写交付物」不是安静。少了它,健康路径上每次「事件已被消费、PM 还没整合完」
+   * 都会惊动一次业务经理 —— **对着一条正在推进的流水线喊**。
+   */
+  readonly integratableRootCount: number;
+}
+
+/** 平台已经放弃叫醒的待办(账本到顶)。只搬结构化列,**不读任何正文**。 */
+export interface AbandonedTodo {
+  /** 待办的身份(`(项目, todo_key)` 里的那一半)—— 也是 `refs` 里给出去的东西 */
+  readonly key: string;
+  /**
+   * 它属于哪一类待办。
+   *
+   * 从 key 的前缀还原(`key` 的形态恒为 `${kind}:...`,所有 15 条规则的 key 都这样)——
+   * 账本表里**没有** kind 列,而「给账本加一列」要一笔迁移;前缀还原在读的一处做完,
+   * 并有 `TODO_KINDS` 兜底校验(还原不出来就是装配错误,不猜)。
+   */
+  readonly kind: TodoKind;
+  /** 已经叫醒过几次(= 到顶时的上限值) */
+  readonly attempts: number;
 }
 
 /** 一条规则产出的待办(还没挂上库里的尝试预算)。 */
@@ -1420,6 +1496,89 @@ export const RULES: readonly Rule[] = [
       "不是平台能从库里推出来的结论(§2.11.3)。终局那一次的正确行为是" +
       "「业务经理看着交付物说一句『可以收了』」,不是「平台觉得活干完了就销号」。",
   },
+  {
+    id: "escalate_abandoned_todo",
+    // 账本到顶这件事**在闭合触发集里没有名字**(它是排空器自己的记账,不发事件)——
+    // 按那张表的判据「闭合集里没有任何取值能让它变 ⇒ 老实写 `tick`」。
+    on: ["tick"],
+    if: (q) => {
+      const pm = q.members.find((m) => m.role === "project_manager");
+      if (pm === undefined || q.abandonedTodos.length === 0) return [];
+      const keys = q.abandonedTodos.map((t) => t.key);
+      return [{
+        agentId: pm.agentId, role: "project_manager", kind: "escalate_stalled_work",
+        // 集合谓词,与 `review_work` / `integrate` 同形:**进度 = key 变了**。
+        // 处置掉一条,它从集合里消失 ⇒ 新 key ⇒ 自动拿到新预算(at-least-once)。
+        key: `escalate_stalled_work:${keys.join("+")}`,
+        target: null, refs: keys, targetState: null,
+        label: `处置 ${keys.length} 条「平台已经不再叫醒」的待办`,
+      }];
+    },
+    then: { kind: "escalate_stalled_work", targetRole: "project_manager" },
+    why:
+      "**用户原话**(2026-10-07):「如果项目没有交付,且一段时间内没有任何角色在干活," +
+      "系统去问问 PM 现在进度」——方向对,但判据换了。" +
+      "⚠️ **不用「安静了多久」判**:那是墙钟启发式,要在「真的干完了」与「卡住了」之间猜," +
+      "而这个项目为那条边界付过两次代价(批次 20 的 `stallStore` 因「指纹漏一类状态 ⇒ " +
+      "把真实进展读成无进展 ⇒ 掐死整条链」被整块删除;`runningTurns` 是**宿主内存**的忙闩," +
+      "重启即清零,更不能当判据)。库里已经有**不需要猜**的那份记录:`dispatch_attempts`" +
+      "——「这条待办被叫醒过 N 次而目标一动不动」;而「干完了」的待办**根本没有那一行**" +
+      "(待办消失 ⇒ `pruneAttempts` 作废),两者在库里长得**完全不同**。" +
+      "⚠️ **判据是「换人」而不是「再叫一次」**:被放弃的待办本来就归 PM 的那些**不算**" +
+      "(`collectRuleFacts` 里机械读 `RULES` 的 `then.targetRole`)—— 同一个模型被同一件事" +
+      "叫过三次都不动,叫第四次不会有不同的结果。真机上被放弃的是**质检**的 `review_work`," +
+      "换手到 PM 才有意义(事实也证明是 PM 写下了那份缺的整合稿)。" +
+      "⚠️ **它此前是个真空**:账本到顶在规则表里**零读者** —— 只有 `announceDrain` 一条" +
+      "一次性的 `system` 通知(`notified_at` 保证只播一次),之后永久静默,而人不知道" +
+      "该做什么。真机 2026-10-07 那个静默死锁就是踩着这个真空走出来的。",
+  },
+  {
+    id: "review_undelivered_project",
+    on: ["work_status_changed", "artifact_inserted", "tick"],
+    if: (q) => {
+      const bm = q.members.find((m) => m.role === "business_manager");
+      if (bm === undefined) return [];
+      // 终止判据:项目已经不是 active(收口不可逆,别叫第二次)
+      if (q.projectStatus !== "active") return [];
+      // 空项目不归它 —— 那是 `decompose_empty_project` 的活(拆解由 PM 起头)
+      if (q.works.length === 0) return [];
+      // ── 「真的没有人在动」的条件(少一个就会对着一条**活着的**流水线喊)──
+      //
+      // 这条兜底的判据是**安静**,而「安静」必须逐条排除掉「其实还有人在动」。
+      // 真机回归(本批的变异自检)里正是这么红的:一个「工作项全 done、审也审完、
+      // 只是还没落交付物」的项目被反复叫醒 —— 而那条路上 `integrate` / `handover`
+      // 本来就会接手,业务经理白白多烧几个回合。
+      if (q.nonTerminalWorkCount > 0) return [];      // 还有人没跑完
+      if (q.pendingReview.length > 0) return [];      // 还有人等着审
+      if (q.events.length > 0) return [];             // 下游结果还没交代(业务经理马上会被叫)
+      if (q.unresolvedBlockerCount > 0) return [];    // 还有没解决的阻塞
+      // 还有根等着 PM 整合(**integrate 的同一对判据**)⇒ 他马上会去写交付物
+      if (q.integratableRootCount > 0) return [];
+      // 有**已验收**交付物 ⇒ 那是 `handover` 或 `close_finished_project` 的活
+      if (q.acceptedDeliverables.length > 0) return [];
+      return [{
+        agentId: bm.agentId, role: "business_manager", kind: "review_undelivered_project",
+        // key 用项目 id:这件事的身份就是项目本身,变化只可能来自上面那几条判据。
+        key: `review_undelivered_project:${q.projectId}`,
+        target: q.projectId, refs: [], targetState: null,
+        label: "判断这个项目为什么一份已验收交付物都没有",
+      }];
+    },
+    then: { kind: "review_undelivered_project", targetRole: "business_manager" },
+    why:
+      "**这一格此前没有任何规则**(2026-10-07 补)。判据三方同时成立:项目 `active` + " +
+      "工作项**全部真终结** + **零已验收交付物**。而另外两条最可能接手它的规则在这里" +
+      "**都恰好不成立**:`close_finished_project` 的资格判据里写着「已验收交付物 ≥ 1」" +
+      "(那一条是为「工作项全 done 而甲方手上什么都没有」加的),`handover` 的资格判据是" +
+      "「有一份 **已验收** 的 deliverable」⇒ 于是「全终结 + 0 交付物」时**无人被叫醒**," +
+      "项目永远是 `active`。真机形态就是 AGENTS 里那句「11 条全 done 而甲方要的那一份" +
+      "并不存在」。" +
+      "它同时盖住另一种死尾:**交付物写成 `open` 之后就永远是 `open`** —— 平台今天没有任何" +
+      "地方会把它改成 `accepted`(`applyArtifactStatus` 全仓零生产调用方)⇒ `handover` 与" +
+      "收口**永远**不成立,而库里看起来「有交付物」。交业务经理判断是刻意的:" +
+      "「这算不算交付 / 要不要重开范围 / 要不要如实告诉甲方」是**业务判断**," +
+      "不是平台能从结构化列里推出来的结论(§2.11.3,与 `close_finished_project` 同一条纪律)。",
+  },
 ];
 
 /**
@@ -1732,7 +1891,84 @@ function collectRuleFacts(
     // 结论按工作项**一次查全**(`latestVerdictsByWork`),不逐条查 —— 逐条查会让
     // 每个 tick 的查询数随工作项数线性长。
     reworkPending: collectReworkPending(db, projectId, works, latestVerdictsByWork(db, projectId)),
+    abandonedTodos: abandonedTodos(db, projectId),
+    integratableRootCount: countIntegratableRoots(works, deliverables),
   };
+}
+
+/**
+ * **平台已经不再叫醒的待办** —— 兜底规则(`escalate_stalled_work`)的判据来源。
+ *
+ * ── 判据为什么是 `notified_at` 而不是「attempts 到顶」────────────────
+ *
+ * `notified_at` 只在**排空器真的停在那里**时才写:一轮排空结束时 `runnable` 为空、
+ * 而它还挂在 `exhausted` 里,平台据此播报一次(就是项目页那条「组织停止推进」)。
+ * 它与「计数到顶」的差别在一次真机回归里现出来了:那条待办在**同一轮**里已经被
+ * 别的机制解决掉了(pass 被消费 ⇒ 待办消失 ⇒ 账本作废),而「计数到顶」的读数
+ * 是**上一轮**的,于是升级会对着一个已经解决的问题喊一次 —— **误报**,
+ * 而误报的代价是「报多了就没人看了」。`notified_at` 不含这种滞后:
+ * 目标一动,`bumpAttempt` 就把它清成 `null`,待办消失则整行被 `pruneAttempts` 删掉。
+ *
+ * ── 为什么这里要过滤两件事(两条都是判据的一部分,不是优化)──────
+ *
+ * ① **项目经理自己的活不算**:被放弃的待办若本来就归 PM(`RULES` 的 `then.targetRole`
+ *    是 `project_manager`,机械读那张表,不另写名单),再把它交给 PM 只是**同一个模型
+ *    被同一件事叫第四次** —— 尝试预算早就把这个答案说过了。这条兜底的价值是**换手**。
+ * ② **升级待办自己不算**(顺带被①挡住,是刻意的):`escalate_stalled_work` 的 owner
+ *    就是 PM,所以「PM 不动 ⇒ 升级待办耗尽 ⇒ 又生成一条升级待办」这条无限链
+ *    **结构上不可能**。⚠️ 这条不变式**由测试守**:哪天有人把
+ *    `escalate_abandoned_todo` 的目标角色改成别人,自噬防护会随之失效,
+ *    `tests/platform/stalled-project.test.ts` 那条用例会**当场变红**
+ *    —— 所以这里**不写**第二道显式守卫:它是当前实现下**没有读者**的代码
+ *    (变异自检实测:删掉它没有一个用例变红),而没有读者的保护是假保护。
+ *
+ * ⚠️ 账本里出现 `TODO_KINDS` 之外的 key = **装配错误**,这里**跳过而不是猜一个 kind**:
+ * 猜出来的 kind 会去查 `ownerByKind`,那样一个拼错的 key 会静默变成「PM 的活」而被排除,
+ * 于是这条兜底永远不响 —— 那正是「坏掉的检查返回一个看起来正常的答案」。
+ */
+/**
+ * 还有几条根**可以被整合**(`integrate` 的判据,**同一对函数**,不另写一份)。
+ *
+ * ⚠️ 复用是关键:`integrate` 的 `if` 与本函数必须永远同源,否则会出现
+ * 「规则说没得整合、兜底说没人要整合」这种两边都以为对方在管的状态 ——
+ * 那正是这个项目为「两份定义会漂」付过好几次代价的形态。
+ */
+function countIntegratableRoots(
+  works: readonly WorkRow[],
+  deliverables: readonly ArtifactRow[],
+): number {
+  const children = childrenByParent(works);
+  const deliverableWorkIds = new Set(
+    deliverables.map((a) => a.workId).filter((id): id is string => id !== null),
+  );
+  return works.filter(
+    (w) =>
+      w.parentWorkId === null &&
+      deliveryCollected(w, children) &&
+      !hasDeliverableOnSubtree(w, children, deliverableWorkIds),
+  ).length;
+}
+
+function abandonedTodos(db: Database.Database, projectId: string): AbandonedTodo[] {
+  const ownerByKind = new Map<TodoKind, RuleTargetRole>();
+  for (const r of RULES) ownerByKind.set(r.then.kind, r.then.targetRole);
+  const out: AbandonedTodo[] = [];
+  for (const row of listAttempts(db, projectId).values()) {
+    if (row.notifiedAt === null) continue; // 平台还没停在那里过 ⇒ 不算「已放弃」
+    const kind = todoKindOfKey(row.todoKey);
+    if (kind === null) continue;
+    if (ownerByKind.get(kind) === "project_manager") continue;
+    out.push({ key: row.todoKey, kind, attempts: row.attempts });
+  }
+  return out.sort((a, b) => a.key.localeCompare(b.key));
+}
+
+/** `todo_key` 的前缀就是 kind(`key` 的形态恒为 `${kind}:...`;还原不出来给 `null`)。 */
+function todoKindOfKey(key: string): TodoKind | null {
+  const sep = key.indexOf(":");
+  if (sep <= 0) return null;
+  const head = key.slice(0, sep);
+  return (TODO_KINDS as readonly string[]).includes(head) ? (head as TodoKind) : null;
 }
 
 /**
@@ -2116,6 +2352,51 @@ export function renderTask(db: Database.Database, todo: DriverTodo): string {
         "(只剩记忆与代码工具)。**拿不准就别关** —— 代价只是下一次 tick 再问你一遍;" +
         "关错的代价是整个项目作废。"
       );
+    case "escalate_stalled_work": {
+      // 只摆结构化事实:哪几条、属于谁、被叫了几次。**不复述它们各自的内容** ——
+      // 模型自己 `work_list` / `board_list`(与 `renderDownstream` 同一条纪律)。
+      const rows = todo.refs.map((key) => {
+        const kind = todoKindOfKey(key);
+        return `- \`${key}\`(${kind ?? "认不出的 kind"})`;
+      });
+      return [
+        "# 现在轮到你了:这几条待办,**平台已经不再叫醒它们了**",
+        "",
+        "平台按 `(项目, 待办)` 记账:同一条待办被叫醒到上限而**目标一动不动**,就不再叫了。",
+        "下面这些都已经到顶 —— 继续叫下去不会有不同的结果,所以平台把判断权交给你:",
+        "",
+        ...rows,
+        "",
+        "## 你要做的判断(不是「再跑一遍」)",
+        "",
+        "1. **换人**:这件事该谁做?该改派就改派(`work_assign`)",
+        "2. **重新划范围**:目标太大 / 说不清,就拆开或改写它(`work_update`)",
+        "3. **登记阻塞**:卡在外部依赖上,就 `blocker_open` 说清卡在哪(它会被汇报给甲方)",
+        "4. **取消并说明**:这块范围不要了,就 `work_update` 成 `cancelled`,",
+        "   并把原因落成一条工件 —— **别让它无声消失**",
+        "",
+        "⚠️ 上面每一条你**真的动了之后**,对应的待办会从账本里消失,它也就重新拿到预算;",
+        "你什么都不做的话,这一条同样会被叫到上限然后停下 —— 那时平台不再自动升级,",
+        "只剩下项目页那条「不会自愈」由人决定。",
+      ].join("\n");
+    }
+    case "review_undelivered_project": {
+      const p = getProjectRow(db, todo.projectId);
+      return (
+        "# 现在轮到你了:**这个项目一份已验收交付物都没有,而所有工作项都终结了**\n\n" +
+        `项目 \`${todo.projectId}\`「${p?.name ?? "(读不到项目名)"}」:\n\n` +
+        "- `projects.status` = **active**(还没收口)\n" +
+        "- 非终态工作项 = **0**(没有人在干活)\n" +
+        "- **已验收交付物 = 0**\n\n" +
+        "⚠️ 两件事因此在库里同时成立:**收口的判据不成立**(它要求至少一份已验收交付物)," +
+        "**交付的判据也不成立**(它要求有一份已验收的交付物)⇒ 平台不会替你决定。\n\n" +
+        "## 你要做的判断\n\n" +
+        "1. **产出到底在哪**:是有人写了但没写成交付物(那就让 PM 重新整合,或你自己落一份)," +
+        "还是压根没产出(那要重新划范围)?\n" +
+        "2. **要不要如实告诉甲方**:这个项目**没有可交付的东西** —— 那正是该说清楚的一件事。\n" +
+        "3. **这个项目怎么收场**:继续推、还是 `project_close` 如实收口(收口不可逆)。\n"
+      );
+    }
     case "execute_work":
       // 执行角色那条不走这里 —— `runWorkItem` 自己拼 `composeWorkPrompt`。
       // 留着这一支是为了穷尽性:新增 TodoKind 时这里会编译失败。
