@@ -163,6 +163,8 @@ import {
   artifactKindTone,
   artifactStatusLabel,
   artifactStatusTone,
+  DELIVERY_VERDICT_LABEL,
+  DELIVERY_VERDICT_TONE,
   deliverableTypeLabel,
   deliverableTypeTone,
   fmtTime,
@@ -172,6 +174,7 @@ import {
 import { HtmlReport } from "@/components/deliverable/HtmlReport";
 import { CodeService } from "@/components/deliverable/CodeService";
 import { ContentDriftNote } from "@/components/deliverable/ContentDriftNote";
+import { DeliveryVerdictActions } from "@/components/deliverable/DeliveryVerdictActions";
 import { bodyMode, htmlReportFileName, shortSha } from "@/lib/deliverable";
 
 /** 展示顺序:结论类优先,过程类靠后。表里没有的 kind 落在末尾(不丢)。 */
@@ -1229,6 +1232,29 @@ export function ArtifactRow({
             {deliverableTypeLabel("code_service")}
           </Pill>
         )}
+        {/*
+          甲方收货的状态(029)。**只在交付物上出现** —— 非交付物的 acceptance
+          是 `null`(契约),而这里不许拿它去猜一个默认值。
+          ⚠️ 三个分支分开渲染:`null`(没表态)不是任何一种裁决,把它并进 else
+          会让「等你验收」在屏幕上消失。
+        */}
+        {a.acceptance !== null && (
+          a.acceptance.verdict === null ? (
+            <Pill
+              tone={a.acceptance.handedOver ? "amber" : "mute"}
+              title={a.acceptance.handedOver ? "已交付,等你表态" : "还没交付给你"}
+            >
+              {a.acceptance.handedOver ? "等你验收" : "未交付"}
+            </Pill>
+          ) : (
+            <Pill
+              tone={DELIVERY_VERDICT_TONE[a.acceptance.verdict]}
+              title={a.acceptance.at === null ? undefined : fmtTime(a.acceptance.at)}
+            >
+              {DELIVERY_VERDICT_LABEL[a.acceptance.verdict]}
+            </Pill>
+          )
+        )}
         <span className="ss-body" style={{ color: "var(--bone)" }}>
           {a.title || "(无标题)"}
         </span>
@@ -1273,6 +1299,15 @@ export function ArtifactRow({
         {a.links.length > 0 &&
           ` · 关联 ${a.links.map((l) => `${l.rel}→${l.targetId}`).join(" · ")}`}
       </div>
+      {/*
+        验收动作(029)。**挂在这里是因为甲方就在这一页读正文** —— 让他看完还要
+        跳到项目页去表态,等于把「有事等你」藏起来。
+        ⚠️ `handedOver === false` 时组件自己会说明「还没交付」而不显示按钮
+        (后端也会拒:没收到货谈不上验收)。
+      */}
+      {a.acceptance !== null && (
+        <DeliveryVerdictActions artifactId={a.id} title={a.title} acceptance={a.acceptance} />
+      )}
       {open && <ArtifactDetail id={a.id} known={known} />}
     </article>
   );

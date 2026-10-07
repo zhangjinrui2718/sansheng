@@ -70,6 +70,13 @@ export const PLATFORM_DATA_TABLES: readonly string[] = [
   // ⚠️ 它引 `works` / `projects` / `agents`,而 `artifacts` 那条是 **NO ACTION**
   // ⇒ 删工件不会级联,但删工作项会。所以排在 `works` 之前、`artifacts` 之后。
   "review_verdicts",
+  // 甲方的验收裁决(migration 029)
+  //
+  // ⚠️ 它引 `projects`(CASCADE)与 `artifacts`(**NO ACTION**)⇒ 必须排在**两者
+  // 之前**(外键安全顺序:子先于父)。它是**事实数据**,不是派生数据 —— 但重置会
+  // 清掉项目,而「一个不存在的项目的验收裁决」没有任何意义,所以照样要清。
+  // 漏登记的后果与 021 那条同形:「重置」在有验收记录的库上直接 500。
+  "delivery_verdicts",
   // 知识语料(migration 028,`docs/DESIGN-KNOWLEDGE.md`)
   //
   // ⚠️ 它引 `projects`(ON DELETE CASCADE)⇒ 排在父表之前。它是**派生数据**

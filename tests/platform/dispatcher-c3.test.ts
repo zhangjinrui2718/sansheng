@@ -37,6 +37,7 @@ import {
 } from "../../src/platform/storage/repo/works.js";
 import { insertArtifact } from "../../src/platform/storage/repo/artifacts.js";
 import { openDeliverableSession } from "../../src/platform/storage/repo/sessions.js";
+import { insertDeliveryVerdict } from "../../src/platform/storage/repo/deliveryVerdicts.js";
 import {
   collectTodos, drainProject, renderTask, RULES,
   type DrainTurnReport,
@@ -441,16 +442,34 @@ describe("C3 · 排空:整合 → 交付", () => {
       runAgentTurn: async (agentId, task) => { pmWritesDeliverable(agentId, task); return okTurn; },
       runWork: async () => { throw new Error("这一串里没有工作项要执行"); },
     });
-    // ⚠️ 第三项 `bm:close_project` 是 2026-10-06 真机终局之后**预期**多出来的:
-    // 交付会话在 `bm:handover` 那个回合**成功结束后**才建出来(C4 的顺序),
-    // 于是「所有工作项终结 + 审过 + 有交付物 + 交付物已交付」在那一刻**同时成立**
-    // —— 这个项目真的做完了,而平台以前没有任何一条规则认领这件事。
+    // ⚠️ 第三项 `bm:close_project` 在 2026-10-06 真机终局之后曾经**预期**多出来,
+    // 而 **2026-10-08(029)把它挡回去了 —— 这是用户裁决,不是回归**:
     //
-    // 它证明的正是新规则读的是**库里的状态**而不是「刚才发生了什么」:
-    // 交付会话一落库,下一次查库就看见了(批次 21 的纪律)。
+    //   「业务经理把交付物给到甲方之后,项目进入『待收货』状态」
+    //   「只有甲方认可了之后,项目才算是结项」
+    //
+    // 那一刻成立的仍然是「工作项全终结 + 审过 + 有交付物 + 已交付」,但**甲方还没
+    // 看过货**。以前 `close_project` 会在这里出现,是因为判据读的是
+    // `artifacts.status='accepted'` —— 而那是**申请人自己写的**(PM 提示词逐字教它
+    // 这么写)。所以这一格是这次改动的牙:**它现在必须等甲方的裁决**。
     expect(r.visited.map((v) => `${v.agentId}:${v.kind}`)).toEqual([
-      "pm:integrate", "bm:handover", "bm:close_project",
+      "pm:integrate", "bm:handover",
     ]);
+
+    // ── 正向续演:甲方点头之后,那条收口待办**真的会来** ──────────────
+    //
+    // 只断言「少了什么」是一条假牙(一个被写坏的规则会让它更绿)。所以这里把
+    // 甲方那一步补上,证明收口门**只是被挡住了**,不是坏了。
+    const artifacts = db
+      .prepare(`SELECT id FROM artifacts WHERE kind = 'deliverable'`)
+      .all() as Array<{ id: string }>;
+    expect(artifacts.length, "夹具:项目经理那一轮真的写出了交付物").toBe(1);
+    insertDeliveryVerdict(db, {
+      projectId: "p1", artifactId: artifacts[0]!.id, verdict: "accept", note: null,
+      createdAt: T0 + 1000,
+    });
+    const kindsAfter = board().runnable.map((t) => t.kind);
+    expect(kindsAfter, "甲方接受了 ⇒ 收口门重新成立").toContain("close_project");
   });
 
   it("**终止判据生效 ⇒ 整合只叫醒一次**:第二次排空不再有 integrate", async () => {
@@ -513,18 +532,35 @@ describe("C3 · 排空:整合 → 交付", () => {
       runAgentTurn: async () => okTurn,
       runWork: async () => { throw new Error("不该被调用"); },
     });
-    // ⚠️ 这一条原先是 `toEqual([])`(「有终点」= 安静)。2026-10-07 加了兜底之后
-    // 它不再成立,而且**不成立是对的**:夹具里那个假业务经理从不真的收口,
-    // 于是 `close_project` 被叫到上限 ⇒ 平台**已经放弃**它 —— 那正是
-    // `escalate_abandoned_todo` 要如实报出来的事(「零待办」与「组织干完了」
-    // 在库里长得一模一样,这一批拆的就是这个假设)。
+    // ⚠️ 这一条原先是 `toEqual([])`(「有终点」= 安静),2026-10-07 加了兜底之后
+    // 改成「必须有 `escalate_stalled_work`」—— 因为那个假业务经理从不真的收口,
+    // `close_project` 被叫到上限 ⇒ 平台放弃它 ⇒ 兜底必须有人接手。
+    //
+    // ⚠️ **2026-10-08(029)它又变了,而且这次变成「安静」是对的**:甲方还没验收,
+    // 收口待办**根本不产生**(收口门新增的两条判据之一),于是没有任何东西被
+    // 叫到上限、没有任何东西被放弃 ⇒ 整个项目停在**待收货**,零待办。
+    // 所以这里的判据不是「安静」(那与「组织干完了」长得一模一样),而是
+    // **「安静,而且原因是球在甲方那边」** —— 两句都得验。
     expect(
       second.visited.filter((v) => v.kind === "handover"),
       "交付那一环仍然不许被重复叫醒(本用例真正要钉的性质)",
     ).toEqual([]);
     expect(
       second.visited.map((v) => v.kind),
-      "被叫醒的是**兜底**:平台放弃过一条待办,这件事必须有人接手",
-    ).toContain("escalate_stalled_work");
+      "甲方还没验收 ⇒ 收口门不成立(这就是「待收货」在规则侧的形态)",
+    ).not.toContain("close_project");
+    expect(
+      second.visited.map((v) => v.kind),
+      "而且**没有任何待办被放弃**:安静的原因是等甲方,不是平台放弃了谁",
+    ).not.toContain("escalate_stalled_work");
+    // 球在甲方那边的**机器表达**:已交付 + 无裁决。
+    const pending = db
+      .prepare(
+        `SELECT COUNT(*) AS n FROM project_sessions s
+          WHERE s.deliverable_artifact_id IS NOT NULL
+            AND NOT EXISTS (SELECT 1 FROM delivery_verdicts v WHERE v.artifact_id = s.deliverable_artifact_id)`,
+      )
+      .get() as { n: number };
+    expect(pending.n, "待收货:货交出去了、甲方还没表态").toBe(1);
   });
 });

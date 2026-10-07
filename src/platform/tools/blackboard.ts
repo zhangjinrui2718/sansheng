@@ -23,6 +23,7 @@ import {
 } from "../storage/repo/artifacts.js";
 import { isArtifactKind, ARTIFACT_KINDS, type ArtifactKind } from "../identity/role.js";
 import { latestReviewVerdict } from "../storage/repo/reviewVerdicts.js";
+import { latestDeliveryVerdict } from "../storage/repo/deliveryVerdicts.js";
 import { CODE_SERVICE_REQUIRED_META, type CodeServiceFacts } from "../codeservice/port.js";
 import { getWork } from "../storage/repo/works.js";
 import {
@@ -530,11 +531,13 @@ const boardWrite: PlatformTool = {
     // 生产调用方是工作区索引对账,不是模型),所以「更新」在这里的正确形态是
     // **新写一份 + 把旧的那份退休** —— 这样「当前是哪一版」在库里始终只有一个答案。
     //
-    // 判据(三条同时成立,全是结构化列):
+    // 前置(两条,全是结构化列):
     //   ① 这次写的是 `deliverable` 且挂到了某条工作项上(`workId`);
-    //   ② 这条工作项最近一次审查结论是 **`fail`**;
-    //   ③ 候选是**比那次结论更早**、且仍是 `accepted` 的交付物 —— 那正是被质检否掉、
-    //      而作者刚刚重交的那一版。
+    //   ② 它是一份**定稿**(`status='accepted'`)—— 见下面那段 ⚠️。
+    //
+    // 「旧的那份该退休吗」有**两条独立的判据**(任一成立即退休),见循环里那一段:
+    //   ① 质检判过不通过(2026-10-07,`review_verdicts`);
+    //   ② **甲方拒收过那一版**(2026-10-08,029 的 `delivery_verdicts`)。
     //
     // ⚠️ **只在新交付物是 `accepted` 时做**。若作者交的是一份 `open` 草稿就把旧的
     // `accepted` 退休,这条工作项会**一份已验收交付物都不剩**,而平台今天**没有任何
@@ -544,13 +547,25 @@ const boardWrite: PlatformTool = {
     const supersededIds: string[] = [];
     if (kind === "deliverable" && workId !== null && statusRaw === "accepted") {
       const lastFail = latestReviewVerdict(ctx.db, workId);
-      if (lastFail !== null && lastFail.verdict === "fail") {
-        for (const prev of listArtifacts(ctx.db, pid, { workId, kind: "deliverable", limit: 500 })) {
-          if (prev.id === id || prev.status !== "accepted") continue;
-          if (prev.createdAt >= lastFail.createdAt) continue;
-          setArtifactStatus(ctx.db, prev.id, "superseded", at);
-          supersededIds.push(prev.id);
-        }
+      for (const prev of listArtifacts(ctx.db, pid, { workId, kind: "deliverable", limit: 500 })) {
+        if (prev.id === id || prev.status !== "accepted") continue;
+        // 两条**独立的**「该退休了」判据(任一成立即退休):
+        //
+        // ① 质检判过不通过(2026-10-07):那之后作者重新交了一份;
+        // ② **甲方拒收过这一版**(029,2026-10-08):甲方在界面上点了「要改」,
+        //    作者重交了一份。
+        //
+        // ⚠️ ② 是**按被拒的那一份**判的(不是按工作项):拒收天然是「针对某一版」
+        // 说的话。少了它,被拒的那一版会永远留在 `status='accepted'` 里 ⇒
+        // 收口门(它要求当前每一版都被甲方接受)会读到一个**永远消不掉的拒收**
+        // ⇒ 项目永远收不了口,而作者明明已经改完重交了。
+        const failedReview =
+          lastFail !== null && lastFail.verdict === "fail" && prev.createdAt < lastFail.createdAt;
+        const rejectedByClient =
+          latestDeliveryVerdict(ctx.db, prev.id)?.verdict === "reject";
+        if (!failedReview && !rejectedByClient) continue;
+        setArtifactStatus(ctx.db, prev.id, "superseded", at);
+        supersededIds.push(prev.id);
       }
     }
 

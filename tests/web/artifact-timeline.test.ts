@@ -96,6 +96,12 @@ function art(
     updatedAt: at,
     links: [],
     workId,
+    // 025 / 026 / 029 的三个字段 —— 夹具必须造全(契约必填,而 `tests/**`
+    // 不参与 typecheck ⇒ 漏了只在运行期变 `undefined`,读面的 `!== null`
+    // 会把它当成「有一份在等验收」)。见 artifact-dag.test.ts 同一处注释。
+    deliverableType: null,
+    codeService: null,
+    acceptance: null,
     ...over,
   };
 }

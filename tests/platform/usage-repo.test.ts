@@ -195,6 +195,51 @@ describe("usage · 聚合(合计 / 今日 / 按角色 / 按天)", () => {
     expect(r.totals).toEqual({ input: 120, output: 6, cacheRead: 6, turns: 3 });
   });
 
+  /** 造一条工作项(`turn_usage.work_id` 有外键 ⇒ 账不能凭空挂在 id 上)。 */
+  const mkWork = (id: string): void => {
+    insertWork(db, {
+      id, projectId: "p1", parentWorkId: null, title: `活 ${id}`, goal: "g",
+      status: "in_progress", assigneeAgentId: "wk", createdAt: 1, updatedAt: 1,
+    });
+  };
+
+  it("★ 按**工作项**分组(2026-10-08):`null` 是独立的一桶,**不许并进任何工作项**", () => {
+    // 这一维回答的是「哪件活在花钱」—— 而 `byAgent` 只回答「谁在花钱」。
+    // 真机那条单回合 109k token 的工作项,在只有 byAgent 的读面上与别的活
+    // 长得一模一样。
+    mkWork("w_big");
+    mkWork("w_small");
+    put({ agentId: "wk", createdAt: at(0), workId: "w_big", inputTokens: 900 });
+    put({ agentId: "wk", createdAt: at(0), workId: "w_small", inputTokens: 10 });
+    put({ agentId: "pm", createdAt: at(0), workId: "w_small", inputTokens: 30 });
+    // 平台回合:不挂任何工作项(播报 / 答复处置 / 收口判断)—— 真实花费
+    put({ agentId: "pm", createdAt: at(0), workId: null, inputTokens: 5 });
+
+    const r = aggP1();
+    // 量的降序;**null 桶排在最后**(它是「不挂环节」,不是「最小的 id」)
+    expect(r.byWork.map((b) => b.workId)).toEqual(["w_big", "w_small", null]);
+    expect(r.byWork[0]).toMatchObject({ workId: "w_big", input: 900, turns: 1 });
+    expect(r.byWork[1]).toMatchObject({ workId: "w_small", input: 40, turns: 2 });
+    expect(r.byWork[2]).toMatchObject({ workId: null, input: 5, turns: 1 });
+
+    // **分项之和 = 合计**:丢一个桶或并一个桶都会让这条等式不成立 ——
+    // 而对不上的账本会让人先怀疑数字,再怀疑整个观测面。
+    const sum = r.byWork.reduce((n, b) => n + b.input, 0);
+    expect(sum).toBe(r.totals.input);
+  });
+
+  it("★ 按工作项分组**不受 `dayLimit` 截断**(工作项是十位数量级,回合是千位)", () => {
+    for (let i = 0; i < 12; i += 1) {
+      const wid = `w_${String(i).padStart(2, "0")}`;
+      mkWork(wid);
+      put({ agentId: "wk", createdAt: at(0), workId: wid, inputTokens: i + 1 });
+    }
+    const short = aggregateProjectUsage(db, "p1", { now: NOW, days: 7, dayLimit: 1 });
+    // `byDay` 被截(那是它的契约),而 `byWork` 一条都不许少
+    expect(short.byDay).toHaveLength(1);
+    expect(short.byWork).toHaveLength(12);
+  });
+
   it("`today` 是**本地日历日**,不是「最近 24 小时」", () => {
     put({ agentId: "wk", createdAt: startOfLocalDay(NOW) - 1, inputTokens: 7 }); // 昨夜 23:59:59.999
     put({ agentId: "wk", createdAt: startOfLocalDay(NOW), inputTokens: 9 }); // 今晨 00:00

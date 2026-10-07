@@ -23,6 +23,8 @@ import type {
   BlockerStatus,
   ChangeStatus,
   DeliverableType,
+  DeliveryVerdict,
+  ProjectLifecycleStatus,
   ProjectRole,
   ProjectStatus,
   WorkStatus,
@@ -31,20 +33,56 @@ import type { Tone } from "@/components/ui/primitives";
 
 // ── 项目 ────────────────────────────────────────────────────────
 
-export const PROJECT_STATUS_LABEL: Record<ProjectStatus, string> = {
+/**
+ * 项目生命周期状态 → 中文。
+ *
+ * ⚠️ key 是 `ProjectLifecycleStatus`,不是 `ProjectStatus` —— 它比库里的那一列
+ * **多一个派生取值 `awaiting_acceptance`(待收货)**。把它写成 `ProjectStatus`
+ * 会让新增的那个取值落进 `?? t` 的英文兜底,而那正是本文件第 2 条纪律要挡的
+ * 「显示一个没人认识的英文」。
+ *
+ * ⚠️ `done` 读作**已结项**(不是「已交付」):2026-10-08 起「交付」发生在
+ * **待收货之前** —— 货交出去了、甲方还没点头,项目就已经不是「进行中」了。
+ * 把 `done` 继续读成「已交付」会让两个不同的时刻共用一个词,而它们的处置
+ * 截然不同(一个在等甲方,一个是终局)。
+ */
+export const PROJECT_STATUS_LABEL: Record<ProjectLifecycleStatus, string> = {
   draft: "立项中",
   active: "进行中",
+  awaiting_acceptance: "待收货",
   paused: "已暂停",
-  done: "已交付",
+  done: "已结项",
   abandoned: "已放弃",
 };
 
-export const PROJECT_STATUS_TONE: Record<ProjectStatus, Tone> = {
+export const PROJECT_STATUS_TONE: Record<ProjectLifecycleStatus, Tone> = {
   draft: "mute",
   active: "jade",
+  // 琥珀而不是竹子:它是**球在甲方那边** —— 需要有人动手,而不是一个已经完成
+  // 的状态。与 `ClientQuestionDock`(等你回答)同色系:两件事都是「等你」。
+  awaiting_acceptance: "amber",
   paused: "amber",
   done: "bamboo",
   abandoned: "cinnabar",
+};
+
+// ── 甲方验收(029)──────────────────────────────────────────────
+
+/**
+ * 甲方对一份交付物的裁决 → 中文。
+ *
+ * ⚠️ **`null`(还没表态)不在这张表里** —— 它不是一种裁决。读面拿 `null` 时
+ * 必须自己说「等你验收」,不许落到这里取一个 `?? t` 的兜底:把「还没表态」
+ * 显示成任何一句话,都是在替甲方说他说过的话。
+ */
+export const DELIVERY_VERDICT_LABEL: Record<DeliveryVerdict, string> = {
+  accept: "已接受",
+  reject: "要改",
+};
+
+export const DELIVERY_VERDICT_TONE: Record<DeliveryVerdict, Tone> = {
+  accept: "bamboo",
+  reject: "cinnabar",
 };
 
 // ── 工作项 ──────────────────────────────────────────────────────
@@ -270,6 +308,23 @@ export const changeStatusTone = (s: string): Tone =>
   (CHANGE_STATUS_TONE as Record<string, Tone>)[s] ?? "mute";
 
 // ── 展示工具 ────────────────────────────────────────────────────
+
+/**
+ * token 数的**紧凑读法**(`1_294_099` → `1.29M`)。
+ *
+ * ⚠️ **它是给人扫一眼的近似值,不是精确数**。所以:
+ *   · 任何**合计**那一格都必须把精确值放进 `title`(`toLocaleString()`),
+ *     「看起来差不多的数字」在成本这件事上会被当成事实引用;
+ *   · 小于 1000 时原样返回(近似一个三位数没有意义,反而丢信息);
+ *   · `NaN` / 负数一律 `"—"` —— 编一个 `0` 会让「读不到」看起来像「没花钱」
+ *     (与 `ProjectLiveView.runtime: "unavailable"` 同一条纪律)。
+ */
+export function fmtTokens(n: number): string {
+  if (!Number.isFinite(n) || n < 0) return "—";
+  if (n < 1000) return String(n);
+  if (n < 1_000_000) return `${(n / 1000).toFixed(n < 10_000 ? 1 : 0)}k`;
+  return `${(n / 1_000_000).toFixed(2)}M`;
+}
 
 /** `toLocaleString()` 的短格式:带日期,秒级精度不需要。 */
 export function fmtTime(ts: number): string {

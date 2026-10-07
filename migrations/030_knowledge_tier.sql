@@ -1,0 +1,67 @@
+-- 030 · 知识语料分级(tier):定稿 vs 原始材料
+--
+-- ── 它补的是什么 ────────────────────────────────────────────────
+--
+-- 「worker 执行中抓来的外部网页这种材料,能不能作为**低权重**语料,在 search 里
+-- 降低召回权重?」—— 平台**没有**能力机械判定「这段文字是不是从外网抓来的」:
+-- 语料只有两类来源(工件正文 / `kind IN ('user','assistant')` 的消息),
+-- 一次工具调用的返回**根本不进语料**(见 `knowledge/reindex.ts` 的选择子)。
+-- 所以「外网标记」这件事平台做不到,做出来就是编造一个平台没有的事实。
+--
+-- 平台**能**机械判定的只有一件事:这份来源是**定稿**还是**原始材料**。
+-- 而 worker 抓来的外部材料必然落在原始材料这一类里 —— 它是 `evidence` 工件、
+-- 或 assistant 的工作叙述(`docs/DESIGN-KNOWLEDGE.md` §7 已经把这条写成
+-- 「worker 从外部网页抓来的内容没有 tainted 标记」这个**已知缺口**)。
+--
+-- 所以这一列说的是「来源的**地位**」,不是「内容的**来源渠道**」:
+--   · `primary`  = 定稿/结论:deliverable / decision / client_question /
+--                  meeting_note / change_record / project_brief / work_brief,
+--                  以及 `kind='user'` 的消息(甲方原话);
+--   · `material` = 未加工的现场材料:evidence / hypothesis / note / review_finding,
+--                  以及 `kind='assistant'` 的消息(角色自己的工作叙述,包括它
+--                  从任何地方抄回来的段落)。
+-- 取值域与判据的真身在 `src/platform/storage/repo/knowledge.ts`
+-- (`KNOWLEDGE_TIERS` / `artifactTier` / `messageTier`)。
+--
+-- ── 为什么这一列**不加 CHECK**(先例是 022 的 `session_messages.todo_kind`)──
+--
+-- 判据域随 TS 里的常量变(今天判 `artifacts.kind`,将来可能按别的结构化列再分),
+-- 每加/改一个取值就要写一条**重建表**的迁移来放宽闭集(015 就是这么来的:
+-- CHECK 只能靠重建表放宽)。022 的文件头把这条论证写透了 ——
+-- 「闭集改由读写两侧的 TypeScript 保证,那一侧不会漂」:
+--   · 写:`ReplaceSourceSpec.tier` 收的是 `KnowledgeTier` 类型,不是 `string`;
+--   · 读:`rowToChunk` 拿 `isKnowledgeTier` 校验,不认识的取值**抛错**
+--     (与同一段代码对 `source_kind` 的处置逐字同形 —— fail loud,不静默降级);
+--   · 迁移外:`KNOWLEDGE_TIERS` 是唯一一处声明。
+--
+-- ── 为什么可空,以及**为什么不回填** ─────────────────────────────
+--
+-- `tier` 可空 ⇒ 030 之前索引的行全是 `NULL`。**`NULL` 在这里是一个事实,
+-- 不是缺参数**:那一行索引的时候平台**还没有算过**这件事,它的地位无从得知。
+--
+-- 回填(按今天的判据给存量行补一个值)就是**给存量行编一个平台没算过的值** ——
+-- 与 022 文件头那段话同一条纪律(那里拒绝给存量行补 `todo_kind`,因为
+-- 「猜错的方向正好是这次要修的 bug」)。这里同理:回填会让「这一行的地位是
+-- 索引时算出来的」这句话在存量行上变成假的。
+--
+-- 自愈的方式是**重扫**,不是回填:
+--   · T3 回合边界 `reindexProjectKnowledge`(成功/失败/超时/被中断四条路都到)
+--   · T5 宿主启动 `reindexAllKnowledge`
+-- 而重扫能修好它的前提是 `replaceSourceChunks` 把 tier 纳进幂等判据 ——
+-- 只看 `sha256` 的话,存量行正文没变就**永远**停在 NULL。那条判据已经改了
+-- (见 `repo/knowledge.ts` 的 `prev.sha256 === sha && prev.tier === tier`)。
+-- 在重扫跑到之前,读面**如实给 `null`**:读不到不是取值,不许渲染成 `material`。
+--
+-- ── 本迁移只做加法 ──────────────────────────────────────────────
+--
+-- 一条 `ALTER TABLE ... ADD COLUMN`,**一行 DROP 都没有**,不改任何已有列、
+-- 不重建表、不改任何既有约束,不动 FTS5 表结构与三个同步触发器。
+-- `knowledge_chunks` **没有子表**(没有别的表 REFERENCES 它),所以这一列
+-- 不需要登记进任何「引用子表」清单。
+-- ⇒ 030 **不是** `INTENTIONAL_REBUILDS` 的成员,`tests/platform/migrations.test.ts`
+-- 的重名守卫不会把它当成「同一张表被两个迁移创建」。
+--
+-- ⚠️ 它不影响检索的**召回**:filters 与 MATCH 一个字都没改,只多了一层排序
+-- (`primary` 组在前,组内保持原来的 bm25 顺序)。`limit` 的语义不变(仍是前 N 条)。
+
+ALTER TABLE knowledge_chunks ADD COLUMN tier TEXT;

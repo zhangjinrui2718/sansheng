@@ -1505,7 +1505,7 @@ export type ArtifactKind =
 **不再使用** `waiting_for_decision` 作为通用等待态 —— 等待是一个**实体状态**(Blocker / Question),不是工件状态。这消除了 7-N 那次「未收敛只有一句 note、零现场」问题的结构性来源。
 
 ```
-Artifact:  open → accepted | rejected | superseded
+Artifact:  open → accepted(定稿) | rejected | superseded
 Work:      open → in_progress → blocked → in_progress
                     └→ done | failed | cancelled
 Blocker:   open → acknowledged → resolved | deferred | rejected
@@ -1513,7 +1513,17 @@ Change:    proposed → under_review → accepted → implemented
                          └──────→ rejected
 Meeting:   convened → in_progress → concluded
 Project:   draft → active → paused → done | abandoned
+Delivery:  (无「状态」可言) 甲方裁决 append-only:accept | reject   ← 029
 ```
+
+> ⚠️ **`artifacts.status = 'accepted'` 读作「定稿」,不读作「甲方验收了」**(2026-10-08,029)。
+> 它由**作者**写(`board_write` 的 `status`),表达的是「我整合完了、可以交出去了」——
+> 那是**作者的自述**,所以模型写得了。甲方的裁决是**另一张表**(`delivery_verdicts`,
+> append-only,只有 HTTP 面能写,任何角色都没有这个能力)。
+> 在这之前两者共用一个词,于是收口门读的是**申请人的自我声明**(见 §「甲方验收」)。
+>
+> **「待收货」不是 `Project` 那一行的取值**,而是 `active` 项目上的一个**派生状态**:
+> 判据 = 存在「已交付(有交付会话)且没有裁决」的交付物。理由与落点见 §「甲方验收」。
 
 ### 6.4 交付物类型(`deliverable_type`,migration 025 / 026)
 
@@ -1951,9 +1961,10 @@ AgentRuntime
 
 | 角色 | 「可执行的待办」 | 判据来源 |
 |---|---|---|
-| `business_manager` | **有下游结果还没向甲方交代**(且过了**合并窗口**:攒够 N 条 / 最老的一条等到 T)**或**有立刻可播的(失败 / 高危阻塞);**甲方答复到了还没处置**(`resume_client`,020);**有已验收交付物还没交付**(`handover`);**这个项目没有一件没做完的事了**(`close_project`,第 13 条 —— 2026-10-06 真机终局补) | `dispatch_events`(outbox)里未消费的行 / `client_questions.consumed_at` / `project_sessions.deliverable_artifact_id` / `projects.status` |
-| `project_manager` | 有人问它;有变更待评;**项目一个工作项都没有**(还没拆解);**有工作项被派给了非 worker**;**有工作项停在 `blocked` 而没有驱动者**(第 11 条规则 `resolve_blocked_work` —— 2026-10-06 补记,此前本表漏了它) | `pendingWork.ts` + `works` |
-| `worker` | **分派给它、前置已满足、还没到终态**的工作项 | `pendingWork.ts` 的 `myOpenWorks` |
+| `business_manager` | **有下游结果还没向甲方交代**(且过了**合并窗口**:攒够 N 条 / 最老的一条等到 T)**或**有立刻可播的(失败 / 高危阻塞);**甲方答复到了还没处置**(`resume_client`,020);**有定稿交付物还没交付**(`handover`);**这个项目没有一件没做完的事了、且甲方全部验收过**(`close_project`,第 13 条 + 029);**这个项目连一份定稿交付物都没有**(`review_undelivered_project`,第 17 条兜底) | `dispatch_events`(outbox)里未消费的行 / `client_questions.consumed_at` / `project_sessions.deliverable_artifact_id` / `delivery_verdicts` / `projects.status` |
+| `project_manager` | 有人问它;有变更待评;**项目一个工作项都没有**(还没拆解);**有工作项被派给了非执行角色**;**有工作项停在 `blocked` 而没有驱动者**(第 11 条规则 `resolve_blocked_work` —— 2026-10-06 补记,此前本表漏了它);**有工作项停在 `failed`**(第 14 条 `recover_failed_work`) | `pendingWork.ts` + `works` |
+| `research_worker` / `coding_worker` | **分派给它、前置已满足、还没到终态**的工作项 | `pendingWork.ts` 的 `myOpenWorks`(`isExecutorRole` 是唯一判据) |
+| 产出被退回的那一位(执行角色或 PM) | **质检判了不通过**(第 15 条 `rework`);**甲方拒收了一份交付物**(第 18 条 `rework_rejected`)—— 目的地都是**产出的作者**,第 3 轮换人给 PM | `review_verdicts` / `delivery_verdicts` |
 | `quality_reviewer` | 有人问它;有变更待评;**有做完但没审的产出** | `works.status='done' AND review_state='pending'` |
 
 **「等待审查」是一个真状态,不是一条被硬编出来的假查询。** 它落在 `works.review_state`(`none | pending | done`,migration 013):
@@ -1964,7 +1975,8 @@ AgentRuntime
 
 **下游结果同理落进 outbox**(`dispatch_events`):工作项迁入 `done` / `failed` / `blocked`、或登记了新阻塞时写一行。业务经理的汇报待办 = 「这个项目还有没被交代的事件吗」。它因此**不会因为撞上排空上界而消失** —— 批次 20 真机跑出来过「工作项做完了而没有人向甲方汇报」。
 
-**收口是「判断」而不是「推导」(第 13 条 `close_finished_project`,2026-10-06 补)。** 真机终局:11 条工作全 `done` + 全审过、outbox 空、四类计数全 0 —— 而 `projects.status` 永远是 `active`;`project_close` 工具一直有生产调用方却**零自动触发**。规则读八件事(非终态工作项 / 待审产出 / 未消费事件 / 等甲方的提问 / 未处置的答复 / 未解决阻塞 / 已验收交付物是否 ≥1 / 是否全部已交付),**全部只读结构化的列**;判据成立时**叫醒业务经理去判断**,不自动关闭 —— 收口不可逆,而「收不收口」不是一行 `status` 能推出来的结论。终止判据 = `projects.status` 变终态。
+**收口是「判断」而不是「推导」(第 13 条 `close_finished_project`,2026-10-06 补)。** 真机终局:11 条工作全 `done` + 全审过、outbox 空、四类计数全 0 —— 而 `projects.status` 永远是 `active`;`project_close` 工具一直有生产调用方却**零自动触发**。规则读八件事(非终态工作项 / 待审产出 / 未消费事件 / 等甲方的提问 / 未处置的答复 / 未解决阻塞 / 已定稿交付物是否 ≥1 / 是否全部已交付),**全部只读结构化的列**;判据成立时**叫醒业务经理去判断**,不自动关闭 —— 收口不可逆,而「收不收口」不是一行 `status` 能推出来的结论。终止判据 = `projects.status` 变终态。
+> ⚠️ **2026-10-08(029)补了第 9、10 两格:甲方没表态、或拒收了 ⇒ 不叫收口。** 那两格的判据在 `delivery_verdicts` 上,与「已定稿」是**两件事**(见 §「甲方验收」)。在此之前收口门读的是作者写下的 `accepted`,等于读申请人的自我声明。
 
 **「要达成什么」必须出现在验收现场(2026-10-06 补)。** `renderPendingReviews` 此前只渲染 `id` / 标题 / 负责人,而 `review_work` 的任务正文问的是「目标达成了吗?」—— **判据在提示词里,达成目标的定义不在**。质检于是去读项目经理的整改 brief 当判据,真机现场是「严格按 work_brief 的『目录式引用 + 严禁复述/改写』执行,4 条判据全部满足」,而甲方明确答复过要的是「一份」。现在渲染 `projects.goal` 与 `works.goal` **两层**,并写死优先级(工作项 goal > 项目 goal > brief,冲突以 goal 为准并写进 `review_finding`)。goal 是**数据**不是硬编码判据 —— 与旧 pi 的 `Blackboard.goal` 同一个思路:**谁都可以改,但验收现场必须看得见它**。
 
@@ -2097,10 +2109,10 @@ AgentRuntime
 | 6c | 甲方接口 + 待办注入面 | `ClientChannel` 端口 + `pendingWork` | 不动 | 中 | ✅ `1ed35eb` |
 | 7 | BC6 Execution | 一个回合 + 跑工作项 + CLI 驱动 | 不动 | 中高 | ✅ `bf2283b` |
 | 7b | 角色提示词单元 | 四角色 12 个单元(693 行) | 不动 | 中 | ✅ `4b7e1c6` |
-| **12** | **传输层 + 宿主** | 平台侧 HTTP/WS + `ClientChannel` 真实实现 + 托管前端 | 不动 | **中高** | ⬜ 未做 |
-| 13 | 前端改接 | 换父节点:会话 → 项目;补项目/工作项/待办三屏 | 不动 | 中 | ⬜ 未做 |
-| 14 | 调度器 | 超时巡检 + 周期对焦 | 不动 | 中 | ⬜ 依赖 12 |
-| **8** | **清场** | — | DROP 旧表;删旧模块与它们的测试 | **中高(原标"低")** | ⬜ 依赖 12–14 |
+| **12** | **传输层 + 宿主** | 平台侧 HTTP/WS + `ClientChannel` 真实实现 + 托管前端 | 不动 | **中高** | ✅ `9c62c01` 一带(W2–W7;此后又长到 39 条路由 + 7 tab 并成 6 tab) |
+| 13 | 前端改接 | 换父节点:会话 → 项目;补项目/工作项/待办三屏 | 不动 | 中 | ✅ W4–W7(「待办」后来并入对话页右下角,**没有第七个 tab**) |
+| 14 | 调度器 | 超时巡检 + 周期对焦 | 不动 | 中 | ✅ 宿主 `setInterval` 兜底 + `collectTodos` 的无状态排空(批次 21 起;不再需要「周期对焦」这个独立概念) |
+| **8** | **清场** | — | DROP 旧表;删旧模块与它们的测试 | **中高(原标"低")** | ✅ 批次 15 + 18(`src/server/` 与两份历史文档已删) |
 
 **阶段 1 故意选成纯逻辑**,因为它零依赖、可穷举测试,且是整个设计的支点(§4)。事后看这个排序是对的:后面每一步都站在一个已验证的授权模型上,返工为零。
 
@@ -2430,3 +2442,155 @@ insertWork(db, { id: "W0", parentWorkId: null, title: "整合与最终交付", �
 `tests/platform/c4-deliverable-session-e2e.test.ts`(真宿主,断言「甲方的话与业务经理的回话
 在**同一条线**」)。三个变异自检都实跑过:把 `ensureMainSession` / `mainSessionOf` / `tell`
 逐条改回旧规则,对应用例当场变红,恢复后逐字一致。
+
+---
+
+## 甲方验收与「待收货」(2026-10-08 · migration 029)
+
+> **用户裁决(原话)**:
+> 「把甲方从『只读观察者』变成闭环里的一等主体:交付 → 甲方验收 → 收口 / 返工 / 下一版」
+> 「只有甲方认可了之后,项目才算是结项,业务经理把交付物给到甲方之后,项目进入『待收货』状态」
+
+### 一、它修的是一道**假门**
+
+在此之前,交付与收口两道门的资格判据都是「存在 `status='accepted'` 的 `deliverable`」——
+而那个 `accepted` 是**申请人自己写的**:
+
+- `harness/system_prompts/project_manager.core.md` 逐字教它「`status` 用 `accepted`,
+  因为交付那一环的资格判据是『已验收的交付物』」;
+- 真机库(2026-10-08 实测)7 份 `deliverable` **全部** `accepted`,作者是 `wk` / `pm` 自己;
+- 平台三处注释自己承认这条路是死的(`tools/blackboard.ts` / `runtime/dispatcher.ts`):
+  「平台今天**没有任何地方**会把 `open` 改成 `accepted`」—— 把它当事实记着,没当缺陷修。
+
+⇒ **门的判据 = 申请人的自我声明**,而收口**不可逆**。这不是「少一道校验」,是
+「组织可以自己宣布甲方验收了,然后自己销号」。
+
+对照一下同一个月里的另一道门:`code_service` 的写入口被设计成**平台当场去盘上核对七件事**
+(`tools/blackboard.ts` 的 `verifyCodeService`)—— 那才是真门。两者的差别不是严格程度,
+是**判据是不是由提出主张的人自己写**。
+
+### 二、两个词,两件事(这次一定要分清)
+
+| 词 | 谁写 | 意思 |
+|---|---|---|
+| `artifacts.status='accepted'` | **作者**(`board_write`) | **定稿**:我整合完了,可以交出去了 |
+| `delivery_verdicts.verdict` | **只有甲方** | **收不收**:accept / reject |
+
+把两者混成一个词,就是上面那道假门的来源。所以 029 **没有**去改 `artifacts.status` 的语义
+(那会让存量库里「已定稿待交付」的交付物全部失格 —— 一次静默的语义迁移),而是**补上缺的那一半事实**。
+
+### 三、为什么「待收货」是一个**派生状态**,而不是 `projects.status` 的新取值
+
+加一个取值要**重建 `projects`**(SQLite 的 CHECK 只能收紧不能放宽,015 的实测),
+而那张表有 **14 张 `ON DELETE CASCADE` 的子表**(实测 `PRAGMA foreign_key_list`:
+`project_assignments` / `works` / `blockers` / `change_requests` / `asks` / `meetings` /
+`project_sessions` / `dispatch_attempts` / `dispatch_events` / `turn_usage` / `client_questions` /
+`review_verdicts` / `artifacts` / `knowledge_chunks`)。026 的探针已经证明:数据少的时候
+那种重建**不报错而静默清空子表**。为一个**完全可以从别的表算出来**的状态去动 14 张表的级联,
+是把一个查询换成一次数据风险。
+
+⇒ 判据只有一条,落在 `delivery_verdicts` 上:
+
+```
+待收货 ⟺ 存在「已交付(project_sessions.deliverable_artifact_id 非空)且没有裁决」的交付物
+```
+
+- **读面**:`transport/views.ts` 的 `lifecycleOf` —— `active` 项目在这一条成立时**显示**为
+  `awaiting_acceptance`(`ProjectLifecycleStatus`,契约里的派生取值;`projects.status` 那一列不变);
+- **规则**:`collectRuleFacts` 的 `acceptancePending`(收口门的一格);
+- **工具门**:`tools/project.ts` 的 `project_close`(模型直接调也绕不过去)。
+
+三处读的是**同一个函数** `deliveryAcceptance()`(`storage/repo/deliveryVerdicts.ts`)——
+两份判据会漂,而这个项目为「两份定义会漂」付过好几次代价。
+
+⚠️ **它只精化 `active`**:`paused` / `done` / `abandoned` 不显示待收货 —— 那三种状态下
+「还有货没验收」是**收不了口的原因**,不是项目此刻的状态。混进去会让「我按了暂停」在屏幕上
+变成「等收货」。
+
+### 四、唯一写入口是 HTTP,而且没有一个角色有能力
+
+`POST /api/artifacts/:id/verdict`(`{verdict: "accept"|"reject", note?}`)。它**不是工具**:
+做成工具就意味着某个角色的 ceiling 里有它,而那个角色是模型扮演的 —— 「甲方验收」又会退化成
+「模型替甲方点头」。所以它与 `POST /api/client-questions/:id/answer` 同一条纪律:
+**甲方的话由甲方点出来**。
+
+四条拒收,每条都带可执行的处置:
+
+| 情形 | 码 | 为什么 |
+|---|---|---|
+| 工件不是 `deliverable` | 400 | 给一份 `evidence` 盖章没有意义 |
+| 项目已收口(`done`/`abandoned`) | 409 | 收口不可逆;之后再验收等于给已经生效的结论补签 |
+| **还没交付给你** | 409 | 没收到货,谈不上验收 —— 这是「待收货」这个词的机器表达 |
+| 理由 > 2000 字 | 400 | 那句话会**逐字**进返工任务正文,没有上界就是一条吃掉 context 的路 |
+
+**append-only**:改判(拒收 → 返工 → 再交付 → 接受)是新写一行,历史全留;读面取
+`(created_at, seq)` 最大的那条 —— 与 021 的 `review_verdicts` 同一条理由(只留最后一条
+= 改判现场消失)。
+
+### 五、拒收之后有人接手(第 18 条规则 `rework_rejected_delivery`)
+
+与第 15 条 `rework_failed_review` **同构**:一行结构化结论 → 下一步。
+
+| | 质检返工(021,第 15 条) | 甲方拒收(029,第 18 条) |
+|---|---|---|
+| 结论在哪 | `review_verdicts.verdict='fail'` | `delivery_verdicts.verdict='reject'` |
+| 目的地 | **产出的作者**;没有作者退 PM;第 3 轮换人 | **同一个判据**(共用 `reworkOwner`) |
+| 终止判据 | 那条工作项上出现了比结论更新的产出 | **那之后又交了一份定稿**(`deliverable` + `accepted`) |
+
+⚠️ **第二条的差别是刻意的、也是回归里现出来的**:甲方拒收之后,唯一能让流水线继续的事是
+「再交一版 → 再交付 → 再裁决」。作者写一条 `note`(「我明天改」)就算返工完成的话,
+这条待办消失、被拒的那一版还在、收口门仍然不成立、**没有任何人再被叫醒** ——
+那正是本项目最怕的静默停(「零待办」与「组织干完了」长得一模一样)。
+
+⚠️ **甲方那句话(`note`)照原样进任务正文** —— 与 `rework` 的「正文一个字都不搬」相反。
+理由:质检意见是几千字(复述白占 context),而甲方通常只说一句话,且它是**唯一的现场**
+(裁决不是工件,模型 `board_read` 读不到它)。没写理由时**不替他编**,如实说「他没写」,
+并指出唯一能问的人(业务经理)。
+
+### 六、被拒的那一版必须退休
+
+`board_write` 在「新的定稿交付物落盘」时会把**被拒收的那一版**标成 `superseded`
+(与质检返工同一处逻辑,`tools/blackboard.ts`)。少了它,收口门会读到一个**永远消不掉的拒收**
+⇒ 作者明明改完重交了,项目却永远收不了口。
+
+### 七、这次改动同时改掉的措辞
+
+- `project_manager.core.md` 里「`status` 用 `accepted` —— 交付那一环的资格判据是『已验收的交付物』」
+  → **「定稿」**;
+- `business_manager.core.md` 的收口那一节:交出去之后**不是收口**,而是**待收货**;
+  只有甲方接受之后平台才会再叫醒它判断收口;
+- `close_finished_project` 的 `why` 与三条消费点(`RuleFacts.acceptedDeliverables` /
+  `handover` / 兜底规则)的注释:统一到「定稿」与「甲方裁决」两个词。
+
+### 八、回归
+
+`tests/platform/delivery-acceptance.test.ts`(31 条)钉住:唯一写入口与四条拒收 ·
+追加式改判 · 收口门「接受之前不成立、接受之后成立」 · `project_close` 工具绕不过去
+(`abandoned` 不受挡) · 拒收 → 返工目的地与终止判据 · 待收货派生状态与三态读面 ·
+被拒那版的退休。`tests/web/delivery-verdict.test.ts`(10 条)钉住界面三态不许混成两态
+(尤其:**「还没表态」不许渲染成任何一种裁决**)。
+
+---
+
+## 成本:只做观测,不设上界(2026-10-08)
+
+> **用户裁决**:「针对『成本没有上界』现在这个阶段可以放松一点,**先只做 observation**」。
+
+所以这一批**没有**加任何闸门(不拦、不警告、不自动停)。做的是把观测面补完:
+
+- **`byWork`**:按**工作项**分桶(此前只有 `byAgent` / `byDay`)。
+  `byAgent` 回答「谁在花钱」,**`byWork` 回答「哪件活在花钱」** —— 后者才是能做决定的那一问。
+  真机事故(2026-10-06)是一条工作项**单回合读进 109,231 token** 撞墙钟被 `abort()`;
+  在只有 `byAgent` 的读面上,它和别的活长得一模一样。
+  `work_id IS NULL` 的那一桶是**平台回合**(播报 / 答复处置 / 收口判断)—— 真实花费,
+  既不许并进某条工作项(假归属),也不许丢掉(丢了之后分项和与合计对不上)。
+  **不截断**:工作项是十位数量级,截掉一条就可能正好截掉「最贵的那条」。
+- **前端第一次有读者**:`useProjectUsage` 此前**一个渲染点都没有**(hook 与端点都在,
+  没有任何页面用它 —— 「代码里写了逻辑」≠「它有读者」的第 N 次复发)。项目页新增「成本」段:
+  全历史 / 窗口 / 今日三格 + 谁花的 + **花在哪件活上**,窗口与"最近一笔"都写在明面上
+  (一个没有窗口的合计数字看起来永远是对的)。
+- 反造假:`usage === null` 且未查完 ⇒ 「加载中」(不是 0);读失败 ⇒ 印 error;
+  窗口内没有账 ⇒ 「一笔都没有」,不拿「现在」冒充。
+
+**仍然没有的**(如实):预算闸门、按工作项的 token 上界、超支告警。它们是下一批的事
+—— 而观测面先落地,是因为**不知道钱花在哪,设上界只能靠猜**。

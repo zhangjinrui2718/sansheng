@@ -40,9 +40,10 @@
 import { useCallback, useState } from "react";
 import { PageHeader, Pill, Section, StatStrip, EmptyState, KV, Flag } from "@/components/ui/primitives";
 import { ClientQuestionCard } from "@/components/client/ClientQuestionCard";
+import { DeliveryVerdictActions } from "@/components/deliverable/DeliveryVerdictActions";
 import {
   useProjectAsks, useProjectChanges, useProjectDetail, useProjectLive, useProjectMessages,
-  useProjectWorkspace,
+  useProjectUsage, useProjectWorkspace,
 } from "@/lib/data";
 import { platformNoticeLabel, type PlatformNoticeKind } from "@/lib/platformNotices";
 import { liveHeadline, orgRuntime } from "@/lib/orgState";
@@ -57,7 +58,10 @@ import {
   blockerStatusTone,
   changeStatusLabel,
   changeStatusTone,
+  deliverableTypeLabel,
+  deliverableTypeTone,
   excerpt,
+  fmtTokens,
   fmtTime,
   projectStatusLabel,
   projectStatusTone,
@@ -155,6 +159,14 @@ export function ProjectDetailPage() {
     loading: workspaceLoading,
     error: workspaceError,
   } = useProjectWorkspace(projectId);
+  // 成本观测面(2026-10-08)。**只读、不设上界** —— 用户裁决是「先只做 observation」,
+  // 所以这里没有任何闸门:它只回答「花了多少 / 谁花的 / 花在哪件活上」。
+  // `days: 7` = 含今日共 7 个本地日历日(契约窗口),全历史那格不受它影响。
+  const {
+    data: usage,
+    loading: usageLoading,
+    error: usageError,
+  } = useProjectUsage(projectId, { days: 7 });
   // 两类平台记录的**分类**(platformNotices.ts)与**状态派生**(orgState.ts)都是纯函数 ——
   // 页面只渲染结果,不自己认字符串、也不自己编状态。
   const runtime = orgRuntime({ messages, live: live.data });
@@ -186,6 +198,14 @@ export function ProjectDetailPage() {
                   value: detail.counts.pendingQuestions,
                   tone: detail.counts.pendingQuestions > 0 ? "amber" : undefined,
                   title: "等你回答的问题(来自 /api/client-questions 的同一批工件)",
+                },
+                {
+                  label: "待验收",
+                  value: detail.counts.pendingAcceptance,
+                  tone: detail.counts.pendingAcceptance > 0 ? "amber" : undefined,
+                  title:
+                    "已经交付给你、而还没表态的交付物(029)。与「待答」并列:两件事都是「有事在等你」。" +
+                    "判据与收口门同源 —— 它们不清零,项目就收不了口。",
                 },
                 {
                   label: "内部提问",
@@ -426,6 +446,56 @@ export function ProjectDetailPage() {
             )}
           </Section>
 
+          {/*
+            「待你验收」(029)。为什么它与「待你回答」并列而不是塞进工件列表:
+            它是**球在甲方那边**的时刻 —— 交付物已经交到你手上了,组织这边没有
+            任何人会再动它,直到你说收或不收。放远了就等于「有事在等你」没人知道
+            (真机第一条 client_question 就是这么被漏掉的,见 ClientQuestionDock 头注释)。
+          */}
+          <Section
+            title="待你验收"
+            count={detail.awaitingAcceptance.length}
+            hint="需要你处理 · 收不收由你说"
+            hintTitle="来源:ProjectDetail.awaitingAcceptance(029)。判据只有一条:已交付(有交付会话)、而且甲方还没有裁决 —— 与收口门、project_close 门读的是同一条(deliveryAcceptance)。这里点了才算数:模型写在工件上的 accepted 是「定稿」,不是你的验收。"
+          >
+            {detail.awaitingAcceptance.length === 0 ? (
+              <EmptyState>没有等你验收的东西。</EmptyState>
+            ) : (
+              <div className="grid gap-2">
+                {detail.awaitingAcceptance.map((a) => (
+                  <article key={a.artifactId} className="sansheng-card p-3" title={a.artifactId}>
+                    <div className="flex items-center gap-2 flex-wrap">
+                      {a.deliverableType !== null && (
+                        <Pill tone={deliverableTypeTone(a.deliverableType)} title="deliverable_type">
+                          {deliverableTypeLabel(a.deliverableType)}
+                        </Pill>
+                      )}
+                      <span className="ss-body" style={{ color: "var(--bone)" }}>
+                        {a.title || "(无标题)"}
+                      </span>
+                      <span className="ss-meta ml-auto">交付于 {fmtTime(a.deliveredAt)}</span>
+                    </div>
+                    {/* ⚠️ 这里的 `acceptance` 不是「编出来的」:能出现在这张清单里
+                        **按定义**就是 handedOver && verdict === null(见
+                        `views.ts` 的 awaitingAcceptanceOf)。所以这三个字段是
+                        这条清单的判据本身,而不是一个猜的默认值。 */}
+                    <DeliveryVerdictActions
+                      artifactId={a.artifactId}
+                      title={a.title}
+                      acceptance={{
+                        handedOver: true, verdict: null, note: null, at: null,
+                        // 这一段**只在项目不是终态时才渲染**(`awaitingAcceptanceOf`
+                        // 对收口项目返回空数组)⇒ 这里的 `false` 是那条判据的推论,
+                        // 不是一个乐观的默认值。
+                        projectClosed: false,
+                      }}
+                    />
+                  </article>
+                ))}
+              </div>
+            )}
+          </Section>
+
           <Section
             title="待你回答"
             count={detail.pendingQuestions.length}
@@ -590,6 +660,109 @@ export function ProjectDetailPage() {
                     </div>
                   </article>
                 ))}
+              </div>
+            )}
+          </Section>
+
+          {/*
+            成本观测面(2026-10-08)。**只读、不设上界** —— 用户裁决:
+            「针对『成本没有上界』现在这个阶段可以放松一点,先只做 observation」。
+
+            所以这一段**没有任何闸门**:不拦、不警告、不自动停(那些是「设防」,
+            不是这一批的事)。它只把三件已经在库里的事摆出来:
+              · 花了多少(全历史 / 窗口 / 今日,窗口必须写出来 —— 一个没有窗口的
+                合计数字看起来永远是对的);
+              · 谁花的(byAgent);
+              · **花在哪件活上**(byWork)—— 这一维是这次新加的,也是唯一能让人
+                做决定的那一问(真机那条单回合 109k token 的工作项,在只有
+                byAgent 的读面上与别的活长得一模一样)。
+
+            三条反造假纪律:
+              · `usage === null` 且还没查完 ⇒ 「加载中」,不是 0(0 会被读成
+                「这个项目一分钱没花」);
+              · 读失败 ⇒ 把 error 印出来,不渲染成空表;
+              · `updatedAt === null`(窗口内一笔都没有)⇒ 如实说,不拿「现在」冒充。
+          */}
+          <Section
+            title="成本"
+            hint="只读观测 · 不设上界"
+            hintTitle={
+              "来源:GET /api/projects/:id/usage(窗口默认含今日共 7 个本地日历日;全历史那格不受窗口影响)。" +
+              "⚠️ **现在没有预算闸门**(用户裁决:先只做 observation)—— 平台不会因为花钱多而停下任何事,这个面只负责把账摆清楚。" +
+              "「平台回合」那一桶是不挂在任何工作项上的花费(播报、答复处置、收口判断):它们是真的花了钱,既不许并进某条工作项(假归属),也不许丢掉(丢掉之后分项和与合计对不上)。"
+            }
+          >
+            {usageError !== null ? (
+              <div className="sansheng-card p-3 text-xs" style={{ color: "var(--cinnabar)" }}>
+                读不到用量:{usageError}
+              </div>
+            ) : usageLoading && usage === null ? (
+              <EmptyState>加载中…</EmptyState>
+            ) : usage === null ? (
+              // 「还没查过」不是「查过了,是 0」—— 与 useProjectUsage 文件头那条同源。
+              <EmptyState>还没有读到用量。</EmptyState>
+            ) : (
+              <div className="grid gap-2">
+                <div className="sansheng-card p-3">
+                  <div className="flex items-center gap-3 flex-wrap">
+                    {[
+                      { label: "全历史", b: usage.allTime },
+                      { label: `最近 ${usage.window.days} 天`, b: usage.totals },
+                      { label: "今日", b: usage.today },
+                    ].map(({ label, b }) => {
+                      const total = b.input + b.output;
+                      return (
+                        <div key={label} className="flex flex-col">
+                          <span className="ss-meta">{label}</span>
+                          <span
+                            className="ss-body"
+                            style={{ color: "var(--bone)" }}
+                            title={`${total.toLocaleString()} token(输入 ${b.input.toLocaleString()} / 输出 ${b.output.toLocaleString()}),${b.turns} 个有花费的回合`}
+                          >
+                            {fmtTokens(total)} token · {b.turns} 回合
+                          </span>
+                        </div>
+                      );
+                    })}
+                    <span className="ss-meta ml-auto">
+                      {usage.updatedAt === null
+                        ? "这个窗口里一笔都没有"
+                        : `最近一笔 ${fmtTime(usage.updatedAt)}`}
+                    </span>
+                  </div>
+                </div>
+
+                {usage.byAgent.length > 0 && (
+                  <div className="sansheng-card p-3">
+                    <div className="ss-meta mb-1">谁花的</div>
+                    {usage.byAgent.map((a) => (
+                      <div key={a.agentId} className="flex items-center gap-2">
+                        <span className="ss-body" style={{ color: "var(--bone-dim)" }}>
+                          {a.agentName}
+                        </span>
+                        <span className="ss-meta ml-auto">
+                          {fmtTokens(a.input + a.output)} token · {a.turns} 回合
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {usage.byWork.length > 0 && (
+                  <div className="sansheng-card p-3">
+                    <div className="ss-meta mb-1">花在哪件活上</div>
+                    {usage.byWork.map((w) => (
+                      <div key={w.workId ?? "__platform__"} className="flex items-center gap-2">
+                        <span className="ss-body" style={{ color: "var(--bone-dim)" }}>
+                          {w.workTitle ?? (w.workId === null ? "平台回合(不挂工作项)" : w.workId)}
+                        </span>
+                        <span className="ss-meta ml-auto">
+                          {fmtTokens(w.input + w.output)} token · {w.turns} 回合
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
             )}
           </Section>

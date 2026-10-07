@@ -24,6 +24,8 @@ import { create } from "zustand";
 import {
   eventProjectId,
   todoKindReachesClient,
+  type ArtifactAcceptanceView,
+  type DeliveryVerdict,
   type MessageOrigin,
   type ProjectSummary,
   type ServerEvent,
@@ -431,6 +433,17 @@ export interface ChatState {
   sendInterrupt(): void;
   /** 回答问题(HTTP POST;WS 也有等价命令,前端统一走 HTTP 有回执)。 */
   answerQuestion(questionId: string, answer: string): Promise<boolean>;
+  /**
+   * **甲方验收一份交付物**(029,HTTP POST)。
+   *
+   * 返回**服务端重新算出来的**收货进展;失败返回 `null`(message 已进 `error`,
+   * 就地显示 —— 四条拒收都是可执行的处置,不能吞)。
+   */
+  submitVerdict(
+    artifactId: string,
+    verdict: DeliveryVerdict,
+    note?: string,
+  ): Promise<ArtifactAcceptanceView | null>;
   attachSocket(s: PlatformSocket | null): void;
   reset(): void;
   applyEvent(e: ServerEvent): void;
@@ -947,6 +960,33 @@ export const useChatStore = create<ChatState>((set, get) => ({
     } catch (e) {
       set({ error: { code: "answer_failed", message: errorMessage(e) } });
       return false;
+    }
+  },
+
+  /**
+   * **甲方的验收裁决**(029)。
+   *
+   * 与 `answerQuestion` 逐字同形,理由也同:两条都改「有事在等你」的计数 ——
+   * 验收掉一份,项目可能从**待收货**回到**进行中**(甚至立刻可以收口),
+   * 所以三个 revision 全推一格,让项目列表的徽标、项目页与工作项页一起重拉。
+   *
+   * ⚠️ **失败要如实回给调用方**(返回 `null` + 把 message 带出去):服务端有四条
+   * 拒收(不是交付物 / 已收口 / 还没交付给你 / 理由太长),那些话是给用户看的
+   * 处置 —— 吞掉它们会让按钮「点了没反应」。
+   */
+  async submitVerdict(artifactId, verdict, note) {
+    try {
+      const r = await api.submitDeliveryVerdict(artifactId, verdict, note);
+      set((s) => ({
+        projectRevision: s.projectRevision + 1,
+        projectsRevision: s.projectsRevision + 1,
+        activityRevision: s.activityRevision + 1,
+      }));
+      return r.acceptance;
+    } catch (e) {
+      const message = errorMessage(e);
+      set({ error: { code: "verdict_failed", message } });
+      return null;
     }
   },
 

@@ -106,6 +106,32 @@ export interface UsageByDayBucket extends UsageBucket {
   readonly day: string;
 }
 
+/**
+ * 按**工作项**分组的一桶(2026-10-08,成本观测面)。
+ *
+ * ── 为什么加它 ──────────────────────────────────────────────────
+ *
+ * 用户裁决:「针对『成本没有上界』现在这个阶段可以放松一点,**先只做 observation**」。
+ * 而已有的观测面回答了「这个项目花了多少 / 谁花的 / 哪天花的」,**没有回答
+ * 「花在哪件活上」** —— 那恰恰是唯一能让人做决定的那一问:
+ *
+ *   · 真机事故(2026-10-06)是一条 worker 工作项**单回合读进 109,231 token**
+ *     后撞上墙钟上界被 `abort()`;`dispatcher` 的第 14 条规则正是那一次的补丁。
+ *   · 没有这一维,「这个项目 129 万 token」只是一个吓人的数字;**有了它**,
+ *     它变成「那条整合工作项吃掉了 87%」—— 一句可以直接行动的事实。
+ *
+ * ⚠️ **`workId === null` 是合法且有信息的一桶**:平台回合(播报、答复处置、
+ * 收口判断)不挂在任何工作项上,而它们是**真实的花费**。把它们并进某一条
+ * 工作项里就是假归属;丢掉它们则合计与分项对不上(那更坏:一个对不上的账本
+ * 会让人先怀疑数字,再怀疑整个观测面)。
+ *
+ * `title` 由读面补(`repo` 只交 id 与数字,与 `agentId` 同一条规矩)——
+ * 所以它**不在这里**,见 `ProjectUsageAggregate.byWork`。
+ */
+export interface UsageByWorkBucket extends UsageBucket {
+  readonly workId: string | null;
+}
+
 /** 一个项目(或接待会话)的用量聚合。**纯数据,不含显示名**。 */
 export interface ProjectUsageAggregate {
   readonly projectId: string | null;
@@ -123,6 +149,14 @@ export interface ProjectUsageAggregate {
   /** 今日(本地日历日) */
   readonly today: UsageBucket;
   readonly byAgent: readonly UsageByAgentBucket[];
+  /**
+   * 按**工作项**分组(量的降序,同量按 `work_id` 字典序;`null` 桶排在最后)。
+   *
+   * ⚠️ **它不做截断**:工作项是十位数量级(而回合是千位),截掉一条会让
+   * 「最贵的那条活」有机会正好落在被截掉的一段里 —— 那正是这个维度存在的理由。
+   * 每一条的标题由视图层补(`WorkView.title` 那一处),仓储只交 id。
+   */
+  readonly byWork: readonly UsageByWorkBucket[];
   /** 按天升序(旧的在前)—— 与 `listSessionMessages` 的返回次序同一条规矩 */
   readonly byDay: readonly UsageByDayBucket[];
   /** `byDay` 是否因为 `dayLimit` 被截断(**不许静默少几天**) */
@@ -361,6 +395,22 @@ export function aggregateProjectUsage(
     ...bucketOf(r),
   }));
 
+  // 按工作项(`work_id` 为 NULL 的那些是平台回合 —— 真实花费,单独一桶)。
+  // 次序与 `byAgent` 同规矩:量的降序、同量按 id 字典序。`null` 用 `IS NULL`
+  // 排序兜到最后(它不是「最小的 id」,是一个不同的东西)。
+  const workRows = db
+    .prepare(
+      `SELECT work_id AS work_id, ${SUM_COLUMNS} FROM turn_usage
+        WHERE ${windowWhere}
+        GROUP BY work_id
+        ORDER BY input DESC, output DESC, (work_id IS NULL) ASC, work_id ASC`,
+    )
+    .all(...args) as Array<RawSum & { work_id: string | null }>;
+  const byWork: UsageByWorkBucket[] = workRows.map((r) => ({
+    workId: r.work_id,
+    ...bucketOf(r),
+  }));
+
   // 按本地日历日。先取**最新** dayLimit 天,再翻回升序交出去
   // (与 `listSessionMessages` 的「降序取尾巴、升序交回去」同形)。
   const dayRows = db
@@ -400,6 +450,7 @@ export function aggregateProjectUsage(
     allTime,
     today,
     byAgent,
+    byWork,
     byDay,
     byDayTruncated: (dayCountRow?.n ?? 0) > byDay.length,
     updatedAt: latest?.at ?? null,

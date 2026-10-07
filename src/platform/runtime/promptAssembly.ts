@@ -32,6 +32,9 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { ROLE_SPECS, type ProjectRole } from "../identity/role.js";
+// ⚠️ 角色中文名的**唯一来源**(`ORG`)。从 `org.js` 读而不是在本模块再写一张表 ——
+// 这里为「第三张表」付过一次代价(假通过的那条断言),见下面那段注释。
+import { roleDisplayName } from "./org.js";
 import type { Capability } from "../harness/capability.js";
 
 export interface LoadedPromptUnits {
@@ -126,19 +129,20 @@ const CAPABILITY_LABEL: Readonly<Partial<Record<Capability, string>>> = {
   "work.report": "汇报进度",
 };
 
-/**
- * 角色中文名。**必须与 `runtime/org.ts` 的 `ORG` 逐项相同** —— 这一份曾经
- * 写成 `Worker(执行者)`(一个名字里塞进一句解释),而 `ORG` 写的是 `工程师`,
- * 于是同一个角色在提示词与界面上有两个名字(2026-10-08 收编)。
- * `tests/web/role-names.test.ts` 现在把这一份也纳入跨边界对照。
+/*
+ * ⚠️ **这里曾经有一张 `ROLE_NAME` 表**(2026-10-08 之后仍在)。
+ *
+ * 它的形状就是「同一个东西的第三份定义」:那张表把 `quality_reviewer` 写成
+ * **`质检审查员`**,而 `ORG` 写的是 **`质检`** —— 同一个角色,提示词里一个名字、
+ * 界面上另一个名字。而 `tests/web/role-names.test.ts` 当时那条断言写的是
+ * `expect(brief).toContain(`# 你的角色:${roleDisplayName(role)}`)`:
+ * `"质检审查员"` **包含** `"质检"` ⇒ **假通过**(一个坏掉的哨兵返回了一个
+ * 看起来正常的答案 —— 本项目第 3 类静默失败的原样复发)。
+ *
+ * 现在名字只有一处:`runtime/org.ts` 的 `ORG`,经 `roleDisplayName()` 读。
+ * 那份测试的断言也改成了**逐字相等**(`toContain` → 提取后 `toBe`),
+ * 否则同一个假通过会再来一次。
  */
-const ROLE_NAME: Readonly<Record<ProjectRole, string>> = {
-  business_manager: "业务经理",
-  project_manager: "项目经理",
-  research_worker: "研究员",
-  coding_worker: "工程师",
-  quality_reviewer: "质检审查员",
-};
 
 /**
  * 从 `ROLE_SPECS` 机械渲染角色简报。
@@ -153,7 +157,7 @@ const ROLE_NAME: Readonly<Record<ProjectRole, string>> = {
 export function renderRoleBrief(role: ProjectRole): string {
   const spec = ROLE_SPECS[role];
   const lines: string[] = [
-    `# 你的角色:${ROLE_NAME[role]}`,
+    `# 你的角色:${roleDisplayName(role)}`,
     "",
     spec.clientFacing
       ? "你是**唯一**对甲方接口的角色。别人遇到需要甲方拍板的事,都必须来找你转达。"

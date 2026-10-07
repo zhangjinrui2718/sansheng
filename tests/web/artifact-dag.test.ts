@@ -89,6 +89,14 @@ const art = (id: string, over: Partial<ArtifactView> = {}): ArtifactView => ({
   updatedAt: 2000,
   links: [],
   workId: null,
+  // 025 / 026 / 029 的三个字段。**夹具必须造全** —— 契约里它们是必填
+  // (`deliverableType: ... | null` / `codeService: ... | null` /
+  // `acceptance: ArtifactAcceptanceView | null`),而 `tests/**` 不参与 typecheck,
+  // 漏了就只在**运行期**变成 `undefined`,而读面用 `!== null` 判断,于是
+  // 「非交付物」会被当成「有一份在等验收」——一个只有渲染时才会炸的假形状。
+  deliverableType: null,
+  codeService: null,
+  acceptance: null,
   ...over,
 });
 

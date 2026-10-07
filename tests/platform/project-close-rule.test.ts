@@ -38,6 +38,7 @@ import { openDeliverableSession } from "../../src/platform/storage/repo/sessions
 import { insertWork, markWorkReviewed } from "../../src/platform/storage/repo/works.js";
 import { insertBlocker } from "../../src/platform/storage/repo/blockers.js";
 import { insertArtifact } from "../../src/platform/storage/repo/artifacts.js";
+import { insertDeliveryVerdict } from "../../src/platform/storage/repo/deliveryVerdicts.js";
 import { ensureProjectOrg } from "../../src/platform/runtime/org.js";
 import {
   collectTodos, renderTask, drainProject, RULES, NUDGE_CAPABILITIES,
@@ -88,6 +89,14 @@ function seedFinishedProject(over: {
   reviewed?: boolean;
   deliverableStatus?: "accepted" | "open";
   delivered?: boolean;
+  /**
+   * **甲方收不收**(029)。`null` = 甲方还没表态 —— 那是「待收货」,
+   * 与「作者写了 `accepted`(定稿)」是**两件不同的事**。
+   *
+   * 缺省 `"accept"`,因为其余每一格测的都是**别的机制**;把它缺省成 `null`
+   * 会让这一格里所有用例一起变红,而那些红与该用例要证明的事无关。
+   */
+  clientVerdict?: "accept" | "reject" | null;
   pendingQuestion?: boolean;
   unconsumedAnswer?: boolean;
   openBlocker?: boolean;
@@ -109,6 +118,19 @@ function seedFinishedProject(over: {
   if (over.delivered !== false) {
     openDeliverableSession(db, {
       id: "s_d1", projectId: P, deliverableArtifactId: "art_d1", createdAt: T0 + 2,
+    });
+  }
+
+  // ── 甲方的验收裁决(029)──────────────────────────────────────
+  //
+  // ⚠️ **它只能在「已交付」时写**:`POST /api/artifacts/:id/verdict` 的四条拒收
+  // 之一就是「还没交付给你」。夹具照这个形状造,否则会造出一个 HTTP 面根本
+  // 写不出来的状态(而那种夹具会让「后端会拒」这条判据失效)。
+  const verdict = over.clientVerdict === undefined ? "accept" : over.clientVerdict;
+  if (verdict !== null && over.delivered !== false) {
+    insertDeliveryVerdict(db, {
+      projectId: P, artifactId: "art_d1", verdict,
+      note: verdict === "reject" ? "夹具:甲方要改" : null, createdAt: T0 + 3,
     });
   }
 
@@ -177,6 +199,13 @@ describe("① `close_finished_project`:八件事同时成立才叫醒业务经�
       ["还有问题在等甲方", { pendingQuestion: true }],
       ["甲方的答复到了还没处置", { unconsumedAnswer: true }],
       ["还有没解决的阻塞", { openBlocker: true }],
+      // ── 2026-10-08(029)新增的两格 ──────────────────────────────
+      //
+      // ⚠️ 这两格是这次改动的**全部意义**:在此之前,「甲方验收了」在库里
+      // 就是 `status='accepted'`,而那是**申请人自己写的**(PM 提示词逐字教它
+      // 这么写)。所以下面这两格以前**根本不存在** —— 判据读的是作者的自述。
+      ["已交付但甲方还没验收(待收货)", { clientVerdict: null }],
+      ["甲方拒收了这一版", { clientVerdict: "reject" }],
     ];
     for (const [why, over] of cases) {
       db.close();

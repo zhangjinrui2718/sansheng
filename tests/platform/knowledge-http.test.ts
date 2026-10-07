@@ -30,6 +30,18 @@ import { createGitWorkspace } from "../../src/platform/workspace/git.js";
 import { createPlatformApp, type HttpDeps } from "../../src/platform/transport/http.js";
 import type { KnowledgeChunkView, KnowledgeOverviewView } from "@shared/types/platform.js";
 
+/**
+ * 明细行 + 分级(migration 030)。
+ *
+ * `shared/types/**` 是跨端协议的冻结面,所以 `tier` / `tierNote` 是在
+ * `http.ts` 的 handler 里加上去的(纯加法,web 端不读它也不会坏)——
+ * 测试侧照它的实际形状收窄,而不是等到 shared 那侧补字段才敢断言。
+ */
+type ChunkWithTier = KnowledgeChunkView & {
+  tier: "primary" | "material" | null;
+  tierNote: string | null;
+};
+
 const P1 = "p-k1";
 const P2 = "p-k2";
 const NOW = 1_760_000_000_000;
@@ -116,10 +128,10 @@ async function getOverview(): Promise<KnowledgeOverviewView> {
   return (await res.json()) as KnowledgeOverviewView;
 }
 
-async function getChunks(query: string): Promise<KnowledgeChunkView[]> {
+async function getChunks(query: string): Promise<ChunkWithTier[]> {
   const res = await app().request(`/api/knowledge/chunks${query}`);
   expect(res.status).toBe(200);
-  return ((await res.json()) as { chunks: KnowledgeChunkView[] }).chunks;
+  return ((await res.json()) as { chunks: ChunkWithTier[] }).chunks;
 }
 
 describe("概览:机制有没有在正常运行(判据是几个会动的数字)", () => {
@@ -269,5 +281,63 @@ describe("明细:检索 / 浏览 / 出处 / 三态", () => {
     const bad = await getChunks("?limit=abc");
     expect(bad.length).toBeLessThanOrEqual(20);
     expect(bad.length).toBeGreaterThan(0);
+  });
+});
+
+// ── 分级(migration 030)──────────────────────────────────────────
+
+describe("分级:每条带 tier,而**读不到就如实给 null**", () => {
+  beforeEach(() => {
+    addArtifact(P1, "a1", "# 催收外呼方案\n\n甲方聚焦技术架构与集成,预算按坐席规模算。"); // kind=note ⇒ material
+    addMessage("m1", "s1", "甲方是做催收业务的,电话催收外呼方向。"); // user ⇒ primary
+    reindexAll();
+  });
+
+  it("检索那一路:工件是 material、甲方原话是 primary,且两个取值都真的出现在响应里", async () => {
+    const chunks = await getChunks("?q=" + encodeURIComponent("催收"));
+    expect(chunks.length).toBeGreaterThan(0);
+    const artifact = chunks.find((c) => c.sourceKind === "artifact");
+    const message = chunks.find((c) => c.sourceKind === "message");
+    expect(artifact?.tier, "kind=note 的工件是原始材料").toBe("material");
+    expect(message?.tier, "甲方原话是定稿侧").toBe("primary");
+    // 有取值时不该带"没算过"的说明(否则读面等于在两句互相矛盾的话里挑一句信)
+    expect(artifact?.tierNote).toBeNull();
+    expect(message?.tierNote).toBeNull();
+    expect(chunks.map((c) => c.tier)).toContain("primary");
+    expect(chunks.map((c) => c.tier)).toContain("material");
+  });
+
+  it("浏览那一路也带 tier(两条路共用同一个 handler,不是只给检索那一路补的)", async () => {
+    const chunks = await getChunks("?projectId=" + P1);
+    expect(chunks.length).toBeGreaterThan(0);
+    expect(chunks.some((c) => c.tier === "primary")).toBe(true);
+    expect(chunks.some((c) => c.tier === "material")).toBe(true);
+  });
+
+  it("老行(030 之前索引,tier 为 NULL)⇒ **如实给 null** + 一句说明,不许渲染成 material", async () => {
+    // 模拟 030 之前的存量行:正文一个字没动,只是当时没有分级这一列
+    db.prepare(`UPDATE knowledge_chunks SET tier = NULL`).run();
+
+    const chunks = await getChunks("?projectId=" + P1);
+    expect(chunks.length).toBeGreaterThan(0);
+    for (const c of chunks) {
+      expect(c.tier, `块 ${c.id} 没有算过分级`).toBeNull();
+      expect(c.tierNote, `块 ${c.id} 必须带一句说明`).not.toBeNull();
+      expect(c.tierNote).toContain("030");
+      expect(c.tierNote).toContain("重扫");
+    }
+    // 负样本:null 不许被当成低权重那一档 —— 否则"读不到"就被渲染成了一个取值
+    expect(new Set(chunks.map((c) => c.tier))).toEqual(new Set([null]));
+  });
+
+  it("重扫之后 null 变成真取值(自愈路径能被读面看见)", async () => {
+    db.prepare(`UPDATE knowledge_chunks SET tier = NULL`).run();
+    expect((await getChunks("?projectId=" + P1)).every((c) => c.tier === null)).toBe(true);
+
+    reindexAll();
+
+    const after = await getChunks("?projectId=" + P1);
+    expect(after.every((c) => c.tier !== null)).toBe(true);
+    expect(after.every((c) => c.tierNote === null)).toBe(true);
   });
 });

@@ -57,6 +57,32 @@ export type Specialization = "engineering" | "algorithm" | "data";
 
 export type ProjectStatus = "draft" | "active" | "paused" | "done" | "abandoned";
 
+/**
+ * 项目在**读面上**的生命周期状态 = 库里的 5 个取值 + 一个**派生**取值「待收货」。
+ *
+ * ── 为什么「待收货」不是 `projects.status` 的一个取值(029)────────
+ *
+ * `projects.status` 的 CHECK 是闭合集,加一个取值要**重建表**,而那张表有
+ * **14 张 ON DELETE CASCADE 的子表**(实测 `PRAGMA foreign_key_list`)——
+ * 026 的探针已经证明:数据少的时候那种重建**不报错而静默清空子表**。
+ * 为一个**完全可以从别的表算出来**的状态去动 14 张表的级联,是把一个查询
+ * 换成一次数据风险(完整论证见 `migrations/029_delivery_verdicts.sql` 文件头)。
+ *
+ * 判据只有一条,落在 `delivery_verdicts` 上:
+ * **存在「已交付(有交付会话)且没有甲方裁决」的交付物** ⇒ 显示为 `awaiting_acceptance`。
+ * 组织这边项目仍然是 `active`(`projects.status` 不变,排空器照常扫它 ——
+ * 甲方拒收要有人返工,球在甲方那边不等于组织停摆)。
+ *
+ * ⚠️ **它只在读面上出现**:库里的 `status` 列仍取 `ProjectStatus`,
+ * `GET /api/projects?status=` 这个筛选参数也仍取 `ProjectStatus`(派生取值
+ * 不是一个可以筛的库事实 —— 拿它去筛只会得到空数组,而空数组看起来像
+ * 「没有这样的项目」)。
+ */
+export type ProjectLifecycleStatus = ProjectStatus | "awaiting_acceptance";
+
+/** 甲方对一份交付物的裁决(029)。**只有甲方能写**,任何角色都没有这个能力。 */
+export type DeliveryVerdict = "accept" | "reject";
+
 export type WorkStatus =
   | "open"
   | "in_progress"
@@ -140,7 +166,11 @@ export interface ProjectSummary {
   name: string;
   client: string;
   goal: string;
-  status: ProjectStatus;
+  /**
+   * 生命周期状态。**`awaiting_acceptance`(待收货)是派生值**,判据见
+   * {@link ProjectLifecycleStatus} —— 库里的 `projects.status` 仍然是 `active`。
+   */
+  status: ProjectLifecycleStatus;
   createdAt: number;
   /** 该项目的规模概览 —— 列表页直接用,不必再拉详情 */
   counts: {
@@ -150,7 +180,31 @@ export interface ProjectSummary {
     /** **等甲方答的**问题数。这是左栏徽标的来源。 */
     pendingQuestions: number;
     openBlockers: number;
+    /**
+     * **等甲方验收的交付物数**(已交付、还没裁决)。
+     *
+     * 与 `pendingQuestions` 并列,理由相同:它是「有事在等你」的另一半。
+     * 少了它,「待收货」只能靠项目名旁边那个状态字看出来,而一个**不带计数**
+     * 的标记等于「有事在等你」没人知道 —— 真机第一条 `client_question` 就是
+     * 这么被漏掉的(见 `components/client/ClientQuestionDock.tsx` 的文件头)。
+     */
+    pendingAcceptance: number;
   };
+}
+
+/**
+ * 一份**已经交给甲方、还没有拿到裁决**的交付物(「待收货」清单的一条)。
+ *
+ * ⚠️ 它只包含**已交付**的:甲方没收到货,谈不上验收。所以这份清单为空
+ * **不等于**「没有交付物」—— 可能是「还没交付」(那是 `handover` 回合的活)。
+ */
+export interface AwaitingAcceptanceView {
+  readonly artifactId: string;
+  readonly title: string;
+  /** 交付那条会话是什么时候开出来的(= 平台把货交出去的时刻) */
+  readonly deliveredAt: number;
+  /** 交付物类型。`null` = 026 之前的存量交付物(读面必须先看 kind) */
+  readonly deliverableType: DeliverableType | null;
 }
 
 export interface ProjectDetail extends ProjectSummary {
@@ -158,6 +212,8 @@ export interface ProjectDetail extends ProjectSummary {
   works: WorkView[];
   /** 待甲方答的问题(本项目) */
   pendingQuestions: ClientQuestionView[];
+  /** 待甲方**验收**的交付物(本项目)。判据与收口门同源(029) */
+  awaitingAcceptance: AwaitingAcceptanceView[];
 }
 
 export interface WorkView {
@@ -249,6 +305,48 @@ export interface ArtifactView {
    * 把它们都塞进字符串并拼上一句「大概是这样」,正是本项目反复拒绝的那种做法。
    */
   codeService: CodeServiceView | null;
+  /**
+   * **甲方收货这件事,进展到哪了**(029)。`kind !== 'deliverable'` 时恒为 `null`
+   * —— 非交付物没有「收货」可言,给它一个空对象会让读面以为「有一份在等验收」。
+   *
+   * ⚠️ **`verdict: null` 不是「通过了」**:它精确地表示**甲方还没表态**。
+   * 把「没表态」渲染成「已接受」,正是这次改动要去掉的那种假话
+   * (`status='accepted'` 从前的语义就是这个)。
+   */
+  acceptance: ArtifactAcceptanceView | null;
+}
+
+/**
+ * 一份交付物的**收货**进展(029)。
+ *
+ * 两个字段各答一个问题,缺一个读面就会猜:
+ *   · `handedOver` —— 「平台把货交出去了没有」。没有它,「还没交付」与
+ *     「交付了但甲方没表态」在界面上长得一模一样,而处置完全不同
+ *     (前者是等业务经理,后者是等甲方)。
+ *   · `verdict` —— 「甲方收不收」。`null` = 还没表态(**不是**通过)。
+ */
+export interface ArtifactAcceptanceView {
+  /** 平台是否已经把它开成一条交付线(`handover` 回合成功结束) */
+  readonly handedOver: boolean;
+  /** 甲方最近一次的裁决。`null` = 还没验 */
+  readonly verdict: DeliveryVerdict | null;
+  /** 甲方写的那句话(拒收时「哪里不行」) */
+  readonly note: string | null;
+  /** 裁决时间。`verdict === null` 时也是 `null` */
+  readonly at: number | null;
+  /**
+   * **项目已经收口**(`done` / `abandoned`)⇒ 验收入口是关的。
+   *
+   * ⚠️ 少了这一格,读面会在**收口项目**上显示「等你验收」和一排按钮,而服务端
+   * 一定会回 `409 project_closed`(收口不可逆,之后再验收等于给已经生效的结论补签)
+   * —— 一个**兑现不了的按钮**,与「待答队列里那些收口项目的提问」是同一款问题
+   * (2026-10-07 的处置:不进队列,但把事实显示出来)。
+   *
+   * 所以这一格不是「权限」,是**能不能动**:`true` 时读面必须说
+   * 「这一版没有被验收过,而项目已经收口」而**不是**给按钮。
+   * 存量库上这是常态(真机那个项目 2026-10-07 就 `done` 了,而 029 是 10-08 才有的)。
+   */
+  readonly projectClosed: boolean;
 }
 
 /**
@@ -1070,6 +1168,20 @@ export interface UsageByAgentView extends UsageBucketView {
   role: ProjectRole;
 }
 
+/**
+ * **按工作项**分的一桶(2026-10-08,成本观测面)。
+ *
+ * ⚠️ `workId === null` = **不挂在任何工作项上的花费**(平台回合:播报、答复处置、
+ * 收口判断)。它是**真实的花费**,不是「未分类」—— 读面必须把它显示成
+ * 「平台回合」,既不许并进某条工作项(假归属),也不许丢掉(丢掉之后
+ * 分项之和与合计对不上,而一个对不上的账本会让人先怀疑数字)。
+ */
+export interface UsageByWorkView extends UsageBucketView {
+  workId: string | null;
+  /** 工作项标题;`workId === null` 时为 `null`(读面自己写「平台回合」) */
+  workTitle: string | null;
+}
+
 export interface UsageByDayView extends UsageBucketView {
   /** 本地日历日 `YYYY-MM-DD` */
   day: string;
@@ -1103,6 +1215,18 @@ export interface ProjectUsageView {
   today: UsageBucketView;
   /** 按角色,量的降序(同量按 agentId 字典序 —— 次序固定,两次读可比对) */
   byAgent: UsageByAgentView[];
+  /**
+   * 按**工作项**,量的降序(同量按 `workId` 字典序;`null` 桶在最后)。
+   *
+   * `byAgent` 回答「谁在花钱」,这一维回答「**哪件活在花钱**」——
+   * 后者才是能让人做决定的那一问(真机那条单回合 109k token 的工作项,
+   * 在只有 `byAgent` 的读面上与其它工作项长得一模一样)。
+   *
+   * **不截断**(理由见契约另一侧 `ProjectUsageAggregate.byWork`);
+   * 工作项按 `workId → works.title` 解析标题,解析不到时 `workTitle` 为 `null`
+   * —— 不许拿 id 冒充标题,也不许丢这一桶。
+   */
+  byWork: UsageByWorkView[];
   /** 按本地日历日**升序**(旧的在前),最多 `?limit=` 天 */
   byDay: UsageByDayView[];
   /** `byDay` 是否因为 `?limit=` 被截断(**不许静默少几天**) */
@@ -1251,6 +1375,19 @@ export type TriggerTodoKind =
    * 于是没有任何执行者接手,而收口又把它 8 秒内写回 `done`。
    */
   | "rework"
+  /**
+   * **甲方拒收了一份交付物 —— 退回给写它的那个人返工**(2026-10-08,029)。
+   *
+   * 与 `rework` 是**同一款**判据(「一行结论 → 推出来的下一步」),只是那一行
+   * 从质检的 `review_verdicts` 换成了甲方的 `delivery_verdicts`:
+   * 最近一次裁决是 `reject`,且那之后这条工作项上没有比它更新的产出。
+   * 目的地同样是**产出的作者**(没有作者才兜底给项目经理;第 3 轮起换人)。
+   *
+   * ⚠️ **它不是「收口失败」的别名**:甲方拒收**不改变** `projects.status`
+   * (组织照常运转),改的是「这条交付物还没被接受」这个事实 ——
+   * 于是收口门继续不成立,直到新的一版被接受。
+   */
+  | "rework_rejected"
   /**
    * **平台已经不再叫醒某条待办了 —— 换个人来处置**(2026-10-07 补)。
    *
@@ -1767,6 +1904,18 @@ export function eventProjectId(ev: ServerEvent): string | null {
 //                                                ⚠️ 文件不在 HEAD / sha 不可达 ⇒
 //                                                `runtime: "unavailable"` + `problem`,
 //                                                **不是空正文、不是 404**。
+//   POST   /api/artifacts/:id/verdict          { verdict:"accept"|"reject", note? }
+//                                              → { ok, acceptance: ArtifactAcceptanceView }
+//                                                **甲方的验收裁决**(029)。这是全平台
+//                                                **唯一**能把「甲方收不收」写成事实的
+//                                                入口:任何角色都没有这个能力(模型
+//                                                不能替甲方拍板),所以它只有 HTTP 面。
+//                                                只对 `kind='deliverable'` 且**已经交付**
+//                                                (有交付会话)的工件成立 —— 没收到货
+//                                                谈不上验收。追加式:改判再写一条,
+//                                                读面取最新那条。
+//                                                ⚠️ 终态项目 409:收口之后再验收
+//                                                等于给一个已经不可逆的结论补签。
 //   ── 待甲方答的问题(跨项目;左栏徽标用它)──
 //   GET    /api/client-questions              → { questions: ClientQuestionView[] }
 //   POST   /api/client-questions/:id/answer   → { ok, decisionArtifactId }
@@ -1912,6 +2061,22 @@ export interface KnowledgeChunkView {
   excerpt: string;
   /** 该块正文(≤ 1200 字);`state === "unavailable"` 时是空串 */
   text: string;
+  /**
+   * **语料分级**(030)。检索时 `primary` 优先于 `material`
+   * —— 判据见 `storage/repo/knowledge.ts` 的 `artifactTier` / `messageTier`。
+   *
+   * ⚠️ **它是「这份来源是定稿还是原始材料」,不是「内容从哪来」**:
+   * 平台**没有能力**判定一段文字是不是从外网抓来的(语料只收工件正文与
+   * `user`/`assistant` 消息,工具结果根本不进语料)。所以读面不许把它
+   * 说成「外部内容已标记」—— 那是编造一个平台没有的事实。
+   *
+   * ⚠️ **`null` = 这一行还没算过**(030 之前索引、且本次没被重扫),
+   * **不是** `material`。读不到不是取值 —— 与 `runtime: "unavailable"`
+   * 同一条纪律。重扫(回合边界 / 宿主启动)会自愈。
+   */
+  tier: "primary" | "material" | null;
+  /** `tier === null` 时那一句人话说明;有值时是 `null` */
+  tierNote: string | null;
 }
 
 // 注意:`SettingsPublic` / `ProviderInfo` **不在这里重定义** —— 它们在

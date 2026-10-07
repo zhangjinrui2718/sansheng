@@ -18,7 +18,7 @@
  */
 import type Database from "better-sqlite3";
 import {
-  listWorks, listDeps, type WorkRow,
+  listWorks, listDeps, getWork, type WorkRow,
 } from "../storage/repo/works.js";
 import {
   getArtifact, listArtifacts, listLinkEdges, type ArtifactRow,
@@ -33,6 +33,10 @@ import {
   type SessionMessageRow,
 } from "../storage/repo/sessions.js";
 import { getAgent } from "../storage/repo/agents.js";
+import {
+  deliveryAcceptance, deliveredDeliverables, latestDeliveryVerdict,
+  type DeliveryAcceptance,
+} from "../storage/repo/deliveryVerdicts.js";
 import {
   getProjectRow, listProjects, listAssignments, type ProjectRow,
 } from "../storage/repo/projects.js";
@@ -51,11 +55,14 @@ import { makeArtifactTextReader, materializeChunk, type Materialization } from "
 import { buildMatchQuery } from "../knowledge/query.js";
 import type { WorkspacePort } from "../workspace/port.js";
 import type {
-  AskView, ArtifactView, BlockerView, ChangeView, ClientQuestionView, CodeServiceView,
+  ArtifactAcceptanceView, AskView, ArtifactView, AwaitingAcceptanceView, BlockerView,
+  ChangeView, ClientQuestionView, CodeServiceView,
   IntakeLiveView,
   KnowledgeChunkView, KnowledgeOverviewView, KnowledgePendingSourceView, KnowledgeProjectStatsView,
-  MemberActivityView, MemberView, MessageOrigin, ProjectDetail, ProjectLiveView,
-  ProjectSummary, ProjectUsageView,
+  MemberActivityView, MemberView, MessageOrigin, ProjectDetail, ProjectLifecycleStatus,
+  ProjectLiveView,
+  ProjectStatus,
+  ProjectSummary, ProjectUsageView, UsageByWorkView,
   SessionMessageView, TurnTrigger, TurnUsageView,
   UsageByAgentView, WorkView,
 } from "@shared/types/platform.js";
@@ -166,7 +173,52 @@ export function toArtifactView(
     //  而 `null` 读成「这不是代码服务」,两者是不同的信息)。
     codeService:
       row.deliverableType === "code_service" ? parseCodeServiceView(row.metadataJson) : null,
+    // 甲方收货(029)。**只有交付物才有这一项** —— 非交付物给它一个空对象,
+    // 读面会把「有一份在等验收」读出来(空对象 ≠ 没有)。
+    acceptance: row.kind === "deliverable" ? acceptanceOfArtifact(db, row) : null,
   };
+}
+
+/**
+ * 一份交付物的**收货**进展(029) —— `ArtifactView.acceptance` 的唯一来源。
+ *
+ * 两件事各查一次,都很便宜(交付物数量级是个位数):
+ *   · `handedOver` / 交付时间 —— `project_sessions.deliverable_artifact_id`;
+ *   · `verdict` / `note` / `at` —— `delivery_verdicts` 里最新的那条。
+ *
+ * ⚠️ **`verdict: null` 与 `handedOver: false` 是两件不同的事**,读面必须分开处置:
+ *   · 没交付 → 等业务经理(他还没把货交出去);
+ *   · 交付了没表态 → 等甲方(球在他那边)。
+ * 混成一个「未完成」,页面就没法告诉用户该等谁 —— 而「等谁」正是这次改动的全部内容。
+ */
+function acceptanceOfArtifact(
+  db: Database.Database,
+  row: ArtifactRow,
+): ArtifactAcceptanceView {
+  const delivered = db
+    .prepare(`SELECT created_at FROM project_sessions WHERE deliverable_artifact_id = ? LIMIT 1`)
+    .get(row.id) as { created_at: number } | undefined;
+  const verdict = latestDeliveryVerdict(db, row.id);
+  const project = getProjectRow(db, row.projectId);
+  return {
+    handedOver: delivered !== undefined,
+    verdict: verdict?.verdict ?? null,
+    note: verdict?.note ?? null,
+    at: verdict?.createdAt ?? null,
+    // ⚠️ 项目读不到时按**收口**处理(fail-closed):给一排一定会 409 的按钮,
+    // 比少给一个按钮坏得多(前者是「平台让我点了又拒」)。
+    projectClosed: project === null || isTerminalProjectStatus(project.status),
+  };
+}
+
+/**
+ * 项目是不是**终态**(收口不可逆)`done` / `abandoned`。
+ *
+ * 判据只有这一处 —— 收口门、验收读面、`pendingAcceptance` 的口径都从它来。
+ * 写两遍就会出现「状态说已结项、而页面还在等你验收」这种自相矛盾。
+ */
+export function isTerminalProjectStatus(s: ProjectStatus): boolean {
+  return s === "done" || s === "abandoned";
 }
 
 /**
@@ -543,6 +595,17 @@ export function toProjectUsageView(
     };
   });
 
+  // 工作项标题:仓储只交 id(`agentId` 同一条规矩),名字在这一层解析。
+  // 查不到就是 `null`(工作项被删过 / id 拼错)—— **不许拿 id 冒充标题**。
+  const byWork: UsageByWorkView[] = agg.byWork.map((b) => ({
+    workId: b.workId,
+    workTitle: b.workId === null ? null : (getWork(db, b.workId)?.title ?? null),
+    input: b.input,
+    output: b.output,
+    cacheRead: b.cacheRead,
+    turns: b.turns,
+  }));
+
   return {
     projectId: agg.projectId,
     window: agg.window,
@@ -550,6 +613,7 @@ export function toProjectUsageView(
     allTime: { ...agg.allTime },
     today: { ...agg.today },
     byAgent,
+    byWork,
     byDay: agg.byDay.map((d) => ({
       day: d.day,
       input: d.input,
@@ -578,15 +642,64 @@ function countsOf(db: Database.Database, projectId: string) {
   };
 }
 
+/**
+ * 读面上的**生命周期状态** = 库里的 `projects.status` + 派生值「待收货」(029)。
+ *
+ * 判据只有一条(用户裁决 2026-10-08:「业务经理把交付物给到甲方之后,项目进入
+ * 『待收货』状态」):**存在已交付、甲方还没表态的交付物**。
+ *
+ * ⚠️ **只精化 `active`**:`paused` 是组织/用户显式按下的暂停,`done`/`abandoned`
+ * 是终态 —— 那三种状态下「还有货没验收」是另一件事(它是收不了口的原因,不是
+ * 项目此刻的状态)。混进去会让「我按了暂停」在屏幕上变成「等收货」。
+ *
+ * ⚠️ 它**不进数据库**(理由:重建 `projects` 要动 14 张 CASCADE 子表,
+ * 见 `migrations/029_delivery_verdicts.sql` 文件头)。所以读面是它唯一的出口 ——
+ * 任何新读面都必须调这个函数,不许自己写一份判断。
+ */
+function lifecycleOf(
+  row: ProjectRow,
+  acceptance: DeliveryAcceptance,
+): ProjectLifecycleStatus {
+  if (row.status !== "active") return row.status;
+  return acceptance.pending.length > 0 ? "awaiting_acceptance" : row.status;
+}
+
+/**
+ * **能不能真的验收**(= 有没有可行动的「待收货」)。
+ *
+ * ⚠️ 与 `lifecycleOf` 分开:那个说的是「项目此刻是什么状态」,**这个说的是
+ * 「有没有一件甲方能动手的事」**。终态项目两种都不是 —— 它既不是待收货,
+ * 也不该给按钮(`POST /api/artifacts/:id/verdict` 会回 409,理由:收口不可逆)。
+ *
+ * 收口项目上「某份交付物从没被验收过」是**历史事实**,它由该交付物自己的卡片
+ * 如实说出(`ArtifactAcceptanceView.projectClosed`),**不进这张待办清单** ——
+ * 兑现不了的队列不是队列(2026-10-07 那条裁决的同一条推理)。
+ */
+function actionableAcceptance(
+  row: ProjectRow,
+  acceptance: DeliveryAcceptance,
+): readonly string[] {
+  if (isTerminalProjectStatus(row.status)) return [];
+  return acceptance.pending;
+}
+
 export function toProjectSummary(db: Database.Database, row: ProjectRow): ProjectSummary {
+  // ⚠️ **判据只算一次**:派生状态与计数来自**同一次** `deliveryAcceptance` 调用 ——
+  // 算两次会让「状态显示待收货、计数写 0」这种自相矛盾的读面有机会出现。
+  const acceptance = deliveryAcceptance(db, row.id);
   return {
     id: row.id,
     name: row.name,
     client: row.client,
     goal: row.goal,
-    status: row.status,
+    status: lifecycleOf(row, acceptance),
     createdAt: row.createdAt,
-    counts: countsOf(db, row.id),
+    counts: {
+      ...countsOf(db, row.id),
+      // 终态项目恒 0:计数与下面那张清单必须**同口径**,否则会得到
+      // 「徽标写着 7、清单是空」这种自相矛盾的页面。
+      pendingAcceptance: actionableAcceptance(row, acceptance).length,
+    },
   };
 }
 
@@ -617,12 +730,57 @@ export function toProjectDetail(db: Database.Database, row: ProjectRow): Project
   const works = listWorks(db, row.id).map((w) => toWorkView(db, w, name));
   const questions = listArtifacts(db, row.id, { kind: "client_question", status: "open" })
     .map((a) => toClientQuestionView(db, a, name));
+  // ⚠️ `toProjectSummary` 里已经算过一次收货判据 —— 这里再算一次是**同一个纯函数**,
+  // 不是第二份定义(它只读库、没有副作用)。写成共享变量会让 `...toProjectSummary`
+  // 与这一行之间多一个必须保持同步的隐形耦合,而这个函数本身足够便宜。
+  const acceptance = deliveryAcceptance(db, row.id);
   return {
     ...toProjectSummary(db, row),
     members: listProjectMembers(db, row.id),
     works,
     pendingQuestions: questions,
+    awaitingAcceptance: awaitingAcceptanceOf(db, row, acceptance),
   };
+}
+
+/**
+ * 「等你验收」的清单(029)—— 已交付、甲方还没表态的交付物。
+ *
+ * ⚠️ **与收口门同源**:两边都走 `deliveryAcceptance`(`repo/deliveryVerdicts.ts`)。
+ * 页面说「还有 2 份等你验收」而收口门认为可以收口,是本项目最忌的那种自相矛盾 ——
+ * 两份判据长得像、结论相反,而屏幕上看起来一切正常。
+ *
+ * ⚠️ **读不到就跳过这一条**,不编一个标题:交付物被删掉(库被清理过)时,
+ * 列表里少一条而**计数照样来自同一次判据** —— 少的那条在项目页的计数里仍看得见。
+ * 反过来给它编一个「(未知交付物)」的标题,是让读面替库里不存在的东西说话。
+ */
+function awaitingAcceptanceOf(
+  db: Database.Database,
+  row: ProjectRow,
+  acceptance: DeliveryAcceptance,
+): AwaitingAcceptanceView[] {
+  const projectId = row.id;
+  // ⚠️ **终态项目没有「待收货」这件事**:收口不可逆,验收接口会 409。
+  // 把那些交付物列进「待你验收」= 给用户一件做不到的事(2026-10-07
+  // 「收口项目的提问不进待答队列」是同一条处置)。它们**没有被删掉** ——
+  // 交付物自己的卡片会如实写「项目已收口 · 这一版没有被验收过」。
+  if (isTerminalProjectStatus(row.status)) return [];
+  if (acceptance.pending.length === 0) return [];
+  const deliveredAt = new Map(
+    deliveredDeliverables(db, projectId).map((d) => [d.artifactId, d.deliveredAt]),
+  );
+  const out: AwaitingAcceptanceView[] = [];
+  for (const id of acceptance.pending) {
+    const a = getArtifact(db, id);
+    if (a === null) continue;
+    out.push({
+      artifactId: a.id,
+      title: a.title,
+      deliveredAt: deliveredAt.get(id) ?? a.updatedAt,
+      deliverableType: a.deliverableType,
+    });
+  }
+  return out;
 }
 
 /** 全项目等甲方答的问题(左栏徽标 + 待办列表)。 */
@@ -1038,8 +1196,22 @@ export function toKnowledgeChunkView(
     problem: m.problem,
     excerpt: excerpt(m.slice, 200),
     text: m.state === "unavailable" ? "" : m.slice,
+    // 030:分级**直接来自索引行**(不是现算的)。`null` = 这一行还没算过 ——
+    // 如实透出,不许渲染成 `material`(读不到不是取值)。
+    tier: chunk.tier,
+    tierNote: chunk.tier === null ? KNOWLEDGE_TIER_UNCOMPUTED_NOTE : null,
   };
 }
+
+/**
+ * `tier === null` 时那一句人话说明。
+ *
+ * 它只解释「为什么没有值 + 怎么才会有」,**不对这一行做任何分类断言** ——
+ * 一句「大概算低权重吧」就是把读故障说成一次分类结论。
+ */
+export const KNOWLEDGE_TIER_UNCOMPUTED_NOTE =
+  "这一行还没有分级 —— 它是 030 之前索引的(那时平台还没算过分级),重扫之后就会有。" +
+  "它现在**既不是 primary 也不是 material**。";
 
 export interface KnowledgeChunkQuery {
   /** 空 / 缺省 = 按时间浏览;有值 = FTS 检索(切不出词由调用方拒收,见 http) */

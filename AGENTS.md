@@ -6,9 +6,12 @@
 ## 项目速览
 
 - **Sansheng(三生)** = 单用户本机常驻 Node 服务:Pi SDK 驱动**五个角色的 agent 组织**,SQLite 持久化,HTTP + WS + 托管前端。
-  **2026-10-08**:执行角色按**产出形态**一分为二 —— 原来的 `worker` 改名 **研究工** `research_worker`
-  (交信息:文档 / 伪代码 / 架构图 / 汇报材料),新增 **编码工** `coding_worker`
-  (交能跑的东西:可独立部署到 Docker 的**代码服务**)。
+  **2026-10-08**:执行角色按**产出形态**一分为二 —— 原来的 `worker` 改名 `research_worker`
+  **研究员**(交信息:文档 / 伪代码 / 架构图 / 汇报材料),新增 `coding_worker`
+  **工程师**(交能跑的东西:可独立部署到 Docker 的**代码服务**)。
+  ⚠️ **运行期的中文名以 `ORG` 为准 = 业务经理 / 项目经理 / 研究员 / 工程师 / 质检**;
+  设计文档(`docs/DESIGN-AGENTS.md` 等)里那两个角色写作「研究工 / 编码工」——
+  那是**文档对角色轴的称呼**,不是任何界面或提示词里的字。两处都是同一对角色。
 - **组织架构是一等数据**:`agents` / `projects` / `project_assignments` 在库里,**角色属性在代码里**(`ROLE_SPECS`)。制品是工件(`artifacts` 表),不是聊天记录。
 - 默认 `127.0.0.1:2718`;数据目录默认 `~/.sansheng/`,可用 `--data` 或 `SANSHENG_DATA` 覆盖。
 - **「此刻」的读面只有一处**:`GET /api/projects/:id/live`(`ProjectLiveView`)—— 成员页的
@@ -16,9 +19,12 @@
   (`hub.runningTurns()`,重启即清零)/ 库里的工作项与 `collectTodos` 的待办 / 落库痕迹。
   `runtime: "unavailable"` 是**读不到**,不是「空闲」—— 前端不许把它渲染成后者。
   工件页的产出图靠 `ArtifactView.workId`(migration 014 的产出边)把工件挂回环节。
-- **导航现在只有 7 个 tab**:对话 / 项目 / 工作项 / 待办 / 成员 / 记忆 / 设置。两次合并:
+- **导航现在只有 6 个 tab**:对话 / 项目 / 工作项 / 成员 / 记忆 / 设置
+  (判据是 `web/src/components/shell/TopBar.tsx` 的 `TABS`)。三次收编:
   **「工件」并入「工作项」**(`web/src/routes/Works.tsx`,2026-10-06)与
   **「Harness」并入「成员」**(`web/src/components/members/RoleHarness.tsx`,同日)。
+  **「待办」页签也已删除**(2026-10-06):它是**唯一需要甲方动手**的数据,而甲方 90% 的时间在
+  「对话」页 —— 现在长在对话页右下角(`web/src/components/client/ClientQuestionDock.tsx`)。
   **「记忆」页三段是两套东西**:用户画像 / 记忆碎片(关于**用户**,模型写、会淡忘)+
   **知识语料**(关于**项目 / 组织**,平台索引、agent 只读 —— 见下「知识语料」一节)。
   **工作项页的信息顺序 = 依赖关系图 → 推进图 → 选中的环节**(前者**不折叠**,用户点名的顺序);
@@ -48,14 +54,21 @@
   判据的一部分:同一对节点上两类边**方向一致**时不是环(真机那份数据就是这样),方向相反
   才是环(`mutualPairs` 会点名是哪两条边)。写反会让「交付」跑到最左、并且把一个不存在的
   环报出来(`web/src/lib/workGraph.ts` 的 `collectEdges`)。
-- 基线:**1913 passed / 95 test files** · 两条 typecheck 0 error · `check:design` E1–E14 全绿(5 角色)。
-- **角色中文名只有一处**:`src/platform/runtime/org.ts` 的 `ORG`(播种 + `RoleHarnessView.displayName`
-  共用);前端兜底表 `web/src/lib/vocab.ts` 的 `ROLE_LABEL` 必须逐项相同,由
-  `tests/web/role-names.test.ts` 跨边界对照。**不许在某个页面里再写一张名字表**
-  (曾经 harness 页写 `Worker(执行者)`、成员页写 `工程师`、前端兜底写 `执行者`)。
+- 基线:**1993 passed / 99 test files** · 两条 typecheck 0 error · `check:design` E1–E14 全绿(5 角色)。
+- **角色中文名只有一处**:`src/platform/runtime/org.ts` 的 `ORG`(播种 / `roleDisplayName()` /
+  `RoleHarnessView.displayName` / **系统提示里的「# 你的角色:X」**全走它);
+  前端兜底表 `web/src/lib/vocab.ts` 的 `ROLE_LABEL` 必须逐项相同,由
+  `tests/web/role-names.test.ts` 跨边界对照。**不许在任何地方再写一张名字表**
+  —— 这条被违反过**三次**:harness 页写 `Worker(执行者)`、成员页写 `工程师`、
+  前端兜底写 `执行者`;2026-10-08 又发现 `runtime/promptAssembly.ts` 里还藏着一张
+  `ROLE_NAME`(把 `quality_reviewer` 写成**「质检审查员」**,而 `ORG` 是「质检」)
+  ⇒ **已删,改成调 `roleDisplayName()`**。
+  ⚠️ **那条哨兵当时是假通过**:断言写的是 `expect(brief).toContain(\`# 你的角色:${roleDisplayName(role)}\`)`,
+  而 `"质检审查员"` **包含** `"质检"` —— 现在改成**逐字相等**(`toBe`),并带变异自检
+  (把旧写法喂回去,它当场变红)。这是本项目第 3 类静默失败(坏掉的检查返回了看起来正常的答案)的一次复发。
 - 日志只走 stdout:`~/.sansheng/logs/sansheng.log` 恒为 0 字节,别去 tail 它。
 
-## 源码地图(`find src -name '*.ts' | wc -l` = 74)
+## 源码地图(`find src -name '*.ts' | wc -l` = 77)
 
 ```
 src/cli/                 CLI 入口(index.ts + paths.ts)
@@ -63,15 +76,17 @@ src/platform/cli/        smoke / run 两个子命令的实现
 src/platform/host/       常驻宿主:serve / scheduler / reset
 src/platform/transport/  传输:http(API)/ hub(WS 广播)/ views
 src/platform/runtime/    boot session turn execution assembly promptAssembly pendingWork
-                         projectContext dispatcher org sdkAdapter
+                         projectContext dispatcher org sdkAdapter rework
+                         (rework.ts = 「退回给谁」的判据,质检返工与甲方拒收共用)
 src/platform/tools/      工具层:12 个文件、38 个平台工具定义 + registry.ts 的 dispatch()
 src/platform/codeservice/ 代码服务:port.ts(端口)+ git.ts(真实现,盘上核对仓库)
 src/platform/harness/    授权:capability(能力↔工具表)/ authorize(三道门)/ toolSet(L2 集合文件读盘)/ write(提示词写盘)
 src/platform/identity/   角色:role.ts 的 ROLE_SPECS
-src/platform/storage/    db.ts + repo/ 下 14 个仓储(含 knowledge.ts)
+src/platform/storage/    db.ts + repo/ 下 15 个仓储(含 knowledge.ts / deliveryVerdicts.ts)
 src/platform/infra/      keyring / settings / settingsApply / providers / migrations
 src/platform/memory/     MemoryPort 端口 + sqlite 实现(**关于用户**,会淡忘)
 src/platform/knowledge/  知识语料:切块 / 索引器 / 现读(**关于项目**,只读;见下)
+src/platform/workspace/  工作区:root(项目根)/ git(提交·读·show)/ scan(目录观测面)/ port
 src/platform/client/     ClientChannel 端口
 shared/types/            跨端协议类型(platform.ts / settings.ts)
 ```
@@ -106,14 +121,21 @@ shared/types/            跨端协议类型(platform.ts / settings.ts)
 
 | 角色 | 交什么 | 交付物类型 | ceiling 的差别 |
 |---|---|---|---|
-| `research_worker` 研究工 | **信息**:技术方案 / 架构图 / 伪代码 / 调研结论 / 汇报材料 | `html_report` | 有 `code.read` + `code.exec`,**没有 `code.write`** |
-| `coding_worker` 编码工 | **能跑的东西**:可独立部署到 Docker 的**代码服务**(git 仓库) | `code_service` | 三个都有(唯一差别就是 `code.write`) |
+| `research_worker` 研究员 | **信息**:技术方案 / 架构图 / 伪代码 / 调研结论 / 汇报材料 | `html_report` | 有 `code.read` + `code.exec`,**没有 `code.write`** |
+| `coding_worker` 工程师 | **能跑的东西**:可独立部署到 Docker 的**代码服务**(git 仓库) | `code_service` | 三个都有(唯一差别就是 `code.write`) |
 
-> ⚠️ **`worker` 这个字符串在代码与库里都不再存在**(026 把存量行改成 `research_worker`)。
+> ⚠️ **界面 / 提示词里的名字是「研究员 / 工程师」**(`ORG` 是唯一来源,见上)。
+> 设计文档里写「研究工 / 编码工」—— 同一个角色轴的另一种读法,**不要**拿它去改代码里的名字。
+
+> ⚠️ **`worker` 这个字符串在活代码与库里都不再存在**(026 把存量行改成 `research_worker`)。
+> 唯一的痕迹是**历史迁移** `migrations/007_platform_core.sql` 的 CHECK(它给全新库建表,
+> 026 紧接着重建掉)与几个 `tests/web/*` 夹具 —— 那些是历史,不是活代码。
 > **判断「谁能执行工作项」只有一处判据**:`identity/role.ts` 的 `EXECUTOR_ROLES` + `isExecutorRole()`。
-> 三处消费者必须用同一个答案 —— `runtime/execution.ts` 的 `checkRunnable`、
+> 消费者**七个文件**(实测 `grep -rln 'isExecutorRole\|EXECUTOR_ROLES' src/`):
+> `identity/role.ts`(定义)、`harness/authorize.ts`、`runtime/execution.ts` 的 `checkRunnable`、
 > `runtime/pendingWork.ts` 的 `canExecuteWork`、`runtime/dispatcher.ts` 的
-> `execute_assigned_work` / `fix_stranded_assignment`。**别再写死一个角色名**:
+> `execute_assigned_work` / `fix_stranded_assignment`、`runtime/org.ts`、`tools/project.ts`。
+> 七处必须用同一个答案 —— **别再写死一个角色名**:
 > 硬编码 `role === "worker"` 在角色集变化时不会报错,只会让新角色**静默不工作**
 > (「编码工怎么派都派不出去」)。
 >
@@ -168,9 +190,10 @@ shared/types/            跨端协议类型(platform.ts / settings.ts)
 
 | 角色 | 待办判据 | 判据从哪来 |
 |---|---|---|
-| `business_manager` | 有人问它 / **有下游结果还没向甲方交代**(**且过了合并窗口**:攒够 N 条或最老的一条等到 T;失败与高危阻塞**绕过**窗口) / **甲方答复到了还没处置**(`resume_client`) / **有已验收交付物还没交付**(`handover`) / **这个项目没有一件没做完的事了**(`close_project`) | 库里的 `open` ask + **`dispatch_events`(outbox)里未消费的行** + `client_questions.consumed_at` + `project_sessions.deliverable_artifact_id` + `projects.status` |
+| `business_manager` | 有人问它 / **有下游结果还没向甲方交代**(**且过了合并窗口**:攒够 N 条或最老的一条等到 T;失败与高危阻塞**绕过**窗口) / **甲方答复到了还没处置**(`resume_client`) / **有定稿交付物还没交付**(`handover`) / **这个项目没有一件没做完的事了,且甲方全部验收过**(`close_project`,029) | 库里的 `open` ask + **`dispatch_events`(outbox)里未消费的行** + `client_questions.consumed_at` + `project_sessions.deliverable_artifact_id` + **`delivery_verdicts`(甲方裁决)** + `projects.status` |
 | `project_manager` | 有人问它 / 有变更待评 / **项目零工作项** / **有工作项被派给了非执行角色** / **有工作项停在 `failed`** → 重新划范围(`recover_failed_work`) | `pendingWork.ts` + `works` + `works.status='failed'` |
 | `research_worker` / `coding_worker` | **分派给它、前置已满足、还没终态**的工作项 | `pendingWork.ts` 的 `myOpenWorks` |
+| **产出的作者**(执行角色或 PM) | **质检判了不通过**(`rework`)/ **甲方拒收了一份交付物**(`rework_rejected`,029)—— 目的地都是**产出的作者**,没有作者退 PM,第 3 轮起换人 | `review_verdicts` / `delivery_verdicts` |
 | `quality_reviewer` | 有人问它 / 有变更待评 / **有做完但没审的产出** | `works.status='done' AND review_state='pending'` |
 
 > ✅ **「等待审查」现在是库里的真状态**(`works.review_state = none | pending | done`,migration 013)。迁入 `done` → `pending`,质检回合**成功结束后**由平台置 `done`;维护点是 `works.status` 的唯一写口 `repo/works.ts` 的 `updateWorkStatus`。所以质检的待办就是**一条查询**,重启后补跑。批次 20 那句「不要把它写成一条 SQL 查询」随这次重构作废 —— 当时它是对的(语义为假),现在是假的(状态真的存在了)。
@@ -189,7 +212,7 @@ shared/types/            跨端协议类型(platform.ts / settings.ts)
 
 > 前两层管「**还要不要叫醒**」,第三层管「**已经叫醒的那一个回合还能跑多久**」—— 一个回合卡在某个工具上时前两层都拦不住(它占着项目 busy 闩,而账本记的是次数不是时长;真机现场是一个 worker 回合跑了 16 分钟还在 `curl` 文档)。到点由平台 `AgentSession.abort()` **真的打断**,然后**按超时处置**:还没终态就记 `failed`(经唯一写口写出 `work_failed` 事件 → 业务经理的汇报待办),它自己已终态 / 已 blocked 就不覆盖。**为什么是 `failed` 而不是留在 `in_progress`**:留着 = 静默死(不在任何 outbox 事件里、会被反复叫醒直到预算用尽、然后永久停在原地),而每次叫醒再买一个完整的墙钟上界。**Wave 1 只做完了判定与打断,运行期吃不到它**(宿主没把 `ServeOptions.turnWallClockMs` 接出去,于是「我调了上界」与「它根本没生效」在真机上长得一样);Wave 2 把那条线接上了,而且**两条路都要接**(`runAgentTurn` 聊天那条 + `runWorkInSession` 执行那条 —— 只接前者等于没接)。
 
-**合并唤醒:少打扰甲方的第二刀(判定侧的时机收窄)**。写入侧只对「根工作项终态 / 里程碑 / `work_failed` / high|critical 阻塞」写 outbox —— **但真机复核发现它在扁平结构下是空转的**:用户自己的库**当时**是 `9 work → 9 root → 0 中间`(⚠️ **2026-10-05 复核三次,形状每次都不同,所以别把它当常量**:`9 root` → `1 根 + 4 子` → **同一晚 W3-③ 实测是 `0 work / 0 项目 / 0 工件`**(该库被清过)。判据永远是那两条 `SELECT COUNT(*) …`,**结论不变**:按「是根」判会让扁平库里的每条真活失去执行者),而**运行期任务提示词里明写着要建树**(`runtime/dispatcher.ts:517-518` 的 `decompose_project` 正文:
+**合并唤醒:少打扰甲方的第二刀(判定侧的时机收窄)**。写入侧只对「根工作项终态 / 里程碑 / `work_failed` / high|critical 阻塞」写 outbox —— **但真机复核发现它在扁平结构下是空转的**:用户自己的库**当时**是 `9 work → 9 root → 0 中间`(⚠️ **2026-10-05 复核三次,形状每次都不同,所以别把它当常量**:`9 root` → `1 根 + 4 子` → **同一晚 W3-③ 实测是 `0 work / 0 项目 / 0 工件`**(该库被清过)。判据永远是那两条 `SELECT COUNT(*) …`,**结论不变**:按「是根」判会让扁平库里的每条真活失去执行者),而**运行期任务提示词里明写着要建树**(`runtime/dispatcher.ts` 的 `decompose_project` 正文(`renderTask` 那一支,2026-10-08 实测在 `dispatcher.ts:2266`):
 「多件产出同属**一个交付物**时,用 `parentWorkId` 把它们挂到一条根工作项下面」),
 真机库却仍是 `9 work → 9 root → 0 中间` ⇒ **不是「没人告诉它」,而是「告诉了没做到」**(§9.4 已按此更正归因)。于是每条工作项终态都是「根终态」,全部照写。
 
@@ -207,7 +230,7 @@ shared/types/            跨端协议类型(platform.ts / settings.ts)
 >
 > 判据:`SELECT COUNT(*) FROM works WHERE parent_work_id IS NOT NULL`。**不是** `grep -rn parentWorkId harness/` —— 那个 grep 当时漏了运行期任务提示词,让我把归因搞错了(见上)。
 
-> 会话池的键是 `(上下文, agent)` 而不是上下文 —— 一个项目里五个角色各要一条自己的会话(工具面不同)。原先 BM 独占,键是 `string | null`。
+> 会话池的键是 `(项目, 会话, agent)`(`hub.ts` 的 `pooledKey`)—— 一个项目里五个角色各要一条自己的会话(工具面不同),而 024 之后同一个项目里还可以有多条对话线。原先 BM 独占,键是 `string | null`;哪条是主对话由 `project_sessions.kind` 认(`ensureMainSession`)。
 
 ### 「甲方问了但没得到答复」与「重启后模型失忆」(2026-10-07 真机事故)
 
@@ -272,16 +295,28 @@ dev/prod + CI/CD」,09:54 业务经理只回了一句「我先看下你之前留
 
 ⚠️ **`serve.ts` 里那条 `code: "project_closed"` 硬拒已删**。它让项目收口之后甲方**连一句都发不出去**,项目成了只读墓碑 —— 而交付物全在库里,「这个项目到底做成了什么」恰恰是验收时要问的第一句。
 
-现在分两层(`harness/authorize.ts` 的 `DIALOGUE_SURVIVES_CLOSURE`):
+现在分两层,而**两层判的是不同的东西**(这里曾经把机制归属写混过,以代码为准):
+
+| 层 | 判据 | 管什么 |
+|---|---|---|
+| `harness/authorize.ts` 的 `PROJECT_SCOPED_PREFIXES` | 能力 id 的**前缀在不在这个集合里** | 收口之后**还能不能调它** |
+| `harness/authorize.ts` 的 `DIALOGUE_SURVIVES_CLOSURE` | **只有三项**:`project.read` / `project.open` / `project.close` | 上面那条的一处显式例外(「说话」类) |
 
 | 收口后 | 能力 |
 |---|---|
-| ✅ 仍然可用 | `project.read` / `project.open`(开下一个版本)/ `project.close` / `client.*` / `memory.*` / `knowledge.read`(全局语料的只读检索) |
-| ❌ 被挡 | `project.update` 与 `work.*` / `collab.*` / `blackboard.*` / `change.*` / `blocker.*` |
+| ✅ 仍然可用 | `project.read` / `project.open`(开下一个版本)/ `project.close`;以及**前缀不在 `PROJECT_SCOPED_PREFIXES` 里**的那些 —— `client.*` / `memory.*` / `knowledge.read`(它们从来就没被收口挡过,不是靠 `DIALOGUE_SURVIVES_CLOSURE` 豁免的) |
+| ❌ 被挡 | `project.update` 与 `work.*` / `collab.*` / `blackboard.*` / `change.*` / `blocker.*`(前缀在 `PROJECT_SCOPED_PREFIXES` 里,且不在上面那三项例外中) |
 
-**豁免的是「说话」,不是「改」。** 另:接待会话的 `renderProjectContext(null)` 从**空串**改成**列清单** + 新增 `project_list` 工具 —— 业务经理此前**没有任何一条路**能知道库里有哪些项目(`project_read` 要一个已知的 projectId,而那个 id 从哪来?)。
+**豁免的是「说话」,不是「改」。** ⚠️ 另有一处**新的** `code: "project_closed"`
+(`transport/http.ts` 的验收端点,029):它挡的是**给已收口项目补验收** ——
+与那条被删掉的硬拒不是一回事(那条挡的是甲方说话,这条挡的是给一个已经生效的
+不可逆结论补签)。 另:接待会话的 `renderProjectContext(null)` 从**空串**改成**列清单** + 新增 `project_list` 工具 —— 业务经理此前**没有任何一条路**能知道库里有哪些项目(`project_read` 要一个已知的 projectId,而那个 id 从哪来?)。
 
-### 第 15–17 条规则:质检返工 + 两条兜底(2026-10-07)
+### 质检返工 + 两条兜底(2026-10-07)
+
+> ⚠️ **下文按 `RULES` 的 `id` 说话,不按「第 N 条」** —— 序数会随增删漂
+> (2026-10-08 加了 `rework_rejected_delivery` 之后,原来的「第 13/14/15 条」
+> 全部平移了一格,而**没有任何检查会红**)。当前 `RULES` 与 `TODO_KINDS` 都是 **18** 条。
 
 真机驱动:根工作项被质检**连续三轮 fail**,而 `turn_usage` 显示**三次审查之间一个执行回合都
 没有** —— 两个缺陷叠加:`fail` 对**容器**是空操作(判 fail 走 `updateWorkStatus(in_progress)`,
@@ -296,17 +331,17 @@ dev/prod + CI/CD」,09:54 业务经理只回了一句「我先看下你之前留
 |---|---|---|
 | `rework_failed_review` | 最近一次结论是 `fail` 且那之后这条工作项**自己**没有新产出 | **产出的作者**;没有自己的产出 ⇒ PM;第 3 轮起换人 |
 | `escalate_abandoned_todo` | 账本 `notified_at` 非空(= 平台**真的停在那里**并播报过)且被放弃的待办**本来不归 PM** | PM —— **换手**,不是「再叫一次」 |
-| `review_undelivered_project` | 项目 `active` + 工作项**全终结** + **零已验收交付物** + 真的安静(无待审 / 无 outbox / 无阻塞 / 无可整合的根) | 业务经理 |
+| `review_undelivered_project` | 项目 `active` + 工作项**全终结** + **零定稿交付物** + 真的安静(无待审 / 无 outbox / 无阻塞 / 无可整合的根) | 业务经理 |
 
 ⚠️ 后两条补的是**真空**:账本到顶在规则表里零读者(只有一条一次性 `system` 通知);而
-「全终结 + 0 交付物」时收口要「已验收交付物 ≥ 1」、交付要「有已验收交付物」⇒ 两条都不成立。
+「全终结 + 0 交付物」时收口要「定稿交付物 ≥ 1」、交付要「有定稿交付物」⇒ 两条都不成立。
 ⚠️ 兜底的命门是**乱响**:「安静」必须逐条排除「其实还有人在动」。完整叙事(两个缺陷的现场、
 五处配套收窄、`superseded` 的边界、以及「为什么判据不能用墙钟」)在
 `docs/DESIGN-PLATFORM.md` 的「质检返工与兜底」一节;**回归**:`tests/platform/rework.test.ts` ·
-`tests/platform/stalled-project.test.ts`(17 条,四个变异自检)。⚠️ 第 15 条能走到真机,是因为
+`tests/platform/stalled-project.test.ts`(17 条,四个变异自检)。⚠️ `rework_failed_review` 能走到真机,是因为
 旧夹具是 `parentWorkId: null` 的「整合」—— **一个没有子项的「整合」**。
 
-### 第 14 条规则 `recover_failed_work`(2026-10-06 真机停摆补)
+### 规则 `recover_failed_work`(2026-10-06 真机停摆补)
 
 真机现场(项目「美股自动化交易平台方案设计·单报告合并版」):一条 worker 工作项单回合读进
 **109,231 token** 后撞上墙钟上界(10 分钟)被 `abort()` 打断,记成 `failed`。
@@ -333,7 +368,7 @@ dev/prod + CI/CD」,09:54 业务经理只回了一句「我先看下你之前留
 真机复跑已验证:PM 22:58 把失败那条**退役成 `cancelled`**、按报告章节**拆成 4 条**
 新工作项,worker 随即开跑第一条。
 
-### 第 13 条规则 `close_finished_project`(2026-10-06 真机终局补)
+### 规则 `close_finished_project`(2026-10-06 真机终局补)
 
 真机现场(项目「美股自动化交易平台方案设计」跑完之后):11 条工作全 `done` +
 全 `review_state='done'`、6 条 `review_verdict` 全 `pass`、outbox 空、
@@ -344,8 +379,13 @@ dev/prod + CI/CD」,09:54 业务经理只回了一句「我先看下你之前留
 
 判据是**八件事同时不成立**(`runtime/dispatcher.ts` 的 `close_finished_project`):
 非终态工作项 0 · 待审产出 0 · 未消费 outbox 0 · 等甲方的提问 0 · 未处置的答复 0 ·
-未解决阻塞 0 · **已验收交付物 ≥ 1**(否则「工作项全 done 而甲方手上什么都没有」
+未解决阻塞 0 · **定稿交付物 ≥ 1**(否则「工作项全 done 而甲方手上什么都没有」
 不算完成) · 且**全部已交付**。全部只读结构化的列。
+
+> ⚠️ **2026-10-08(029)又加了三条**:`acceptancePending` 非空(已交付、甲方还没表态)
+> 或 `rejectedDeliveries` 非空(甲方拒收、还没重交)⇒ 也不叫收口。所以判据现在是 **11 条**。
+> 那三条读的是 `delivery_verdicts` —— 与「定稿」是**两件事**(见下「甲方验收」一节):
+> 在此之前收口门读的是**作者自己写的** `accepted`,等于读申请人的自我声明。
 
 > ⚠️ **判据成立时不自动关闭,而是叫醒 `business_manager` 去判断** —— 收口不可逆
 > (`closeProject` 对终态项目直接抛错、项目内能力随即失效),而「收不收口」是业务判断,
@@ -359,7 +399,11 @@ dev/prod + CI/CD」,09:54 业务经理只回了一句「我先看下你之前留
 
 - 迁移在 `migrations/`:**007–010 建平台表**,**011 把旧系统的 7 张表 DROP**(`blackboards` / `conversations` / `messages` / `fragments` / `user_profile` / `agent_states` / `fragments_vec`),**012 接待会话**(重建 `project_sessions` 放宽 `project_id` 可空,已登记进 `INTENTIONAL_REBUILDS`),**013 排空器状态**(`works.review_state` + `dispatch_events` + `dispatch_attempts`,纯加法),**014 产出边**(`artifacts.work_id` + 一条部分索引,纯加法),**015 放宽 `dispatch_events.kind`**(加 `work_cancelled`;闭集**只能靠重建表**放宽,已登记进 `INTENTIONAL_REBUILDS`),**016 交付物 kind**(重建 `artifacts`),**017 交付会话**(`project_sessions.deliverable_artifact_id` + `channel`,纯加法),**018 `turn_usage` 表**(纯加法),**019 会话消息的封套**(`session_messages.origin_source` + `trigger_kind`,纯加法;两列各有自己的 CHECK),**020 `client_questions` 台账**,**021 `review_verdicts`**,**022 `session_messages.todo_kind`**(纯加法、**不建 CHECK** —— 取值域随 `TODO_KINDS` 变,闭集在读写两侧的 TS 里),**023 项目版本链**(`projects.version` + `parent_project_id`,`ON DELETE SET NULL`),**024 对话一等实体**(`project_sessions.kind` + `title`;`kind` **有** CHECK —— 两值闭集,与 022 相反),**025 交付物类型**(`artifacts.deliverable_type` + 一条部分索引,纯加法),**026 执行角色一分为二 + 交付物类型加 `code_service`**(⚠️ **重建两张表**:`agents` 的 role 闭集 4→5 值并改名 + `artifacts` 的 `deliverable_type` 闭集 1→2 值;两张都登记进 `INTENTIONAL_REBUILDS`),**027 工件正文落文件**(⚠️ **重建 `artifacts`**:`body TEXT` → `body_path` / `body_sha256` / `body_bytes` 三列 NOT NULL + `commit_sha` 可空;登记进 `INTENTIONAL_REBUILDS`。**它故意不走「建 _new → 拷 → 改名」**:没有数据要拷(用户明确「老数据全不要」),而改名法会让「`artifacts` 被多个迁移创建」这条登记**当场过期**;数据安全改由一条会响的前置检查承担 —— `CHECK (n = 0)`,非空库上**响亮失败并整体回滚**,而不是静默清空)。
 **028 知识语料**(`knowledge_chunks` + FTS5 `knowledge_fts` + 三个同步触发器,
-纯加法;设计 `docs/DESIGN-KNOWLEDGE.md` —— **只读检索语料,不是记忆**,见下)。
+纯加法;设计 `docs/DESIGN-KNOWLEDGE.md` —— **只读检索语料,不是记忆**,见下),
+**029 甲方的验收裁决**(`delivery_verdicts`:append-only,`verdict CHECK IN ('accept','reject')`
++ `note` + 两条索引;**纯加法、不重建任何表** —— 见下「甲方验收」一节),
+**030 语料分级**(`knowledge_chunks.tier`;**纯加法、可空、不建 CHECK**,与 022 同一条先例
+—— 取值域在读写两侧的 TS 里;`PRAGMA table_info` 实测列已加)。
 - ⚠️ **`artifacts.work_id` 一条边承载两个语义**(「产出」∪「关于」,migration 014):执行角色写 `evidence` 是产出,质检把 `review_finding` 挂到**被审的那条**上是「关于」。取「这条工作项交付了什么」必须自己区分(`runtime/execution.ts` 用 `work_id` + 作者 + `kind ∉ ABOUT_ONLY_ARTIFACT_KINDS` 三条判据);**不要删那些边** —— 它是 `review_finding` 唯一能表达「审的是哪一条」的地方。
 - `artifacts` 直接挂项目 —— **没有 blackboard 容器层**。记忆在 `memory_fragments` / `memory_profile`,不是 `fragments`:`fragments` 是旧名字,001 已占用。
 - 平台表**不得复用旧表名**:`CREATE TABLE IF NOT EXISTS` 撞名时静默无操作,新表根本建不出来(见下 §三类静默失败)。加表前先 `ls migrations/` 查名。
@@ -431,8 +475,17 @@ dev/prod + CI/CD」,09:54 业务经理只回了一句「我先看下你之前留
 - **触发全是平台侧的**:回合边界 `housekeepingCommit` 重扫本项目 + 宿主启动 `reindexAllKnowledge`。
   **幂等**(`(source_kind, source_id, seq)` + `sha256`);**读不到不许删已有块**(读故障 ≠ 语料丢失),
   工件数撞 500 单次上限时**跳过按来源对账并如实报出**。
+- **分级(tier,030)**:每条块带 `primary`(定稿类工件 / 甲方原话)或 `material`
+  (`evidence` / `hypothesis` / `note` / `review_finding` / assistant 叙述 / **未知 kind**);
+  检索**排序**改成「tier 优先,同 tier 内保持 bm25 顺序」—— **降权不是过滤**,
+  `material` 仍然检索得到。幂等判据从「只有 `sha256`」改成「`sha256` **和** `tier`」,
+  否则正文没变的存量行**永远**停在 `NULL`(重扫补上,块 id 不变)。
+  ⚠️ **平台判定的是「定稿 vs 原始材料」,不是「内容从哪来」** —— 语料只收工件正文与
+  `user`/`assistant` 消息(工具结果根本不进语料),「worker 把抓来的网页粘进产出」在库里
+  与「它自己写的段落」长得一样。**任何声称「已识别外部内容」的字段都是假话。**
 - **可见性缺口如实记**:P1 是**跨项目全局可读**,没有 `tainted` / scope 列(闭集里每个值都要有真写入口)
-  —— 那是 P2 第一件事(设计 §7/§8)。收口之后 `knowledge.read` **仍然可用**(与 `memory.*` 同理)。
+  —— 那是 P2 第一件事(设计 §7/§8)。**tier 是排序权重,不是可见性边界**:
+  跨项目全局可读这件事一个字没变。收口之后 `knowledge.read` **仍然可用**(与 `memory.*` 同理)。
 - **读面(2026-10-08 补)**:记忆页第三段「知识语料」= `GET /api/knowledge`(量级 / 时效 /
   机制状态)+ `GET /api/knowledge/chunks?q=&projectId=&limit=`(`q` 有值=检索、没值=按时间浏览)。
   状态判据在 `web/src/lib/knowledgeState.ts` 的 `corpusStatus`(纯函数 + 单测):
@@ -452,7 +505,7 @@ dev/prod + CI/CD」,09:54 业务经理只回了一句「我先看下你之前留
 | | 事实 | 位置 |
 |---|---|---|
 | ① 提得到 | `PROJECT_SCOPED_PREFIXES` **不含 `client.`** ⇒ 收口后 `ask_client` 仍可用 | `harness/authorize.ts:129`(**有意**:「豁免的是说话,不是改」) |
-| ② 没人处理 | 排空器排的是 `listProjects(db,"active")` ⇒ **终态项目永远不进排空器** | `host/serve.ts:1408` |
+| ② 没人处理 | 排空器排的是 `listProjects(db,"active")` ⇒ **终态项目永远不进排空器** | `host/serve.ts:1969`(`drainAll`) |
 | ③ ⇒ | 用户点「回答」只会多落一条 `decision`,**没有任何人会被叫醒**,而这一条仍然挂着 | `POST /api/client-questions/:id/answer` |
 
 ⇒ 「待答」承诺的是「你答了会有人处理」。**兑现不了的队列不是队列,是看起来很正常的噪音** ——
@@ -500,6 +553,9 @@ dev/prod + CI/CD」,09:54 业务经理只回了一句「我先看下你之前留
   新写入被强制带类型,所以 NULL 只会减少;**不许为了「整齐」去改写历史行**。
 - **两个类型的正文语义不同**:`html_report` 的正文**就是交付物**(一份 HTML 文档),
   `code_service` 的正文只是一份 markdown 说明,**主体是 `metadata_json` 里的仓库坐标**。
+- ⚠️ **`artifacts.status='accepted'` 读作「定稿」,不读作「甲方验收了」**(2026-10-08,029)。
+  它由**作者**写(`board_write` 的 `status`)= 「我整合完了、可以交出去了」;
+  甲方收不收是**另一张表**(`delivery_verdicts`,只有 HTTP 面能写)。见下「甲方验收」一节。
 
 #### `code_service` 的写入口 = 平台**当场去盘上核对**
 
@@ -548,12 +604,133 @@ HEAD 一直在动,而交付物可能根本没变 —— 读面说「这版交付
 它的**主体是仓库坐标**(在 `metadata_json` 里),正文只是一份 markdown 说明。
 所以 `bodyMode` 有三个分支,把它当 `html_report` 渲染 = 一片空白、当 `text` 渲染 = 坐标根本看不到。
 
+## 甲方验收与「待收货」(2026-10-08 · migration 029)
+
+> **用户裁决(原话)**:
+> 「把甲方从『只读观察者』变成闭环里的一等主体:交付 → 甲方验收 → 收口 / 返工 / 下一版」
+> 「**只有甲方认可了之后,项目才算是结项**,业务经理把交付物给到甲方之后,项目进入『待收货』状态」
+
+### 它修的是一道**假门**
+
+在此之前,交付与收口两道门的资格判据都是「存在 `status='accepted'` 的 `deliverable`」——
+而那个 `accepted` 是**申请人自己写的**:PM 提示词逐字教它「`status` 用 `accepted`,
+因为交付那一环的资格判据是『已验收的交付物』」;真机库 7 份交付物**全部** `accepted`,
+作者是 `wk` / `pm` 自己 ⇒ **门的判据 = 申请人的自我声明**,而收口**不可逆**。
+(对照 `code_service` 的写入口 —— 平台**当场去盘上核对七件事**,那才是真门。)
+
+### 两个词,两件事(这条分不清就会再造一次假门)
+
+| 词 | 谁写 | 意思 |
+|---|---|---|
+| `artifacts.status='accepted'` | **作者**(`board_write`) | **定稿**:我整合完了,可以交出去了 |
+| `delivery_verdicts.verdict` | **只有甲方** | **收不收**:`accept` / `reject` |
+
+- **`delivery_verdicts`**(029)**纯加法、不重建任何表**:`seq` 自增主键 + `project_id`
+  (CASCADE)+ `artifact_id`(**NO ACTION**:删交付物不抹掉「甲方判过它」这件事)+
+  `verdict CHECK IN ('accept','reject')` + `note` + 两条索引。**append-only**:
+  改判(拒收 → 返工 → 再交付 → 接受)是新写一行,读面取 `(created_at, seq)` 最新那条
+  —— 与 021 的 `review_verdicts` 同一条理由。
+- **唯一写入口是 HTTP**:`POST /api/artifacts/:id/verdict`。它**不是工具、不在任何角色的
+  ceiling 里** —— 做成工具就意味着某个模型能替甲方拍板。四条拒收都带可执行的处置:
+  不是交付物 400 / 项目已收口 409 / **还没交付给你** 409 / 理由 >2000 字 400。
+
+### 「待收货」是**派生状态**,不是 `projects.status` 的新取值
+
+加一个取值要**重建 `projects`**,而它实测有 **14 张 `ON DELETE CASCADE` 子表**
+(`PRAGMA foreign_key_list` 逐表查出来的:project_assignments / works / blockers /
+change_requests / asks / meetings / project_sessions / dispatch_attempts / dispatch_events /
+turn_usage / client_questions / review_verdicts / artifacts / knowledge_chunks)——
+026 的探针已经证明过「数据少的时候那种重建**不报错而静默清空子表**」。
+为一个完全可以从别的表算出来的状态去动 14 张表的级联,是**把一个查询换成一次数据风险**。
+
+⇒ 判据只有一条,落在 `delivery_verdicts` 上:
+
+```
+待收货 ⟺ 存在「已交付(project_sessions.deliverable_artifact_id 非空)且没有裁决」的交付物
+```
+
+**三个消费者读同一个函数** `deliveryAcceptance()`(`repo/deliveryVerdicts.ts`):
+
+- 读面 `transport/views.ts` 的 `lifecycleOf` ⇒ `ProjectSummary.status` 显示 `awaiting_acceptance`
+  (契约里的 `ProjectLifecycleStatus`,**只精化 `active`**;`paused`/`done`/`abandoned` 不显示);
+- 规则 `collectRuleFacts` 的 `acceptancePending`(收口门的一格);
+- 工具门 `tools/project.ts` 的 `project_close`(模型直接调也绕不过去)。
+
+⚠️ **收口门因此从 8 条变 11 条**:`acceptancePending` 非空(甲方没表态)或
+`rejectedDeliveries` 非空(甲方要改)⇒ 都不叫收口。`abandoned` **不受挡**
+(放弃不需要甲方先验收)。
+
+### 拒收之后有人接手:`rework_rejected_delivery`
+
+与 `rework_failed_review` **同构**(一行结构化结论 → 下一步),**共用** `reworkOwner`
+(「有作者就给作者,没有退 PM,第 3 轮换人」):
+
+| | 质检返工 | 甲方拒收 |
+|---|---|---|
+| 结论 | `review_verdicts.verdict='fail'` | `delivery_verdicts.verdict='reject'` |
+| 目的地 | 产出的作者 ⇒ PM 兜底 ⇒ 第 3 轮换人 | **同一个判据** |
+| 终止 | 那条工作项上出现了比结论更新的产出 | **那之后又交了一份定稿**(`deliverable` + `accepted`) |
+
+⚠️ 终止判据**比质检那条更窄,而且这是回归里现出来的**:作者写一条 `note`(「我明天改」)
+就把它算成返工完成的话,待办消失、被拒那版还在、收口门不成立、**没有任何人再被叫醒**
+—— 静默停的同款。写一份 `open` 草稿同样不算(交付要的是定稿),那种死尾由
+`review_undelivered_project` 兜底。
+
+⚠️ **甲方那句话(`note`)照原样进任务正文** —— 与 `rework` 的「正文一个字都不搬」相反:
+那边是几千字审查意见(复述白占 context),这边通常一句话,而且它是**唯一的现场**
+(裁决不是工件,模型 `board_read` 读不到)。没写理由时**不替他编**,如实说「他没写」,
+并指出唯一能问的人(业务经理)。
+
+⚠️ **被拒的那一版必须退休**:`board_write` 交新定稿时把被拒的那一版标 `superseded`
+(与质检返工同一处逻辑)。少了它,收口门会读到一个**永远消不掉的拒收** ⇒ 项目永远收不了口。
+
+⚠️ **收口项目上不给按钮**:`ArtifactAcceptanceView.projectClosed` —— 后端一律 409
+(收口不可逆),所以读面说「已交付 · 未被验收(项目已收口)」而**不是**给一排兑现不了的按钮;
+`counts.pendingAcceptance` 与项目页那张「待你验收」清单**同口径**(终态项目恒 0,
+免得出现「徽标 7、清单空」)。**事实一条不删**:那份交付物的卡片照旧如实说它没被验收过
+—— 真机那个项目 2026-10-07 就 `done` 了,而验收是 10-08 才有的,那 7 份交付物全是这个形状。
+
+**回归**:`tests/platform/delivery-acceptance.test.ts`(33 条)· `tests/web/delivery-verdict.test.ts`
+(14 条)· `project-close-rule` 的逐格拆解里加了「已交付但甲方没验收」「甲方拒收」两格 ·
+`dispatcher-c3` 的期望值改判(交付之后**不再**立刻 `close_project`,并补了「甲方接受之后
+那条待办真的会来」的正向续演)。
+
+## 成本:只做观测,不设上界(2026-10-08)
+
+> **用户裁决**:「针对『成本没有上界』现在这个阶段可以放松一点,**先只做 observation**」。
+
+所以**没有加任何闸门**(不拦、不警告、不自动停)。做的是把观测面补完:
+
+- **`byWork`**:按**工作项**分桶(此前只有 `byAgent` / `byDay`)。`byAgent` 回答「谁在花钱」,
+  `byWork` 回答「**哪件活在花钱**」—— 后者才是能做决定的那一问。真机事故(2026-10-06)
+  是一条工作项**单回合读进 109,231 token** 撞墙钟被 `abort()`;
+  在只有 `byAgent` 的读面上,它和别的活长得一模一样。
+  `work_id IS NULL` 那一桶是**平台回合**(播报 / 答复处置 / 收口判断):真实花费,
+  **既不许并进某条工作项(假归属),也不许丢**(丢了之后分项和与合计对不上)。
+  **不截断**(工作项是十位数量级,截一条就可能截掉最贵的那条)。
+- **前端第一次有读者**:`useProjectUsage` 此前**一个渲染点都没有**(hook 与端点都在,
+  没有任何页面用它 —— 「代码里写了逻辑」≠「它有读者」的第 N 次复发)。项目页新增「成本」段:
+  全历史 / 窗口 / 今日 + 谁花的 + **花在哪件活上**;窗口与「最近一笔」都写在明面上
+  (一个没有窗口的合计数字看起来永远是对的)。
+- 反造假:`usage === null` 且未查完 ⇒ 「加载中」(不是 0);读失败 ⇒ 印 error;
+  窗口内没有账 ⇒ 「一笔都没有」(不拿「现在」冒充)。
+
+**真机第一次读出来的事实**:平台回合 **20 个回合吃掉 1,026,083 token**,
+而每条研究工作项 3–7 万 —— **81% 的钱花在播报 / 交付 / 收口判断 / 答复处置上**,
+不是花在写方案上。这正是「先做 observation」的价值:**不知道钱花在哪,设上界只能靠猜。**
+
+**仍然没有的**(如实):预算闸门、按工作项的 token 上界、超支告警。
+
 ## 提示词(harness)
 
 - 单元内容在 `harness/system_prompts/`,**14 个唯一单元**;构建时由 `scripts/copy-harness.mjs` 拷进 `dist/harness/`(出厂副本)。
 - 运行时从**数据目录**读:`<dataDir>/harness/system_prompts/{unitId}.md`(`src/platform/runtime/promptAssembly.ts`)。
-- 角色→单元的声明在 `ROLE_SPECS[].promptUnits`:5 个角色共 **19 处声明**、14 个唯一单元。跨角色共享的只有两个 —— `collaboration.ask`(4 个角色)与 `collaboration.convene`(2 个角色)。
-- **角色中文名的第三处写法已收编**(2026-10-08):`runtime/promptAssembly.ts` 的 `ROLE_NAME`(系统提示里的「# 你的角色:X」)此前写着 `Worker(执行者)`,已改成与 `ORG` 逐项相同,并由 `tests/web/role-names.test.ts` 一并对照。
+- 角色→单元的声明在 `ROLE_SPECS[].promptUnits`:5 个角色共 **19 处声明**、14 个唯一单元。跨角色共享的有**三个** —— `collaboration.ask`(4 个角色)、`collaboration.convene`(2 个角色)、`change.propose`(2 个角色)。
+- **角色中文名的第三处写法已彻底删掉**(2026-10-08):`runtime/promptAssembly.ts` 曾有一张
+  `ROLE_NAME`,先写着 `Worker(执行者)`、后写着「质检审查员」(而 `ORG` 是「质检」)——
+  现在**没有那张表了**,系统提示里的「# 你的角色:X」直接调 `roleDisplayName()`。
+  `tests/web/role-names.test.ts` 的第三条断言同时从 `toContain` 改成**逐字相等**
+  (旧写法 `"质检审查员"` **包含** `"质检"`,于是那条断言曾是**假通过**)。
 - 系统提示 = 机械生成的角色简报(从 `ROLE_SPECS` 转写)+ 盘上真正装载到的单元。**盘上没有的单元如实报为 missing,不静默吞掉。**
 - **工具集合文件**在 `<dataDir>/harness/tools/{role}.json`(L2;文件名必须正好是角色名,写错了不会被读取,成员页该角色的 harness 面板会把落空的文件名列出来)。读取 = `src/platform/harness/toolSet.ts`,对用户可见 = `GET /api/harness` 每个角色的 `toolSet`。**不提供写面** —— 直接编辑文件即可,改完不用重启(每个新会话现读一次)。
 
@@ -588,7 +765,7 @@ help
 ```
 npx tsc -p tsconfig.server.json --noEmit
 npx tsc -p tsconfig.web.json --noEmit
-npm test                  # 1913 passed / 95 files
+npm test                  # 1993 passed / 99 files
 npm run build
 npm run check:design      # 设计一致性 E1–E14
 ```

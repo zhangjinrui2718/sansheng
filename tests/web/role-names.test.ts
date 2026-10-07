@@ -77,15 +77,22 @@ describe("角色中文名:后端 ORG ↔ 前端 ROLE_LABEL 逐项相同", () => 
    * **没有任何检查会红**(当时这份测试只对照 ORG ↔ ROLE_LABEL 两张表)。
    * 2026-10-08 收编之后在这里补上跨边界对照:三张表逐项相同。
    */
-  it("第三处:提示词简报里的角色名与 ORG 也逐项相同", () => {
+  it("第三处:提示词简报里的角色名与 ORG **逐字相同**(不是「包含」)", () => {
     for (const role of PROJECT_ROLES) {
       const brief = renderRoleBrief(role);
-      expect(brief, `role=${role} 的简报里名字不是 ORG 那一份`).toContain(
-        `# 你的角色:${roleDisplayName(role)}`,
-      );
+      const line = brief.split("\n").find((l) => l.startsWith("# 你的角色:"));
+      expect(line, `role=${role} 的简报里没有「# 你的角色:」这一行`).toBeDefined();
+      // ⚠️ **`toBe` 而不是 `toContain`** —— 这条断言的第一版写的是
+      // `expect(brief).toContain(\`# 你的角色:${roleDisplayName(role)}\`)`,
+      // 而那时 `promptAssembly.ts` 里还有一张把 `quality_reviewer` 写成
+      // **「质检审查员」** 的表(`ORG` 写的是「质检」)。`"质检审查员"` **包含**
+      // `"质检"` ⇒ **假通过** —— 一个坏掉的哨兵返回了一个看起来正常的答案
+      // (本项目第 3 类静默失败)。所以这里是逐字相等:多一个字就红。
+      expect(line, `role=${role} 的名字与 ORG 漂了`).toBe(`# 你的角色:${roleDisplayName(role)}`);
     }
-    // 正样本自检 + 负样本:旧的写法必须**不再**出现
+    // 正样本自检(证明上面那圈真的在跑)+ 负样本(证明判据有牙)
     expect(renderRoleBrief("coding_worker")).toContain("# 你的角色:工程师");
     expect(renderRoleBrief("coding_worker")).not.toContain("Worker(执行者)");
+    expect("# 你的角色:质检审查员").not.toBe("# 你的角色:质检");
   });
 });

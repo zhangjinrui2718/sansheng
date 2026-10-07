@@ -15,6 +15,8 @@ import {
   WORK_STATUSES, type WorkStatus, type WorkStatusChange,
 } from "../storage/repo/works.js";
 import { getAgent } from "../storage/repo/agents.js";
+import { listArtifacts } from "../storage/repo/artifacts.js";
+import { deliveryAcceptance } from "../storage/repo/deliveryVerdicts.js";
 import { ensureProjectOrg } from "../runtime/org.js";
 import { EXECUTOR_ROLES, isExecutorRole } from "../identity/role.js";
 import { resolveAssignee } from "./resolve.js";
@@ -287,6 +289,57 @@ const projectClose: PlatformTool = {
       ]);
     }
     if (getProjectRow(ctx.db, pid) === null) return fail("not_found", `找不到项目 ${pid}`);
+    // ── 甲方验收门(029,用户裁决 2026-10-08)────────────────────────
+    //
+    // 「只有甲方认可了之后,项目才算是结项」。这道门是**机器判据**,不是提示词里的
+    // 一句话:模型以为自己验过了不算,申请书上写着 `status='accepted'` 也不算 ——
+    // 只有 `delivery_verdicts` 里那一行(甲方在界面上点出来的)才算。
+    //
+    // ⚠️ **只挡 `done`,不挡 `abandoned`**:放弃不需要甲方点头(那是组织的判断,
+    // 而且放弃本身就不承诺交付)。把放弃也拦下来会让「这个项目不做了」变成一件
+    // 需要甲方先验收才做得到的事 —— 那是荒谬的。
+    //
+    // 判据与读面、与收口规则**同源**(`deliveryAcceptance`),所以不可能出现
+    // 「页面说还有 2 份等你验收、而工具说可以收口」。
+    if (outcome === "done") {
+      const current = listArtifacts(ctx.db, pid, {
+        kind: "deliverable", status: "accepted", limit: 500,
+      });
+      const currentIds = new Set(current.map((a) => a.id));
+      const acceptance = deliveryAcceptance(ctx.db, pid);
+      const pending = acceptance.pending.filter((id) => currentIds.has(id));
+      const rejected = acceptance.rejected.filter((id) => currentIds.has(id));
+      if (pending.length > 0 || rejected.length > 0) {
+        const title = (id: string): string => {
+          const a = current.find((x) => x.id === id);
+          return a === undefined ? id : `「${a.title}」`;
+        };
+        const parts: string[] = [];
+        if (pending.length > 0) {
+          parts.push(
+            `${pending.length} 份已经交付给甲方、但甲方还没表态:` +
+              pending.map(title).join("、"),
+          );
+        }
+        if (rejected.length > 0) {
+          parts.push(
+            `${rejected.length} 份被甲方拒收、还没重交:` + rejected.map(title).join("、"),
+          );
+        }
+        return fail(
+          "conflict",
+          `收口被拒:甲方还没认可这个项目(${parts.join(";")})。` +
+            `「已验收」不是作者写下的状态,而是甲方在界面上点出来的裁决 —— ` +
+            `平台里只有甲方能写它。请先在项目的「待收货」里让甲方验收;` +
+            `被拒收的那些走返工,重交之后会重新交付。`,
+          [
+            "等甲方在界面上验收(接受 / 要改)",
+            "被拒收的:按拒收理由重做一份交付物,平台会再交付一次",
+            "如果这件事不该继续:outcome 用 abandoned(放弃不需要甲方验收)",
+          ],
+        );
+      }
+    }
     try {
       closeProject(ctx.db, pid, outcome, ctx.now());
     } catch (err) {

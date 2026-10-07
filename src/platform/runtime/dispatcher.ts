@@ -114,9 +114,13 @@ import {
 import { blockersForWork, listBlockers } from "../storage/repo/blockers.js";
 import { latestReviewVerdict, latestVerdictsByWork } from "../storage/repo/reviewVerdicts.js";
 import {
-  collectReworkPending, pendingReworkOfProject, reworkOwner,
-  renderReworkPacket, REWORK_ESCALATE_ROUND, type ReworkPending,
+  collectReworkPending, pendingReworkOfProject, rejectedDeliveriesOfProject, reworkOwner,
+  renderRejectedPacket, renderReworkPacket, REWORK_ESCALATE_ROUND,
+  type RejectedDelivery, type ReworkPending,
 } from "./rework.js";
+import {
+  deliveryAcceptance, deliveredDeliverableIds,
+} from "../storage/repo/deliveryVerdicts.js";
 import {
   listArtifacts, getArtifact, type ArtifactRow,
 } from "../storage/repo/artifacts.js";
@@ -206,6 +210,21 @@ export const TODO_KINDS = [
    * 说出来的事实。
    */
   "rework",
+  /**
+   * **甲方拒收了一份交付物,退回给写它的那个人重做**(2026-10-08,029)。
+   *
+   * 与上一条是**同一款判据**(一行结构化结论 → 推出来的下一步),只是那一行
+   * 从质检的 `review_verdicts` 换成了甲方的 `delivery_verdicts`:
+   * 最新裁决是 `reject`,且那之后这条工作项上没有更新的产出。
+   *
+   * ⚠️ **用户裁决(2026-10-08)**:「只有甲方认可了之后,项目才算是结项,
+   * 业务经理把交付物给到甲方之后,项目进入『待收货』状态」。所以这一条不是
+   * 「质检返工」的别名 —— 它接的是**甲方**说的话,而甲方的那句话只有
+   * `delivery_verdicts.note` 一处落点(`board_read` 读不到它),所以
+   * `renderRejectedPacket` 会把它**照原样**带进任务正文(与 `rework` 的
+   * 「一个字的正文都不搬」相反:那边是几千字的审查意见,这边通常就一句话)。
+   */
+  "rework_rejected",
   /** 有工作项做完了、还等着审(`works.review_state = 'pending'`) */
   "review_work",
   /**
@@ -336,6 +355,11 @@ const PRIORITY: Readonly<Record<TodoKind, number>> = {
   // 返工排在**审查之前**:它要重做的是审查已经否掉的那份产出,所以它必须先跑完,
   // 才有新的东西可审(`review_work` 的判据也把「等返工」的那些排除掉了 —— 见那条规则)。
   rework: 8,
+  // 甲方拒收与质检不通过在**同一条缝**上:两者都要重做一份产出,才有新东西可审。
+  // 排在一起(而不是给甲方那条更高的优先级)的理由:它们的判据是同构的
+  // 「那之后有没有新产出」,抢跑一条不会让另一条更快达成;而队列里同时出现两条时,
+  // 先跑谁都要重写同一份产出 —— 让质检那条先跑(它更靠近流水线末端)。
+  rework_rejected: 8,
   review_work: 9,
   // 整合与交付接在**审查之后**(C3,§2.11.4):子树收口 → 整合 → 交付。
   // `integrate` 排在 `review_work` 之后是刻意的:容器自己也可能 `done` 而没审,
@@ -695,18 +719,41 @@ export interface RuleFacts {
   /**
    * `kind='deliverable' AND status='accepted'` 的工件 —— `handover` 的**资格**判据。
    *
-   * 只有**已验收**的交付物才该交付:整合刚写完(`open`)时还不该惊动甲方。
+   * ⚠️ **`accepted` 的语义是「定稿」,不是「甲方验收了」**(2026-10-08 收窄,029)。
+   * 它由作者写(`board_write` 的 `status`),表达的是「我整合完了,可以交出去了」——
+   * 那是**作者的自述**,所以它可以由模型写。甲方的裁决在 `delivery_verdicts`
+   * (只有甲方能写),两者是两件事 —— 详见 `migrations/029_delivery_verdicts.sql`。
+   *
+   * 只有**定稿**的交付物才该交付:整合刚写完(`open`)时还不该惊动甲方。
    */
   readonly acceptedDeliverables: readonly ArtifactRow[];
   /**
    * **已经有交付会话挂着的**交付物 id —— `handover` 的**终止**判据。
    *
-   * 读的是 `project_sessions.deliverable_artifact_id`,而**那一列今天还不存在**:
-   * 它是 C4 的 migration 017(§2.11.6)。所以这里**先问 schema**,列不在时如实
-   * 返回空集(= 还没有任何交付会话),并**不假装**判据已成立或已失效 ——
-   * 见 `deliveredArtifactIds` 的说明。
+   * 读的是 `project_sessions.deliverable_artifact_id`(migration 017,§2.11.6)。
+   * 读法只有一份:`repo/deliveryVerdicts.ts` 的 `deliveredDeliverableIds` ——
+   * 029 之后它同时是「甲方验收」那三个集合的来源,两份读法会漂。
+   * 那个函数**先问 schema**(`PRAGMA table_info`),列不在时如实返回空集
+   * (= 还没有任何交付会话),并**不假装**判据已成立或已失效。
    */
   readonly deliveredArtifactIds: ReadonlySet<string>;
+  /**
+   * **已经交到甲方手上、而他还没有表态**的交付物 id(029)。
+   *
+   * 它是「待收货」这条判据在规则侧的那一半:**收口门必须等它清零** ——
+   * 甲方没收到货、或者收到了没说话,都不是「这个项目做完了」。
+   *
+   * ⚠️ 只看**当前那一版**(`status='accepted'` 的定稿):被 `superseded` 的旧版本
+   * 不该再把项目钉住(它已经被新的一版取代了)。
+   */
+  readonly acceptancePending: readonly string[];
+  /**
+   * **甲方拒收了、而作者还没重交**的交付物(029)—— `rework_rejected` 的判据。
+   *
+   * 与 `reworkPending` 同形:一行结构化结论(`delivery_verdicts`)推出的下一步,
+   * 目的地由**产出的作者**决定(`runtime/rework.ts`)。
+   */
+  readonly rejectedDeliveries: readonly RejectedDelivery[];
   readonly reportBatchSize: number;
   readonly reportMaxDelayMs: number;
   // ── 2026-10-06 真机终局补的三条事实(`close_finished_project` + goal 对齐)──
@@ -1185,6 +1232,56 @@ export const RULES: readonly Rule[] = [
       "执行回合派出去(那个回合不带质检意见)、`closeIntegratedContainers` 不再撤销这次退回。",
   },
   {
+    id: "rework_rejected_delivery",
+    // 触发名说的是「这条规则的输出会因为什么而变」:
+    //   `artifact_inserted` —— **返工完成的信号**:这条工作项上出现了比甲方裁决
+    //     更新的产出(`board_write` 会敲门铃),于是这条待办消失;
+    //   `tick` —— 甲方那条裁决是从 **HTTP** 进来的(`POST /api/artifacts/:id/verdict`),
+    //     它不经过工具的 `dispatch()`,也就**不会敲门铃**。所以定时器不是可有可无的
+    //     兜底,而是这条规则**唯一**的触发起始点(与 `resume_client` 同一个处境:
+    //     甲方的答复也是从 HTTP 进来的)。10 秒的延迟在这里没有任何代价 ——
+    //     它后面跟着的是一整个返工回合。
+    on: ["artifact_inserted", "tick"],
+    if: (q) => {
+      const out: TodoDraft[] = [];
+      for (const r of q.rejectedDeliveries) {
+        // 目的地与质检返工**共用** `reworkOwner`(「有作者就给作者,没有就给 PM,
+        // 第 3 轮换人」)—— 它是用户对「退给谁」唯一的裁决,不许有第二套实现。
+        const owner = reworkOwner(
+          { round: r.round, authorAgentId: r.authorAgentId },
+          q.members,
+        );
+        if (owner === null) continue; // 项目里连项目经理都没有 —— 装配问题,不是判据
+        out.push({
+          agentId: owner.agentId, role: owner.role, kind: "rework_rejected",
+          // key 按**交付物**单键:一份交付物被拒收就是一件事。与 `rework` 按工作项
+          // 单键同形(而不是集合谓词)—— 一条待办 = 一个回合。
+          key: `rework_rejected:${r.artifactId}`,
+          target: r.artifactId,
+          refs: [r.artifactId],
+          // ⚠️ `targetState` **刻意是 null**:与 `rework` 逐字同一条理由 ——
+          // 「目标动了」= 作者重新交了一份产出 = 待办消失 ⇒ `pruneAttempts` 清预算。
+          // 挂任何时间戳都会让一次 no-op 的清零预算(「重复即停」的失效方向)。
+          targetState: null,
+          label: `重做被甲方拒收的交付物「${r.artifactTitle}」(第 ${r.round} 轮)`,
+        });
+      }
+      return out;
+    },
+    then: { kind: "rework_rejected", targetRole: "roster" },
+    why:
+      "**用户裁决(2026-10-08)**:「只有甲方认可了之后,项目才算是结项,业务经理把交付物" +
+      "给到甲方之后,项目进入『待收货』状态」。有收就有退 —— 甲方点「要改」之后必须有" +
+      "**人**接手,否则那份交付物的状态会永远停在「已交付 + 被拒收」,而收口门又要求它" +
+      "被接受 ⇒ **项目永远 active 且没有任何人在动**。那正是这个项目最怕的形态:" +
+      "「零待办」与「活干完了」在日志里长得一模一样(第 14 条规则为同一个形态补过)。" +
+      "判据与质检返工**同构**(`runtime/rework.ts`):最新裁决是 `reject` 且那之后这条" +
+      "工作项上没有更新的产出。目的地也是同一份判据(产出的作者;第 " +
+      REWORK_ESCALATE_ROUND + " 轮起换人)。" +
+      "⚠️ **它不是「收口失败」**:甲方的拒收**不改变** `projects.status`(组织照常运转)," +
+      "改的只是「这份交付物还没被接受」这一个事实 —— 而收口门读的正是它。",
+  },
+  {
     id: "review_done_works",
     // `review_state` 的唯一写口就是 `works.status` 的唯一写口(`updateWorkStatus`),
     // 所以「刚做完」在这里表现为一次工作项状态迁移。
@@ -1472,6 +1569,20 @@ export const RULES: readonly Rule[] = [
       if (q.acceptedDeliverables.length === 0) return [];
       // 有交付物却**还没交付给甲方** —— 那是 `handover` 的活,顺序在它后面。
       if (q.acceptedDeliverables.some((a) => !q.deliveredArtifactIds.has(a.id))) return [];
+      // ── 甲方**收没收**(029,2026-10-08)──────────────────────────────
+      //
+      // ⚠️ 这两条是这次改动**唯一的牙**:在它之前,`acceptedDeliverables` 那个
+      // `status='accepted'` 是**申请人自己写的**(`project_manager.core.md` 逐字教
+      // 它「status 用 accepted,因为交付那一环的资格判据是『已验收的交付物』」),
+      // 于是「甲方验收了」= 「我说我验过了」,而收口是**不可逆**的。
+      // 现在收口门读的是 `delivery_verdicts` —— 那张表**只有甲方能写**
+      // (没有任何角色持这个能力,唯一的写入口是 HTTP 的 verdict 端点)。
+      //
+      // ① 有货交出去了、而甲方还没表态 ⇒ 不叫收口:那是**待收货**(用户裁决:
+      //    「业务经理把交付物给到甲方之后,项目进入『待收货』状态」)。
+      // ② 甲方明确说要改 ⇒ 更不收口:`rework_rejected_delivery` 正在派返工。
+      if (q.acceptancePending.length > 0) return [];
+      if (q.rejectedDeliveries.length > 0) return [];
       // ── 到这里才成立 ────────────────────────────────────────────
       return [{
         agentId: bm.agentId, role: "business_manager", kind: "close_project",
@@ -1494,7 +1605,11 @@ export const RULES: readonly Rule[] = [
       "**「代码里写了逻辑」不等于「它有读者」**(7-E)。" +
       "⚠️ **判据成立时不自动关闭,而是叫醒业务经理去判断**:「收不收口」是业务判断," +
       "不是平台能从库里推出来的结论(§2.11.3)。终局那一次的正确行为是" +
-      "「业务经理看着交付物说一句『可以收了』」,不是「平台觉得活干完了就销号」。",
+      "「业务经理看着交付物说一句『可以收了』」,不是「平台觉得活干完了就销号」。" +
+      "⚠️ **2026-10-08(029)加的那两条**:八件事之外还要**甲方说了算** —— " +
+      "交付物全部交付且全部被甲方 `accept`(没有「已交付没表态」、没有「被拒收没返工完」)。" +
+      "在此之前那道门读的是 `status='accepted'`,而那是**申请人自己写的**(见 `why` 上方" +
+      "`acceptancePending` 那一段):门的判据等于申请人的自我声明,而收口不可逆。",
   },
   {
     id: "escalate_abandoned_todo",
@@ -1582,33 +1697,13 @@ export const RULES: readonly Rule[] = [
 ];
 
 /**
- * **交付会话 ↔ 交付物**这条边(设计 1 §2.11.6)的读面。
+ * **交付会话 ↔ 交付物**这条边(设计 1 §2.11.6)的读面 —— 定义已搬到
+ * `repo/deliveryVerdicts.ts` 的 `deliveredDeliverableIds`。
  *
- * ⚠️ **这一列今天还不存在** —— 它由 **C4** 的 migration 017 加到 `project_sessions`
- * 上(`deliverable_artifact_id TEXT REFERENCES artifacts(id)`)。C3 只做「产出这条
- * 待办」,建会话留给 C4。所以这里**先问 schema 再查**(`PRAGMA table_info`):
- *
- *   - 列在  → 查出已被交付过的交付物 id(终止判据真的成立)
- *   - 列不在 → 返回**空集**,含义是「还没有任何交付会话」
- *
- * 为什么不是 `try { … } catch { return new Set() }`:一条 SQL 报错被吞掉之后,
- * 「列还没迁移」与「查询写错了」在结果上长得一模一样(本项目最贵的失败形态)。
- * `PRAGMA table_info` 是一次**问得出答案**的检查,不需要靠异常区分。
- *
- * 为什么不在模块作用域缓存这张表的结构:那是**跨调用的进程内状态**,而本模块
- * 全部的纪律就是「判定每次从库里重算」(§9.4)。`table_info` 是常数级开销。
+ * 搬走的理由:029 之后它有**两个**消费者(`handover` 的终止判据与甲方验收判据),
+ * 而两份读法会漂。它原先写在这里的那段论证(`PRAGMA table_info` 先问 schema、
+ * 不用 `try/catch` 吞异常)逐字保留在那个函数上。
  */
-function deliveredArtifactIds(db: Database.Database, projectId: string): ReadonlySet<string> {
-  const columns = db.pragma("table_info(project_sessions)") as ReadonlyArray<{ name: string }>;
-  if (!columns.some((c) => c.name === "deliverable_artifact_id")) return new Set();
-  const rows = db
-    .prepare(
-      `SELECT deliverable_artifact_id AS id FROM project_sessions
-       WHERE project_id = ? AND deliverable_artifact_id IS NOT NULL`,
-    )
-    .all(projectId) as ReadonlyArray<{ id: string }>;
-  return new Set(rows.map((r) => r.id));
-}
 
 /**
  * 这条根 R 的交付**收口了**吗 —— 设计 1 §2.11.4 的 **①②** + 两条「没什么可交付」
@@ -1853,6 +1948,9 @@ function collectRuleFacts(
   });
 
   const events = listPendingDispatchEvents(db, projectId);
+  // 甲方收货(029):**一次算完**,两个字段与读面读的是同一条判据
+  // (`deliveryAcceptance`)。分开算两次会让「收口门」与「待收货清单」有机会漂。
+  const acceptance = acceptanceFacts(db, projectId, deliverables);
   return {
     projectId,
     now,
@@ -1880,7 +1978,15 @@ function collectRuleFacts(
       status: "accepted",
       limit: 500,
     }),
-    deliveredArtifactIds: deliveredArtifactIds(db, projectId),
+    deliveredArtifactIds: new Set(deliveredDeliverableIds(db, projectId)),
+    // ── 甲方收货这件事(029,2026-10-08)────────────────────────────
+    //
+    // 两个字段全部从 `deliveryAcceptance` 那**一条判据**里来(它同时被读面与
+    // `project_close` 门用) —— 两份定义会漂,而这个项目为此付过好几次代价。
+    // 交点只取**当前那一版**(`acceptedDeliverables` 的 id 集合)一次:
+    // 被 `superseded` 的旧版本不该再把项目钉住。
+    acceptancePending: acceptance.acceptancePending,
+    rejectedDeliveries: acceptance.rejectedDeliveries,
     reportBatchSize: opts.reportBatchSize ?? DEFAULT_REPORT_BATCH_SIZE,
     reportMaxDelayMs: opts.reportMaxDelayMs ?? DEFAULT_REPORT_MAX_DELAY_MS,
     projectStatus: getProjectRow(db, projectId)?.status ?? "draft",
@@ -1893,6 +1999,33 @@ function collectRuleFacts(
     reworkPending: collectReworkPending(db, projectId, works, latestVerdictsByWork(db, projectId)),
     abandonedTodos: abandonedTodos(db, projectId),
     integratableRootCount: countIntegratableRoots(works, deliverables),
+  };
+}
+
+/**
+ * **甲方收货那件事**在规则侧的两个读数(029)—— 一次算完,不重复查库。
+ *
+ * 两个判据各自只有一个来源,不许在这里另写一套:
+ *   · `acceptancePending` ← `deliveryAcceptance()`(`repo/deliveryVerdicts.ts`),
+ *     读面算「待收货」用的是**同一个函数**;
+ *   · `rejectedDeliveries` ← `rejectedDeliveriesOfProject()`(`runtime/rework.ts`),
+ *     与质检返工共用「退给谁」的判据。
+ *
+ * ⚠️ **只保留当前那一版**(`status='accepted'`):被 `superseded` 的旧版本
+ * (作者重交后退休的那一版)不该再把项目钉在「等验收」上 —— 那会得到一个
+ * **永远收不了口**的项目。这与 `acceptedDeliverables` 的口径逐字一致。
+ */
+function acceptanceFacts(
+  db: Database.Database,
+  projectId: string,
+  deliverables: readonly ArtifactRow[],
+): Pick<RuleFacts, "acceptancePending" | "rejectedDeliveries"> {
+  const current = deliverables.filter((a) => a.status === "accepted");
+  const currentIds = new Set(current.map((a) => a.id));
+  const acceptance = deliveryAcceptance(db, projectId);
+  return {
+    acceptancePending: acceptance.pending.filter((id) => currentIds.has(id)),
+    rejectedDeliveries: rejectedDeliveriesOfProject(db, projectId, current),
   };
 }
 
@@ -2210,6 +2343,42 @@ export function renderTask(db: Database.Database, todo: DriverTodo): string {
             ]
           : []),
       ].join("\n");
+    }
+    case "rework_rejected": {
+      // ── 「甲方拒收包」:裁决 + 甲方那句话 + 交付物 id ──────────────
+      //
+      // 与 `rework` 同一条纪律:**现场从库里现查**(待办只带 id),不在这里
+      // 另写一份「谁被拒收了」—— 那就是两份定义。
+      //
+      // ⚠️ 与 `rework` 唯一的差别:甲方那句话要**照原样带上**。`renderReworkPacket`
+      // 的原则是「正文一个字都不搬」(质检意见几千字),而甲方这里通常就一句话,
+      // 且它是**唯一的现场** —— 裁决不是工件,模型 `board_read` 读不到它。
+      const artifactId = todo.refs[0];
+      const current = listArtifacts(db, todo.projectId, {
+        kind: "deliverable", status: "accepted", limit: 500,
+      });
+      const rejected = artifactId === undefined
+        ? undefined
+        : rejectedDeliveriesOfProject(db, todo.projectId, current)
+            .find((r) => r.artifactId === artifactId);
+      if (rejected === undefined) {
+        // 现场与待办不一致(常见原因:作者刚交了新产出 ⇒ 它已经不在等返工了)。
+        // **不编一套现场** —— 如实说平台此刻查到的形状(与 `rework` 同)。
+        return (
+          "# 现在轮到你了:甲方拒收的返工\n\n" +
+          "平台刚查了一遍库:这份交付物**此刻已经不在等返工了**" +
+          "(有人交过新产出,或者它的最新裁决不再是「拒收」)。\n\n" +
+          "先用 `board_list` 看清现状,再决定要不要动手 —— " +
+          "**别凭这条待办的标题猜内容**:它可能已经过期了。"
+        );
+      }
+      const members = loadProjectRoster(db, todo.projectId)
+        .flatMap((m) => (isProjectRole(m.role) ? [{ agentId: m.id, role: m.role }] : []));
+      const owner = reworkOwner(
+        { round: rejected.round, authorAgentId: rejected.authorAgentId },
+        members,
+      );
+      return renderRejectedPacket(rejected, owner?.reason ?? "author");
     }
     case "report_downstream":
       return (

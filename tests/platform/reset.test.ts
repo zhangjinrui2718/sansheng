@@ -42,6 +42,7 @@ import { insertWork } from "../../src/platform/storage/repo/works.js";
 import { insertArtifact } from "../../src/platform/storage/repo/artifacts.js";
 import { recordClientQuestion } from "../../src/platform/storage/repo/clientQuestions.js";
 import { insertReviewVerdict } from "../../src/platform/storage/repo/reviewVerdicts.js";
+import { insertDeliveryVerdict } from "../../src/platform/storage/repo/deliveryVerdicts.js";
 import { insertSession, appendSessionMessage } from "../../src/platform/storage/repo/sessions.js";
 import { insertDispatchEvent, bumpAttempt } from "../../src/platform/storage/repo/dispatch.js";
 import { insertTurnUsage } from "../../src/platform/storage/repo/usage.js";
@@ -197,6 +198,22 @@ async function seedEverything(): Promise<{ project: string; work: string; agent:
     findingArtifactId: null, note: "夹具:判不通过", reviewedBy: reviewer, createdAt: NOW,
   });
 
+  // delivery_verdicts(029):甲方对那份 `client_question` 的验收裁决?——不,
+  // 它只对交付物成立,所以这里给一条**交付物**。夹具要防的是「整张表漏登记」:
+  // 漏了它,「重置」在有验收记录的库上会因为 `projects` 的 CASCADE 顺序或残留行
+  // 出问题(而这类失败只在有数据的库上出现 —— 与 2026-10-05 那次 500 同形)。
+  insertArtifact(db, {
+    id: "art_deliv", projectId: project, conversationId: null, kind: "deliverable",
+    status: "accepted", authorAgentId: agent, title: "交付物",
+    ...bodyAt("artifacts/art_deliv.md", "D"),
+    metadataJson: null, createdAt: NOW, updatedAt: NOW, workId: root,
+    deliverableType: "html_report",
+  });
+  insertDeliveryVerdict(db, {
+    projectId: project, artifactId: "art_deliv", verdict: "accept",
+    note: "夹具:甲方收了", createdAt: NOW,
+  });
+
   insertSession(db, { id: "s_test", projectId: project, createdAt: NOW });
   appendSessionMessage(db, {
     id: "m_test", sessionId: "s_test", agentId: agent, kind: "assistant",
@@ -257,6 +274,10 @@ async function seedEverything(): Promise<{ project: string; work: string; agent:
   replaceSourceChunks(db, {
     sourceKind: "message", sourceId: "m_test", projectId: project, messageId: "m_test",
     chunks: [{ seq: 0, offset: 0, length: 1, text: "c" }],
+    // 030 起 `tier` 是**必填**(缺省 null 只在迁移期的那一版里存在过):
+    // 一个新增的写口忘了传它,那一行就会停在 NULL 直到下一次重扫 —— 让它在
+    // 编译期红,比让它在库里静默糊过去好。
+    tier: "primary",
     newId: (p) => `${p}_test`, now: NOW, segOf: indexTerms,
   });
   // memory_profile:**没有仓储**,唯一的写面是 HTTP 的 `PUT /api/profile/:key` 里那段裸 SQL

@@ -16,6 +16,7 @@
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ApiError, getIntakeUsage, getProjectUsage } from "../../web/src/lib/api.js";
+import { fmtTokens } from "../../web/src/lib/vocab.js";
 
 interface Seen {
   url: string;
@@ -41,7 +42,7 @@ const EMPTY_USAGE = {
     totals: { input: 0, output: 0, cacheRead: 0, turns: 0 },
     allTime: { input: 0, output: 0, cacheRead: 0, turns: 0 },
     today: { input: 0, output: 0, cacheRead: 0, turns: 0 },
-    byAgent: [], byDay: [], byDayTruncated: false, updatedAt: null,
+    byAgent: [], byWork: [], byDay: [], byDayTruncated: false, updatedAt: null,
   },
 };
 
@@ -109,5 +110,33 @@ describe("用量取数 · 错误语义与其余端点一致", () => {
     expect(err).toBeInstanceOf(ApiError);
     expect((err as ApiError).code).toBe("not_found");
     expect((err as ApiError).status).toBe(404);
+  });
+});
+
+// ════════════════════════════════════════════════════════════════
+// token 的**紧凑读法**(2026-10-08 成本观测面)
+// ════════════════════════════════════════════════════════════════
+
+describe("`fmtTokens`:给人扫一眼的近似值,而不是精确数", () => {
+  it("小于 1000 原样返回(近似一个三位数只会丢信息)", () => {
+    expect(fmtTokens(0)).toBe("0");
+    expect(fmtTokens(7)).toBe("7");
+    expect(fmtTokens(999)).toBe("999");
+  });
+
+  it("k / M 两档:每一档都进位正确", () => {
+    expect(fmtTokens(1000)).toBe("1.0k");
+    expect(fmtTokens(9_400)).toBe("9.4k");
+    expect(fmtTokens(10_000)).toBe("10k");
+    expect(fmtTokens(1_294_099)).toBe("1.29M");
+    expect(fmtTokens(1_000_000)).toBe("1.00M");
+  });
+
+  it("**负样本**:NaN / 负数 / Infinity ⇒ `—`,**不许**回一个 0", () => {
+    // 编一个 0 会让「读不到」看起来像「没花钱」—— 与 `runtime: "unavailable"`
+    // 不许渲染成「空闲」是同一条纪律。
+    for (const bad of [Number.NaN, -1, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]) {
+      expect(fmtTokens(bad), `${bad} 必须是「读不到」`).toBe("—");
+    }
   });
 });

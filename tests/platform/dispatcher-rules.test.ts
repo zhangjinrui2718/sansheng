@@ -150,8 +150,11 @@ describe("B1 · 规则表:每个 `TodoKind` 恰好一条规则(C3 之后 10 条,
     // `myOpenWorks` 里,连 `execute_work` 都收不到),而收口又把它 8 秒内写回 `done`
     // ⇒ 质检对着库里一个字节都没变的产出连判三轮(`turn_usage`:三次审查之间零回合)。
     // 这几个数字**同时**改是对的:集合相等那条断言才是闭合性本身。
-    expect(RULES).toHaveLength(17);
-    expect(TODO_KINDS).toHaveLength(17);
+    // 2026-10-08(029)补上第 18 条 `rework_rejected_delivery`:甲方拒收之后
+    // **没有规则认领「这份交付物要重做」** —— 而收口门又要求它被接受 ⇒
+    // 项目永远 `active` 且没有任何人在动(与第 14/15 条同一个形态)。
+    expect(RULES).toHaveLength(18);
+    expect(TODO_KINDS).toHaveLength(18);
     // 集合相等 ⇒ 「表产出的 kind」与「闭集」是同一个集合
     expect([...kinds].sort()).toEqual([...TODO_KINDS].sort());
     // 且没有两条规则争同一个 kind(否则「谁负责这一条」没有答案)
@@ -204,9 +207,14 @@ describe("B1 · 规则表:每个 `TodoKind` 恰好一条规则(C3 之后 10 条,
     // 它守的仍然是同一条纪律:规则的 `if` 只许读工件的**结构化列**(kind /
     // `work_id` / status),不许读正文;而**判定永远重新查库** —— 门铃只是门铃。
     const usingArtifact = RULES.filter((r) => r.on.includes("artifact_inserted")).map((r) => r.id);
+    // 2026-10-08(029)的 `rework_rejected_delivery` 是第六处:它的终止信号同样
+    // 是「这条工作项上出现了比甲方裁决更新的产出」—— 与 `rework_failed_review`
+    // 逐字同构,只是那一行结论来自 `delivery_verdicts`。它会因 `tick`(裁决从
+    // HTTP 进来,不敲门铃)而起始,由 `artifact_inserted` 而终止。
     expect(usingArtifact.sort()).toEqual([
       "close_finished_project", "handover_deliverable", "integrate_reviewed_subtree",
       "resume_client", "review_undelivered_project", "rework_failed_review",
+      "rework_rejected_delivery",
     ]);
     const used = new Set<string>(RULES.flatMap((r) => [...r.on]));
     expect([...used].sort()).toEqual([

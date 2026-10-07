@@ -24,7 +24,9 @@ import type { WorkspacePort } from "../workspace/port.js";
 import { listArtifacts } from "../storage/repo/artifacts.js";
 import { listProjects } from "../storage/repo/projects.js";
 import {
+  artifactTier,
   countProjectKnowledge,
+  messageTier,
   pruneProjectKnowledge,
   replaceSourceChunks,
   sourceKey,
@@ -66,6 +68,7 @@ export interface KnowledgeIndexReport {
 interface MessageRow {
   id: string;
   content: string;
+  kind: string;
 }
 
 /**
@@ -73,6 +76,12 @@ interface MessageRow {
  *
  * 来源:P1 = 工件正文 + 甲方/角色的会话消息(`kind IN ('user','assistant')`)。
  * `system` 是平台通知(告警/停止推进),不是语料,刻意不收(设计 §3)。
+ *
+ * 每条来源都带上 `tier`(migration 030)—— 判据**只读结构化列**
+ * (`artifacts.kind` / `session_messages.kind`),由 `artifactTier` / `messageTier`
+ * 转写,绝不读正文、绝不猜「这段是不是从外网抓的」(见 030 文件头)。
+ * 重扫是存量行 `tier = NULL` 的**唯一**自愈路径:幂等判据把 tier 也算进去了,
+ * 所以正文没变但 tier 没算过的行会被这一趟补上(`repo/knowledge.ts`)。
  */
 export function reindexProjectKnowledge(
   deps: KnowledgeIndexDeps,
@@ -107,6 +116,7 @@ export function reindexProjectKnowledge(
     replaceSourceChunks(db, {
       sourceKind: "artifact", sourceId: a.id, projectId, artifactId: a.id, workId: a.workId,
       chunks, newId, now: at, segOf: indexTerms,
+      tier: artifactTier(a.kind),
     });
     artifactsIndexed++;
   }
@@ -114,7 +124,7 @@ export function reindexProjectKnowledge(
   // ── 会话消息(只收 user / assistant)─────────────────────────────
   const messages = db
     .prepare(
-      `SELECT m.id AS id, m.content AS content
+      `SELECT m.id AS id, m.content AS content, m.kind AS kind
          FROM session_messages m
          JOIN project_sessions ps ON ps.id = m.session_id
         WHERE ps.project_id = ?
@@ -130,6 +140,7 @@ export function reindexProjectKnowledge(
     replaceSourceChunks(db, {
       sourceKind: "message", sourceId: m.id, projectId, messageId: m.id,
       chunks, newId, now: at, segOf: indexTerms,
+      tier: messageTier(m.kind),
     });
     messagesIndexed++;
   }

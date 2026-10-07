@@ -51,6 +51,7 @@ import {
   listAllClientQuestions,
   listProjectArtifacts, listProjectAsks, listProjectBlockers,
   listProjectChanges, toProjectDetail, listProjectMembers,
+  isTerminalProjectStatus,
   listProjectMessages, listProjectSummaries, toArtifactView, toProjectLiveView,
   toIntakeLiveView,
   toProjectSummary,
@@ -60,6 +61,10 @@ import {
   type LiveCollectOptions, type LiveRuntimeSnapshot,
 } from "./views.js";
 import { buildMatchQuery } from "../knowledge/query.js";
+import {
+  DELIVERY_VERDICTS, deliveredDeliverables, insertDeliveryVerdict, isDeliveryVerdict,
+} from "../storage/repo/deliveryVerdicts.js";
+
 import {
   aggregateProjectUsage, normalizeUsageDayLimit, normalizeUsageDays,
 } from "../storage/repo/usage.js";
@@ -72,6 +77,7 @@ import type { SessionMessageKind, SessionMessageRow } from "../storage/repo/sess
 import type {
   ArtifactContentView,
   HarnessView, MemberConversationView, MemberConversationsResponse,
+  KnowledgeChunkView,
   PromptUnitView, RepoCommitsView, RoleHarnessView, SessionMessageView, WorkspaceView,
 } from "@shared/types/platform.js";
 import type { ResetReport } from "../host/reset.js";
@@ -223,6 +229,20 @@ function toWorkspaceView(opts: {
     index: { paths: index.length },
   };
 }
+
+// ── 语料分级(migration 030)· 只服务 `GET /api/knowledge/chunks` ──────────
+//
+// tier 在**这一层**补上,而不是加进 `views.ts` 的 `KnowledgeChunkView`:
+//   · `views.ts` 那一条链是"块 → 视图",它读的是 `KnowledgeChunkRow`;
+//     tier 是**这一行自己的列**,在 handler 里一次批量查出来最直接;
+//   · `shared/types/**` 是跨端协议的冻结面,加字段要前后端同步评审 ——
+//     这里是纯加法,web 端不读它也不会坏(读面少一个字段比协议漂移便宜)。
+//
+// ⚠️ **`null` 如实给,不许渲染成 `material`。** 它是"这一行平台还没算过"
+// (030 之前索引的行,本次没被重扫到),不是"这一行的取值是低权重"。
+// 这个项目反复栽在"读不到 ≠ 那个值"上(`ProjectLiveView.runtime: "unavailable"`、
+// 工件正文三态、`pendingQuestions`),语料分级没有理由例外。
+// 自愈路径是**重扫**(回合边界 / 宿主启动),不是回填。
 
 export function createPlatformApp(deps: HttpDeps): Hono {
   const app = new Hono();
@@ -886,6 +906,101 @@ export function createPlatformApp(deps: HttpDeps): Hono {
     return c.json(ok);
   });
 
+  /**
+   * **甲方的验收裁决**(029,用户裁决 2026-10-08)。
+   *
+   * ── 为什么它是 HTTP 端点,而不是一个平台工具 ─────────────────────
+   *
+   * 「甲方收不收」**不是一个角色能做的事**。把它做成工具就意味着某个角色的
+   * ceiling 里有它 —— 而那个角色是模型扮演的,于是「甲方验收」又会退化成
+   * 「模型替甲方点头」(这正是这次改动要治的病:`status='accepted'` 从前就是
+   * 申请人自己写的)。所以它**不在任何角色的 ceiling 里**,唯一的写入口在这里,
+   * 与 `POST /api/client-questions/:id/answer` 同一条纪律。
+   *
+   * ── 四条拒收(每条都带可执行的处置,不是一句「参数不对」)────────
+   *
+   *   · 工件不存在 → 404;
+   *   · 不是交付物 → 400(验收一份 evidence 是没有意义的);
+   *   · 项目已收口 → 409:收口不可逆,之后再验收等于给一个已经生效的结论补签;
+   *   · **还没交付给甲方** → 409:没收到货,谈不上验收。这一条是「待收货」
+   *     这个词的机器表达 —— 也挡住了「甲方凭 id 给一份还没交出去的草稿盖章」。
+   *
+   * ── 追加式:可以改判 ────────────────────────────────────────────
+   *
+   * 不拒绝重复裁决(甲方今天说要改、作者返工后又说可以了)。每次写一行,
+   * 读面取 `(created_at, seq)` 最新的那条 —— 改判留痕,与 021 的 `review_verdicts` 同。
+   */
+  app.post("/api/artifacts/:id/verdict", async (c) => {
+    const body = (await c.req.json().catch(() => null)) as
+      | { verdict?: unknown; note?: unknown }
+      | null;
+    if (body === null) return c.json(err("invalid_body", "请求体不是合法 JSON").body, 400);
+    if (!isDeliveryVerdict(body.verdict)) {
+      return c.json(
+        err(
+          "invalid_args",
+          `verdict 只能是 ${DELIVERY_VERDICTS.join(" 或 ")}(收到「${String(body.verdict)}」)`,
+        ).body,
+        400,
+      );
+    }
+    const rawNote = typeof body.note === "string" ? body.note.trim() : "";
+    // 上界:这句话会**逐字**进返工任务正文(`renderRejectedPacket`),没有上界
+    // 就是一条能把整个 context 吃掉的路。2000 字足够说清哪里不行。
+    if (rawNote.length > 2000) {
+      return c.json(
+        err("invalid_args", `note 太长(${rawNote.length} 字,上界 2000)—— 说清哪里不行就够了`).body,
+        400,
+      );
+    }
+    const row = getArtifact(db, c.req.param("id"));
+    if (row === null) return c.json(err("not_found", "工件不存在", 404).body, 404);
+    if (row.kind !== "deliverable") {
+      return c.json(
+        err(
+          "invalid_args",
+          `工件 ${row.id} 的 kind 是 ${row.kind},不是 deliverable —— ` +
+            `只有交付物才有「甲方验收」这件事。`,
+        ).body,
+        400,
+      );
+    }
+    const project = getProjectRow(db, row.projectId);
+    if (project === null) return c.json(err("not_found", "工件所属项目不存在", 404).body, 404);
+    if (isTerminalProjectStatus(project.status)) {
+      return c.json(
+        err(
+          "project_closed",
+          `项目 ${project.id} 已经收口(${project.status})—— 收口不可逆,` +
+            `之后再验收等于给一个已经生效的结论补签。要接着做,请让业务经理开下一个版本(project_open 的 parentProjectId)。`,
+        ).body,
+        409,
+      );
+    }
+    const delivered = deliveredDeliverables(db, row.projectId)
+      .some((d) => d.artifactId === row.id);
+    if (!delivered) {
+      return c.json(
+        err(
+          "not_delivered",
+          `这份交付物还没有交付给你(平台里没有它的交付会话)—— ` +
+            `「验收」的对象是**已经收到的货**;还没交出去的话,那是业务经理的 handover 回合的事。`,
+        ).body,
+        409,
+      );
+    }
+    insertDeliveryVerdict(db, {
+      projectId: row.projectId,
+      artifactId: row.id,
+      verdict: body.verdict,
+      note: rawNote === "" ? null : rawNote,
+      createdAt: deps.now(),
+    });
+    // 回包直接给**重新算出来**的收货进展(不让前端自己拼一个乐观值)。
+    const view = toArtifactView(db, row, (id) => getAgent(db, id)?.displayName ?? id);
+    return c.json({ ok: true, acceptance: view.acceptance });
+  });
+
   // ── 等甲方答的问题(全项目)────────────────────────────────────
 
   // 载荷形状就是 `listAllClientQuestions` 的返回值(含 `fromClosedProjects`)——
@@ -1120,6 +1235,9 @@ app.get("/api/client-questions", (c) => c.json(listAllClientQuestions(db)));
     }
 
     return c.json({
+      // ⚠️ `tier` / `tierNote` 由 `views.ts` 的 `toKnowledgeChunkView` 填
+      // (**契约字段**,不是这一层的补丁):分级来自索引行,`null` 表示
+      // 「030 之前索引、还没被重扫」—— 读不到不是取值。
       chunks: listKnowledgeChunkViews(
         db,
         { ...(q !== "" ? { q } : {}), ...(projectId !== undefined ? { projectId } : {}), limit },

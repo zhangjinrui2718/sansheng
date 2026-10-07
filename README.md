@@ -1,9 +1,13 @@
 # 三生 · Sansheng
 
-> 单用户本机常驻的 Node 服务:Pi SDK 驱动**四个角色的 agent 组织**,SQLite 持久化,
+> 单用户本机常驻的 Node 服务:Pi SDK 驱动**五个角色的 agent 组织**,SQLite 持久化,
 > HTTP + WebSocket + 托管前端。制品是**工件**(`artifacts` 表),不是聊天记录。
 >
 > Token 是工资,产出是工件。
+
+**闭环两头都是机制,不是提示词**:立项由业务经理执行(`project_open`);交付之后
+项目进入**待收货** —— 只有**甲方在界面上点出来的验收裁决**(`delivery_verdicts`)
+成立,项目才谈得上收口。作者写下的 `accepted` 只表示「**定稿**」,不表示甲方点头。
 
 **组织架构是一等数据**:`agents` / `projects` / `project_assignments` 在库里;
 **角色属性在代码里**(`ROLE_SPECS`)。所以「甲方只与业务经理交互」这类边界是
@@ -39,14 +43,18 @@ node dist/src/cli/index.js platform-serve
 常用选项:`--data <目录>`(数据目录,默认 `~/.sansheng/`,`SANSHENG_DATA` 亦可)、
 `--port <端口>`、`--host <地址>`、`--cwd <目录>`(代码工具的工作根)。
 
-## 四个角色
+## 五个角色
 
 | 角色 | 职责 | 甲方接口 |
 |---|---|---|
-| `business_manager` | 收敛诉求、立项、对甲方播报 | ✅ **唯一** |
-| `project_manager` | 拆解成工作项、推进、不见甲方 | — |
-| `worker` | 唯一能动代码的角色(工程 / 算法 / 数据) | — |
-| `quality_reviewer` | 质检审查,只写 `review_finding` | — |
+| `business_manager` 业务经理 | 收敛诉求、立项、交付、对甲方播报 | ✅ **唯一** |
+| `project_manager` 项目经理 | 拆解成工作项、推进、整合交付物,不见甲方 | — |
+| `research_worker` 研究员 | 交**信息**:方案 / 架构图 / 伪代码 / 汇报材料(`html_report`) | — |
+| `coding_worker` 工程师 | 交**能跑的东西**:可独立部署到 Docker 的代码服务(`code_service`) | — |
+| `quality_reviewer` 质检 | 质检审查,只写 `review_finding` | — |
+
+> 两个执行角色按**产出形态**分,不按层级分;唯一的能力差别是编码工多一个
+> `code.write`。`worker` 这个名字在代码与库里都已不存在。
 
 完整规格(ceiling / writeKinds / promptUnits / boundaryDeny)在
 `src/platform/identity/role.ts` 的 `ROLE_SPECS`。增删角色 = 改那个联合 + `ROLE_SPECS`,
@@ -118,6 +126,9 @@ npm run check:design      # 设计文档 ↔ 代码的一致性(E1–E14)
   · **记忆** `memory_fragments` / `memory_profile` —— 关于**用户**,模型写,会淡忘;
   · **知识语料** `knowledge_chunks` + FTS5 `knowledge_fts` —— 关于**项目 / 组织**,
     平台索引、agent **只读**(`knowledge_search` / `knowledge_read`),正文留在原处不复制。
+    每条块带 `tier`(030):**定稿**(deliverable / decision / 甲方原话…)排在
+    **原始材料**(evidence / 角色自己的工作叙述…)前面 —— 分级只看来源的结构化列,
+    平台**不判断内容从哪来**(详见 `docs/DESIGN-KNOWLEDGE.md`)。
   设计见 [`docs/DESIGN-KNOWLEDGE.md`](docs/DESIGN-KNOWLEDGE.md)。
 - 平台表**不得复用旧表名**:`CREATE TABLE IF NOT EXISTS` 撞名时静默无操作,
   新表根本建不出来。加表前先 `ls migrations/` 查名。
@@ -129,7 +140,7 @@ npm run check:design      # 设计文档 ↔ 代码的一致性(E1–E14)
 |---|---|
 | [`AGENTS.md`](AGENTS.md) | **工作规范**(每个 DSH 会话自动注入):坐标、纪律、静默失败清单 |
 | [`docs/DESIGN-PLATFORM.md`](docs/DESIGN-PLATFORM.md) | 结构、能力模型、授权、存储、运行时拓扑 |
-| [`docs/DESIGN-AGENTS.md`](docs/DESIGN-AGENTS.md) | 四个角色的职责 / ceiling / 出厂集合 / 提示词单元 |
+| [`docs/DESIGN-AGENTS.md`](docs/DESIGN-AGENTS.md) | 五个角色的职责 / ceiling / 出厂集合 / 提示词单元 |
 | [`docs/ADR-001-harness-wiring.md`](docs/ADR-001-harness-wiring.md) | 会话在哪建、平台工具怎么变成 SDK 的 customTools |
 | [`HANDOFF.md`](HANDOFF.md) | 批次进度与历史现场 |
 

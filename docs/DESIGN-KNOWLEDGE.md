@@ -124,9 +124,43 @@ housekeeping 里那一次是**同步**的(与它现有的提交/回填同一纪�
 
 ⇒ P2 的第一件事是加 scope(project/global)+ `tainted` + 内部/对外边界,**每条有真的写入口之后才建列**。
 
+## §7.1 分级(tier):能做的那一半,已经做了(2026-10-08,030)
+
+用户的问法是:「worker 执行中『外部网页进语料』这种材料,是否可以作为低权重语料,
+在 search 里降低被召回的权重」。**答法是分两半的,而分清哪一半能做是要紧的**:
+
+- ❌ **平台没有能力判定「这段文字是不是从外网抓来的」。** 语料来源只有两类
+  (工件正文 / `session_messages` 里 `kind IN ('user','assistant')` 的消息),
+  **工具结果根本不进语料**;而「worker 把抓来的网页粘进交付物」这件事在库里
+  与「worker 自己写的段落」长得一模一样。任何声称「已识别外部内容」的字段,
+  都是一句平台造不出来的假话(本项目的 7-E)。
+- ✅ **平台能机械判定的那一半是「这份来源是定稿还是原始材料」**,而外网抓来的
+  东西**必然**落在原始材料那一类里(worker 的 `evidence` 工件 / 它自己的工作叙述)。
+  所以把原始材料整体降权,就把它一起降了权 —— 而**判据只读结构化列**:
+
+  | 来源 | tier | 判据(结构化列) |
+  |---|---|---|
+  | 工件 | `primary` | `kind ∈ {deliverable, decision, client_question, meeting_note, change_record, project_brief, work_brief}` |
+  | 工件 | `material` | `kind ∈ {evidence, hypothesis, note, review_finding}`,以及**任何未知 kind**(fail-closed) |
+  | 消息 | `primary` | `kind = 'user'`(甲方原话) |
+  | 消息 | `material` | `kind = 'assistant'`(角色自己的工作叙述) |
+
+- **落点**:`knowledge_chunks.tier`(030,纯加法、可空、**不建 CHECK** —— 与 022 的
+  `todo_kind` 同一条先例:取值域在读写两侧的 TS 里)。检索排序改成**两级**:
+  tier 优先(定稿在前),同 tier 内保持原来的 bm25 顺序。`limit` 语义不变。
+- **自愈而不是回填**:存量行的 `tier` 是 `NULL`(030 之前索引的)。幂等判据从
+  「只有 `sha256`」改成「`sha256` **和** `tier`」—— 否则正文没变的那些行**永远**
+  停在 `NULL`。重扫(回合边界 / 宿主启动)会把它们补上,块 id 不变。
+- **读面**:`knowledge_search` / `knowledge_read` 每条带 `[primary]` / `[material]` /
+  `[分级未算]`;`GET /api/knowledge/chunks` 的每条带 `tier`,**`null` 如实给 `null`**
+  (读不到不是取值 —— 不许渲染成 `material`)。
+- ⚠️ **降权只是排序,不是过滤**:`material` 仍然**检索得到**。把它从召回里删掉,
+  就等于平台替模型决定「原始材料不值得看」—— 而那条判断的现场在模型那里。
+
 ## §8 明确不做(P2 清单)
 
-1. `scope` / `tainted` / 内部对外边界(§7)。
+1. `scope` / `tainted` / 内部对外边界(§7)。**分级(tier)已于 030 落地,见 §7.1** ——
+   但那是**排序权重**,不是可见性边界:跨项目全局可读这件事一个字没变。
 2. 编译层:karpathy 那套"LLM 更新页 + 矛盾标注 + index.md/log.md"——它是**往同一个语料里再放一类文档**,不冲突。
 3. ~~HTTP 读面~~ —— **已做**(§6.2,记忆页第三段)。仍未做:独立的语料浏览器
    (从命中跳到工件正文、按 kind / 时间筛选、分页)。

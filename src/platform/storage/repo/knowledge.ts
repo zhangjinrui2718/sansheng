@@ -29,7 +29,82 @@ export function isKnowledgeSourceKind(v: unknown): v is KnowledgeSourceKind {
   return typeof v === "string" && (KNOWLEDGE_SOURCE_KINDS as readonly string[]).includes(v);
 }
 
-/** 块文本的哈希。它是"同一来源重扫时这块变没变"的唯一判据(幂等的另一半是 seq)。 */
+// ── 分级(migration 030)──────────────────────────────────────────
+//
+// ⚠️ **它判的是「来源的地位」,不是「内容从哪来」。** 平台**没有**能力机械判定
+// 「这段文字是不是从外网抓来的」:语料只有两类来源(工件正文 / user|assistant 消息),
+// 一次工具调用的返回根本不进语料。所以这里既不叫 `source`、也不叫 `tainted`,
+// 更不许在任何读面说「已识别外部网页内容」—— 那是在编造一个平台没有的事实。
+//
+// 平台**能**机械判定的只有一件事:**这份来源是定稿,还是原始材料**。
+// 而 worker 抓来的外部材料必然落在原始材料这一类里(它是 `evidence` 工件、
+// 或 assistant 的工作叙述)。判据**只读结构化列**(`artifacts.kind` /
+// `session_messages.kind`),**绝不读正文** —— 读正文就等于上启发式。
+//
+// 先例:`session_messages.todo_kind`(migration 022)。库里那一列是可空 TEXT、
+// **不建 CHECK**,闭集在读写两侧的 TS 里(理由见 030 的文件头)。
+
+/**
+ * 分级闭集。**唯一一处声明** —— 加一个取值只改这里。
+ *
+ * - `primary`  = 定稿/结论。它**不是**「更可信」的断言,只是「这份材料是定稿」。
+ * - `material` = 未加工的现场材料(原始素材、工作叙述、审查意见)。
+ *   它**不是**「脏」或「被污染」的断言,只是「平台没有把它当结论」。
+ */
+export type KnowledgeTier = "primary" | "material";
+
+export const KNOWLEDGE_TIERS: readonly KnowledgeTier[] = ["primary", "material"];
+
+export function isKnowledgeTier(v: unknown): v is KnowledgeTier {
+  return typeof v === "string" && (KNOWLEDGE_TIERS as readonly string[]).includes(v);
+}
+
+/**
+ * 工件 kind → tier。
+ *
+ * ⚠️ **未知 kind → `material`,这个方向是故意选的(fail-closed)**:
+ * 把一份可疑的来源降权,最坏结果是它排在定稿后面(还能被检索到);
+ * 反过来把它当定稿,就会让一份平台不认识的东西**冒充结论**排在最前面 ——
+ * 那才是不可逆的错(`knowledge_search` 的正文会直接进模型上下文)。
+ *
+ * 入参收 `string` 而不是 `ArtifactKind`:这样"未知 kind"这一支是**活的代码**
+ * 而不是一个被类型系统挡住的死分支 —— 类型是编译期的事,库里那一列不是。
+ */
+export function artifactTier(kind: string): KnowledgeTier {
+  switch (kind) {
+    case "deliverable":
+    case "decision":
+    case "client_question":
+    case "meeting_note":
+    case "change_record":
+    case "project_brief":
+    case "work_brief":
+      return "primary";
+    case "evidence":
+    case "hypothesis":
+    case "note":
+    case "review_finding":
+      return "material";
+    default:
+      return "material";
+  }
+}
+
+/**
+ * 消息 kind → tier。甲方原话是定稿侧(`primary`),角色自己的工作叙述是材料侧。
+ *
+ * 索引器的选择子只放 `user` / `assistant` 进来(`reindex.ts` 的 WHERE),
+ * 所以 `user` 之外的一切都走 `material` —— 与 `artifactTier` 同一条 fail-closed 方向:
+ * 哪天那个选择子放宽了,新进来的东西**默认降权**,不会静默冒充甲方原话。
+ */
+export function messageTier(kind: string): KnowledgeTier {
+  return kind === "user" ? "primary" : "material";
+}
+
+/**
+ * 块文本的哈希。它是"同一来源里这一块**正文**变没变"的判据(幂等的另外两半是
+ * `seq` 与 `tier` —— 后者自 migration 030 起也进判据,见 `replaceSourceChunks`)。
+ */
 export function chunkSha(text: string): string {
   return createHash("sha256").update(text).digest("hex");
 }
@@ -47,6 +122,14 @@ export interface KnowledgeChunkRow {
   readonly offset: number;
   readonly length: number;
   readonly sha256: string;
+  /**
+   * 来源的分级(migration 030)。
+   *
+   * ⚠️ **`null` 是一个事实,不是缺参数**:这一行是 030 之前索引的,
+   * 平台当时**没有算过**这件事。重扫会把它算上(判据见 `replaceSourceChunks`),
+   * 在重扫跑到之前读面如实给 `null` —— **不许**渲染成 `material`。
+   */
+  readonly tier: KnowledgeTier | null;
   readonly createdAt: number;
   readonly updatedAt: number;
 }
@@ -64,6 +147,7 @@ interface RawChunk {
   offset: number;
   length: number;
   sha256: string;
+  tier: string | null;
   created_at: number;
   updated_at: number;
 }
@@ -73,6 +157,12 @@ function rowToChunk(raw: RawChunk): KnowledgeChunkRow {
   // 不静默当成某一类。静默归类会让"来源"这件事在读面撒谎。
   if (!isKnowledgeSourceKind(raw.source_kind)) {
     throw new Error(`knowledge_chunks 表里出现未定义 source_kind「${raw.source_kind}」(id=${raw.id})`);
+  }
+  // tier 与 source_kind 同款处置(**不是**同款语义):`null` 合法(030 之前的行),
+  // 而闭集外的取值是**库坏了 / 有别的写者** —— 那时静默当成某一档就是编造,
+  // 所以照样抛错(fail loud,与 022 的读侧处置逐字同形)。
+  if (raw.tier !== null && !isKnowledgeTier(raw.tier)) {
+    throw new Error(`knowledge_chunks 表里出现未定义 tier「${raw.tier}」(id=${raw.id})`);
   }
   return {
     rowid: raw.chunk_rowid,
@@ -87,6 +177,7 @@ function rowToChunk(raw: RawChunk): KnowledgeChunkRow {
     offset: raw.offset,
     length: raw.length,
     sha256: raw.sha256,
+    tier: raw.tier,
     createdAt: raw.created_at,
     updatedAt: raw.updated_at,
   };
@@ -112,6 +203,19 @@ export interface ReplaceSourceSpec {
   readonly messageId?: string | null;
   readonly workId?: string | null;
   readonly chunks: readonly KnowledgeChunkInput[];
+  /**
+   * 这一份来源的分级(migration 030)。**生产调用方(索引器)每条都要显式给** ——
+   * 它由 `artifactTier` / `messageTier` 从结构化列算出来,绝不由正文猜。
+   *
+   * ⚠️ **必填**(2026-10-08 由 Lead 收口):它一度是可省的 —— 那时的理由是
+   * 「`tests/platform/reset.test.ts` 不在允许改动清单里」。而可省的真实代价是
+   * **将来新增一个写口、忘了传 tier ⇒ 那一行静默停在 `null`**,直到下一次重扫;
+   * 而 `null` 在检索里按「非 primary」降权,于是这个洞的形态是
+   * 「新索引的语料悄悄排到了后面」—— 屏幕上一切正常。
+   * 值可以是 `null`(存量行重扫时也算得出来,所以生产路径永远是具体值),
+   * 但**必须显式写出来**:让「忘了」在编译期红。
+   */
+  readonly tier: KnowledgeTier | null;
   /** id 生成注入(与平台其它仓储同款:可复现的测试要能注入) */
   readonly newId: (prefix: string) => string;
   readonly now: number;
@@ -132,11 +236,21 @@ export interface ReplaceResult {
  *
  * 块数变少(正文被改短)时按 `seq >= chunks.length` 删掉多余的行 ——
  * 留下幽灵块等于"检索得到一个正文里不存在的片段",那是最坏的一种错(不是空,是错)。
+ *
+ * ⚠️ **幂等判据是两条:`sha256` **和** `tier`。**(migration 030)
+ * 只看 `sha256` 的话,030 之前索引的行正文没变就**永远**停在 `tier = NULL` ——
+ * 重扫修不了它,而"重扫会自愈"就成了平台说过的一句空话。所以:
+ * `prev.sha256 === sha && prev.tier === tier` 才算 `unchanged`,否则 UPDATE 并写上 tier。
+ * 注意这是**只改 tier 也 UPDATE**:行的 `id` 不变(块不重建),`updated_at` 会动 ——
+ * 后者是对的,它就是"这一行被重写过"的事实。
  */
 export function replaceSourceChunks(db: Database.Database, spec: ReplaceSourceSpec): ReplaceResult {
+  const tier = spec.tier ?? null;
   const existing = db
-    .prepare(`SELECT chunk_rowid, seq, sha256 FROM knowledge_chunks WHERE source_kind = ? AND source_id = ?`)
-    .all(spec.sourceKind, spec.sourceId) as Array<{ chunk_rowid: number; seq: number; sha256: string }>;
+    .prepare(`SELECT chunk_rowid, seq, sha256, tier FROM knowledge_chunks WHERE source_kind = ? AND source_id = ?`)
+    .all(spec.sourceKind, spec.sourceId) as Array<{
+      chunk_rowid: number; seq: number; sha256: string; tier: string | null;
+    }>;
   const bySeq = new Map(existing.map((r) => [r.seq, r]));
 
   let inserted = 0;
@@ -147,13 +261,13 @@ export function replaceSourceChunks(db: Database.Database, spec: ReplaceSourceSp
   const insert = db.prepare(
     `INSERT INTO knowledge_chunks
        (id, source_kind, source_id, project_id, artifact_id, message_id, work_id,
-        seq, offset, length, sha256, seg, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        seq, offset, length, sha256, seg, tier, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   );
   const update = db.prepare(
     `UPDATE knowledge_chunks
         SET project_id = ?, artifact_id = ?, message_id = ?, work_id = ?,
-            offset = ?, length = ?, sha256 = ?, seg = ?, updated_at = ?
+            offset = ?, length = ?, sha256 = ?, seg = ?, tier = ?, updated_at = ?
       WHERE chunk_rowid = ?`,
   );
   const remove = db.prepare(`DELETE FROM knowledge_chunks WHERE chunk_rowid = ?`);
@@ -166,15 +280,15 @@ export function replaceSourceChunks(db: Database.Database, spec: ReplaceSourceSp
         insert.run(
           spec.newId("chk"), spec.sourceKind, spec.sourceId, spec.projectId,
           spec.artifactId ?? null, spec.messageId ?? null, spec.workId ?? null,
-          c.seq, c.offset, c.length, sha, spec.segOf(c.text), spec.now, spec.now,
+          c.seq, c.offset, c.length, sha, spec.segOf(c.text), tier, spec.now, spec.now,
         );
         inserted++;
         continue;
       }
-      if (prev.sha256 === sha) { unchanged++; continue; }
+      if (prev.sha256 === sha && prev.tier === tier) { unchanged++; continue; }
       update.run(
         spec.projectId, spec.artifactId ?? null, spec.messageId ?? null, spec.workId ?? null,
-        c.offset, c.length, sha, spec.segOf(c.text), spec.now, prev.chunk_rowid,
+        c.offset, c.length, sha, spec.segOf(c.text), tier, spec.now, prev.chunk_rowid,
       );
       updated++;
     }
@@ -243,6 +357,16 @@ export interface KnowledgeHit {
  * 由 `knowledge/query.ts` 的 `buildMatchQuery()` 用同一套分词生成,
  * 不要在这里拼字符串(拼错一个引号就是一次 `fts5: syntax error`,而它对模型
  * 只表现为"检索坏了")。
+ *
+ * ── 排序:两级(migration 030)──────────────────────────────────
+ *
+ * 第一级是 tier:**定稿在前**,第二级才是 bm25(组内保持原来的顺序)。
+ * 它**不是**过滤器 —— `limit` 的语义一个字都没改(仍是取前 N 条,只是这 N 条
+ * 的**顺序**变了),召回面也没有收窄:低权重的材料照样能被检索到,只是排在定稿后面。
+ *
+ * ⚠️ **`tier IS NULL` 在这一层按"非 primary"分组**(`WHEN 'primary' THEN 0 ELSE 1`)。
+ * 这是**排序**上的处置,**不是**断言那一行等于 `material`:它只是"没算过",
+ * 所以不享有 primary 的优先。读面必须如实给 `null`(见 `KnowledgeChunkRow.tier`)。
  */
 export function searchKnowledgeChunks(
   db: Database.Database,
@@ -268,13 +392,14 @@ export function searchKnowledgeChunks(
          FROM knowledge_fts
          JOIN knowledge_chunks c ON c.chunk_rowid = knowledge_fts.rowid
         WHERE knowledge_fts MATCH ?${kindFilter}${projectFilter}
-        ORDER BY score ASC
+        ORDER BY CASE c.tier WHEN 'primary' THEN 0 ELSE 1 END ASC, score ASC
         LIMIT ?`,
     )
     .all(...vals) as Array<RawChunk & { score: number }>;
 
   return rows.map((r) => ({ chunk: rowToChunk(r), score: r.score }));
 }
+
 
 /** 语料条数(诊断与测试用)。 */
 export function countKnowledgeChunks(db: Database.Database): number {

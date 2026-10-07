@@ -19,6 +19,7 @@ import {
   isKnowledgeSourceKind,
   searchKnowledgeChunks,
   type KnowledgeSourceKind,
+  type KnowledgeTier,
 } from "../storage/repo/knowledge.js";
 import { makeArtifactTextReader, materializeChunk, type Materialization } from "../knowledge/sources.js";
 import { buildMatchQuery, excerpt } from "../knowledge/query.js";
@@ -30,6 +31,39 @@ const SEARCH_LIMIT_MAX = 20;
 const SEARCH_LIMIT_DEFAULT = 5;
 /** 单条摘要上限(字符)。 */
 const EXCERPT_MAX = 200;
+
+/**
+ * 分级的人话说明(migration 030)。
+ *
+ * ⚠️ 措辞是判据的一部分:**不许**在这里说「已识别外部网页内容」「已标记污染」——
+ * 平台判的是「这份来源是定稿还是原始材料」(`artifacts.kind` / 消息 kind),
+ * 它**没有**能力判断一段文字从哪来(见 `migrations/030_knowledge_tier.sql` 文件头)。
+ * 说成"已识别外部内容"就是在编造一个平台没有的事实。
+ */
+const TIER_LEGEND =
+  "分级说明(按**来源的结构化类型**算,不读正文、也不判断内容从哪来):" +
+  "primary = 定稿/结论(甲方原话、交付物、决议、纪要、变更);" +
+  "material = 未加工的现场材料(原始记录、角色自己的工作叙述、审查意见),**不是平台结论**。" +
+  "排序上 primary 在前,material 与它后面的照常可检索 —— 排在后面不等于内容有问题。";
+
+/** 单条命中的分级标签。`null` = 这一行是 030 之前索引的,平台还没算过(不是 material)。 */
+function tierTag(tier: KnowledgeTier | null): string {
+  if (tier === "primary") return "[primary]";
+  if (tier === "material") return "[material]";
+  return "[分级未算]";
+}
+
+/** 一条来源的分级(读得到才给)。 */
+function tierOf(ctx: ToolRunContext, chunkId: string): KnowledgeTier | null {
+  return getKnowledgeChunk(ctx.db, chunkId)?.tier ?? null;
+}
+
+/** `knowledge_read` 里那一行分级说明。`null` 如实说"还没算过"。 */
+function tierLine(tier: KnowledgeTier | null): string {
+  if (tier === "primary") return "分级:primary —— 定稿/结论。";
+  if (tier === "material") return "分级:material —— 未加工的现场材料,不是平台结论。";
+  return "分级:未算 —— 这一行是 030 之前索引的,下一次重扫会补上(它现在既不是 primary 也不是 material)。";
+}
 
 /** 读一条块的正文(工件走项目仓、消息走库里)。装配缺失 ⇒ 返回 null,由调用方如实报错。 */
 function materializer(ctx: ToolRunContext, chunkId: string): Materialization | null {
@@ -65,7 +99,9 @@ const knowledgeSearch: PlatformTool = {
     "**与 memory_search 不是一回事**:记忆记的是关于**用户**的偏好/事实(短片段、会淡忘);" +
     "这里查的是**项目里实际写过什么**(正文语料、按来源可追溯)。" +
     "回答「之前那个方案里怎么写的」「谁交付过什么」「上次讨论的结论是什么」之前查这里," +
-    "比自己猜准得多。返回的是**片段**;要看某一段全文,用返回的 chunkId 调 knowledge_read。",
+    "比自己猜准得多。返回的是**片段**;要看某一段全文,用返回的 chunkId 调 knowledge_read。" +
+    "每条结果带**分级**:primary = 定稿/结论,material = 未加工的现场材料(不是平台结论)。" +
+    "同等相关度时 primary 排在 material 前面 —— 排在后面只是「它不是定稿」,不代表内容有问题。",
   parameters: Type.Object({
     query: Type.String({ description: "检索词。中文按相邻两字匹配,英文按整词;至少 2 个字" }),
     limit: Type.Optional(Type.Number({
@@ -105,7 +141,7 @@ const knowledgeSearch: PlatformTool = {
 
     const lines: string[] = [`命中 ${hits.length} 条(检索式:${match}):`];
     for (const [i, h] of hits.entries()) {
-      lines.push(`${i + 1}. ${provenanceLine(ctx, h.chunk.id)} · chunkId=${h.chunk.id}`);
+      lines.push(`${i + 1}. ${tierTag(h.chunk.tier)} ${provenanceLine(ctx, h.chunk.id)} · chunkId=${h.chunk.id}`);
       const m = materializer(ctx, h.chunk.id);
       if (m === null) {
         lines.push("   （索引行已不在）");
@@ -116,6 +152,8 @@ const knowledgeSearch: PlatformTool = {
         lines.push(`   ${excerpt(m.slice, EXCERPT_MAX)}`);
       }
     }
+    lines.push("");
+    lines.push(TIER_LEGEND);
     lines.push("");
     lines.push(`上面每条都只是**片段**。要看某一条的完整段落,调 knowledge_read({ chunkId }) —— 只读一条,别一次读很多条。`);
     return ok(lines.join("\n"));
@@ -150,7 +188,7 @@ const knowledgeRead: PlatformTool = {
       m.state === "ok"
         ? "状态:ok(与索引一致)"
         : `状态:drifted —— ${m.problem ?? "索引与来源不一致"}`;
-    return ok(`${head}\n${stateLine}\n\n${m.slice}`);
+    return ok(`${head}\n${tierLine(tierOf(ctx, id.value))}\n${stateLine}\n\n${m.slice}`);
   },
 };
 

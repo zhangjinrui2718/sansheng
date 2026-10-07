@@ -32,6 +32,7 @@ import { dirname, join } from "node:path";
 import { openPlatformMemoryDb } from "../../src/platform/storage/index.js";
 import { insertAgent } from "../../src/platform/storage/repo/agents.js";
 import { insertProject, addMember } from "../../src/platform/storage/repo/projects.js";
+import { insertWork } from "../../src/platform/storage/repo/works.js";
 import { insertArtifact, getArtifact } from "../../src/platform/storage/repo/artifacts.js";
 import { insertTurnUsage } from "../../src/platform/storage/repo/usage.js";
 import { createPlatformApp, type HttpDeps } from "../../src/platform/transport/http.js";
@@ -79,6 +80,8 @@ function at(dayOffset: number, hour = 12): number {
 function put(over: {
   projectId?: string | null;
   agentId?: string;
+  /** 挂在哪条工作项上(缺省 `null` = 平台回合)。029 起它对 `byWork` 是判据 */
+  workId?: string | null;
   createdAt: number;
   input?: number;
   output?: number;
@@ -91,7 +94,7 @@ function put(over: {
     projectId: over.projectId === undefined ? P1 : over.projectId,
     sessionId: null,
     agentId: over.agentId ?? "wk",
-    workId: null,
+    workId: over.workId ?? null,
     model: null,
     inputTokens: over.input ?? 0,
     outputTokens: over.output ?? 0,
@@ -172,9 +175,15 @@ async function post(
 // ════════════════════════════════════════════════════════════════
 
 describe("GET /api/projects/:id/usage · 正样本", () => {
-  it("合计 / 今日 / 按角色 / 按天 四件事都答得出来", async () => {
-    put({ agentId: "wk", createdAt: at(0, 9), input: 100, output: 10, cacheRead: 5 });
-    put({ agentId: "pm", createdAt: at(0, 10), input: 200, output: 20, cacheRead: 7 });
+  it("合计 / 今日 / 按角色 / 按天 / **按工作项** 五件事都答得出来", async () => {
+    // `turn_usage.work_id` 有外键 ⇒ 账不能凭空挂在一个不存在的工作项上
+    insertWork(db, {
+      id: "w_big", projectId: P1, parentWorkId: null, title: "大活", goal: "g",
+      status: "in_progress", assigneeAgentId: "wk", createdAt: 1, updatedAt: 1,
+    });
+    put({ agentId: "wk", createdAt: at(0, 9), input: 100, output: 10, cacheRead: 5, workId: "w_big" });
+    put({ agentId: "pm", createdAt: at(0, 10), input: 200, output: 20, cacheRead: 7, workId: "w_big" });
+    // 不挂工作项的那一笔:**平台回合也真的花钱**,它必须自己占一桶
     put({ agentId: "wk", createdAt: at(3, 9), input: 7, output: 1, cacheRead: 0 });
 
     const u = await usage(`/api/projects/${P1}/usage?days=7&limit=7`);
@@ -190,12 +199,23 @@ describe("GET /api/projects/:id/usage · 正样本", () => {
     expect(u.byDay.map((d) => [d.day, d.input])).toHaveLength(2);
     expect(u.byDayTruncated).toBe(false);
     expect(u.updatedAt).toBe(at(0, 10));
+    // ── 按工作项(2026-10-08):这一维回答「花在哪件活上」──────────
+    //
+    // 标题由**视图层**解析(`workId → works.title`),所以这里同时钉住
+    // 「id 解析成了标题」与「`null` 桶没有被丢掉/并掉」。
+    expect(u.byWork.map((b) => [b.workId, b.workTitle, b.input, b.turns])).toEqual([
+      ["w_big", "大活", 300, 2],
+      [null, null, 7, 1],
+    ]);
+    // 分项之和 = 合计(丢桶或并桶都会让这条不成立)
+    expect(u.byWork.reduce((n, b) => n + b.input, 0)).toBe(u.totals.input);
   });
 
   it("项目一分钱没花 ⇒ 全零 + `updatedAt: null`,**不是** 404", async () => {
     const u = await usage(`/api/projects/${P2}/usage`);
     expect(u.totals).toEqual({ input: 0, output: 0, cacheRead: 0, turns: 0 });
     expect(u.byAgent).toEqual([]);
+    expect(u.byWork).toEqual([]);
     expect(u.byDay).toEqual([]);
     expect(u.updatedAt).toBeNull();
   });

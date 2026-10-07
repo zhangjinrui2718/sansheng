@@ -50,12 +50,24 @@
  * 不做任何状态迁移、不写库、不决定「要不要重试」。`rework` 待办由
  * `dispatcher.ts` 的规则表产出(与另外 14 条同形:纯查询 → 待办 → 排空器派发),
  * 返工回合怎么写产出、写几份,仍然是模型的判断。
+ *
+ * ── 2026-10-08:第二个入口(甲方拒收,029)────────────────────────
+ *
+ * 甲方在界面上点「要改」之后,那份交付物同样要回到写它的人手上。判据形状**完全
+ * 同构**(一行结构化结论 → 下一步),只是结论的来源从 `review_verdicts` 换成了
+ * `delivery_verdicts`。所以本模块现在有**两个** collector
+ * ({@link collectReworkPending} / {@link rejectedDeliveriesOfProject}),
+ * 而它们共用同一个目的地判据 {@link reworkOwner} —— 「退给谁」的裁决只有一条。
  */
 import type Database from "better-sqlite3";
 import { listArtifacts, type ArtifactRow } from "../storage/repo/artifacts.js";
 import {
   listReviewVerdicts, latestVerdictsByWork, type ReviewVerdictRow,
 } from "../storage/repo/reviewVerdicts.js";
+import {
+  deliveredDeliverableIds, listDeliveryVerdicts,
+  type DeliveryVerdictRow,
+} from "../storage/repo/deliveryVerdicts.js";
 import { isProducedArtifactKind, type ProjectRole } from "../identity/role.js";
 import { listWorks, type WorkRow } from "../storage/repo/works.js";
 
@@ -201,6 +213,21 @@ export interface ReworkOwner {
   readonly reason: "author" | "pm_fallback" | "pm_escalated";
 }
 
+/**
+ * 目的地判据需要的那**两个事实** —— 只此两项,不多要。
+ *
+ * 抽出来是因为现在有**两个**返工入口,而它们的「该退给谁」必须是同一个答案:
+ *   · `ReworkPending`(质检判 fail,014/021);
+ *   · `RejectedDelivery`(甲方拒收,029)。
+ * 两处各写一份判据 = 两份定义会漂(这个项目为此付过好几次代价)。
+ */
+export interface OwnerInput {
+  /** 第几轮(见 {@link REWORK_ESCALATE_ROUND}) */
+  readonly round: number;
+  /** 产出的作者;`null` = 没有产出 / 不知道作者 */
+  readonly authorAgentId: string | null;
+}
+
 /** 名字里带 role 的最小投影 —— 不引 `AgentRow`,免得为了一个字段拖进整个仓储类型。 */
 interface OwnerCandidate {
   readonly agentId: string;
@@ -221,7 +248,7 @@ interface OwnerCandidate {
  * 「它不知道这不是自己的活」。谁是产出者,谁就该改它;没有产出者,就是没人认领 ⇒ PM。
  */
 export function reworkOwner(
-  pending: ReworkPending,
+  pending: OwnerInput,
   members: readonly OwnerCandidate[],
 ): ReworkOwner | null {
   const pm = members.find((m) => m.role === "project_manager");
@@ -289,6 +316,161 @@ export function renderReworkPacket(pending: ReworkPending, reason: ReworkOwner["
     "2. 那个新产出落盘时,平台会把**被退回的那一版**标成 `superseded`(已被取代) ——",
     "   所以你不必手工去改旧工件的状态(也改不了:工件不可改,只能再写一份)。",
     "3. 改完之后把工作项状态推成 `done`(`work_update`)—— 它会重新进入审查。",
+  ];
+  return lines.join("\n");
+}
+
+// ══════════════════════════════════════════════════════════════════
+// 第二个返工入口:**甲方拒收**(029,2026-10-08)
+// ══════════════════════════════════════════════════════════════════
+//
+// 与上面那一段是**同一款判据**,只是那一行结论换了来源:
+//
+//   质检判不通过  →  `review_verdicts`(021)  →  `rework`
+//   甲方拒收      →  `delivery_verdicts`(029) →  `rework_rejected`
+//
+// 两处共用 {@link reworkOwner}(「有作者就给作者,没有就给 PM,第 3 轮换人」)
+// 与 {@link REWORK_ESCALATE_ROUND}。**不许**再写第二套目的地判据 —— 用户对
+// 「退给谁」的裁决只有一条,两份实现会漂。
+//
+// ⚠️ **终止判据同样是「那之后有了新产出」**,而它在这里尤其要紧:甲方拒收是
+// **过去式**(那一行永远在库里),没有终止判据的话,这条规则每个 tick 都成立,
+// 只能靠尝试预算兜住 —— 而预算按 AGENTS.md 的定性是**限流不是判据**。
+
+/** 一条「甲方拒收」的现场。**全是结构化列,没有正文。** */
+export interface RejectedDelivery {
+  readonly artifactId: string;
+  /** 交付物标题 —— 只给人读(待办 label / 日志),判据一个都不用 */
+  readonly artifactTitle: string;
+  /**
+   * 这份交付物挂在哪条工作项上(`artifacts.work_id`)。
+   *
+   * ⚠️ **可以是 `null`**:立项书那种不挂环节的工件当不了交付物,但存量行里
+   * 确实可能有一条没挂 work_id 的交付物。那时**判不了「返工做完了没有」**
+   * (没有工作项可查),所以它会被一直当作「在等返工」—— 由尝试预算兜住,
+   * 并如实写在读面上。不为了消掉这个边界去猜一个 work_id。
+   */
+  readonly workId: string | null;
+  /** 甲方那一次裁决(最新一条) */
+  readonly verdict: DeliveryVerdictRow;
+  /** 这份交付物累计被拒收几次(= 第几轮) */
+  readonly round: number;
+  /** 写这份交付物的人 —— 返工的目的地来源 */
+  readonly authorAgentId: string | null;
+}
+
+/**
+ * 项目里**在等返工**的、被甲方拒收的交付物 —— 纯查询。
+ *
+ * 判据两条**同时**成立:
+ *   - 它的**最新**裁决是 `reject`;
+ *   - 那次拒收**之后**,它挂的那条工作项上没有更新的产出(否则作者已经重交过
+ *     一版,这条就该让位给新版本的裁决)。
+ *
+ * ⚠️ `deliverables` 由调用方传**当前那一版**(`status='accepted'` 的定稿)——
+ * 被 `superseded` 的旧版本不该再进待办:`tools/blackboard.ts` 会在新一版落盘时
+ * 把被拒的那一版退休(与质检返工同一处逻辑),于是「当前是哪一版」始终只有一个答案。
+ */
+export function rejectedDeliveriesOfProject(
+  db: Database.Database,
+  projectId: string,
+  deliverables: readonly ArtifactRow[],
+): RejectedDelivery[] {
+  const delivered = new Set(deliveredDeliverableIds(db, projectId));
+  if (delivered.size === 0) return [];
+  const verdicts = listDeliveryVerdicts(db, projectId);
+  const byArtifact = new Map<string, DeliveryVerdictRow[]>();
+  for (const v of verdicts) {
+    const bucket = byArtifact.get(v.artifactId);
+    if (bucket === undefined) byArtifact.set(v.artifactId, [v]);
+    else bucket.push(v);
+  }
+  const out: RejectedDelivery[] = [];
+  for (const a of deliverables) {
+    if (!delivered.has(a.id)) continue;
+    const list = byArtifact.get(a.id);
+    if (list === undefined || list.length === 0) continue;
+    const last = list[list.length - 1]!;
+    if (last.verdict !== "reject") continue;
+    if (a.workId !== null) {
+      // ── 终止判据:**那之后又交了一份定稿** ────────────────────────
+      //
+      // ⚠️ 它比质检返工那条**更窄**,而这是刻意的(2026-10-08 的回归里现出来的):
+      // `reworkPendingOf` 收的是「任何一条本工作项自己的新产出」,而这里必须是
+      // **一份能交付出去的定稿**(`kind='deliverable'` + `status='accepted'`)。
+      // 理由:甲方拒收之后,唯一能让流水线继续的事是「再交一版 → 再交付 → 再裁决」。
+      // 作者写一条 `note`(「我明天改」)就把它算成「返工完了」的话,这条待办消失了,
+      // 而被拒的那一版还在、收口门仍然不成立、**没有任何人再被叫醒** —— 那正是
+      // 这个项目最怕的那种静默停(「零待办」与「组织干完了」长得一模一样)。
+      // 写一份 `open` 草稿同样不算:交付那一环要的是定稿(`handover` 的资格判据),
+      // 草稿落盘之后仍然没人能动,而那种死尾由 `review_undelivered_project` 兜底
+      // (「工作项全终结 + 零已验收交付物」)。
+      const redone = listArtifacts(db, projectId, {
+        workId: a.workId, kind: "deliverable", status: "accepted", limit: 500,
+      }).some((p) => p.id !== a.id && p.createdAt > last.createdAt);
+      if (redone) continue;
+    }
+    out.push({
+      artifactId: a.id,
+      artifactTitle: a.title,
+      workId: a.workId,
+      verdict: last,
+      round: list.filter((v) => v.verdict === "reject").length,
+      authorAgentId: a.authorAgentId,
+    });
+  }
+  return out;
+}
+
+/**
+ * `rework_rejected` 待办的任务正文。
+ *
+ * ── 甲方那句话要**照原样带上** ──────────────────────────────────
+ *
+ * `renderReworkPacket` 的原则是「正文一个字都不搬」(质检意见几千字,复述等于
+ * 白占 context)。这里相反:甲方写的通常**就是一句话**,而且它是**唯一的现场** ——
+ * 甲方没有别的落点(裁决不是工件,模型 `board_read` 读不到它)。漏掉它,模型拿到的
+ * 就是「你被拒收了」这五个字,只能猜甲方为什么不满意。
+ *
+ * ⚠️ 仍然**不知道就不编**:甲方没写理由时如实说「他没写」,并给出唯一能问的人
+ * (业务经理,`ask_role`)—— 而不是替甲方编一个理由(那是本项目最忌的「编造现场」)。
+ */
+export function renderRejectedPacket(
+  rejected: RejectedDelivery,
+  reason: ReworkOwner["reason"],
+): string {
+  const lines = [
+    `# 现在轮到你了:甲方**拒收**了这份交付物(第 ${rejected.round} 轮)`,
+    "",
+    `- 交付物:\`${rejected.artifactId}\`「${rejected.artifactTitle}」`,
+    rejected.workId === null
+      ? "- ⚠️ 这份交付物**没有挂在任何工作项上**(`work_id` 为空)—— 所以平台" +
+        "判不了「返工做完了没有」。做完之后请把它挂到对应的工作项上(`board_write` 的 `workId`)"
+      : `- 它挂在工作项 \`${rejected.workId}\` 上 —— **返工要交在同一个 \`workId\` 上**`,
+    "- 甲方的裁决:**拒收**(要改)",
+    rejected.verdict.note === null || rejected.verdict.note.trim() === ""
+      ? "- 甲方**没有写理由**。平台不替他编 —— 要问清楚就 `ask_role` 找业务经理" +
+        "(他是唯一能与甲方对话的人),别自己猜他要什么"
+      : `- 甲方的原话(**照原样**):\n\n> ${rejected.verdict.note.trim().split("\n").join("\n> ")}`,
+    reason === "pm_escalated"
+      ? `- ⚠️ **第 ${rejected.round} 轮了,平台把这一条换给了你(项目经理)**:` +
+        "反复退给同一个作者已经没有不同的结果 —— " +
+        "先判断「这件事到底该谁做 / 范围该怎么划」,再决定是你亲自写还是改派"
+      : reason === "pm_fallback"
+        ? "- ⚠️ **这份交付物没有可退的作者**,所以平台把它交给你(项目经理):" +
+          "这通常意味着「该产出这份交付物的人从来没被指派过」—— 那正是你要裁定的那件事"
+        : "- 判据是**谁写的谁改**:这一版是你写的",
+    "",
+    "## 做完之后",
+    "",
+    "1. 把甲方指出的问题解决掉,重新 `board_write` 一份**定稿**交付物" +
+      "(`kind: \"deliverable\"`,`status: \"accepted\"`,`workId` 与上面那条一致)。",
+    "   平台判「返工做完了没有」看的就是这一条:**这条工作项上出现了比甲方裁决更新的产出**。",
+    "   新的一版落盘时,平台会把**被拒收的那一版**标成 `superseded`(已被取代)。",
+    "2. 新的一版会**重新走一遍交付** —— 业务经理再交给甲方,甲方再裁决一次。",
+    "   你的产出**不是**在等甲方点头,而是「改完交出去」这件事又发生了一次。",
+    "3. ⚠️ **不要**自己去改那一条甲方裁决(改不了,也不该改):" +
+      "它是甲方说的话,是审计面的事实。",
   ];
   return lines.join("\n");
 }

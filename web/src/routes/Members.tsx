@@ -188,6 +188,8 @@ const TODO_KIND_LABEL: Record<TriggerTodoKind, string> = {
   decompose_project: "拆解项目",
   execute_work: "执行工作项",
   rework: "返工(质检判了不通过)",
+  // 029:同一款待办的另一个入口 —— 甲方在界面上点了「要改」。
+  rework_rejected: "重做(甲方拒收了交付物)",
   review_work: "审查产出",
   integrate: "整合成果",
   handover: "交付交接",

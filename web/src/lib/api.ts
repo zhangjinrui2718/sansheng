@@ -33,6 +33,7 @@
  */
 import type {
   AppConfigResponse,
+  ArtifactAcceptanceView,
   ArtifactContentView,
   ArtifactStatus,
   ArtifactView,
@@ -41,6 +42,7 @@ import type {
   ChangeView,
   ClientQuestionList,
   ClientQuestionView,
+  DeliveryVerdict,
   HarnessView,
   HealthResponse,
   IntakeMessagesResponse,
@@ -417,8 +419,37 @@ export function getRepoCommits(id: string, limit = 20): Promise<RepoCommitsView>
   );
 }
 
-/** 本项目成员(四个固定职能)。`ProjectDetail` 里也带 members,这一条给成员页单独用。 */
-export function listMembers(projectId: string): Promise<{ members: MemberView[] }> {
+/**
+ * **甲方的验收裁决**(029,`POST /api/artifacts/:id/verdict`)。
+ *
+ * 这是全平台**唯一**能写下「甲方收不收」的调用 —— 它没有对应的平台工具,
+ * 任何角色都写不了(模型不能替甲方拍板)。所以这个函数的调用点只应该在
+ * **甲方看得到的地方**(交付物卡 / 项目的「待收货」),而不在成员页或端到端脚本里。
+ *
+ * 四条服务端拒收(400/404/409)都带可执行的说明,直接把它们显示给用户:
+ *   · 不是交付物;· 项目已收口(收口之后再验收等于补签);
+ *   · **还没交付给你**(没收到货谈不上验收);· 理由太长(>2000 字)。
+ *
+ * 追加式:重复调用不报错(改判就是再写一条),返回值是**重新算出来**的收货进展。
+ */
+export function submitDeliveryVerdict(
+  artifactId: string,
+  verdict: DeliveryVerdict,
+  note?: string,
+): Promise<{ ok: boolean; acceptance: ArtifactAcceptanceView }> {
+  const body: { verdict: DeliveryVerdict; note?: string } = { verdict };
+  if (note !== undefined && note.trim() !== "") body.note = note.trim();
+  return request<{ ok: boolean; acceptance: ArtifactAcceptanceView }>(
+    `/artifacts/${encodeURIComponent(artifactId)}/verdict`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    },
+  );
+}
+
+/** 本项目成员(四个固定职能)。`ProjectDetail` 里也带 members,这一条给成员页单独用。 */export function listMembers(projectId: string): Promise<{ members: MemberView[] }> {
   return request<{ members: MemberView[] }>(`/projects/${encodeURIComponent(projectId)}/members`);
 }
 

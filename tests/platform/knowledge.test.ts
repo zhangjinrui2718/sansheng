@@ -357,4 +357,44 @@ describe("工具:knowledge_search / knowledge_read", () => {
     const knowledgeTools = ALL_TOOLS.filter((t) => t.startsWith("knowledge_"));
     expect(knowledgeTools).toEqual(["knowledge_read", "knowledge_search"]);
   });
+
+  // ── 分级(migration 030)────────────────────────────────────────
+  //
+  // 夹具里 `m1` 是**甲方原话**(user ⇒ primary)、`a1` 是 `kind=note` 的工件
+  // (⇒ material),所以这一组正负样本天然成对。
+
+  it("knowledge_search:每条带分级,并用一句人话说清 material 是什么", async () => {
+    const text = okText(await call("knowledge_search", { query: "催收" }));
+    expect(text).toContain("[primary]");
+    expect(text).toContain("[material]");
+    // 排序:定稿在前(同一条检索里两组都在)
+    expect(text.indexOf("[primary]")).toBeLessThan(text.indexOf("[material]"));
+    // 那一句人话必须在这里 —— 模型看不到这段说明就只能猜"material 是不是坏的"
+    expect(text).toContain("未加工的现场材料");
+    expect(text).toContain("不是平台结论");
+    // 负样本:平台**没有**能力判断内容从哪来,文案里不许出现这种断言
+    expect(text).not.toContain("外部网页");
+    expect(text).not.toContain("污染");
+    expect(text).not.toContain("tainted");
+  });
+
+  it("knowledge_read:带上这一条的分级(与 search 同一个判据)", async () => {
+    const search = okText(await call("knowledge_search", { query: "坐席" }));
+    const chunkId = /chunkId=(chk_\w+)/.exec(search)?.[1];
+    expect(chunkId).toBeDefined();
+    const text = okText(await call("knowledge_read", { chunkId: chunkId! }));
+    // 「坐席」只出现在 a1(note ⇒ material)里
+    expect(text).toContain("分级:material");
+    expect(text).toContain("不是平台结论");
+  });
+
+  it("分级未算的行(chunkId 对应的 tier 为 NULL)如实说「未算」,不冒充任一级", async () => {
+    db.prepare(`UPDATE knowledge_chunks SET tier = NULL`).run();
+    const search = okText(await call("knowledge_search", { query: "催收" }));
+    expect(search).toContain("[分级未算]");
+    const chunkId = /chunkId=(chk_\w+)/.exec(search)?.[1];
+    const text = okText(await call("knowledge_read", { chunkId: chunkId! }));
+    expect(text).toContain("分级:未算");
+    expect(text).toContain("既不是 primary 也不是 material");
+  });
 });
