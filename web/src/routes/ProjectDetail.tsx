@@ -353,114 +353,6 @@ export function ProjectDetailPage() {
             )}
           </Section>
 
-          {/*
-            文件系统:项目目录的**只读观测面**(设计 docs/DESIGN-WORKSPACE.md §4.4,P0)。
-            放在「组织推进」「合规记录」两段之后 —— 那两段回答「组织在不在动、
-            动得规不规矩」,这一段回答「它到底在盘上留下了什么」。
-
-            两条反造假纪律在这里的落法(与 ProjectLiveView.runtime 同源):
-              · `runtime === "unavailable"` ⇒ 显示 problem 那一行,**绝不**渲染成空目录;
-              · `truncated === true` ⇒ 明说「列表不全」,不许让「少列」看起来像「没有」。
-                (`index` 现在只剩 `{ paths }` —— 分期的 `not_migrated` 兜底已作废:
-                 `body_path` 列由 migration 027 保证存在。)
-          */}
-          <Section
-            title="文件系统"
-            count={workspace?.runtime === "ok" ? workspace.counts.entries : undefined}
-            hint="只读:盘上有什么 + 索引引用了什么"
-            hintTitle="来源:GET /api/projects/:id/workspace(设计 docs/DESIGN-WORKSPACE.md §4.4,P0)。这条读面**只读** —— 它不建目录、不写文件。扫描深度上限 3 层、条目上限 500;到界或有内容读不出来时 truncated = true(不静默少列)。"
-          >
-            {workspaceError !== null ? (
-              <div className="sansheng-card p-3 text-xs" style={{ color: "var(--cinnabar)" }}>
-                加载失败:{workspaceError}
-              </div>
-            ) : workspace === null ? (
-              <EmptyState>{workspaceLoading ? "加载中…" : "读不到工作区。"}</EmptyState>
-            ) : (
-              <div className="grid gap-2">
-                {/* root 的绝对路径(可复制)—— 「读不到」时它更要显示:用户要拿着它去盘上核对 */}
-                <CopyPath text={workspace.root} />
-
-                {workspace.runtime === "unavailable" ? (
-                  // 「读不到」**不是**「空目录」—— 这一行是两者的分界线,不许被空态替代。
-                  <Flag tone="cinnabar">
-                    读不到这个项目的工作目录(这不是「空目录」,是「没读到」):{workspace.problem}
-                  </Flag>
-                ) : (
-                  <>
-                    <div className="flex items-center gap-2 flex-wrap ss-meta">
-                      <span>条目 {workspace.counts.entries}</span>
-                      <span>已索引 {workspace.counts.indexed}</span>
-                      <span>孤儿文件 {workspace.counts.orphanFile}</span>
-                      <span>库里有盘上无 {workspace.missing.length}</span>
-                      {/* 对账的分母:索引里正文路径的总条数(它不会被遍历上限影响) */}
-                      <span title="artifacts.body_path 里的总条数 —— 对账的另一个分母">
-                        索引正文路径 {workspace.index.paths}
-                      </span>
-                      {workspace.truncated && (
-                        <Pill tone="amber" title="到深度 / 条目上限,或有内容读不出来 —— 下面这份列表不全">
-                          已截断 · 列表不全
-                        </Pill>
-                      )}
-                    </div>
-
-                    {workspace.entries.length === 0 ? (
-                      <EmptyState>
-                        这个项目的目录是空的 —— 这一次确实「读到了」(runtime ok),里面一个条目都没有。
-                      </EmptyState>
-                    ) : (
-                      <div className="grid gap-1">
-                        {workspace.entries.map((e) => (
-                          <div
-                            key={e.path}
-                            className="sansheng-card p-1.5 flex items-center gap-2 flex-wrap"
-                            title={e.path}
-                          >
-                            <Pill tone={e.kind === "dir" ? "mute" : "bone"}>
-                              {e.kind === "dir" ? "目录" : "文件"}
-                            </Pill>
-                            <code style={{ fontSize: 12, color: "var(--bone)", wordBreak: "break-all" }}>
-                              {e.path}
-                            </code>
-                            {e.indexed && (
-                              <Pill tone="cyan" title="artifacts.body_path 里有这条路径">
-                                已索引
-                              </Pill>
-                            )}
-                            <span className="ss-meta ml-auto">
-                              {e.bytes === null ? "— 目录" : fmtBytes(e.bytes)} · {fmtTime(e.mtimeMs)}
-                            </span>
-                          </div>
-                        ))}
-                      </div>
-                    )}
-
-                    {workspace.missing.length > 0 && (
-                      <div className="grid gap-1">
-                        <div className="ss-note">库里有、盘上没有(索引指向的文件在盘上找不到):</div>
-                        {workspace.missing.map((m) => (
-                          <div
-                            key={m.path}
-                            className="sansheng-card p-1.5 flex items-center gap-2 flex-wrap"
-                            style={{ borderLeft: "2px solid var(--cinnabar)" }}
-                            title={m.path}
-                          >
-                            <code style={{ fontSize: 12, color: "var(--bone)", wordBreak: "break-all" }}>
-                              {m.path}
-                            </code>
-                            <span className="ss-meta ml-auto">
-                              {m.title || "(无标题)"}
-                              {m.artifactId !== "" && ` · ${m.artifactId}`}
-                            </span>
-                          </div>
-                        ))}
-                      </div>
-                    )}
-                  </>
-                )}
-              </div>
-            )}
-          </Section>
 
           {/*
             只在**真的有**认不出类别的平台记录时才渲染这一段(与成员页那段 `strangers`
@@ -698,6 +590,126 @@ export function ProjectDetailPage() {
                     </div>
                   </article>
                 ))}
+              </div>
+            )}
+          </Section>
+
+          {/*
+            文件系统:项目目录的**只读观测面**(设计 docs/DESIGN-WORKSPACE.md §4.4,P0)。
+            **放在页面最后**(用户 2026-10-08 裁定):这一页前几段回答「组织在不在动、
+            动得规不规矩」,这一段回答「它到底在盘上留下了什么」—— 它是**取证**用的
+            观测面,不是每次打开都要先看的东西。
+
+            两条反造假纪律在这里的落法(与 ProjectLiveView.runtime 同源):
+              · `runtime === "unavailable"` ⇒ 显示 problem 那一行,**绝不**渲染成空目录;
+              · `truncated === true` ⇒ 明说「列表不全」,不许让「少列」看起来像「没有」。
+                (`index` 现在只剩 `{ paths }` —— 分期的 `not_migrated` 兜底已作废:
+                 `body_path` 列由 migration 027 保证存在。)
+          */}
+          <Section
+            title="文件系统"
+            count={workspace?.runtime === "ok" ? workspace.counts.entries : undefined}
+            hint="只读:盘上有什么 + 正文索引引用了什么"
+            hintTitle={
+              "来源:GET /api/projects/:id/workspace(设计 docs/DESIGN-WORKSPACE.md §4.4,P0)。这条读面**只读** —— 它不建目录、不写文件。" +
+              "扫描深度上限 3 层、条目上限 500;到界或有内容读不出来时 truncated = true(不静默少列)。" +
+              "⚠️ 「正文已索引」的判据是 **artifacts.body_path 里有这条路径** —— 库不存正文,只存落点 + sha + 字节数(027);" +
+              "它**不是**记忆页那段「知识语料」的检索索引(knowledge_chunks + FTS,回答的是「搜得到什么」)。两个「索引」同名不同物。"
+            }
+          >
+            {workspaceError !== null ? (
+              <div className="sansheng-card p-3 text-xs" style={{ color: "var(--cinnabar)" }}>
+                加载失败:{workspaceError}
+              </div>
+            ) : workspace === null ? (
+              <EmptyState>{workspaceLoading ? "加载中…" : "读不到工作区。"}</EmptyState>
+            ) : (
+              <div className="grid gap-2">
+                {/* root 的绝对路径(可复制)—— 「读不到」时它更要显示:用户要拿着它去盘上核对 */}
+                <CopyPath text={workspace.root} />
+
+                {workspace.runtime === "unavailable" ? (
+                  // 「读不到」**不是**「空目录」—— 这一行是两者的分界线,不许被空态替代。
+                  <Flag tone="cinnabar">
+                    读不到这个项目的工作目录(这不是「空目录」,是「没读到」):{workspace.problem}
+                  </Flag>
+                ) : (
+                  <>
+                    <div className="flex items-center gap-2 flex-wrap ss-meta">
+                      <span>条目 {workspace.counts.entries}</span>
+                      <span title="artifacts.body_path 里有这条路径 —— 这是**正文落点索引**(库不存正文,只记落点 + sha + 字节数),与记忆页的**知识语料**(检索索引)是两回事">
+                        正文已索引 {workspace.counts.indexed}
+                      </span>
+                      <span>孤儿文件 {workspace.counts.orphanFile}</span>
+                      <span>库里有盘上无 {workspace.missing.length}</span>
+                      {/* 对账的分母:artifacts.body_path 的行数(它不会被遍历上限影响) */}
+                      <span title="artifacts.body_path 里的总条数 —— 对账的另一个分母(与遍历上限无关)">
+                        正文索引行 {workspace.index.paths}
+                      </span>
+                      {workspace.truncated && (
+                        <Pill tone="amber" title="到深度 / 条目上限,或有内容读不出来 —— 下面这份列表不全">
+                          已截断 · 列表不全
+                        </Pill>
+                      )}
+                    </div>
+
+                    {workspace.entries.length === 0 ? (
+                      <EmptyState>
+                        这个项目的目录是空的 —— 这一次确实「读到了」(runtime ok),里面一个条目都没有。
+                      </EmptyState>
+                    ) : (
+                      <div className="grid gap-1">
+                        {workspace.entries.map((e) => (
+                          <div
+                            key={e.path}
+                            className="sansheng-card p-1.5 flex items-center gap-2 flex-wrap"
+                            title={e.path}
+                          >
+                            <Pill tone={e.kind === "dir" ? "mute" : "bone"}>
+                              {e.kind === "dir" ? "目录" : "文件"}
+                            </Pill>
+                            <code style={{ fontSize: 12, color: "var(--bone)", wordBreak: "break-all" }}>
+                              {e.path}
+                            </code>
+                            {e.indexed && (
+                              <Pill
+                                tone="cyan"
+                                title="artifacts.body_path 里有这条路径 —— 这是**正文落点索引**,与记忆页的**知识语料**(检索索引)不是一回事"
+                              >
+                                正文已索引
+                              </Pill>
+                            )}
+                            <span className="ss-meta ml-auto">
+                              {e.bytes === null ? "— 目录" : fmtBytes(e.bytes)} · {fmtTime(e.mtimeMs)}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+
+                    {workspace.missing.length > 0 && (
+                      <div className="grid gap-1">
+                        <div className="ss-note">库里有、盘上没有(索引指向的文件在盘上找不到):</div>
+                        {workspace.missing.map((m) => (
+                          <div
+                            key={m.path}
+                            className="sansheng-card p-1.5 flex items-center gap-2 flex-wrap"
+                            style={{ borderLeft: "2px solid var(--cinnabar)" }}
+                            title={m.path}
+                          >
+                            <code style={{ fontSize: 12, color: "var(--bone)", wordBreak: "break-all" }}>
+                              {m.path}
+                            </code>
+                            <span className="ss-meta ml-auto">
+                              {m.title || "(无标题)"}
+                              {m.artifactId !== "" && ` · ${m.artifactId}`}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </>
+                )}
               </div>
             )}
           </Section>
