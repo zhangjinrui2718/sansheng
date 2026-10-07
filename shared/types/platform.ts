@@ -182,7 +182,27 @@ export interface ArtifactView {
   kind: ArtifactKind;
   status: ArtifactStatus;
   title: string;
-  body: string;
+  /**
+   * **工件正文的落点**(2026-10-08 起正文不再住库)。
+   *
+   * 项目根相对路径,如 `artifacts/art_x-report.html`,由平台生成
+   * (`artifacts/<artifactId>-<slug>.<ext>`)—— **不让模型编路径**。
+   * 正文本身走 `GET /api/artifacts/:id/content` 现读。
+   *
+   * ⚠️ **它是落点不是内容**:这一列非空**不代表文件还在盘上**。
+   * 「文件读不到」由那条端点的 `runtime: "unavailable"` 表达,不是靠这里。
+   */
+  bodyPath: string;
+  /** 写入时的字节数。**快照**,不是现值(现值要 stat,那是读面的活)。 */
+  bodyBytes: number;
+  /**
+   * 引入这份正文的提交 sha(平台提交后回填;还没提交时 `null`)。
+   *
+   * 有了它,正文就是**按 sha 可寻址**的:`?at=<sha>` 能读出被改过、被删过、
+   * 被回滚掉的那一版。这也是「`git revert` 回滚安全」的全部依据 ——
+   * 回滚不会让索引说谎。
+   */
+  commitSha: string | null;
   authorAgentId: string;
   authorName: string;
   createdAt: number;
@@ -237,14 +257,40 @@ export interface ArtifactView {
 export interface CodeServiceView {
   readonly repoPath: string | null;
   readonly repoName: string | null;
+  /**
+   * **服务目录**(仓库内相对路径)—— 交付物的**边界**与构建上下文。
+   *
+   * ⚠️ 2026-10-08 起代码服务复用**项目仓**,`repoPath` 因此是项目根 ——
+   * 没有这一项,交付物会把 `artifacts/` / `work/` 一起算进去,而且一个项目交
+   * 两个服务时两条交付物在 `repoPath` 上完全相同,读面分不出谁是谁。
+   */
+  readonly servicePath: string | null;
   readonly branch: string | null;
   readonly headCommit: string | null;
   readonly headSubject: string | null;
+  /**
+   * **这个交付物的版本** = 最后触及 `servicePath` 的提交。
+   *
+   * ⚠️ 与 `headCommit` **不是一回事**:平台每回合都写工件正文并提交,HEAD 一直在动,
+   * 而交付物可能根本没变。读面说「这版交付物是什么」要用**这个**。
+   */
+  readonly deliverableCommit: string | null;
+  /** `deliverableCommit` 的提交标题 */
+  readonly deliverableSubject: string | null;
   readonly commitCount: number | null;
   readonly dockerfile: string | null;
   readonly service: string | null;
   readonly port: number | null;
   readonly files: readonly string[];
+  /**
+   * `servicePath` 下被 `.gitignore` 忽略的条目 —— **交付物会缺这些**。
+   *
+   * 交付物的内容 = 被 git 跟踪的文件,所以忽略掉的东西甲方 clone 不到。
+   * 而 `node_modules` / 构建产物本来就该被忽略 ⇒ 是**告警不是拒绝**,
+   * 读面要如实列出来(空数组 = 没有,不是「读不到」;读不到由 `codeService`
+   * 整体为 `null` 表达)。
+   */
+  readonly ignoredFiles: readonly string[];
 }
 
 /**
@@ -580,7 +626,36 @@ export interface IntakeLiveView {
 }
 
 /**
- * **项目工作区的一条盘上条目**(设计 `docs/DESIGN-WORKSPACE.md` §4.4,P0)。
+ * **一件工件的正文**(`GET /api/artifacts/:id/content`)。
+ *
+ * ── 为什么正文要单独一条端点 ──────────────────────────────────────
+ *
+ * 2026-10-08 起正文不再住数据库:它是项目仓里的一份文件(`ArtifactView.bodyPath`)。
+ * 于是「列表」与「正文」天然分开 —— 列表不再顺手把每份正文都拉一遍。
+ *
+ * ⚠️ **`runtime: "unavailable"` 是读不到,不是空正文。** 两种情形:
+ *   · 文件不在 HEAD(被删 / 被移走 / 被回滚);
+ *   · `?at=<sha>` 指向的提交不可达(`reset --hard` 之后的 `deliverableCommit`)。
+ * 两者都要**如实说**,并让用户知道换个 `at=` 还能不能读到 —— 回一个空字符串
+ * 等于把一次读失败说成「这份工件本来就没有正文」。
+ */
+export interface ArtifactContentView {
+  readonly artifactId: string;
+  /** 实际读的是哪个路径(项目根相对) */
+  readonly path: string;
+  /** 实际读的是哪个提交;读 HEAD 时为 null */
+  readonly at: string | null;
+  readonly runtime: "ok" | "unavailable";
+  /** `unavailable` 时非空,写明原因与**下一步**(可执行) */
+  readonly problem: string | null;
+  readonly content: string;
+  readonly bytes: number;
+  /** 与索引里记的 `bodySha256` 是否一致 —— 人工改过文件时不一致,读面要能说出来 */
+  readonly sha256: string;
+}
+
+/**
+ * **项目工作区的一条盘上条目**(设计 `docs/DESIGN-WORKSPACE.md` §4.4)。
  *
  * 它是「盘上有什么」的投影,不是一件工件 —— `path` 就足以复现(相对 `root`)。
  * 目录以 `/` 结尾,路径本身携带类型;目录的 `bytes` 恒为 `null`
@@ -596,9 +671,7 @@ export interface WorkspaceEntryView {
   /**
    * 这条**被索引引用**了吗(`artifacts.body_path` 里有它)。
    *
-   * ⚠️ 索引还没落地时(P0 的真实状态)这里是 `false`,而 `false` 的含义是
-   * 「**没有一条边指向它**」,不是「它不重要」—— 见 `WorkspaceView.index.runtime`:
-   * 读面必须把这两件事分开说,否则「索引机制缺一半」会被读成「这些文件都是孤儿」。
+   * `false` 的含义是「**没有一条边指向它**」,不是「它不重要」。
    */
   indexed: boolean;
 }
@@ -608,7 +681,7 @@ export interface WorkspaceEntryView {
  *
  * ── 为什么它必须存在(§4.4 原话)───────────────────────────────────
  *
- * 「盘对整个 UI 是黑盒」。索引化(P1–P3)把工件正文从库搬到每项目一个仓之后,
+ * 「盘对整个 UI 是黑盒」。工件正文从库搬到每项目一个仓之后,
  * 「库与盘对不对得上」必须**两端可见** —— 否则一次丢文件、一次孤儿写入,
  * 在界面上都只会表现为「某个工件读不到正文」,而看不出是哪一端出的问题。
  *
@@ -619,9 +692,9 @@ export interface WorkspaceEntryView {
  *     两者在屏幕上长得一模一样,而处置完全相反。
  *   · `problem` 在 `unavailable` 时**必须**非空,且写明**绝对路径**与原因:
  *     用户要能拿着它去磁盘上核对,而不是只知道「读不到」。
- *   · `index.runtime: "not_migrated"` 说的是「平台这边**还没有**索引化这件事」
- *     (`body_path` 列还不存在,P2 才加)。它不是「索引是空的」,所以前端要
- *     **如实写出来**,不能让用户以为这些文件就该是孤儿。
+ *   · `missing` **必须用逐条存在性检查算出来**(`statSync(root/p)`),不能拿
+ *     「本次遍历有没有列到它」当判据 —— 遍历有深度 3 层 / 500 条上限,
+ *     到界时一个真实存在的文件会被报成「库里有、盘上无」,那是一句**自信的假话**。
  */
 export interface WorkspaceView {
   projectId: string;
@@ -646,14 +719,8 @@ export interface WorkspaceView {
   };
   /** 索引里有、盘上没有(库与盘的**不一致处**,逐条带工件身份) */
   missing: Array<{ path: string; artifactId: string; title: string }>;
-  /**
-   * 索引侧的能力状态:
-   *   - `runtime`: `"ok"` = `body_path` 可读;`"not_migrated"` = 这一列还不存在
-   *     (P0 的**真实状态**),读面照实说,不假装索引是空的;
-   *   - `paths`: 索引里正文路径的**总条数**(即使 `not_migrated` 也会如实给出条数
-   *     —— 那时它必然是 0,但 `runtime` 才是原因)。
-   */
-  index: { runtime: "ok" | "not_migrated"; paths: number };
+  /** 索引里正文路径的总条数 —— 对账的分母 */
+  index: { paths: number };
 }
 
 /** 项目内的提问(角色之间,或对角色的)。**甲方看不到横向沟通**,只看发给自己那部分。 */
@@ -1581,13 +1648,12 @@ export function eventProjectId(ev: ServerEvent): string | null {
 //   GET    /api/projects/:id/workspace        → { workspace: WorkspaceView }
 //                                                **只读**的「项目文件系统」观测面
 //                                                (设计 `docs/DESIGN-WORKSPACE.md`
-//                                                §4.4,**P0**):盘上有什么 + 索引
-//                                                引用了什么 + 两边对不对得上。
+//                                                §4.4):盘上有什么 + 索引引用了
+//                                                什么 + 两边对不对得上。
 //                                                `runtime: "unavailable"` 是
 //                                                **读不到根目录**,不是「空目录」;
-//                                                `index.runtime: "not_migrated"`
-//                                                是**索引化还没落地**(P2 才加
-//                                                `body_path`),不是「索引是空的」。
+//                                                `missing` 是逐条 stat 出来的,
+//                                                不受遍历上限影响。
 //                                                项目不存在 → 404。
 //   ── 接待会话(第一个项目之前)──
 //   GET    /api/intake/messages               → IntakeMessagesResponse
@@ -1602,6 +1668,18 @@ export function eventProjectId(ev: ServerEvent): string | null {
 //                                                没有接待会话时返回全零,不是 404。
 //   ── 工件 ──
 //   GET    /api/artifacts/:id                 → { artifact: ArtifactView }
+//                                                正文**不再随工件返回**(2026-10-08
+//                                                起正文住文件,`ArtifactView.bodyPath`
+//                                                是落点),要用下面这条现读。
+//   GET    /api/artifacts/:id/content         → ArtifactContentView
+//                                                读工件正文。`?at=<sha>` 读**历史
+//                                                版本**(`git show <sha>:<path>`)——
+//                                                索引记了 `commitSha` ⇒ 正文按 sha
+//                                                可寻址,`git revert` 回滚之后照样
+//                                                读得出来。
+//                                                ⚠️ 文件不在 HEAD / sha 不可达 ⇒
+//                                                `runtime: "unavailable"` + `problem`,
+//                                                **不是空正文、不是 404**。
 //   ── 待甲方答的问题(跨项目;左栏徽标用它)──
 //   GET    /api/client-questions              → { questions: ClientQuestionView[] }
 //   POST   /api/client-questions/:id/answer   → { ok, decisionArtifactId }

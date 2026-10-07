@@ -31,22 +31,51 @@ import type { DeliverableType } from "../storage/repo/artifacts.js";
  * 没有一个是模型说的 —— 这是这个类型存在的全部意义。
  */
 export interface CodeServiceFacts {
-  /** 仓库根,**绝对路径**(已 realpath,符号链接已解析) */
+  /**
+   * 仓库根,**绝对路径**(已 realpath,符号链接已解析)。
+   *
+   * ⚠️ 2026-10-08 起它就是**项目根**:代码服务不再有独立仓库,直接复用项目仓。
+   * 交付物的**边界**改由 {@link servicePath} 表达 —— 项目根里还有 `artifacts/` /
+   * `work/`,拿它当交付物等于把内部工作记录也算进交付物,而且一个项目交两个服务时
+   * 两条交付物的 `repoPath` 会完全相同,读面分不出谁是谁。
+   */
   readonly repoPath: string;
-  /** 仓库目录名(= 建议的镜像名基底) */
+  /** 仓库目录名(= 项目目录名) */
   readonly repoName: string;
+  /** **服务目录**:仓库内的相对路径,即构建上下文(`docker build services/x`)。Dockerfile 在这里。 */
+  readonly servicePath: string;
   /** 分支名,且 `HEAD` 正好是它的顶端 */
   readonly branch: string;
-  /** 40 位全 sha */
+  /** 40 位全 sha(交付那一刻的仓库现场) */
   readonly headCommit: string;
-  /** HEAD 的提交标题(第一行)—— 给读面一句话看明白「这版做了什么」 */
+  /** HEAD 的提交标题(第一行) */
   readonly headSubject: string;
-  /** 从 HEAD 往回数得到的提交总数 */
+  /**
+   * **这个交付物的版本** = 最后触及 `servicePath` 的那个提交
+   * (`git log -1 --format=%H -- <servicePath>`)。
+   *
+   * ⚠️ 为什么不能直接用 `headCommit`:平台**每个回合**都会写工件正文并提交,
+   * 于是 HEAD 一直在动,而交付物根本没变 —— 用 HEAD 当版本会让一条已经交付的
+   * 代码服务看起来「一直在改」。判据很硬:**平台写一堆工件提交之后这个值不动;
+   * 动了服务目录它必须动。**
+   */
+  readonly deliverableCommit: string;
+  /** `deliverableCommit` 的提交标题(第一行)—— 读面用一句话说「这版做了什么」 */
+  readonly deliverableSubject: string;
+  /** 触及 `servicePath` 的提交总数(`git rev-list --count HEAD -- <servicePath>`) */
   readonly commitCount: number;
-  /** Dockerfile 在仓库里的相对路径(必须在根:`Dockerfile`) */
+  /** Dockerfile 在**仓库内**的相对路径(必须在 `servicePath` 之内) */
   readonly dockerfile: string;
-  /** 仓库根的一级条目(不含 `.git`),读面用来一眼看结构 */
+  /** `servicePath` 的一级条目(不含 `.git`),读面用来一眼看结构 */
   readonly files: readonly string[];
+  /**
+   * `servicePath` 下被 `.gitignore` **忽略**的条目。
+   *
+   * 交付物的内容 = **被 git 跟踪的文件** ⇒ 忽略掉的东西甲方 clone 不到,
+   * 交付物**静默残缺**。而 `node_modules` / 构建产物本来就该被忽略,
+   * 所以这是**告警不是拒绝**:列出来,让读面说清楚。
+   */
+  readonly ignoredFiles: readonly string[];
 }
 
 /**
@@ -62,8 +91,10 @@ export type CodeServiceInspection =
 
 /** 一次核对的输入 —— 全部来自模型在 `board_write` 里写的 metadata。 */
 export interface CodeServiceClaim {
-  /** 仓库路径(绝对,或在工作根之下的相对路径) */
+  /** 仓库路径(绝对,或在工作根之下的相对路径)—— 2026-10-08 起就是**项目根** */
   readonly repoPath: string;
+  /** 服务目录(仓库内相对路径,如 `services/billing-api`);Dockerfile 必须在它里面 */
+  readonly servicePath: string;
   /** 模型声称的分支 */
   readonly branch: string;
   /** 模型声称的 HEAD 提交(短 sha 也接受,前缀匹配即可) */
@@ -89,8 +120,24 @@ export interface CodeServicePort {
    * 读最近若干条提交。**给读面用**(工件详情页的「这版改了什么」),
    * 不参与写入判定 —— 读失败不该让一条已经成立的交付物变成不存在,
    * 所以它返回 `null` 而不是抛错。
+   *
+   * ⚠️ 必须**按 `servicePath` 过滤**:项目仓里还有平台写工件的提交,
+   * 不过滤的话「这个服务改了什么」会混进一堆与它无关的提交。
    */
-  recentCommits(repoPath: string, limit: number): readonly RepoCommit[] | null;
+  recentCommits(input: {
+    readonly repoPath: string;
+    readonly servicePath: string;
+    readonly limit: number;
+  }): readonly RepoCommit[] | null;
+  /**
+   * 这个提交在仓库里**还可达**吗(`git cat-file -e <sha>^{commit}` +
+   * `merge-base --is-ancestor`)。
+   *
+   * 交付物与工作区同仓 ⇒ 一次 `git reset --hard` 就能让 `deliverableCommit`
+   * 变成不可达对象,而库里的索引仍然指着它。读面必须能如实报 `unreachable` ——
+   * **不许**回一个空提交列表假装正常。
+   */
+  isReachable(input: { readonly repoPath: string; readonly sha: string }): boolean;
 }
 
 /**
@@ -98,7 +145,14 @@ export interface CodeServicePort {
  * **必须**带的键。和 `CodeServiceClaim` 一一对应 —— 列在这里是为了让
  * 「缺哪个键」这句拒绝能机械生成,而不是靠人手写三遍。
  */
-export const CODE_SERVICE_REQUIRED_META = ["repoPath", "branch", "headCommit", "service", "port"] as const;
+export const CODE_SERVICE_REQUIRED_META = [
+  "repoPath",
+  "servicePath",
+  "branch",
+  "headCommit",
+  "service",
+  "port",
+] as const;
 
 /** 一个类型化的小断言:这个交付物类型是不是需要仓库核对。 */
 export function needsRepoVerification(t: DeliverableType): boolean {
