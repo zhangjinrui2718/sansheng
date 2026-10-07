@@ -32,7 +32,7 @@ import { dirname, join } from "node:path";
 import { openPlatformMemoryDb } from "../../src/platform/storage/index.js";
 import { insertAgent } from "../../src/platform/storage/repo/agents.js";
 import { insertProject, addMember } from "../../src/platform/storage/repo/projects.js";
-import { insertArtifact } from "../../src/platform/storage/repo/artifacts.js";
+import { insertArtifact, getArtifact } from "../../src/platform/storage/repo/artifacts.js";
 import { insertTurnUsage } from "../../src/platform/storage/repo/usage.js";
 import { createPlatformApp, type HttpDeps } from "../../src/platform/transport/http.js";
 import { createGitWorkspace, PLATFORM_AUTHOR } from "../../src/platform/workspace/git.js";
@@ -146,6 +146,27 @@ async function usage(path: string): Promise<ProjectUsageResponse["usage"]> {
   const r = await get(path);
   expect(r.status, `${path} 应当是 200`).toBe(200);
   return (r.body as ProjectUsageResponse).usage;
+}
+
+/** 写面(目前只有 `/answer`)的请求。 */
+async function post(
+  path: string,
+  payload: unknown,
+  over: Partial<HttpDeps> = {},
+): Promise<{ status: number; body: unknown; text: string }> {
+  const res = await app(over).request(path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  const text = await res.text();
+  let body: unknown = null;
+  try {
+    body = JSON.parse(text) as unknown;
+  } catch {
+    body = null;
+  }
+  return { status: res.status, body, text };
 }
 
 // ════════════════════════════════════════════════════════════════
@@ -540,7 +561,12 @@ const CS_COMMIT: RepoCommit = {
 /** 一行工件(不碰盘:commits 读的是 `metadata_json`)。 */
 function seedRow(
   id: string,
-  over: { deliverableType?: "code_service" | null; metadata?: unknown; kind?: "deliverable" | "evidence" } = {},
+  over: {
+    deliverableType?: "code_service" | null;
+    metadata?: unknown;
+    kind?: "deliverable" | "evidence" | "client_question";
+    status?: "open" | "accepted";
+  } = {},
 ): void {
   const isCs = over.deliverableType === "code_service";
   insertArtifact(db, {
@@ -548,7 +574,7 @@ function seedRow(
     projectId: P1,
     conversationId: null,
     kind: over.kind ?? (isCs ? "deliverable" : "evidence"),
-    status: "open",
+    status: over.status ?? "open",
     authorAgentId: "wk",
     title: `工件 ${id}`,
     bodyPath: `artifacts/${id}.md`,
@@ -692,5 +718,68 @@ describe("GET /api/artifacts/:id · 正文落点与六项坐标", () => {
     });
     const r2 = await get(`/api/artifacts/art_ignored2`);
     expect((r2.body as { artifact: ArtifactView }).artifact.codeService?.ignoredFiles).toEqual([".env"]);
+  });
+});
+
+// ════════════════════════════════════════════════════════════════
+// T4 · 答复要**真的落成工件**(`POST /api/client-questions/:id/answer`)
+//
+// 2026-10-08:答复落的 `decision` 工件,正文也住项目仓里的文件,顺序是
+// **先文件、后插行**(`resolveClientQuestion` 的 workspace 因此是必填)。
+// 两条判据:
+//   · 没接工作区 ⇒ **显式 500**,不是静默成功、也不是插一行指向空文件的记录;
+//   · 接上之后 ⇒ 工件在库里有行,而**正文真的在盘上**(经 content 端点读回来)。
+// ════════════════════════════════════════════════════════════════
+
+describe("POST /api/client-questions/:id/answer · 答复落盘", () => {
+  beforeEach(() => {
+    workRoot = mkdtempSync(join(tmpdir(), "ss-answer-"));
+    ws = createGitWorkspace();
+  });
+  afterEach(() => {
+    rmSync(workRoot, { recursive: true, force: true });
+  });
+
+  it("没接工作区 ⇒ 500 并说明(**不是**静默成功)", async () => {
+    seedRow("art_q1", { kind: "client_question" });
+    const r = await post(`/api/client-questions/art_q1/answer`, { answer: "按 A 方案" }, { cwd: workRoot });
+    expect(r.status).toBe(500);
+    expect((r.body as { error: { message: string } }).error.message).toContain("工作区");
+    // 负样本:答复**没有**生效 —— 提问仍然挂着、没有 decision 工件
+    expect(getArtifact(db, "art_q1")?.status).toBe("open");
+  });
+
+  it("★ 接上工作区 ⇒ decision 工件落库,且正文**真的在盘上**(经 content 端点读回)", async () => {
+    seedRow("art_q2", { kind: "client_question" });
+    const r = await post(
+      `/api/client-questions/art_q2/answer`,
+      { answer: "按 A 方案做" },
+      { cwd: workRoot, workspace: ws },
+    );
+    expect(r.status).toBe(200);
+    const decisionId = (r.body as { decisionArtifactId: string }).decisionArtifactId;
+    expect(decisionId).toBeTruthy();
+
+    const row = getArtifact(db, decisionId);
+    expect(row?.kind).toBe("decision");
+    expect(row?.bodyPath).toBeTruthy();
+    expect(getArtifact(db, "art_q2")?.status).toBe("accepted");
+
+    // 先文件后行的「文件」那一半:正文读得回来,且 sha256 与索引里的对得上
+    const c = await get(`/api/artifacts/${decisionId}/content`, { cwd: workRoot, workspace: ws });
+    const cb = c.body as ArtifactContentView;
+    expect(cb.runtime).toBe("ok");
+    expect(cb.content).toContain("按 A 方案做");
+    expect(cb.sha256).toBe(row?.bodySha256);
+    expect(cb.bytes).toBe(row?.bodyBytes);
+  });
+
+  it("负样本:问题不存在 ⇒ 404;已经答过 ⇒ 409(与「写盘失败」分开)", async () => {
+    const r404 = await post(`/api/client-questions/art_没有/answer`, { answer: "x" }, { cwd: workRoot, workspace: ws });
+    expect(r404.status).toBe(404);
+
+    seedRow("art_q3", { kind: "client_question", status: "accepted" });
+    const r409 = await post(`/api/client-questions/art_q3/answer`, { answer: "x" }, { cwd: workRoot, workspace: ws });
+    expect(r409.status).toBe(409);
   });
 });

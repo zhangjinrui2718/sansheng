@@ -817,24 +817,52 @@ app.get("/api/client-questions", (c) => c.json(listAllClientQuestions(db)));
     if (answer === "") return c.json(err("invalid_args", "answer 不能为空").body, 400);
 
     // 答复由业务经理署名 —— 它是唯一与甲方对话的角色,用户答的话在语义上
-    // 就是「业务经理记录下的甲方答复」
+    // 就是「业务经理记录下的甲方答复」。
+    //
+    // ⚠️ **答复要落一条 `decision` 工件,而工件正文住项目仓里的文件**(设计 §4.3,
+    // 顺序:先文件后行)⇒ `resolveClientQuestion` 的 `workspace` 是**必填**。
+    // 没有工作区就是**没有落点** —— 那只能让这次答复失败,而**不能**插一行指向
+    // 不存在文件的记录(「有索引无内容」)。所以这里显式 500,不静默降级。
+    const ws = deps.workspace;
+    if (ws === undefined) {
+      return c.json(
+        err(
+          "internal",
+          "本次装配没有接上工作区(HTTP 侧拿不到磁盘)—— 答复要落一条 decision 工件," +
+            "而正文写不出去,所以这次答复没有生效。",
+          500,
+        ).body,
+        500,
+      );
+    }
     const r = resolveClientQuestion(db, c.req.param("id"), answer, deps.now(), {
       newId: deps.newId,
       answeredByAgentId: "bm",
+      workspace: ws,
+      // 工作根 = `deps.cwd`(与 workspace 路由的 `projectWorkspaceRoot(deps.cwd, id)`
+      // 同一个根,见 `workspace/root.ts`)。
+      workspaceRoot: deps.cwd,
     });
     if (!r.ok) {
-      const map: Record<string, [string, 400 | 404 | 409]> = {
+      const map: Record<string, [string, 400 | 404 | 409 | 500]> = {
         not_found: ["not_found", 404],
         not_a_question: ["not_a_question", 400],
         already_resolved: ["already_resolved", 409],
+        // 正文没写成就**没有** decision 行(先文件后行)。这是磁盘 / 装配的问题,
+        // 不是「找不到这个问题」—— 用 500 + 把现场带出去,别让用户以为问题不存在。
+        content_write_failed: ["content_write_failed", 500],
       };
-      const [code, status] = map[r.reason ?? "not_found"] ?? ["internal", 400];
+      const [code, status] = map[r.reason ?? "not_found"] ?? ["internal", 500];
       const msg: Record<string, string> = {
         not_found: "问题不存在",
         not_a_question: "该工件不是一个对甲方的提问",
         already_resolved: "这个问题已经答过了",
+        content_write_failed: "答复没能落成 decision 工件(正文写不到项目仓)",
       };
-      return c.json(err(code, msg[r.reason ?? "not_found"] ?? "答复失败", status).body, status);
+      const base = msg[r.reason ?? "not_found"] ?? "答复失败";
+      // `content_write_failed` 带现场(哪条路径 / 为什么写不成)—— 照实透给用户。
+      const text = r.problem !== undefined ? `${base}:${r.problem}` : base;
+      return c.json(err(code, text, status).body, status);
     }
     return c.json({ ok: true, decisionArtifactId: r.decisionArtifactId });
   });
