@@ -40,7 +40,7 @@
   判据的一部分:同一对节点上两类边**方向一致**时不是环(真机那份数据就是这样),方向相反
   才是环(`mutualPairs` 会点名是哪两条边)。写反会让「交付」跑到最左、并且把一个不存在的
   环报出来(`web/src/lib/workGraph.ts` 的 `collectEdges`)。
-- 基线:**1587 passed / 78 test files** · 两条 typecheck 0 error · `check:design` E1–E14 全绿。
+- 基线:**1603 passed / 79 test files** · 两条 typecheck 0 error · `check:design` E1–E14 全绿。
 - **角色中文名只有一处**:`src/platform/runtime/org.ts` 的 `ORG`(播种 + `RoleHarnessView.displayName`
   共用);前端兜底表 `web/src/lib/vocab.ts` 的 `ROLE_LABEL` 必须逐项相同,由
   `tests/web/role-names.test.ts` 跨边界对照。**不许在某个页面里再写一张名字表**
@@ -163,6 +163,42 @@ shared/types/            跨端协议类型(platform.ts / settings.ts)
 > 判据:`SELECT COUNT(*) FROM works WHERE parent_work_id IS NOT NULL`。**不是** `grep -rn parentWorkId harness/` —— 那个 grep 当时漏了运行期任务提示词,让我把归因搞错了(见上)。
 
 > 会话池的键是 `(上下文, agent)` 而不是上下文 —— 一个项目里四个角色各要一条自己的会话(工具面不同)。原先 BM 独占,键是 `string | null`。
+
+### 「甲方问了但没得到答复」与「重启后模型失忆」(2026-10-07 真机事故)
+
+真机现场(接待会话 `s_muxgek4p7ipeqcol`):甲方 09:53 问「docker 里量化系统怎么配
+dev/prod + CI/CD」,09:54 业务经理只回了一句「我先看下你之前留下的偏好」,
+**然后就没有然后了**;09:57 甲方问「然后呢」,业务经理回了一份「三个项目都已 done,挑一个」
+的菜单 —— **从头到尾一次都没回应那个 CI/CD 问题**。两个独立缺陷叠在一起:
+
+| | 缺陷 | 判据落点 |
+|---|---|---|
+| ① | **回合想完、工具调完,却没有正文** —— `stopReason` 正常是 `stop`,不抛错、不超时、不是中断,而 `text` 还有那 22 字开场白。平台侧**所有判据都通过**,于是没有任何东西会响 | `TurnResult.unanswered`(`runtime/turn.ts`) + `serve.ts` 广播 `unanswered_turn` |
+| ② | **服务重启后模型失忆** —— SDK 会话纯内存,`~/.sansheng/agent/sessions/*.jsonl` 落盘了但**从不读回**;而对话页读的是库 ⇒ **屏幕上看不出断裂,只有模型知道**。真机:`ps` 显示服务 09:56:56 起的,而甲方第一条消息是 09:53:37 —— **第一回合跑在旧进程里** | `renderConversationHistory`(`runtime/turn.ts`),由 `getOrCreateSession` 的 `fresh` 决定要不要重放 |
+
+> ⚠️ **①的判据是两条,不是一条。** 真机那次**有**正文(那 22 字开场白),所以「text 为空」
+> 抓不到它。真正缺的判据是「**最后一次工具结果之后没有正文**」(`textSinceLastTool`)——
+> 开场白在工具之前,不能算答复。**只用 `text === ""` 会漏掉真机这一形态。**
+>
+> ⚠️ **①的作用域只有 `trigger.kind === "user"`。** 排空器叫醒的回合**以工具收尾是正常的**
+> (那是活干完了),在那里报「没下文」是把常态说成故障 —— **报多了就没人看了**。
+> 超时 / 打断的回合**一律不报**:那两条路各有自己的现场与告警,再叠一句等于把一个已知
+> 状态说成另一个。
+>
+> ⚠️ **不替模型补话。** 这里只报事实并让甲方重发,平台**不生成任何占位正文** ——
+> 编一句「我还需要一些信息」是把一次失败说成一次澄清(7-D)。
+>
+> ⚠️ **②只重放一次**(`fresh === true` 时)。会话还活着时历史本来就在 SDK 那一侧,再塞一遍
+> 就是让模型把同一段对话读两遍;`userMessageId` 还要**排除本回合甲方这一句**
+> (`handleUserMessage` 是先落库、后跑回合)。只重放 `user`/`assistant` —— `system` 是平台
+> 内部通知,摆给模型只会凭空多出平台自说自话的内容。
+>
+> ⚠️ **②为什么不走 SDK 的 `SessionManager.open`**:SDK 会话文件按时间戳命名,平台从来没记过
+> 「哪个 `project_sessions.id` 对应哪个文件」,对上也对不上;**库才是这个平台自己的真相**
+> (迁移表、接待会话的 `DELETE`、立项时消息迁移都在改它)。
+>
+> 回归:`tests/platform/unanswered-turn.test.ts`(16 条,含**负样本**——不误伤正常回合与
+> 超时回合;以及**自检**——正负样本验证重放判据本身没坏)。
 
 ### 对话是一等实体(2026-10-06,migration 024)
 
@@ -358,7 +394,7 @@ help
 ```
 npx tsc -p tsconfig.server.json --noEmit
 npx tsc -p tsconfig.web.json --noEmit
-npm test                  # 1587 passed / 78 files
+npm test                  # 1603 passed / 79 files
 npm run build
 npm run check:design      # 设计一致性 E1–E14
 ```

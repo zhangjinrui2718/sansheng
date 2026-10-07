@@ -95,6 +95,7 @@ import {
   collectPendingWork, renderPendingWork, summarizePendingWork,
 } from "./pendingWork.js";
 import { renderProjectContext } from "./projectContext.js";
+import { listSessionMessages } from "../storage/repo/sessions.js";
 import { insertTurnUsage, type TurnUsageRow } from "../storage/repo/usage.js";
 
 /** 一次工具调用的现场记录。 */
@@ -180,6 +181,40 @@ export interface TurnResult {
   };
   /** 是否收到了 agent_settled / agent_end */
   readonly settled: boolean;
+  /**
+   * **这一回合结束时「甲方那边没有下文」的现场**(2026-10-07 真机事故补)。
+   *
+   * ⚠️ **为什么它必须存在**:模型完全可能**想完了、也调完工具了,却不产出正文**
+   * —— `stopReason` 正常是 `stop`,不抛错、不超时、不是中断、也没有任何 error。
+   * 真机现场就是这一形态:业务经理先说一句「我先看下你之前留下的偏好」,调了两次
+   * `memory_search`,拿到结果之后**又想了 3754 字符的 thinking 就结束了**。
+   * 平台这一侧什么都不报,甲方在对话页上看到的画面是「**他答完了,然后就没有
+   * 然后了**」—— 三分钟后只好发一句「然后呢」,而模型那一侧已经翻页,答非所问。
+   *
+   * **判据只有两条,都很窄**(宁可漏报也不误报 —— 作用域见 `serve.ts`):
+   * - `no_text`:**整个回合一个字都没说**(`text` 为空)。最硬的那一种。
+   * - `no_text_after_tools`:调过工具,而**最后一次工具结果之后没有正文**。
+   *   真机那次就是这一条 —— 它有一句开场白,所以 `text` 并不为空。
+   *
+   * **它不是失败,只是没有下文** —— 所以是可选现场而不是 `failed`:要不要报由
+   * 调用方按 `trigger` 决定(以工具收尾的工作项回合本就不是缺陷,甲方开口的才是)。
+   *
+   * **可选,理由与 {@link TurnResult.projectContext} 同一条**:手工构造 `TurnResult`
+   * 字面量的地方(测试、`execution.ts` 的 `emptyTurn`)不带它。缺省按「未记录」处理,
+   * **不假装**「没有下文」——`null`(显式记过:没有)与 `undefined`(压根没记)读面
+   * 同形,这是 {@link projectContext} 已经定下的处置。
+   */
+  readonly unanswered?:
+    | null
+    | {
+        readonly kind: "no_text" | "no_text_after_tools";
+        /** 已经说出口的字数(可能是那句开场白) */
+        readonly textChars: number;
+        /** 白烧掉的推理字数 —— 这是「他其实想了很多」的证据 */
+        readonly thinkingChars: number;
+        /** 工具调用次数 */
+        readonly toolCalls: number;
+      };
   /**
    * 有超时收尾(不等于失败,但必须让调用方知道)。
    *
@@ -270,6 +305,22 @@ export interface RunTurnOptions {
    * {@link RunTurnOptions.wallClockTimeoutMs}。两者的区别见文件头。
    */
   readonly timeoutMs?: number;
+  /**
+   * **把这条会话的库内历史重放进这一回合**(2026-10-07 真机事故补)。
+   *
+   * ⚠️ **只在「SDK 会话是刚建出来的」那一次传** —— 会话还活着的时候,历史本来就在
+   * SDK 那一侧,再塞一遍就是让模型把同一段对话读两次。调用点唯一的判据是
+   * `getOrCreateSession` 命中缓存与否(见 `serve.ts`),**不猜**。
+   *
+   * ⚠️ **必须排除本回合自己的那条用户消息**:`handleUserMessage` 是**先落库、
+   * 再跑回合**的,不排除就会把甲方这句话在 prompt 里出现两遍。
+   *
+   * 完整理由与取舍见 {@link renderConversationHistory}。
+   */
+  readonly conversationHistory?: {
+    readonly sessionId: string;
+    readonly excludeMessageId?: string;
+  };
   /**
    * **一个回合的墙钟上界**(毫秒,默认 {@link DEFAULT_WALL_CLOCK_TIMEOUT_MS}
    * = 10 分钟)。到点**调 `AgentSession.abort()` 真的打断这个回合**,
@@ -596,6 +647,76 @@ export function composeTurnMessage(
   return `${pendingBlock}\n\n---\n\n# 本次要做的事\n\n${message}`;
 }
 
+/** 重放时一条消息最多带多少字符 —— 超了截断并标出来,不假装完整。 */
+const HISTORY_ITEM_MAX = 800;
+/** 重放最多带多少条 —— 取**最近**这些(甲方刚说的那几条才是他在接着说的)。 */
+const HISTORY_MAX_MESSAGES = 12;
+
+/**
+ * 把这条会话在库里的历史渲染成一段「此前对话」,拼在本回合消息**前面**。
+ *
+ * ⚠️ **为什么需要它**(2026-10-07 真机事故):SDK 会话是**纯内存**的,平台一行都不
+ * 从 `~/.sansheng/agent/sessions/*.jsonl` 读回来 —— 服务一重启,常驻会话全部作废,
+ * 下一条消息建出来的是**一条全新的、空的** SDK 会话。而**对话页读的是库**,于是
+ * 屏幕上那一段对话明明是连续的,模型那侧却只剩最后一句话。
+ *
+ * 真机现场:甲方 09:53 问「docker 里量化系统怎么配 dev/prod + CI/CD」,业务经理回了
+ * 一句「我先看下你的偏好」就停了;09:56:56 服务重启;09:57 甲方问「然后呢」——
+ * **模型那一侧从来没有见过第一个问题**,于是它照着库里三个 `done` 项目回了
+ * 一份「挑一个」的菜单。答得不算离谱,但答的是另一个问题。
+ *
+ * **为什么不走 SDK 自己的 `SessionManager.open`**:SDK 的会话文件按时间戳命名,
+ * 平台从来没记过「哪个 `project_sessions.id` 对应哪个文件」,对上也对不上;
+ * 而**库才是这个平台自己的真相**(迁移表、接待会话的 `DELETE`、立项时消息迁移
+ * 都在改它)。从库里重放,顺带把「立项后消息被搬走」这种变化也一起跟上。
+ *
+ * **只重放「说过的话」**(`user` / `assistant`):`system` 是平台内部通知
+ * (见 `announceDrain` / `reportUnannouncedTurn` 那两个生产者),它本来就不进对话页,
+ * 摆给模型只会凭空多出平台自说自话的内容。
+ *
+ * @returns 空串 = 没有可重放的历史(**不要**拼一个空壳,理由同 `pendingBlock`)。
+ */
+export function renderConversationHistory(
+  db: Database.Database,
+  sessionId: string,
+  opts: { readonly excludeMessageId?: string } = {},
+): string {
+  const rows = listSessionMessages(db, sessionId, HISTORY_MAX_MESSAGES).filter(
+    (r) =>
+      r.id !== opts.excludeMessageId &&
+      (r.kind === "user" || r.kind === "assistant"),
+  );
+  if (rows.length === 0) return "";
+
+  const lines = rows.map((r) => {
+    const who = r.kind === "user" ? "甲方" : roleLabelOf(db, r.agentId);
+    const body =
+      r.content.length > HISTORY_ITEM_MAX
+        ? `${r.content.slice(0, HISTORY_ITEM_MAX)}…（已截断，原文 ${r.content.length} 字符）`
+        : r.content;
+    // **缩进多行**:正文里有换行时,不缩进的话第二行会看起来像新的对话条目。
+    return `- ${who}：${body.split("\n").join("\n  ")}`;
+  });
+
+  return [
+    "## 此前对话（平台从库里查出来的，不是甲方这句话里说的）",
+    "",
+    "服务重启过，所以这条会话在你这一侧是空的。下面是**已经发生过**的对话：",
+    "**不要重新回答它**，也不要假设甲方还在问那些问题——下面「本次要做的事」才是现在的。",
+    "",
+    ...lines,
+  ].join("\n");
+}
+
+/** 说话人标签 —— 查不到 agent 时如实退到 `agent_id`,不假装知道角色名。 */
+function roleLabelOf(db: Database.Database, agentId: string | null): string {
+  if (agentId === null) return "甲方";
+  const row = db.prepare(`SELECT role FROM agents WHERE id = ?`).get(agentId) as
+    | { role?: unknown }
+    | undefined;
+  return typeof row?.role === "string" && row.role !== "" ? row.role : agentId;
+}
+
 /**
  * 跑一个回合。
  *
@@ -645,7 +766,26 @@ export async function runTurn(opts: RunTurnOptions): Promise<TurnResult> {
   // 接待会话返回空串,这里无脑拼接 —— 那条路径的行为与改动前完全一致。
   const ctx = renderProjectContext(opts.db, opts.agentId, pid);
   const body = composeTurnMessage(pendingBlock, opts.message);
-  const payload = ctx.text === "" ? body : `${ctx.text}\n\n${body}`;
+  // 此前对话在最外层、项目上下文之内 —— 它是「这之前发生过什么」,比项目快照更早。
+  const history =
+    opts.conversationHistory !== undefined
+      ? renderConversationHistory(opts.db, opts.conversationHistory.sessionId, {
+          ...(opts.conversationHistory.excludeMessageId !== undefined
+            ? { excludeMessageId: opts.conversationHistory.excludeMessageId }
+            : {}),
+        })
+      : "";
+  const withHistory = history === "" ? body : `${history}\n\n---\n\n${body}`;
+  const payload = ctx.text === "" ? withHistory : `${ctx.text}\n\n${withHistory}`;
+
+  /**
+   * 「最后一次工具结果之后有没有正文」—— `unanswered` 的第二条判据。
+   *
+   * 用**事件到达顺序**判,不用文本比对:工具结果是正交的第四类消息,正文与它混在
+   * 一起时没有任何一个 `text_delta` 能说明「这句话是在工具之前还是之后说的」。
+   * 真机那次正是这么丢的:开场白(工具之前)被当成了这一回合的答复。
+   */
+  let textSinceLastTool = false;
 
   const unsub = opts.session.subscribe((ev: AgentSessionEvent) => {
     try {
@@ -659,8 +799,12 @@ export async function runTurn(opts: RunTurnOptions): Promise<TurnResult> {
       const u = ev.assistantMessageEvent;
       // 7-I 的现场:thinking 增量曾被当成正文展示(判据写成了不存在的
       // "thinking")。这里**显式分开**,两者永不混流。
-      if (u.type === "text_delta" && typeof u.delta === "string") text.push(u.delta);
-      else if (u.type === "thinking_delta" && typeof u.delta === "string") thinking.push(u.delta);
+      if (u.type === "text_delta" && typeof u.delta === "string") {
+        text.push(u.delta);
+        textSinceLastTool = true;
+      } else if (u.type === "thinking_delta" && typeof u.delta === "string") {
+        thinking.push(u.delta);
+      }
       return;
     }
 
@@ -696,6 +840,9 @@ export async function runTurn(opts: RunTurnOptions): Promise<TurnResult> {
         resultSummary: truncate(resultText(ev.result), 300),
         durationMs: started !== undefined ? Date.now() - started.startedAt : 0,
       });
+      // 工具结果落地 = 又一个「该说话」的时点。从这里起若再没有正文,甲方那边
+      // 就是断的(见 `TurnResult.unanswered`)。
+      textSinceLastTool = false;
       // 立项是**流程状态变更**,必须单独留痕:宿主靠它做「接待会话 → 新项目」
       // 的切换。失败的结果不会带 data(见 sdkAdapter 的失败分支)。
       const opened = openedProjectIdOf(ev);
@@ -939,14 +1086,39 @@ export async function runTurn(opts: RunTurnOptions): Promise<TurnResult> {
       }
     : undefined;
 
+  // ── 「甲方那边没有下文」的判据(2026-10-07)──────────────────────
+  //
+  // **打断与超时一律不算**:那两条路已经有各自的现场与告警(`timeout` / 中断日志),
+  // 在这里再报一次「没下文」等于把一个已知状态说成另一个,反而更难查。
+  const turnText = text.join("");
+  const unanswered: TurnResult["unanswered"] =
+    abortRequested || timedOut
+      ? null
+      : turnText.trim() === ""
+        ? {
+            kind: "no_text",
+            textChars: 0,
+            thinkingChars: thinking.join("").length,
+            toolCalls: toolCalls.length,
+          }
+        : toolCalls.length > 0 && !textSinceLastTool
+          ? {
+              kind: "no_text_after_tools",
+              textChars: turnText.trim().length,
+              thinkingChars: thinking.join("").length,
+              toolCalls: toolCalls.length,
+            }
+          : null;
+
   return {
-    text: text.join(""),
+    text: turnText,
     thinking: thinking.join(""),
     toolCalls,
     openedProjectIds,
     pending: { injected: pendingBlock.trim() !== "", summary: pendingSummary },
     projectContext: { injected: ctx.text.trim() !== "", summary: ctx.summary },
     settled: !timedOut,
+    unanswered,
     timedOut,
     ...(timeout !== undefined ? { timeout } : {}),
     ...(recordedUsage !== undefined ? { usage: recordedUsage } : {}),
@@ -994,6 +1166,17 @@ export function renderTurnReport(r: TurnResult): string {
     }`,
   );
   lines.push(`待办注入: ${r.pending.injected ? r.pending.summary : "无"}`);
+  // 「没有下文」必须出现在**这一份**报告里 —— 它是排查「甲方说他没回话」时
+  // 唯一能一眼认出的那行(真机现场:日志里当时什么都没有)。
+  // `!= null` 同时挡掉 `undefined`(手工构造的字面量没带这个字段)。
+  if (r.unanswered != null) {
+    lines.push(
+      r.unanswered.kind === "no_text"
+        ? `⚠️ 这一回合一个字都没说(白想了 ${r.unanswered.thinkingChars} 字符)`
+        : `⚠️ ${r.unanswered.toolCalls} 次工具结果之后没有正文` +
+          `(开场白 ${r.unanswered.textChars} 字符,之后又想了 ${r.unanswered.thinkingChars} 字符)`,
+    );
+  }
   if (r.toolCalls.length > 0) {
     lines.push(`工具调用 ${r.toolCalls.length} 次:`);
     for (const t of r.toolCalls) {

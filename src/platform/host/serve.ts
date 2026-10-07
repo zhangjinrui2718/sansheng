@@ -674,7 +674,7 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
     try {
       // ⚠️ `{ kind: "user" }` 是这一句的**唯一**合法值 —— 这一轮存在的原因就是
       // 甲方自己开了口(见 `runAgentTurn` 的 `trigger` 形参)。
-      const out = await runAgentTurn(projectId, bm.id, content, { kind: "user" });
+      const out = await runAgentTurn(projectId, bm.id, content, { kind: "user" }, undefined, userMessageId);
       openedProjectIds = out.openedProjectIds;
 
       // 3. 立项 → 收口。**必须在回合结束之后做** —— 回合中途换上下文会让半个
@@ -780,7 +780,22 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
   }
 
   type SessionAcquire =
-    | { readonly ok: true; readonly session: AgentSession }
+    | {
+        readonly ok: true;
+        readonly session: AgentSession;
+        /**
+         * **这条会话是刚建出来的**(没命中常驻池)—— 2026-10-07 真机事故补。
+         *
+         * ⚠️ **只有调用方能靠它判断「要不要把库里的历史重放进去」**:SDK 会话是纯
+         * 内存的,建出来就是空的;而服务重启会把常驻池清空(`disposeAllSessions`),
+         * 于是重启后的第一条消息必然建一条新的。**库里有历史、模型那一侧没有** ——
+         * 对话页读的是库,所以屏幕上看不出任何断裂,只有模型知道它失忆了。
+         *
+         * 真机现场:甲方 09:53 问 CI/CD 方案,09:56:56 服务重启,09:57 问「然后呢」——
+         * 模型**从未见过第一个问题**,于是照着库里三个已完成项目回了「挑一个」。
+         */
+        readonly fresh: boolean;
+      }
     | { readonly ok: false; readonly code: string; readonly message: string };
 
   /**
@@ -825,7 +840,7 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
     const { projectId, sessionId, agentId } = args;
     const key = pooledKey(projectId, sessionId, agentId);
     const cached = sessions.get(key);
-    if (cached !== undefined) return { ok: true, session: cached };
+    if (cached !== undefined) return { ok: true, session: cached, fresh: false };
     if (currentModel === null) {
       return { ok: false, code: "no_model", message: "没有可用的 provider —— 先在设置里配一个" };
     }
@@ -861,7 +876,7 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
           : "") +
         ")",
     );
-    return { ok: true, session: created.session };
+    return { ok: true, session: created.session, fresh: true };
   }
 
   /** 一次 agent 回合的返回形态(内部用)。 */
@@ -914,6 +929,14 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
     trigger: TurnTrigger,
     /** 落在**哪条对话线**上。缺省 = 该项目的主对话(排空器触发的回合走这条) */
     onSession?: string,
+    /**
+     * **本回合对应的甲方那条消息 id**(2026-10-07 历史重放配套)。
+     *
+     * 只在重放历史时用得上,用途是**把它自己排除掉**:`handleUserMessage` 是先落库
+     * 再跑回合的,不排除就会让甲方这句话在 prompt 里出现两遍。
+     * 排空器触发的回合没有这条用户消息,所以调用方不传。
+     */
+    userMessageId?: string,
   ): Promise<AgentTurnOutcome> {
     const got = await getOrCreateSession({
       projectId, agentId, sessionId: onSession ?? mainSessionOf(projectId, agentId),
@@ -986,6 +1009,22 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
         // `usage_recorded` 一个包都收不到。
         sessionId,
         onUsageRecorded: (row) => hub.emitUsageRecorded(row),
+        // ── 历史重放(2026-10-07 真机事故)─────────────────────────────
+        //
+        // **只在 `got.fresh` 时给**:会话还活着的时候历史本来就在 SDK 那一侧,
+        // 再塞一遍等于让模型把同一段对话读两遍。`got.fresh` 是「刚建出来的」
+        // 这一事实的**唯一**来源 —— 不在这里用别的方式猜。
+        //
+        // `userMessageId` 排除的是甲方**这一句**:它先落库、后跑回合,不排除就会
+        // 在 prompt 里出现两遍。
+        ...(got.fresh
+          ? {
+              conversationHistory: {
+                sessionId,
+                ...(userMessageId !== undefined ? { excludeMessageId: userMessageId } : {}),
+              },
+            }
+          : {}),
         // 墙钟上界透传。**不给默认值**:缺省由 `runTurn` 自己那份
         // `DEFAULT_WALL_CLOCK_TIMEOUT_MS` 兜底 —— 两个地方各写一个默认值,
         // 迟早会漂,而漂的表现是「文档说 10 分钟、实际是另一个数」。
@@ -1017,6 +1056,41 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
       }
       hub.emitMessageEnd(projectId, sessionId, messageId);
       hub.emitAgentEnd(projectId, sessionId);
+
+      // ── 「甲方那边没有下文」必须响亮(2026-10-07 真机事故)────────────
+      //
+      // **作用域只有 `trigger.kind === "user"`**:甲方自己开口的那一回合,沉默就是
+      // 缺陷 —— 他发了一句问话,屏幕上只多出一句开场白,然后就没有然后了。
+      // 而排空器叫醒的回合**以工具收尾是正常的**(那是活干完了,不是没话说),
+      // 在那里报「没有下文」会把常态说成故障,报多了就没人看了。
+      //
+      // **为什么不能只靠日志**:真机那次的对话页上,甲方看到的是一段完全正常的
+      // 「他答完了」;`text` 非空、无 error、未超时、未中断 —— 平台这一侧所有
+      // 判据都通过了,所以**没有任何东西会响**。这不是记录不够细,是那一层压根
+      // 没有这个判据(7-E 的复发:代码里没有能报出这件事的东西)。
+      //
+      // **不替模型补话**:这里只报事实,不生成任何占位正文 —— 甲方要的是他的答案,
+      // 平台编一句「我还需要一些信息」是把一次失败说成一次澄清(7-D)。
+      if (turn.unanswered != null && trigger.kind === "user") {
+        const u = turn.unanswered;
+        log.warn(
+          `platform: ${channelLabel(projectId)}上 ${agentId} 的这一回合**没有回答甲方**` +
+            `(${u.kind === "no_text" ? "全程无正文" : `${u.toolCalls} 次工具结果之后无正文`}` +
+            `,已说 ${u.textChars} 字符,又想了 ${u.thinkingChars} 字符)`,
+        );
+        hub.broadcast({
+          type: "error", projectId,
+          error: {
+            code: "unanswered_turn",
+            message:
+              u.kind === "no_text"
+                ? `${agentId} 这一回合没有给出任何答复 —— 可以再说一次,或换个说法问`
+                : `${agentId} 这一回合在 ${u.toolCalls} 次工具调用之后没有给出答复 —— ` +
+                  `可以再说一次,或换个说法问`,
+          },
+        });
+      }
+
       if (aborted) {
         // 用户主动中断,但 SDK 的 prompt() 正常返回了(abort 让回合收敛)。
         // 已经拿到的正文照样落库 —— 中断不是丢弃,是「到此为止」。

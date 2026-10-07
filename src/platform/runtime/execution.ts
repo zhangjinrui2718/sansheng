@@ -435,6 +435,10 @@ function emptyTurn(): TurnResult {
     pending: { injected: false, summary: "(未执行)" },
     projectContext: { injected: false, summary: "(未执行)" },
     settled: true,
+    // ⚠️ **`null` 而不是「无正文」**:这一条代表**这个回合压根没跑**(工作项还没到
+    // 执行的条件),不是「跑了但没说话」。把「没跑」记成「没下文」,会让这条告警
+    // 在真正该响的时候失去可信度 —— 报多了就没人看了。
+    unanswered: null,
     timedOut: false,
   };
 }
