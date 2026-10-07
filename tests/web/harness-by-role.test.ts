@@ -624,8 +624,11 @@ describe("⑨ 提示词单元:默认前 500 字,两个按钮(展开全部 / 编�
   });
 
   it("负样本:短单元(≤500 字)**不许**出现「展开全部」(没有可展开的东西)", () => {
-    const html = visible(renderPane(role("research_worker", "研究工", { promptUnits: [SHORT] })));
-    expect(html).toContain("短短一段正文");
+    const html = renderPane(role("research_worker", "研究工", { promptUnits: [SHORT] }));
+    expect(visible(html)).toContain("短短一段正文");
+    // ⚠️ 按钮的断言走**原始 html**:`visible()` 会把标签剥掉,那样断言
+    // `>展开全部</button>` 永远不匹配 —— 一条恒真的负样本(写这一版时被下面
+    // 「编辑」那条正样本当场抓出来的)。
     expect(html).not.toMatch(/>展开全部<\/button>/);
     // 「编辑」在两种长度下都在 —— 证明上一条不是「整块没渲染」
     expect(html).toMatch(/>编辑<\/button>/);
