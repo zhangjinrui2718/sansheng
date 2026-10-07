@@ -49,6 +49,7 @@
  */
 import { memo, useCallback, useRef, useState } from "react";
 import { useArtifactContent } from "@/lib/data";
+import { ContentDriftNote } from "./ContentDriftNote";
 
 /** 预览区初始高度(px)。iframe 内部滚动,所以这个值只决定「不滚动时露出多少」。 */
 const DEFAULT_HEIGHT = 560;
@@ -196,6 +197,13 @@ export const HtmlReport = memo(function HtmlReport({ artifactId, at, fileName }:
           沙箱渲染:脚本 / 表单 / 外链一律不执行
         </span>
       </div>
+
+      {/*
+        索引漂移当**提示**显示(不是错误、不阻止阅读):屏幕上这份正文已经是
+        盘上真值,只是 `artifacts.body_sha256` 那份快照旧了 —— 下一次提交会
+        重建索引收回一致。见 `ContentDriftNote.tsx` 的文件头。
+      */}
+      <ContentDriftNote drifted={data.drifted} />
 
       {/*
         ⚠️ 正文是**现读**来的(useArtifactContent),但**必须**经 `srcDoc` 喂进

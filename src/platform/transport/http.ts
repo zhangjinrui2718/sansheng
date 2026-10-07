@@ -663,6 +663,13 @@ export function createPlatformApp(deps: HttpDeps): Hono {
         content: "",
         bytes: 0,
         sha256: "",
+        // ⚠️ 没读到东西 ⇒ **没有可比的两份**:`indexedSha256` 为 `null`、
+        // `drifted` 为 `false`。让一次失败读带上索引值,一个只看
+        // `sha256 !== indexedSha256` 的消费者会把它读成「人工改过文件」——
+        // 那正是这个项目最忌的「把读不到说成别的事」。
+        // 不变量:`indexedSha256 !== null` ⟺ 读的是 HEAD **且读到了**。
+        indexedSha256: null,
+        drifted: false,
       };
       return c.json(body);
     };
@@ -692,6 +699,7 @@ export function createPlatformApp(deps: HttpDeps): Hono {
     }
 
     const content = read.value;
+    const sha256 = ws.sha256(content);
     const body: ArtifactContentView = {
       artifactId: row.id,
       path: row.bodyPath,
@@ -702,7 +710,14 @@ export function createPlatformApp(deps: HttpDeps): Hono {
       // 真实字节数,不是索引里的快照。
       bytes: Buffer.byteLength(content, "utf8"),
       // 盘上这份内容的 sha256(见上面那段:不许回索引快照)。
-      sha256: ws.sha256(content),
+      sha256,
+      // ⚠️ `at != null` 时给 `null`:读的是历史版本,拿 HEAD 的索引值去比它
+      // 就是拿两份不同的东西比 —— 那时「漂移」这个概念不适用(见契约)。
+      indexedSha256: at === null ? row.bodySha256 : null,
+      // 判据是**两份 sha256 不同**(不是跟某个常量比),而且只在读 HEAD 时成立。
+      // 这是「还没收口」而不是故障:项目仓是给人用的,手改之后索引旧了,
+      // §3.4 的下一次 `commitWorkspace` 会重建索引把它收回一致。
+      drifted: at === null && sha256 !== row.bodySha256,
     };
     return c.json(body);
   });

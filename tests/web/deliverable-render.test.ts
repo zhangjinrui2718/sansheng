@@ -13,6 +13,8 @@
  * 并且这里带上那条最容易写反的分支:**先看 kind,再看类型**。
  */
 import { describe, expect, it } from "vitest";
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join, relative } from "node:path";
 import type { ArtifactKind, CodeServiceView, DeliverableType } from "@shared/types/platform";
@@ -25,6 +27,7 @@ import {
 } from "@/lib/vocab";
 import { bodyMode, dockerCommands, htmlReportFileName, shortSha } from "@/lib/deliverable";
 import { commitsRuntimeLabel } from "@/components/deliverable/CodeService";
+import { contentDriftNote, ContentDriftNote } from "@/components/deliverable/ContentDriftNote";
 
 const WEB_SRC = join(process.cwd(), "web/src");
 
@@ -277,5 +280,60 @@ describe("交付物 · 前端词表与代码侧闭集对齐", () => {
     expect(deliverableTypeLabel("git_repo")).toBe("git_repo");
     expect(deliverableTypeTone("git_repo")).toBe("bone");
     expect(deliverableTypeLabel("html_report")).toBe("HTML 报告");
+  });
+});
+
+/**
+ * 正文 · **索引漂移**提示(T9)。
+ *
+ * 判据:`ArtifactContentView.drifted`(盘上这份的 sha256 ≠ 索引里那份)。
+ * 它必须被渲染成**一行提示**,不是错误 —— 索引落后是「还没收口」
+ * (下一次提交会重建索引),而屏幕上这份正文**正好是盘上真值**。
+ * 把它画成红色错误 = 把「索引旧了」说成「内容坏了」,与「读不到 ≠ 空」同类。
+ */
+describe("正文 · 索引漂移提示(T9)", () => {
+  it("正样本:漂移 ⇒ 一行提示,说明它**还没收口**而不是故障", () => {
+    const text = contentDriftNote(true);
+    expect(text).not.toBeNull();
+    expect(text).toContain("索引");
+    expect(text).toContain("下一次提交");
+    // 它是提示不是错误:文案里不许出现「失败 / 错误」这类定性
+    expect(text).not.toMatch(/失败|错误/);
+  });
+
+  it("负样本:不漂移 ⇒ 返回 `null`(不许渲染一句「一切正常」的噪音)", () => {
+    expect(contentDriftNote(false)).toBeNull();
+    // 自检:判据真的在判,不是恒 null / 恒非 null
+    expect(contentDriftNote(true)).not.toBe(contentDriftNote(false));
+  });
+
+  it("渲染判据(SSR):drifted=true 出提示行,false 出**空串**", () => {
+    const on = renderToStaticMarkup(createElement(ContentDriftNote, { drifted: true }));
+    expect(on).toContain('data-content-drifted="true"');
+    expect(on).toContain("下一次提交");
+    // 不漂移时**一个字节都不渲染** —— 而不是渲染一个空 div 占位
+    expect(renderToStaticMarkup(createElement(ContentDriftNote, { drifted: false }))).toBe("");
+  });
+
+  it("样式判据:是 `ss-note` 提示,不是报错色", () => {
+    const src = stripComments(readWebSrc("components/deliverable/ContentDriftNote.tsx"));
+    expect(src).toContain("ss-note");
+    expect(src, "漂移是「还没收口」,不许用报错色(--cinnabar)").not.toContain("--cinnabar");
+    expect(src).toContain('data-content-drifted="true"');
+  });
+
+  it("接线判据:三个正文渲染点都真的用了它(**有实现没读者** = 7-E 的病)", () => {
+    for (const rel of [
+      "components/deliverable/HtmlReport.tsx",
+      "components/deliverable/CodeService.tsx",
+      "routes/Works.tsx",
+    ]) {
+      const src = stripComments(readWebSrc(rel));
+      expect(src, `${rel} 没有引用 ContentDriftNote —— 提示没接上`).toContain("ContentDriftNote");
+      expect(src, `${rel} 的 ContentDriftNote 没有传 drifted`).toMatch(/<ContentDriftNote\s+drifted=/);
+    }
+    // 负样本自检:同一条模式对一个**必然不含它**的串要给 false(防止断言恒真)
+    const definition = stripComments(readWebSrc("components/deliverable/ContentDriftNote.tsx"));
+    expect(/<ContentDriftNote\s+drifted=/.test(definition)).toBe(false);
   });
 });

@@ -46,6 +46,7 @@ import type { RepoCommitsView } from "@shared/types/platform";
 import type { CodeServiceView } from "@shared/types/platform";
 import { dockerCommands, shortSha } from "@/lib/deliverable";
 import { useArtifactContent } from "@/lib/data";
+import { ContentDriftNote } from "./ContentDriftNote";
 
 export interface CodeServiceProps {
   /** 工件 id —— 用来读**现读**的提交列表(`GET /api/artifacts/:id/commits`)与正文。 */
@@ -249,22 +250,26 @@ function ServiceBody({ artifactId, at }: { artifactId: string; at?: string }) {
     return <div className="ss-meta">这条交付物没有说明正文。</div>;
   }
   return (
-    <pre
-      style={{
-        whiteSpace: "pre-wrap",
-        wordBreak: "break-word",
-        fontSize: 12,
-        lineHeight: 1.7,
-        margin: 0,
-        padding: "6px 8px",
-        background: "var(--ink-1)",
-        border: "1px solid var(--ink-3)",
-        borderRadius: 6,
-        color: "var(--bone-dim)",
-      }}
-    >
-      {data.content}
-    </pre>
+    <>
+      {/* 索引漂移:一行提示,不是错误(见 ContentDriftNote.tsx 文件头) */}
+      <ContentDriftNote drifted={data.drifted} />
+      <pre
+        style={{
+          whiteSpace: "pre-wrap",
+          wordBreak: "break-word",
+          fontSize: 12,
+          lineHeight: 1.7,
+          margin: 0,
+          padding: "6px 8px",
+          background: "var(--ink-1)",
+          border: "1px solid var(--ink-3)",
+          borderRadius: 6,
+          color: "var(--bone-dim)",
+        }}
+      >
+        {data.content}
+      </pre>
+    </>
   );
 }
 

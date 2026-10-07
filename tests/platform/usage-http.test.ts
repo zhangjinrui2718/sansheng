@@ -385,6 +385,9 @@ describe("GET /api/artifacts/:id/content · 三态(读不到不是空正文)", (
     expect(body.at).toBeNull();
     expect(body.bytes).toBe(Buffer.byteLength(seeded.content, "utf8"));
     expect(body.sha256).toBe(ws.sha256(seeded.content));
+    // 负样本(T9):没动过盘上的文件 ⇒ **不漂移**,且索引侧那一份就是同一个值
+    expect(body.drifted).toBe(false);
+    expect(body.indexedSha256).toBe(ws.sha256(seeded.content));
   });
 
   it("★ 工件不存在 ⇒ 404;而「文件不在盘上」⇒ **不是 404**(读不到 ≠ 没有)", async () => {
@@ -402,6 +405,10 @@ describe("GET /api/artifacts/:id/content · 三态(读不到不是空正文)", (
     // 负样本:把它渲染成「内容为空」的样子 = 把一次读失败说成「本来就没有正文」。
     // 判据是 runtime,不是那三个空值 —— 所以这里同时断言 runtime 不是 ok。
     expect(body.runtime).not.toBe("ok");
+    // ⚠️ T9:读不到 ⇒ **没有可比的两份**。`drifted` 必须是 false —— 否则一次
+    // 「读不到盘」会被渲染成「有人改过文件」,又是一种「把读不到说成别的事」。
+    expect(body.drifted).toBe(false);
+    expect(body.indexedSha256).toBeNull();
   });
 
   it("没接工作区端口 ⇒ unavailable + 说明(**不是** 404、不是空正文)", async () => {
@@ -413,7 +420,7 @@ describe("GET /api/artifacts/:id/content · 三态(读不到不是空正文)", (
     expect(body.problem).toContain("工作区端口");
   });
 
-  it("★ 人工改过文件 ⇒ `sha256` 是**盘上那份**的哈希,不是索引里的快照", async () => {
+  it("★ 人工改过文件 ⇒ `sha256` 是**盘上那份**的哈希,不是索引里的快照,并且 `drifted` 为真", async () => {
     const seeded = seedBody({ content: "第一版\n" });
     const edited = "人工改过的第二版\n";
     writeFileSync(
@@ -429,13 +436,24 @@ describe("GET /api/artifacts/:id/content · 三态(读不到不是空正文)", (
     // 负样本:回索引快照会让这次人工修改彻底隐形(§3.4 的下一次提交才会发现)。
     expect(body.sha256).not.toBe(ws.sha256(seeded.content));
     expect(body.bytes).toBe(Buffer.byteLength(edited, "utf8"));
+    // ⚠️ 正样本(T9):两份 sha256 不同 ⇒ `drifted` 为真,而且**索引侧那一份**
+    // 原样带出来 —— 前端靠它说清「不是同一份」,不是一个恒真的布尔。
+    expect(body.drifted).toBe(true);
+    expect(body.indexedSha256).toBe(ws.sha256(seeded.content));
+    expect(body.indexedSha256).not.toBe(body.sha256);
   });
 
   it("★ `?at=<sha>` 读历史版本:文件被删掉之后那一版仍然读得出来", async () => {
     const root = projectWorkspaceRoot(workRoot, P1);
     const init = ws.initRepo({ root, gitignore: ".env\n", readme: "# 项目\n" });
     expect(init.ok).toBe(true);
-    const seeded = seedBody({ content: "被删除的那一版\n" });
+    // ⚠️ 索引里记的 sha 与提交进仓的那一版**不同** —— 这样下面那条「边界」才是
+    // 真的在判:若实现拿 HEAD 的索引值去比历史版本,`drifted` 会变成 true。
+    const seeded = seedBody({
+      content: "被删除的那一版\n",
+      indexedSha: ws.sha256("索引里记的是另一版\n"),
+    });
+    expect(seeded.content).not.toBe("索引里记的是另一版\n");
     const commit = ws.commit({ root, author: PLATFORM_AUTHOR, message: "引入正文" });
     expect(commit.ok, "提交失败就没有历史版本可测").toBe(true);
     const sha = commit.ok ? commit.value.sha : null;
@@ -451,6 +469,12 @@ describe("GET /api/artifacts/:id/content · 三态(读不到不是空正文)", (
     expect(hb.runtime).toBe("ok");
     expect(hb.content).toBe(seeded.content);
     expect(hb.at).toBe(sha);
+    // ⚠️ 边界(T9):读的是**历史版本** ⇒ 「漂移」不适用 —— `indexedSha256` 必须
+    // 是 `null`(拿 HEAD 的索引值去比一个历史版本 = 拿两份不同的东西比),
+    // `drifted` 恒 false,哪怕两份 sha256 恰好不同。
+    expect(hb.indexedSha256).toBeNull();
+    expect(hb.drifted).toBe(false);
+    expect(hb.sha256).toBe(ws.sha256(seeded.content));
 
     // 负样本:不可达的 sha ⇒ unavailable(**不是**空正文、不是 404)
     const bad = await get(`/api/artifacts/${seeded.id}/content?at=${"0".repeat(40)}`, {
@@ -462,6 +486,8 @@ describe("GET /api/artifacts/:id/content · 三态(读不到不是空正文)", (
     expect(bb.runtime).toBe("unavailable");
     expect(bb.problem).toBeTruthy();
     expect(bb.content).toBe("");
+    expect(bb.drifted).toBe(false);
+    expect(bb.indexedSha256).toBeNull();
   });
 });
 
@@ -772,6 +798,9 @@ describe("POST /api/client-questions/:id/answer · 答复落盘", () => {
     expect(cb.content).toContain("按 A 方案做");
     expect(cb.sha256).toBe(row?.bodySha256);
     expect(cb.bytes).toBe(row?.bodyBytes);
+    // 刚写完的文件必然与索引一致 —— 顺带钉住「drifted 不是恒真」
+    expect(cb.drifted).toBe(false);
+    expect(cb.indexedSha256).toBe(row?.bodySha256);
   });
 
   it("负样本:问题不存在 ⇒ 404;已经答过 ⇒ 409(与「写盘失败」分开)", async () => {

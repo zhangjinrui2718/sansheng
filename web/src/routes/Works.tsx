@@ -171,6 +171,7 @@ import {
 } from "@/lib/vocab";
 import { HtmlReport } from "@/components/deliverable/HtmlReport";
 import { CodeService } from "@/components/deliverable/CodeService";
+import { ContentDriftNote } from "@/components/deliverable/ContentDriftNote";
 import { bodyMode, htmlReportFileName, shortSha } from "@/lib/deliverable";
 
 /** 展示顺序:结论类优先,过程类靠后。表里没有的 kind 落在末尾(不丢)。 */
@@ -2044,6 +2045,8 @@ function TextArtifactBody({ artifactId }: { artifactId: string }) {
       <div className="ss-section" style={{ fontSize: 12 }}>
         正文
       </div>
+      {/* 索引漂移:一行提示(不是错误、不阻止阅读)—— 见 ContentDriftNote.tsx */}
+      <ContentDriftNote drifted={data.drifted} />
       <pre
         style={{
           whiteSpace: "pre-wrap",
