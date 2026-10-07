@@ -46,14 +46,14 @@
   判据的一部分:同一对节点上两类边**方向一致**时不是环(真机那份数据就是这样),方向相反
   才是环(`mutualPairs` 会点名是哪两条边)。写反会让「交付」跑到最左、并且把一个不存在的
   环报出来(`web/src/lib/workGraph.ts` 的 `collectEdges`)。
-- 基线:**1805 passed / 88 test files** · 两条 typecheck 0 error · `check:design` E1–E14 全绿(5 角色)。
+- 基线:**1830 passed / 89 test files** · 两条 typecheck 0 error · `check:design` E1–E14 全绿(5 角色)。
 - **角色中文名只有一处**:`src/platform/runtime/org.ts` 的 `ORG`(播种 + `RoleHarnessView.displayName`
   共用);前端兜底表 `web/src/lib/vocab.ts` 的 `ROLE_LABEL` 必须逐项相同,由
   `tests/web/role-names.test.ts` 跨边界对照。**不许在某个页面里再写一张名字表**
   (曾经 harness 页写 `Worker(执行者)`、成员页写 `工程师`、前端兜底写 `执行者`)。
 - 日志只走 stdout:`~/.sansheng/logs/sansheng.log` 恒为 0 字节,别去 tail 它。
 
-## 源码地图(`find src -name '*.ts' | wc -l` = 56)
+## 源码地图(`find src -name '*.ts' | wc -l` = 74)
 
 ```
 src/cli/                 CLI 入口(index.ts + paths.ts)
@@ -62,18 +62,20 @@ src/platform/host/       常驻宿主:serve / scheduler / reset
 src/platform/transport/  传输:http(API)/ hub(WS 广播)/ views
 src/platform/runtime/    boot session turn execution assembly promptAssembly pendingWork
                          projectContext dispatcher org sdkAdapter
-src/platform/tools/      工具层:9 个文件、34 个平台工具定义 + registry.ts 的 dispatch()
+src/platform/tools/      工具层:12 个文件、38 个平台工具定义 + registry.ts 的 dispatch()
 src/platform/codeservice/ 代码服务:port.ts(端口)+ git.ts(真实现,盘上核对仓库)
 src/platform/harness/    授权:capability(能力↔工具表)/ authorize(三道门)/ toolSet(L2 集合文件读盘)/ write(提示词写盘)
 src/platform/identity/   角色:role.ts 的 ROLE_SPECS
-src/platform/storage/    db.ts + repo/ 下 10 个仓储
+src/platform/storage/    db.ts + repo/ 下 14 个仓储(含 knowledge.ts)
 src/platform/infra/      keyring / settings / settingsApply / providers / migrations
-src/platform/memory/     MemoryPort 端口 + sqlite 实现
+src/platform/memory/     MemoryPort 端口 + sqlite 实现(**关于用户**,会淡忘)
+src/platform/knowledge/  知识语料:切块 / 索引器 / 现读(**关于项目**,只读;见下)
 src/platform/client/     ClientChannel 端口
 shared/types/            跨端协议类型(platform.ts / settings.ts)
 ```
 
-工具表合计 **41 个工具 = 34 平台 + 7 SDK 内置**,能力 **34** 条 —— 这四个数字由 `check:design` 每次核对。
+工具表合计 **45 个工具 = 38 平台 + 7 SDK 内置**,能力 **35** 条 —— 这几个数字由 `check:design`
+(能力/工具)与 `tests/platform/client.test.ts` 的哨兵(已实现工具数)每次核对。
 
 > **不要按「单向分层」的假设推理依赖方向。** 实测 `identity ↔ harness` 之间有**值级 import 环**(`src/platform/identity/role.ts` 从 `src/platform/harness/capability.ts` 取能力表,`src/platform/harness/authorize.ts` 从 `src/platform/identity/role.ts` 取 `ROLE_SPECS`),`transport` 也会向上引 `host`。这是现状,不代表可以随手加新的反向依赖。
 
@@ -268,7 +270,7 @@ dev/prod + CI/CD」,09:54 业务经理只回了一句「我先看下你之前留
 
 | 收口后 | 能力 |
 |---|---|
-| ✅ 仍然可用 | `project.read` / `project.open`(开下一个版本)/ `project.close` / `client.*` / `memory.*` |
+| ✅ 仍然可用 | `project.read` / `project.open`(开下一个版本)/ `project.close` / `client.*` / `memory.*` / `knowledge.read`(全局语料的只读检索) |
 | ❌ 被挡 | `project.update` 与 `work.*` / `collab.*` / `blackboard.*` / `change.*` / `blocker.*` |
 
 **豁免的是「说话」,不是「改」。** 另:接待会话的 `renderProjectContext(null)` 从**空串**改成**列清单** + 新增 `project_list` 工具 —— 业务经理此前**没有任何一条路**能知道库里有哪些项目(`project_read` 要一个已知的 projectId,而那个 id 从哪来?)。
@@ -325,6 +327,8 @@ dev/prod + CI/CD」,09:54 业务经理只回了一句「我先看下你之前留
 ## 数据与存储
 
 - 迁移在 `migrations/`:**007–010 建平台表**,**011 把旧系统的 7 张表 DROP**(`blackboards` / `conversations` / `messages` / `fragments` / `user_profile` / `agent_states` / `fragments_vec`),**012 接待会话**(重建 `project_sessions` 放宽 `project_id` 可空,已登记进 `INTENTIONAL_REBUILDS`),**013 排空器状态**(`works.review_state` + `dispatch_events` + `dispatch_attempts`,纯加法),**014 产出边**(`artifacts.work_id` + 一条部分索引,纯加法),**015 放宽 `dispatch_events.kind`**(加 `work_cancelled`;闭集**只能靠重建表**放宽,已登记进 `INTENTIONAL_REBUILDS`),**016 交付物 kind**(重建 `artifacts`),**017 交付会话**(`project_sessions.deliverable_artifact_id` + `channel`,纯加法),**018 `turn_usage` 表**(纯加法),**019 会话消息的封套**(`session_messages.origin_source` + `trigger_kind`,纯加法;两列各有自己的 CHECK),**020 `client_questions` 台账**,**021 `review_verdicts`**,**022 `session_messages.todo_kind`**(纯加法、**不建 CHECK** —— 取值域随 `TODO_KINDS` 变,闭集在读写两侧的 TS 里),**023 项目版本链**(`projects.version` + `parent_project_id`,`ON DELETE SET NULL`),**024 对话一等实体**(`project_sessions.kind` + `title`;`kind` **有** CHECK —— 两值闭集,与 022 相反),**025 交付物类型**(`artifacts.deliverable_type` + 一条部分索引,纯加法),**026 执行角色一分为二 + 交付物类型加 `code_service`**(⚠️ **重建两张表**:`agents` 的 role 闭集 4→5 值并改名 + `artifacts` 的 `deliverable_type` 闭集 1→2 值;两张都登记进 `INTENTIONAL_REBUILDS`),**027 工件正文落文件**(⚠️ **重建 `artifacts`**:`body TEXT` → `body_path` / `body_sha256` / `body_bytes` 三列 NOT NULL + `commit_sha` 可空;登记进 `INTENTIONAL_REBUILDS`。**它故意不走「建 _new → 拷 → 改名」**:没有数据要拷(用户明确「老数据全不要」),而改名法会让「`artifacts` 被多个迁移创建」这条登记**当场过期**;数据安全改由一条会响的前置检查承担 —— `CHECK (n = 0)`,非空库上**响亮失败并整体回滚**,而不是静默清空)。
+**028 知识语料**(`knowledge_chunks` + FTS5 `knowledge_fts` + 三个同步触发器,
+纯加法;设计 `docs/DESIGN-KNOWLEDGE.md` —— **只读检索语料,不是记忆**,见下)。
 - ⚠️ **`artifacts.work_id` 一条边承载两个语义**(「产出」∪「关于」,migration 014):执行角色写 `evidence` 是产出,质检把 `review_finding` 挂到**被审的那条**上是「关于」。取「这条工作项交付了什么」必须自己区分(`runtime/execution.ts` 用 `work_id` + 作者 + `kind ∉ ABOUT_ONLY_ARTIFACT_KINDS` 三条判据);**不要删那些边** —— 它是 `review_finding` 唯一能表达「审的是哪一条」的地方。
 - `artifacts` 直接挂项目 —— **没有 blackboard 容器层**。记忆在 `memory_fragments` / `memory_profile`,不是 `fragments`:`fragments` 是旧名字,001 已占用。
 - 平台表**不得复用旧表名**:`CREATE TABLE IF NOT EXISTS` 撞名时静默无操作,新表根本建不出来(见下 §三类静默失败)。加表前先 `ls migrations/` 查名。
@@ -373,6 +377,32 @@ dev/prod + CI/CD」,09:54 业务经理只回了一句「我先看下你之前留
   (**剥注释后**扫全 `web/src`,带正负样本与对真源码的内存变异自检)。
   ⚠️ 用裸 `grep '<iframe[^>]*src='` 复核会得到**假阳性**(它命中注释里的反面教材)——
   本文自己就踩过一次:原始 grep 报 3 处,剥掉注释后是 **0**。**错的是仪器,不是代码。**
+
+### 知识语料:一份**只读**的检索语料,不是记忆(2026-10-08)
+
+**用户裁决**:把「所有角色的对话 / 项目 / 工件 / 中间产出」做成一个**当 RAG 用**的只读语料,
+**记忆保持老模式不变**。设计:`docs/DESIGN-KNOWLEDGE.md`。
+
+判据与 `010_memory.sql` 开头那句同源(**会不会淡忘**):
+
+| | memory(不变) | knowledge(新) |
+|---|---|---|
+| 关于谁 | **用户**(偏好 / 事实) | **项目 / 组织**(对话正文 / 工件正文 / 中间产出) |
+| 谁写 | 模型(`memory_remember`,仅业务经理) | **平台**(确定性索引,**零模型调用**)—— 没有写侧能力 |
+| 存储 | 库内 TEXT(`memory_fragments`) | **只有索引**:来源坐标 + 偏移 + `sha256` + bigram 列;正文留在原处 |
+| 读口 | `memory_search` | `knowledge.read` → `knowledge_search`(目录级)+ `knowledge_read`(正文级) |
+
+- **不复制正文**:工件正文在项目仓、消息在 `session_messages`,块表只存坐标 ——
+  与「库只存索引」那条裁决同向,也避免第二份真相漂掉。
+- **检索**:`seg` 列存 bigram(`src/shared/text.ts` 的 `indexTerms`,与记忆的 `tokenize` 同一套切法)+
+  FTS5 外部内容表。⚠️ **中文直接上 FTS5 是假命中 0**(unicode61 把整段 CJK 当一个 token;
+  trigram 对 1–2 字查询也是 0)—— 实测正负样本在设计 §4,回归在 `tests/platform/knowledge.test.ts`。
+- **触发全是平台侧的**:回合边界 `housekeepingCommit` 重扫本项目 + 宿主启动 `reindexAllKnowledge`。
+  **幂等**(`(source_kind, source_id, seq)` + `sha256`);**读不到不许删已有块**(读故障 ≠ 语料丢失),
+  工件数撞 500 单次上限时**跳过按来源对账并如实报出**。
+- **可见性缺口如实记**:P1 是**跨项目全局可读**,没有 `tainted` / scope 列(闭集里每个值都要有真写入口)
+  —— 那是 P2 第一件事(设计 §7/§8)。收口之后 `knowledge.read` **仍然可用**(与 `memory.*` 同理)。
+- **前端暂无读面**(P2);工具是 agent 的消费口。
 
 ### 「待答」队列:**收口项目的提问不是待答**(2026-10-07 真机事故)
 
@@ -523,7 +553,7 @@ help
 ```
 npx tsc -p tsconfig.server.json --noEmit
 npx tsc -p tsconfig.web.json --noEmit
-npm test                  # 1805 passed / 88 files
+npm test                  # 1830 passed / 89 files
 npm run build
 npm run check:design      # 设计一致性 E1–E14
 ```

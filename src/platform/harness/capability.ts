@@ -48,6 +48,9 @@ export type Capability =
   // ── BC7 记忆 ──
   | "memory.read"
   | "memory.write"
+  // ── 知识语料(设计 `docs/DESIGN-KNOWLEDGE.md`)──
+  // **只读**:索引由平台做(零模型调用),agent 只消费 —— 所以没有 knowledge.write
+  | "knowledge.read"
   // ── 面向甲方(受 scope 门控,见设计 1 §4.3)──
   | "client.ask"
   | "client.message"
@@ -89,6 +92,7 @@ export const CAPABILITIES = [
   "blocker.read",
   "memory.read",
   "memory.write",
+  "knowledge.read",
   "client.ask",
   "client.message",
   "code.read",
@@ -118,6 +122,7 @@ export type PlatformToolName =
   | "change_propose" | "change_review" | "change_list" | "change_read"
   | "blocker_open" | "blocker_update" | "blocker_list" | "blocker_read"
   | "memory_search" | "memory_remember"
+  | "knowledge_search" | "knowledge_read"
   | "ask_client" | "tell_client"
   | "report"
   | "review_verdict";
@@ -170,6 +175,10 @@ export const CAPABILITY_TOOLS: Readonly<Record<Capability, readonly ToolName[]>>
   // BC7
   "memory.read": ["memory_search"],
   "memory.write": ["memory_remember"],
+  // 知识语料:目录级(knowledge_search)+ 正文级(knowledge_read)两个工具,
+  // 与 board_list / board_read 同一条"粒度是工具级"的纪律 ——
+  // 只想看列表不该连带拿到正文(而正文会吃光提示词预算)。
+  "knowledge.read": ["knowledge_search", "knowledge_read"],
   // 甲方
   "client.ask": ["ask_client"],
   "client.message": ["tell_client"],

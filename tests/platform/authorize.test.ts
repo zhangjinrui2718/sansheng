@@ -161,8 +161,12 @@ describe("求解期 · ceiling 门(集合文件越权必须可见)", () => {
  */
 const SURVIVES_CLOSURE: ReadonlySet<string> = new Set([
   "project.read", "project.open", "project.close",
-  // 项目无关的两族(它们本来就不在门后,列在这里只为让下面那句「全部」读得顺)
+  // 项目无关的几族(它们本来就不在门后 —— 前缀不在 `PROJECT_SCOPED_PREFIXES` 里,
+  // 列在这里只为让下面那句「全部」读得顺)
   "memory.read", "memory.write", "code.read", "code.write", "code.exec",
+  // 知识语料:全局语料的只读检索,与记忆同一条理由(不碰项目状态)——
+  // 「这个项目到底做成了什么」恰恰是收口之后最该能查的一句
+  "knowledge.read",
 ]);
 
 describe("求解期 · scope 规则 3(项目须 active,但对话类能力活下来)", () => {

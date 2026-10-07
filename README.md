@@ -71,19 +71,19 @@ L3  出厂集合 = L2 的初值(由 ceiling 推导,不另存名单)
 
 **「升级集合」(改文件)与「解除架构约束」(改代码)是两件事。** 集合文件永远突破不了
 ceiling —— 想放开上界得走代码评审。L2 的坏文件**不会**被当成空名单(那等于悄悄收回
-全部权限),而是退化成出厂行为,并在 Harness 页响亮报出「这份文件当前没有生效」。
-文件名必须是 `<role>.json`;写错了不会被读取,Harness 页会把它列出来。
+全部权限),而是退化成出厂行为,并在成员页的「角色 harness」卡片里响亮报出「这份文件当前没有生效」。
+文件名必须是 `<role>.json`;写错了不会被读取,成员页会把落空的文件名列出来。
 
 ## 提示词(harness)
 
-- 单元内容在 `harness/system_prompts/`(**12 个唯一单元**);构建时由
+- 单元内容在 `harness/system_prompts/`(**14 个唯一单元**);构建时由
   `scripts/copy-harness.mjs` 拷进 `dist/harness/` 作为**出厂副本**。
 - 运行时从**数据目录**读:`<dataDir>/harness/system_prompts/{unitId}.md`。
 - **新数据目录不会自动播撒出厂单元。** 用 `--data <临时目录>` 首跑时,
   `platform smoke` 会打印「声明了但盘上没有」,模型只拿到机械生成的角色简报。
   要让它生效,先把出厂单元放进 `<dataDir>/harness/system_prompts/`
-  (或走界面 Harness 页的「恢复出厂」)。
-- 界面 Harness 页可以直接编辑单元:改前自动备份(留最近 10 份),保存后显示的是
+  (或走成员页「角色 harness」卡片的「恢复出厂」)。
+- 成员页的「角色 harness」卡片可以直接编辑单元:改前自动备份(留最近 10 份),保存后显示的是
   **后端回读**到的正文;「恢复出厂」写回出厂字节(不是删文件)。
 
 ## 开发
@@ -106,14 +106,19 @@ npm run build
 npm run check:design      # 设计文档 ↔ 代码的一致性(E1–E14)
 ```
 
-`check:design` 每次核对:能力 **33** · 工具 **41**(= 34 平台 + 7 SDK 内置)·
-角色 **4** · 出厂集合 **4**。改 `ROLE_SPECS`、`CAPABILITY_TOOLS` 或设计文档后它最可能红。
+`check:design` 每次核对:能力 **35** · 工具 **45**(= 38 平台 + 7 SDK 内置)·
+角色 **5** · 出厂集合 **5**。改 `ROLE_SPECS`、`CAPABILITY_TOOLS` 或设计文档后它最可能红。
 
 ## 数据
 
 - 默认数据目录 `~/.sansheng/`,库文件 `sansheng.db`(WAL)。
 - 迁移在 `migrations/`:**007–010 建平台表**,**011 DROP 旧系统的 7 张表**,
-  **012** 加上全局唯一的接待会话。
+  **012** 加上全局唯一的接待会话;之后逐批加平台表(最新 **028** 知识语料)。
+- **两套知识存储,别混**(判据:会不会淡忘):
+  · **记忆** `memory_fragments` / `memory_profile` —— 关于**用户**,模型写,会淡忘;
+  · **知识语料** `knowledge_chunks` + FTS5 `knowledge_fts` —— 关于**项目 / 组织**,
+    平台索引、agent **只读**(`knowledge_search` / `knowledge_read`),正文留在原处不复制。
+  设计见 [`docs/DESIGN-KNOWLEDGE.md`](docs/DESIGN-KNOWLEDGE.md)。
 - 平台表**不得复用旧表名**:`CREATE TABLE IF NOT EXISTS` 撞名时静默无操作,
   新表根本建不出来。加表前先 `ls migrations/` 查名。
 - **日志只走 stdout** —— `~/.sansheng/logs/sansheng.log` 恒为 0 字节,别去 tail 它。

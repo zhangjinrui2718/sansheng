@@ -89,6 +89,7 @@
 | `blocker.read` | 查阻塞列表 —— **未解决阻塞向用户反馈的依据** |
 | `memory.read` | 检索长期记忆 |
 | `memory.write` | 写入长期记忆 —— **仅本角色持有**(见 §11) |
+| `knowledge.read` | 检索项目语料(对话 / 工件正文;索引由平台做,只读) |
 | **`client.ask`** | **向甲方提问** ← 仅本角色持有 |
 | **`client.message`** | **向甲方播报** ← 仅本角色持有 |
 
@@ -107,7 +108,7 @@
     "board_list", "board_read", "board_write",
     "change_propose", "change_list", "change_read",
     "blocker_open", "blocker_update", "blocker_list", "blocker_read",
-    "memory_search", "memory_remember",
+    "memory_search", "memory_remember", "knowledge_search", "knowledge_read",
     "ask_client", "tell_client"
   ],
   "deny": ["work_create", "work_update", "work_assign", "work_list", "work_read",
@@ -159,7 +160,7 @@
 
 ### 3.3 Capability Ceiling
 
-`project.read` · `work.create` · `work.update` · `work.assign` · `work.read` · `work.list` · `collab.ask` · `collab.escalate` · `collab.answer` · `collab.read` · `collab.convene` · `collab.meeting.read` · `collab.meeting.respond` · `collab.meeting.conclude` · `blackboard.read` · `blackboard.write` · `change.propose` · `change.review` · `change.read` · `blocker.open` · `blocker.update` · `blocker.read` · `memory.read` · `work.report`
+`project.read` · `work.create` · `work.update` · `work.assign` · `work.read` · `work.list` · `collab.ask` · `collab.escalate` · `collab.answer` · `collab.read` · `collab.convene` · `collab.meeting.read` · `collab.meeting.respond` · `collab.meeting.conclude` · `blackboard.read` · `blackboard.write` · `change.propose` · `change.review` · `change.read` · `blocker.open` · `blocker.update` · `blocker.read` · `memory.read` · `knowledge.read` · `work.report`
 
 > 上表**全部写全名**,不用「`collab.ask` / `escalate` / `answer`」这种继承式简写 —— 这是实现者要照抄的规范列表,简写会让 `collab.meeting.*` 那几条看起来像独立命名空间。
 
@@ -177,13 +178,13 @@
     "board_list", "board_read", "board_write",
     "change_propose", "change_review", "change_list", "change_read",
     "blocker_open", "blocker_update", "blocker_list", "blocker_read",
-    "memory_search"
+    "memory_search", "knowledge_search", "knowledge_read"
   ],
   "deny": ["ask_client", "tell_client", "project_update", "project_close"]
 }
 ```
 
-**27 个工具。** `deny` 里显式列了四项,都是**它拿不到且不该拿到**的:对甲方说话的两个,和改项目范围的两个(改范围要走 `change_propose`)。这是有意的可见性 —— 比让它们在 UI 上「不存在」更能说明边界。
+**31 个工具。** `deny` 里显式列了四项,都是**它拿不到且不该拿到**的:对甲方说话的两个,和改项目范围的两个(改范围要走 `change_propose`)。这是有意的可见性 —— 比让它们在 UI 上「不存在」更能说明边界。
 
 ### 3.5 提示词单元
 
@@ -240,7 +241,7 @@
 
 ### 4.4 Capability Ceiling
 
-`project.read` · `work.create` · `work.update` · `work.read` · `work.list` · `collab.ask` · `collab.escalate` · `collab.answer` · `collab.read` · `collab.meeting.read` · `collab.meeting.respond` · `blackboard.read` · `blackboard.write` · `change.propose` · `change.review` · `change.read` · `blocker.open` · `blocker.update` · `blocker.read` · `memory.read` · `code.read` · `code.exec` · `work.report`
+`project.read` · `work.create` · `work.update` · `work.read` · `work.list` · `collab.ask` · `collab.escalate` · `collab.answer` · `collab.read` · `collab.meeting.read` · `collab.meeting.respond` · `blackboard.read` · `blackboard.write` · `change.propose` · `change.review` · `change.read` · `blocker.open` · `blocker.update` · `blocker.read` · `memory.read` · `knowledge.read` · `code.read` · `code.exec` · `work.report`
 
 **writeKinds**:`["evidence", "hypothesis", "work_brief", "note", "deliverable"]`
 
@@ -267,14 +268,14 @@
     "board_list", "board_read", "board_write",
     "change_propose", "change_review", "change_list", "change_read",
     "blocker_open", "blocker_update", "blocker_list", "blocker_read",
-    "memory_search",
+    "memory_search", "knowledge_search", "knowledge_read",
     "read", "grep", "find", "ls", "bash"
   ],
   "deny": ["tell_client", "ask_client", "convene", "meeting_conclude", "project_update", "project_close", "edit", "write"]
 }
 ```
 
-**31 个工具。** `deny` 里显式写了八项,都是**它拿不到且不该拿到**的:对甲方说话的两个、发起与收尾会议的两个、改项目范围的两个,以及**写文件的两个**(那是编码工的活)。写进 `deny` 是为了**让用户在 UI 上一眼看到边界**,而不是只看到一串没有的绿 chip。这是有意的可见性设计。
+**33 个工具。** `deny` 里显式写了八项,都是**它拿不到且不该拿到**的:对甲方说话的两个、发起与收尾会议的两个、改项目范围的两个,以及**写文件的两个**(那是编码工的活)。写进 `deny` 是为了**让用户在 UI 上一眼看到边界**,而不是只看到一串没有的绿 chip。这是有意的可见性设计。
 
 ### 4.6 提示词单元
 
@@ -324,7 +325,7 @@
 
 ### 5.4 Capability Ceiling
 
-`project.read` · `work.create` · `work.update` · `work.read` · `work.list` · `collab.ask` · `collab.escalate` · `collab.answer` · `collab.read` · `collab.meeting.read` · `collab.meeting.respond` · `blackboard.read` · `blackboard.write` · `change.propose` · `change.review` · `change.read` · `blocker.open` · `blocker.update` · `blocker.read` · `memory.read` · `code.read` · `code.write` · `code.exec` · `work.report`
+`project.read` · `work.create` · `work.update` · `work.read` · `work.list` · `collab.ask` · `collab.escalate` · `collab.answer` · `collab.read` · `collab.meeting.read` · `collab.meeting.respond` · `blackboard.read` · `blackboard.write` · `change.propose` · `change.review` · `change.read` · `blocker.open` · `blocker.update` · `blocker.read` · `memory.read` · `knowledge.read` · `code.read` · `code.write` · `code.exec` · `work.report`
 
 **writeKinds**:`["evidence", "hypothesis", "work_brief", "note", "deliverable"]`
 
@@ -344,14 +345,14 @@
     "board_list", "board_read", "board_write",
     "change_propose", "change_review", "change_list", "change_read",
     "blocker_open", "blocker_update", "blocker_list", "blocker_read",
-    "memory_search",
+    "memory_search", "knowledge_search", "knowledge_read",
     "read", "grep", "find", "ls", "edit", "write", "bash"
   ],
   "deny": ["tell_client", "ask_client", "convene", "meeting_conclude", "project_update", "project_close"]
 }
 ```
 
-**32 个工具。** `deny` 里六项:对甲方说话的两个、发起与收尾会议的两个、改项目范围的两个。
+**35 个工具。** `deny` 里六项:对甲方说话的两个、发起与收尾会议的两个、改项目范围的两个。
 
 ### 5.6 提示词单元
 
@@ -398,7 +399,7 @@
 
 ### 6.4 Capability Ceiling
 
-`project.read` · `work.read` · `work.list` · `collab.ask` · `collab.escalate` · `collab.answer` · `collab.read` · `collab.meeting.read` · `collab.meeting.respond` · `blackboard.read` · `blackboard.write`(**仅 `review_finding`**)· `change.review` · `change.read` · `blocker.open` · `blocker.read` · `memory.read` · `work.review_verdict`(migration 021)
+`project.read` · `work.read` · `work.list` · `collab.ask` · `collab.escalate` · `collab.answer` · `collab.read` · `collab.meeting.read` · `collab.meeting.respond` · `blackboard.read` · `blackboard.write`(**仅 `review_finding`**)· `change.review` · `change.read` · `blocker.open` · `blocker.read` · `memory.read` · `knowledge.read` · `work.review_verdict`(migration 021)
 
 **writeKinds**:`["review_finding"]` —— **只允许写这一种工件**。这是三重门控(capability × scope × writeKind)里最窄的一个,设计上有意为之:审查员能发言,但不能污染其他记录。
 
@@ -419,7 +420,7 @@
     "board_list", "board_read", "board_write",
     "change_review", "change_list", "change_read",
     "blocker_open", "blocker_list", "blocker_read",
-    "memory_search",
+    "memory_search", "knowledge_search", "knowledge_read",
     "review_verdict"
   ],
   "deny": ["convene", "meeting_conclude", "read", "grep", "find", "ls",
@@ -428,7 +429,7 @@
 }
 ```
 
-**21 个工具。** `deny` 显式列出代码工具、会议主持、项目范围与工作分派 —— 审查员可以**参加**会议但不能**发起或收尾**,可以**看**工作项但不能**创建或改派**。
+**24 个工具。** `deny` 显式列出代码工具、会议主持、项目范围与工作分派 —— 审查员可以**参加**会议但不能**发起或收尾**,可以**看**工作项但不能**创建或改派**。
 
 ### 6.6 提示词单元
 
@@ -490,6 +491,7 @@
 | `blocker.read` | ✅ | ✅ | ✅ | ✅ | ✅ |
 | `memory.read` | ✅ | ✅ | ✅ | ✅ | ✅ |
 | `memory.write` | ✅ | — | — | — |
+| `knowledge.read` | ✅ | ✅ | ✅ | ✅ | ✅ |
 | `work.report` | — | ✅ | ✅ | ✅ | — |
 | `work.review_verdict` | — | — | — | — | ✅ |
 | `code.read` | — | — | ✅ | ✅ | — |
@@ -498,7 +500,7 @@
 | **`client.ask`** | **✅** | — | — | — | — |
 | **`client.message`** | **✅** | — | — | — | — |
 
-**共 34 条 capability。** 读这张表最该看的是**最后两行** —— 整个组织里只有一个角色能跟甲方说话,这不是提示词里的约定,是这张表的形状决定的。
+**共 35 条 capability。** 读这张表最该看的是**最后两行** —— 整个组织里只有一个角色能跟甲方说话,这不是提示词里的约定,是这张表的形状决定的。
 
 三处值得单独注意:
 
@@ -594,6 +596,25 @@
 **明确不做**:向量检索、衰减调度、去重合并、跨项目记忆融合。这些都留给 `MemoryPort` 的后续实现 —— 换成第三方记忆系统时,agent 代码一行不用改。
 
 ---
+
+### 11.6 知识语料(knowledge)不是记忆(2026-10-08)
+
+**把所有角色的对话 / 工件正文 / 中间产出做成一个只读检索语料**(设计 `docs/DESIGN-KNOWLEDGE.md`),
+`knowledge.read` 展开成 `knowledge_search`(目录级)+ `knowledge_read`(正文级),**五个角色都有**。
+
+它与本节讲的记忆是两套东西 —— 判据同 `010_memory.sql` 开头那句「会不会淡忘」:
+
+| | 记忆 | 知识语料 |
+|---|---|---|
+| 记什么 | 关于**用户**(偏好 / 事实) | 关于**项目 / 组织**(对话正文 / 工件正文 / 中间产出) |
+| 谁写 | 模型(`memory.write` 仅业务经理) | **平台**(确定性索引,零模型调用)—— **没有对应的写能力**,agent 只读 |
+| 生命周期 | 会淡忘(importance / decay) | 不淡忘,随来源删除而失效 |
+
+⚠️ **两条边界别混**:`knowledge.read` 不是 `memory.read` 的替代(语义不同:一个是"用户是谁",一个是"项目里写过什么"),
+它也**不进接待会话**的 `INTAKE_CAPABILITIES`(fail-closed;那三条是 `project.open` / `memory.read` / `memory.write`)。
+
+它**项目收口之后仍然可用**(与 `memory.*` 同一条理由):语料是全局的、检索是只读的,
+而「这个项目到底做成了什么」恰恰是收口之后最该能查的一句 —— 被门挡掉的是「干活」,不是「读」。
 
 ## 12. 未决问题(2026-10-08 更新状态)
 

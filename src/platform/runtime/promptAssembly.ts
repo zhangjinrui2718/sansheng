@@ -117,6 +117,7 @@ const CAPABILITY_LABEL: Readonly<Partial<Record<Capability, string>>> = {
   "blocker.read": "查看阻塞",
   "memory.read": "检索长期记忆",
   "memory.write": "写入长期记忆",
+  "knowledge.read": "检索项目语料(对话 / 工件正文)",
   "client.ask": "**向甲方提问**",
   "client.message": "**向甲方播报**",
   "code.read": "读代码",

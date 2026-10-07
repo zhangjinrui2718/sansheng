@@ -54,6 +54,8 @@ import { affectWork } from "../../src/platform/storage/repo/changes.js";
 import { addDep } from "../../src/platform/storage/repo/works.js";
 import { addArtifactLink } from "../../src/platform/storage/repo/artifacts.js";
 import { SqliteMemory } from "../../src/platform/memory/sqliteMemory.js";
+import { replaceSourceChunks } from "../../src/platform/storage/repo/knowledge.js";
+import { indexTerms } from "../../src/shared/text.js";
 
 /**
  * 027 起正文住文件:测试里仍从「想写的正文」造出**落点三列** ——
@@ -102,6 +104,8 @@ describe("① 覆盖差集:清单必须覆盖库里每一张表", () => {
     expect(missing, `漏登记的:${missing.join(", ")}`).toEqual([]);
     // 非空自检:这条断言不是在空数组上空转 —— 迁移确实建了表
     expect(allTables().length).toBeGreaterThan(15);
+    // FTS5 的影子表必须显式登记在"不清"的一侧(直接 DELETE 会让索引与行对不上)
+    expect(NON_RESET_TABLES).toContain("knowledge_fts_data");
     expect(PLATFORM_DATA_TABLES).toContain("turn_usage");
     expect(PLATFORM_DATA_TABLES).toContain("dispatch_events");
     expect(PLATFORM_DATA_TABLES).toContain("dispatch_attempts");
@@ -246,6 +250,14 @@ async function seedEverything(): Promise<{ project: string; work: string; agent:
   // memory_fragments:走端口实现(唯一写口)
   await new SqliteMemory(db, { newId: (p) => `${p}_test`, now: () => NOW }).remember({
     content: "夹具片段", kind: "fact", sourceProjectId: project,
+  });
+  // knowledge_chunks(migration 028):走**唯一写口** `replaceSourceChunks` 写一条块。
+  // 这条夹具的意义与那三张"后补的表"同形:它是派生数据,漏登记会让「有语料时重置」
+  // 留下孤儿行(项目没了却还搜得到正文)。`segOf` 必须与生产同一套切法。
+  replaceSourceChunks(db, {
+    sourceKind: "message", sourceId: "m_test", projectId: project, messageId: "m_test",
+    chunks: [{ seq: 0, offset: 0, length: 1, text: "c" }],
+    newId: (p) => `${p}_test`, now: NOW, segOf: indexTerms,
   });
   // memory_profile:**没有仓储**,唯一的写面是 HTTP 的 `PUT /api/profile/:key` 里那段裸 SQL
   // (见 `transport/http.ts`)。这里照抄它的形状,否则这张表就只能靠路由写。

@@ -2,6 +2,71 @@
 
 ---
 
+# ⚡ 最新一轮 · W18(2026-10-08)· 知识语料:**一份只读的检索语料(RAG),不是记忆**
+
+> 用户两步裁决:
+> ① 「把所有角色的所有对话内容、项目、工件、中间产出物等等这些都做到一个 memory 库里面,
+>    然后所有的角色都共享这个」→ 「写入的触发机制是什么?」「都先由平台来触发写操作,agent 只做消费方」;
+> ② 读到 karpathy 的 [LLM Wiki](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f) 之后:
+>    「那我们就把现在要做的这 wiki 当成一个 rag 来用,不当成 memory,**memory 还是按照老的模式不变**」。
+> ⇒ 结果是**两套存储**:memory 原封不动;新增一份平台索引、agent 只读的语料。
+
+**设计**:[`docs/DESIGN-KNOWLEDGE.md`](docs/DESIGN-KNOWLEDGE.md)(命名刻意不叫 `wiki` —— 那会承诺
+一个平台还没造出来的"LLM 编译层",7-E 的坑)。
+
+## 落成什么
+
+- **迁移 028**(纯加法):`knowledge_chunks`(来源坐标 + 原文偏移 + 块 sha256 + bigram 列)
+  + FTS5 外部内容表 `knowledge_fts` + 三个同步触发器。
+  ⚠️ **不存正文**:工件正文在项目仓、消息在 `session_messages`,块表只存坐标 ——
+  与 W17 的「库只存索引」同一条裁决,也避免第二份真相漂掉。
+- **检索**:`seg` 列存 bigram(`src/shared/text.ts` 的 `indexTerms`,与记忆的 `tokenize` **同一套切法**),
+  查询侧同法切词后 `MATCH`。**实测:中文直接上 FTS5 是假命中 0** ——
+  unicode61 把整段 CJK 当一个 token,`tokenize='trigram'` 对 1–2 字查询也是 0;
+  只有 bigram 索引列能中(正负样本在设计 §4 与 `tests/platform/knowledge.test.ts`)。
+- **写面全是平台侧、零模型调用**:回合边界 `housekeepingCommit` 重扫本项目(T3)+
+  宿主启动 `reindexAllKnowledge`(T5)。幂等(`(source_kind, source_id, seq)` + sha256);
+  **读不到不许删已有块**(读故障 ≠ 语料丢失);工件数撞 500 单次上限时跳过按来源对账并报出。
+- **读面**:能力 `knowledge.read` → `knowledge_search`(目录级:片段 + 来源坐标 + chunkId)
+  + `knowledge_read`(正文级,按索引区间现读,带 `ok` / `drifted` / `unavailable` 三态)。
+  五角色都持;**不进接待会话**(fail-closed);**收口之后仍然可用**(与 `memory.*` 同理)——
+  「这个项目到底做成了什么」正是验收第一句。
+- **闭集加法的那一套同步都做了**:能力联合 / 工具展开表 / 五角色 ceiling / 五份出厂 JSON /
+  角色矩阵 / 两处计数声称 / 能力中文描述;`client.test.ts` 的**已实现工具哨兵 36 → 38**。
+- **reset 守卫同步**:`knowledge_chunks` 进 `PLATFORM_DATA_TABLES`(派生数据,必须清);
+  FTS5 的**影子表**进 `NON_RESET_TABLES`(直接 DELETE 会让索引与行对不上)。
+
+## 证据
+
+```
+npx tsc -p tsconfig.server.json --noEmit   → 0 error
+npx tsc -p tsconfig.web.json --noEmit      → 0 error
+npm test                                   → 89 files / 1830 passed(新增 knowledge.test.ts 24 条)
+npm run build                              → ✓
+npm run check:design                       → E1–E14 全绿(能力 35 · 工具 45 · 角色 5 · 出厂集合 5)
+grep -rn 'as any' src/ web/src/            → 0
+真机(临时 --data,真 provider 配置)        → 001→028 应用成功;/api/health ok;
+                                             启动日志报名「知识语料 项目 …: 工件 N · 消息 M · 语料 K」
+```
+
+## 两处值得留的点
+
+1. **「库里的工具数」三处都漂过**:AGENTS.md 的「41 = 34 + 7」、DESIGN-AGENTS/PLATFORM 的prose
+   「27/31/32/21 个工具」,实测是 43(36+7)与 31/33/35/24 —— 与代码对不上而没有任何检查会红。
+   这次一处一处校正到实测值(闭集减法/加法本来就该顺手做这件事)。
+2. **守卫也要跟着新表走**:`tests/platform/reset.test.ts` 的覆盖差集**当场**抓到了新表没登记
+   (`knowledge_chunks` 与 5 张 FTS 影子表)——这正是那份守卫存在的意义,别把它当成噪音关掉。
+
+## 明确没做(如实)
+
+- **可见性门**:P1 的语料**跨项目全局可读**,没有 `scope` / `tainted` 列(闭集里每个值都要有真写入口)
+  —— worker 从外部网页抓来的内容进语料后,会被别的角色当成平台事实检索到。这是 P2 第一件事。
+- **编译层**(karpathy 那套"LLM 更新页 + 矛盾标注 + index.md/log.md"):语料先当 RAG 用,不做编译产物。
+- **HTTP 读面与前端**:记忆页不动;给"知识语料"的独立读面是 P2。
+- `work` / `project` 两类来源(现在只有 `artifact` / `message`)、向量检索、rerank。
+
+---
+
 # ⚡ 最新一轮 · W17(2026-10-08)· 工作区:**每项目一个 git 仓** + 工件正文**索引化**
 
 > 用户五条裁决(逐条原话见 `docs/DESIGN-WORKSPACE.md` §0):

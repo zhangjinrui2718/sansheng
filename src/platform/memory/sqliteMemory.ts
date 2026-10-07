@@ -18,6 +18,7 @@
  */
 import type Database from "better-sqlite3";
 import { createHash } from "node:crypto";
+import { tokenize } from "../../shared/text.js";
 import {
   isFragmentKind,
   type Fragment,
@@ -63,27 +64,13 @@ function contentHash(content: string): string {
 }
 
 /**
- * 把查询串切成检索词。
+ * 检索词切分 —— 实现在 `shared/text.ts`,与**知识语料的索引侧**共用同一套切法
+ * (两边各写一份 `replace(/[，。]/g,"")` 之类的"差不多"切法,会让中文静默漏召回)。
  *
- * 中文(含日韩等 CJK 统一表意文字)走 bigram;ASCII 连续串走整词。
- * 两类混排时各切各的 —— 「用户的 TypeScript 偏好」会得到
- * [用户, 户的, TypeScript, 偏好]。
+ * 这里 re-export 而不是删掉:本模块是它的既有门面(tests 与调用方都从
+ * `memory/sqliteMemory.js` 取 `tokenize`)。
  */
-export function tokenize(query: string): string[] {
-  const terms = new Set<string>();
-  const s = query.trim();
-  if (s === "") return [];
-
-  // ASCII 词(长度 ≥2,避免 a/the 这类噪音)
-  for (const w of s.match(/[A-Za-z0-9_]{2,}/g) ?? []) terms.add(w.toLowerCase());
-
-  // CJK bigram:只对连续 CJK 段滑窗,不跨标点/空格
-  for (const seg of s.match(/[\u3400-\u4DBF\u4E00-\u9FFF\uF900-\uFAFF]+/g) ?? []) {
-    if (seg.length === 1) { terms.add(seg); continue; }
-    for (let i = 0; i + 1 < seg.length; i++) terms.add(seg.slice(i, i + 2));
-  }
-  return [...terms];
-}
+export { tokenize };
 
 export interface SqliteMemoryOptions {
   /** id 生成(注入以便测试可复现) */

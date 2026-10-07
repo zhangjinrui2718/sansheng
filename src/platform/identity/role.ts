@@ -206,7 +206,7 @@ export const ROLE_SPECS: Readonly<Record<ProjectRole, RoleSpec>> = {
       "blackboard.read", "blackboard.write",
       "change.propose", "change.read",
       "blocker.open", "blocker.update", "blocker.read",
-      "memory.read", "memory.write",
+      "memory.read", "memory.write", "knowledge.read",
       "client.ask", "client.message",
     ],
     writeKinds: ["project_brief", "decision", "note"],
@@ -234,7 +234,7 @@ export const ROLE_SPECS: Readonly<Record<ProjectRole, RoleSpec>> = {
       "blackboard.read", "blackboard.write",
       "change.propose", "change.review", "change.read",
       "blocker.open", "blocker.update", "blocker.read",
-      "memory.read", "work.report",
+      "memory.read", "knowledge.read", "work.report",
     ],
     // `deliverable` = **整合的产物**(把子项产出收成一份交付)。
     // ⚠️ 2026-10-08 起它不再是项目经理独有:两个执行角色都持有它,因为它们
@@ -274,7 +274,7 @@ export const ROLE_SPECS: Readonly<Record<ProjectRole, RoleSpec>> = {
       "blackboard.read", "blackboard.write",
       "change.propose", "change.review", "change.read",
       "blocker.open", "blocker.update", "blocker.read",
-      "memory.read",
+      "memory.read", "knowledge.read",
       "code.read", "code.exec",
       "work.report",
     ],
@@ -311,7 +311,7 @@ export const ROLE_SPECS: Readonly<Record<ProjectRole, RoleSpec>> = {
       "blackboard.read", "blackboard.write",
       "change.propose", "change.review", "change.read",
       "blocker.open", "blocker.update", "blocker.read",
-      "memory.read",
+      "memory.read", "knowledge.read",
       "code.read", "code.write", "code.exec",
       "work.report",
     ],
@@ -340,7 +340,7 @@ export const ROLE_SPECS: Readonly<Record<ProjectRole, RoleSpec>> = {
       "blackboard.read", "blackboard.write",
       "change.review", "change.read",
       "blocker.open", "blocker.read",
-      "memory.read",
+      "memory.read", "knowledge.read",
       // 021:`review_verdict` 让「审出了什么」成为一行结构化事实,
       // 而不是只躺在 review_finding 的正文里(事故 2026-10-06 08:57:
       // 质检判了不通过,而平台把这条工作项标成了已审 —— 不通过没人读)。

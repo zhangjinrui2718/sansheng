@@ -70,6 +70,12 @@ export const PLATFORM_DATA_TABLES: readonly string[] = [
   // ⚠️ 它引 `works` / `projects` / `agents`,而 `artifacts` 那条是 **NO ACTION**
   // ⇒ 删工件不会级联,但删工作项会。所以排在 `works` 之前、`artifacts` 之后。
   "review_verdicts",
+  // 知识语料(migration 028,`docs/DESIGN-KNOWLEDGE.md`)
+  //
+  // ⚠️ 它引 `projects`(ON DELETE CASCADE)⇒ 排在父表之前。它是**派生数据**
+  // (从工件正文与会话正文索引出来),重置时当然要清 —— 留着会得到「项目都没了
+  // 却还搜得到它们的正文」,而那种残留看起来像语料坏了。
+  "knowledge_chunks",
   // BC1 项目与工作
   "work_deps",
   "works",
@@ -96,8 +102,22 @@ export const PLATFORM_DATA_TABLES: readonly string[] = [
   "agents",
 ];
 
-/** 不属于本清单、但也不该被重置的表(守卫测试据此判断)。 */
-export const NON_RESET_TABLES: readonly string[] = ["schema_version"];
+/**
+ * 不属于本清单、但也不该被重置的表(守卫测试据此判断)。
+ *
+ * `knowledge_fts*` = FTS5 虚表与它的**影子表**(`_config` / `_data` / `_docsize` / `_idx`)。
+ * 它们由 FTS5 自己维护,**不能直接 DELETE** —— 索引与 `knowledge_chunks` 的同步
+ * 靠 migration 028 那三个触发器;清 `knowledge_chunks` 的行时索引条目会被一并摘掉。
+ * 直接动影子表 = 让索引与行对不上,而那种不一致没有判据会报。
+ */
+export const NON_RESET_TABLES: readonly string[] = [
+  "schema_version",
+  "knowledge_fts",
+  "knowledge_fts_config",
+  "knowledge_fts_data",
+  "knowledge_fts_docsize",
+  "knowledge_fts_idx",
+];
 
 export interface ResetReport {
   readonly cleared: Array<{ table: string; rows: number }>;

@@ -33,6 +33,7 @@ import { BLACKBOARD_TOOLS } from "./blackboard.js";
 import { CONTROL_TOOLS } from "./control.js";
 import { COLLAB_TOOLS } from "./collab.js";
 import { MEMORY_TOOLS } from "./memory.js";
+import { KNOWLEDGE_TOOLS } from "./knowledge.js";
 import { CLIENT_TOOLS } from "./client.js";
 import { REVIEW_TOOLS } from "./review.js";
 import { NUDGE_CAPABILITIES } from "../runtime/dispatcher.js";
@@ -45,6 +46,7 @@ export const ALL_PLATFORM_TOOLS: readonly PlatformTool[] = [
   ...CONTROL_TOOLS,
   ...COLLAB_TOOLS,
   ...MEMORY_TOOLS,
+  ...KNOWLEDGE_TOOLS,
   ...CLIENT_TOOLS,
   ...REVIEW_TOOLS,
 ];

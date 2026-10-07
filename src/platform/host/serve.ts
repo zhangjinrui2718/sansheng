@@ -39,6 +39,12 @@ import { runTurn, type TurnResult, type ToolCallRecord } from "../runtime/turn.j
 import { runWorkItem } from "../runtime/execution.js";
 import { ORG, ensureOrg, orgReady, syncOrgForExistingProjects } from "../runtime/org.js";
 import {
+  describeReport,
+  reindexAllKnowledge,
+  reindexProjectKnowledge,
+  type KnowledgeIndexDeps,
+} from "../knowledge/reindex.js";
+import {
   drainProject,
   formatIdleTrail,
   type DrainResult, type DrainTurnReport, type DrainWorkReport,
@@ -367,6 +373,30 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
     for (const c of org) log.muted(`platform: 组织播种/校准 —— ${c}`);
     const lines = syncOrgForExistingProjects(db, now());
     for (const l of lines) log.muted(`platform: 组织对齐 —— ${l}`);
+  }
+
+  // ── 知识语料:启动时对所有项目重扫一遍(设计 `docs/DESIGN-KNOWLEDGE.md` §5 的 T5)──
+  //
+  // 为什么在启动就跑,而不是"等下一个回合边界":语料的读者是**任何一次检索**,
+  // 而排空器只处理活跃流水线 —— 存量项目必须在第一次检索之前就被索引到。
+  // 与组织对齐同一形状:幂等、每次启动都可以跑、结论落日志(缺哪条、跳过了对账都要说)。
+  {
+    const reports = reindexAllKnowledge(knowledgeIndexDeps());
+    for (const r of reports) log.muted(`platform: 知识语料 ${describeReport(r)}`);
+  }
+
+  /**
+   * 语料索引的装配 —— 与工具层**同一份依赖**(工作区端口 + 工作根)。
+   *
+   * 缺工作区时 `makeArtifactTextReader` 回 `null`,索引器会如实把工件记成"读不到"
+   * 并**保留旧块**(见 `knowledge/reindex.ts` 文件头 ②):不静默跳过,也不删已有语料。
+   */
+  function knowledgeIndexDeps(): KnowledgeIndexDeps {
+    return {
+      db, now, newId,
+      ...(booted.deps.workspace !== undefined ? { workspace: booted.deps.workspace } : {}),
+      workspaceRoot: workspaceRootOf(),
+    };
   }
 
   const cwd = opts.cwd ?? booted.settings.cwd;
@@ -717,6 +747,31 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
     }
     // 恢复正常:下次再出问题(哪怕是同一条)会重新播报一次。
     if (!problemReported) announcedWorkspaceProblems.delete(projectId);
+
+    // ── 知识语料:重扫本项目(设计 `docs/DESIGN-KNOWLEDGE.md` §5 的 T3)──
+    reindexKnowledgeQuietly(projectId);
+  }
+
+  /**
+   * 知识语料重扫 —— **不许把回合收尾打挂**:它在 `finally` 里,一次抛错会盖掉
+   * 一个已经跑完的回合的真实现场(7-N)。
+   *
+   * 失败只落 `log.error`,**不走 `reportWorkspaceProblem`** —— 那条通知的前缀写着
+   * 「⚠️ 工作区」、尾巴写着"改动没进版本库",拿它报语料等于让通知撒谎。
+   * 语料是可重算的(下一个回合边界 / 下次启动会重试),但失败必须留痕。
+   */
+  function reindexKnowledgeQuietly(projectId: string): void {
+    try {
+      const report = reindexProjectKnowledge(knowledgeIndexDeps(), projectId);
+      if (report.pruned > 0 || report.unreadable.length > 0 || report.pruneSkipped !== null) {
+        log.muted(`platform: 知识语料 ${describeReport(report)}`);
+      }
+    } catch (e) {
+      log.error(
+        `platform: 知识语料重扫失败(项目 ${projectId}):` +
+          `${e instanceof Error ? e.message : String(e)} —— 语料停在上一版,检索结果可能过期`,
+      );
+    }
   }
 
   /**

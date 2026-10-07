@@ -1197,6 +1197,9 @@ export type Capability =
   // BC7 记忆
   | "memory.read"
   | "memory.write"
+  // 知识语料(设计 docs/DESIGN-KNOWLEDGE.md):只读检索 —— 索引由平台做、
+  // agent 只消费,所以没有对应的写能力。
+  | "knowledge.read"
   // 面向甲方(受 scope 门控,见 §4.3)
   | "client.ask"
   | "client.message"
@@ -1245,6 +1248,7 @@ export type Capability =
 | `blocker.read` | `blocker_list` / `blocker_read` | projectId, status?, severity? / blockerId | 阻塞的列表 / 详情 |
 | `memory.read` | `memory_search` | query, limit? | 片段列表 |
 | `memory.write` | `memory_remember` | kind, content, importance? | fragment id |
+| `knowledge.read` | `knowledge_search`, `knowledge_read` | `knowledge_search`: query, limit?, kind? · `knowledge_read`: chunkId | 命中片段 + 来源坐标(工件 id / 消息 id + 项目)/ 一个片段的正文 |
 | `client.ask` | `ask_client` | question, options[], lean? | `{ questionId }`(挂起等待用户) |
 | `client.message` | `tell_client` | text | 播报 |
 | `code.read` | `read` / `grep` / `find` / `ls` | SDK 内置 | |
@@ -1253,7 +1257,7 @@ export type Capability =
 | `work.report` | `report` | workId, status, summary, artifacts? |
 | `work.review_verdict` | `review_verdict` | workId, verdict(pass\|fail), severity, findingArtifactId?, note? | 质检的结论 | |
 
-**34 条 capability 展开成 43 个工具。**
+**35 条 capability 展开成 45 个工具。**
 
 `work.assign` 与 `work.create` 共用同一套 `assignee{role, spec?}` 解析(见 §3.3)—— 改派和分派走同一条路径,避免「改派绕过了歧义检查」这种不一致。
 
