@@ -181,6 +181,24 @@ export function isArtifactLinkRel(v: unknown): v is ArtifactLinkRel {
   return typeof v === "string" && (ARTIFACT_LINK_RELS as readonly string[]).includes(v);
 }
 
+/**
+ * **正文的落点与写入快照**(migration 027)—— 三列一起出现,因为它们一起被写。
+ *
+ * 2026-10-08 起正文不住库:它是项目仓里的一份文件(设计 `docs/DESIGN-WORKSPACE.md`
+ * §4.1 / §4.3)。`body_path` 是**项目根相对路径**、由平台生成
+ * (`artifacts/<artifactId>-<slug>.<ext>`),`body_sha256` / `body_bytes` 是**写入那一刻**
+ * 的快照 —— 用来对账(盘上被人工改过 ⇒ sha 漂移,提交时重算纠正,§3.4)。
+ *
+ * ⚠️ **这是落点,不是内容,也不是「文件还在」的保证。** 文件被删 / 被移走 / 被回滚之后
+ * 这三列仍然相同,「读不到」由读面的 `runtime: "unavailable"` 表达 —— 不许在这里
+ * 猜一个空正文出来。
+ */
+export interface ArtifactBodyPlacement {
+  readonly bodyPath: string;
+  readonly bodySha256: string;
+  readonly bodyBytes: number;
+}
+
 export interface ArtifactRow {
   id: string;
   projectId: string;
@@ -189,7 +207,18 @@ export interface ArtifactRow {
   status: ArtifactStatus;
   authorAgentId: string;
   title: string;
-  body: string;
+  /** 正文落点(项目根相对路径)+ 写入快照,见 {@link ArtifactBodyPlacement} */
+  bodyPath: string;
+  bodySha256: string;
+  bodyBytes: number;
+  /**
+   * **引入这份正文的提交 sha**(migration 027;平台 housekeeping 提交后回填)。
+   *
+   * `null` = 还没提交过。**这是合法状态,不是缺参数**:工件行先落库、提交在回合边界
+   * 发生(设计 §3.4),两者之间这一列就是空的。有了它正文才是**按 sha 可寻址**的
+   * (`?at=<sha>` 读历史版本),这也是「`git revert` 回滚安全」的全部依据。
+   */
+  commitSha: string | null;
   metadataJson: string | null;
   createdAt: number;
   updatedAt: number;
@@ -216,15 +245,19 @@ export interface ArtifactRow {
 }
 
 /**
- * 插入用的一行。`workId` / `deliverableType` 可省:
- * 多数工件不是「某条工作项的产出」,而**所有非交付物工件都没有类型**。
+ * 插入用的一行。`workId` / `deliverableType` / `commitSha` 可省:
+ * 多数工件不是「某条工作项的产出」,而**所有非交付物工件都没有类型**;
+ * `commitSha` 则总是**后填**的(提交发生在回合边界,插行发生在工具调用里)。
  *
- * 与 `repo/works.ts` 的 `NewWorkRow` 同一个形状理由 —— 读出来的一行必须
- * 答得出「谁产出了它」「它是哪种交付物」,写入方却不必知道这两条边。
+ * ⚠️ **入参是落点与哈希,不是正文内容。** 正文由调用方先写到盘上
+ * (`WorkspacePort.writeAtomic`,顺序:先文件后行 —— 反了会得到「有索引无内容」),
+ * 这把 `bodyPath` / `bodySha256` / `bodyBytes` 三个事实交进来。仓储**不碰磁盘**、
+ * 也**不自己算哈希**:它只回答「schema 允许的 kind」与「数据完整性」。
  */
-export type NewArtifactRow = Omit<ArtifactRow, "workId" | "deliverableType"> & {
+export type NewArtifactRow = Omit<ArtifactRow, "workId" | "deliverableType" | "commitSha"> & {
   readonly workId?: string | null;
   readonly deliverableType?: DeliverableType | null;
+  readonly commitSha?: string | null;
 };
 
 interface RawArtifact {
@@ -235,12 +268,15 @@ interface RawArtifact {
   status: string;
   author_agent_id: string;
   title: string;
-  body: string;
+  body_path: string;
+  body_sha256: string;
+  body_bytes: number;
   metadata_json: string | null;
   created_at: number;
   updated_at: number;
   work_id: string | null;
   deliverable_type: string | null;
+  commit_sha: string | null;
 }
 
 /** 行 → 领域对象。边界处校验闭合集,不让未定义的 kind/status/类型冒充类型。 */
@@ -259,6 +295,22 @@ function rowToArtifact(raw: RawArtifact): ArtifactRow {
       `artifacts 表里出现未定义 deliverable_type「${deliverableType}」(id=${raw.id})`,
     );
   }
+  // 027 的落点列:三列 NOT NULL、`commit_sha` 可为 null。「读出来是 undefined」只可能
+  // 意味着**库还没到 027**(`SELECT *` 里根本没有这几列)。那必须响亮报错 —— 把
+  // undefined 塞进 `bodyPath: string` 会让「正文索引缺失」变成一句静默的谎话,而它的
+  // 下游(`GET /api/artifacts/:id/content`)会把 undefined 当成一个真实路径去读;
+  // `?? null` 则会把「列不存在」伪装成「还没提交过」。
+  if (
+    typeof raw.body_path !== "string" ||
+    typeof raw.body_sha256 !== "string" ||
+    typeof raw.body_bytes !== "number" ||
+    (raw.commit_sha !== null && typeof raw.commit_sha !== "string")
+  ) {
+    throw new Error(
+      `artifacts 行缺少正文索引列(body_path/body_sha256/body_bytes/commit_sha)` +
+        `(id=${raw.id})—— migration 027 没有跑到?`,
+    );
+  }
   return {
     id: raw.id,
     projectId: raw.project_id,
@@ -267,7 +319,10 @@ function rowToArtifact(raw: RawArtifact): ArtifactRow {
     status: raw.status,
     authorAgentId: raw.author_agent_id,
     title: raw.title,
-    body: raw.body,
+    bodyPath: raw.body_path,
+    bodySha256: raw.body_sha256,
+    bodyBytes: raw.body_bytes,
+    commitSha: raw.commit_sha,
     metadataJson: raw.metadata_json,
     createdAt: raw.created_at,
     updatedAt: raw.updated_at,
@@ -283,14 +338,16 @@ function rowToArtifact(raw: RawArtifact): ArtifactRow {
 export function insertArtifact(db: Database.Database, row: NewArtifactRow): void {
   db.prepare(
     `INSERT INTO artifacts (id, project_id, conversation_id, kind, status, author_agent_id,
-                            title, body, metadata_json, created_at, updated_at, work_id,
-                            deliverable_type)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                            title, body_path, body_sha256, body_bytes, metadata_json,
+                            created_at, updated_at, work_id, deliverable_type, commit_sha)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     row.id, row.projectId, row.conversationId, row.kind, row.status, row.authorAgentId,
-    row.title, row.body, row.metadataJson, row.createdAt, row.updatedAt,
+    row.title, row.bodyPath, row.bodySha256, row.bodyBytes, row.metadataJson,
+    row.createdAt, row.updatedAt,
     row.workId ?? null,
     row.deliverableType ?? null,
+    row.commitSha ?? null,
   );
 }
 
@@ -374,37 +431,54 @@ export function setArtifactStatus(
   db.prepare(`UPDATE artifacts SET status = ?, updated_at = ? WHERE id = ?`).run(status, at, id);
 }
 
+/**
+ * 换掉一条工件的正文落点(migration 027)。
+ *
+ * 用途是**对账收敛**:平台 housekeeping 提交前重扫盘,发现文件被人工改过
+ * (sha / bytes 与索引记的不一致)时把索引拉回事实(设计 §3.4)。
+ *
+ * ⚠️ 它**不动** `commit_sha` —— 那是提交之后才有的事实,由
+ * {@link setArtifactCommitSha} 单独回填。
+ */
 export function updateArtifactBody(
   db: Database.Database,
   id: string,
-  body: string,
+  placement: ArtifactBodyPlacement,
   at: number,
 ): void {
-  db.prepare(`UPDATE artifacts SET body = ?, updated_at = ? WHERE id = ?`).run(body, at, id);
+  db.prepare(
+    `UPDATE artifacts SET body_path = ?, body_sha256 = ?, body_bytes = ?, updated_at = ?
+     WHERE id = ?`,
+  ).run(placement.bodyPath, placement.bodySha256, placement.bodyBytes, at, id);
 }
 
-// ── 索引化的读面(设计 `docs/DESIGN-WORKSPACE.md` §4.1 / §4.4)──────
+/**
+ * 回填「正文是被哪一次提交引入的」(设计 §3.4 第 4 步)。
+ *
+ * ⚠️ **不动机 `updated_at`**:这不是一次内容变更,是索引在向 git 收敛
+ * (`updated_at` 的语义是「这一行的内容被改过」)。也**不校验 sha 存在** ——
+ * 可达性检查是读面的事(`runtime: "unreachable"`),仓储不调 git。
+ */
+export function setArtifactCommitSha(
+  db: Database.Database,
+  artifactId: string,
+  commitSha: string,
+): void {
+  db.prepare(`UPDATE artifacts SET commit_sha = ? WHERE id = ?`).run(commitSha, artifactId);
+}
+
+// ── 正文索引的读面(设计 `docs/DESIGN-WORKSPACE.md` §4.1 / §4.4)────
 //
-// ⚠️ **今天 `body_path` 这一列还不存在** —— 它由 **P2** 的 migration 027 加上
-// (与 `body_sha256` / `body_bytes` / `commit_sha` 一起)。P0 只是**读面**,
-// 所以这里必须先问 schema 再查(`PRAGMA table_info`),读法与
-// `runtime/dispatcher.ts` 的 `deliveredArtifactIds` 逐字同源:
+// ⚠️ **这里曾经有一个 `listIndexedBodyPaths`,带着 `runtime: "not_migrated"` 兜底。**
+// 那是分期方案的残留(P0 只做读面、027 后落地):它先 `PRAGMA table_info` 问一句
+// 「body_path 列在不在」,不在就回 `not_migrated` + 空数组。
+// **输入 6 把分期整个消掉了** —— 027 一次到终态,列不存在这件事在支持的系统里
+// **不可能发生**,所以那条分支连同它的类型一起删掉:
 //
-//   - 列不在 → `runtime: "not_migrated"` + 空 paths —— **如实报**「索引还没落地」;
-//   - 列在   → 查出这个项目里 `body_path` 非空的行。
-//
-// 为什么**不**返回一个空数组假装索引是空的:那会与「迁移已跑、但这个项目一件
-// 工件都还没落盘」**在结果上完全一样**,而前者是「机制缺一半」、后者是「项目还
-// 没干活」—— 本项目最贵的失败形态就是把这两种混成一种(7-E)。
-//
-// 为什么不是 `try { … } catch { return [] }`:一条 SQL 报错被吞掉之后,
-// 「列还没迁移」与「查询写错了」长得一模一样。`PRAGMA table_info` 是一次
-// **问得出答案**的检查,不需要靠异常区分。
-//
-// 为什么不在模块作用域缓存表结构:那是跨调用的进程内状态,而这条读面的纪律是
-// 「每次从库里重算」;`table_info` 是常数级开销。
-//
-// ⚠️ **P2 落地后这条读面自动点亮** —— 扫描模块与 UI 一行都不用改。
+//   · 列一定在 ⇒ 直接查;
+//   · 列若真的不在(库没跑到 027 / 有人手改了 schema)⇒ **让 SQL 响亮报错**。
+//     留一个「查询失败 ⇒ 回空数组」的兜底,正是本项目反复拒绝的那种做法:
+//     「机制缺一半」与「项目还没产出」会变成同一个返回值(7-E)。
 
 /** 索引里的一条正文路径。`title` 随行带上,让「库里有、盘上无」能报出是哪件工件。 */
 export interface IndexedBodyPath {
@@ -414,29 +488,23 @@ export interface IndexedBodyPath {
   title: string;
 }
 
-export interface IndexedBodyPathList {
-  /** `not_migrated` = `body_path` 列还不存在(P0 的真实状态),不是「索引是空的」 */
-  runtime: "ok" | "not_migrated";
-  paths: IndexedBodyPath[];
-}
-
-export function listIndexedBodyPaths(
-  db: Database.Database,
-  projectId: string,
-): IndexedBodyPathList {
-  const columns = db.pragma("table_info(artifacts)") as ReadonlyArray<{ name: string }>;
-  if (!columns.some((c) => c.name === "body_path")) {
-    return { runtime: "not_migrated", paths: [] };
-  }
+/**
+ * 这个项目里被索引引用的**全部**正文落点(migration 027 之后恒可用)。
+ *
+ * 读法是 `body_path IS NOT NULL` 那句的等价物吗?**不是** —— 027 起三列 NOT NULL,
+ * 所以这里不做过滤:每一件工件都该有一条边。返回值给 workspace 对账用
+ * (`GET /api/projects/:id/workspace` 的 `index` 与 `missing`,设计 §4.4)。
+ */
+export function artifactBodyPaths(db: Database.Database, projectId: string): IndexedBodyPath[] {
   const rows = db
     .prepare(
       `SELECT id AS artifactId, title AS title, body_path AS path
        FROM artifacts
-       WHERE project_id = ? AND body_path IS NOT NULL
+       WHERE project_id = ?
        ORDER BY body_path`,
     )
     .all(projectId) as ReadonlyArray<{ artifactId: string; title: string; path: string }>;
-  return { runtime: "ok", paths: rows.map((r) => ({ path: r.path, artifactId: r.artifactId, title: r.title })) };
+  return rows.map((r) => ({ path: r.path, artifactId: r.artifactId, title: r.title }));
 }
 
 /** 按 kind 计数 —— 「未解决阻塞/待审意见有多少」这类汇总读法。 */

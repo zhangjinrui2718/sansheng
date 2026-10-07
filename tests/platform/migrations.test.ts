@@ -64,7 +64,7 @@ const INTENTIONAL_REBUILDS: ReadonlyArray<{
   },
   {
     table: "artifacts",
-    files: ["008_blackboard_change.sql", "016_artifacts_deliverable.sql", "026_worker_split_and_code_service.sql"],
+    files: ["008_blackboard_change.sql", "016_artifacts_deliverable.sql", "026_worker_split_and_code_service.sql", "027_artifact_body_files.sql"],
     why:
       "016 把 kind 的 CHECK 闭集从 10 个取值放宽到 11 个(加 deliverable —— 设计 1 §2.11.5:" +
       "「整合完没有 / 交付了没有」由 deliverable 工件的存在性表达)。同 015:SQLite 改不了已有 " +
@@ -79,7 +79,12 @@ const INTENTIONAL_REBUILDS: ReadonlyArray<{
       "而这次多了一个 016 没遇到的坑:**025 注释里那份子表清单是错的**,漏了 client_questions ×2 " +
       "与 review_verdicts ×1 三条外键。`DROP TABLE artifacts` 会**级联清空整张 client_questions**" +
       "(待答台账),而 foreign_key_check 一声不响。判据是**动态的**:`PRAGMA foreign_key_list(<每张表>)`," +
-      "不是 `grep -rn 'REFERENCES artifacts' migrations/`(那只数历史文件里的行)",
+      "不是 `grep -rn 'REFERENCES artifacts' migrations/`(那只数历史文件里的行)。" +
+      "⚠️ 027 **第三次重建**(工件正文从 `body` 一列搬去文件,落点四列;设计-DESIGN-WORKSPACE §4.1 / §5)。" +
+      "SQLite 没有 ALTER COLUMN,而 `ADD COLUMN body_path TEXT NOT NULL` 在有存量行时也装不上" +
+      "(NOT NULL 要每一行都有值)。**这次与前两次的关键不同是没有数据要搬**(输入 6:存量数据全不要)," +
+      "所以没有 `_backup` 中转表、没有 `INSERT … SELECT`;取而代之的是第 1 步一条**会响的前置检查**" +
+      "(`CHECK (n = 0)`):非空库上迁移响亮失败并整体回滚,而不是静默清空 artifacts 与它的 CASCADE 子表",
   },
   {
     table: "agents",
@@ -1810,5 +1815,261 @@ describe("026 执行角色一分为二 + 交付物类型加 code_service", () =>
     // 免得与 016 的 `artifacts_backup` 撞名(撞名就被上面那条不变量抓红)。
     expect(createdTables(sql).filter((t) => t.endsWith("_backup")).every((t) => t.startsWith("m026_")),
       "中转表必须带 m026_ 前缀:与 016 的 artifacts_backup 撞名会被守卫抓到").toBe(true);
+  });
+});
+
+/**
+ * 027 · 工件正文落文件(`artifacts.body` → `body_path` / `body_sha256` / `body_bytes`
+ *       / `commit_sha`)—— 设计 `docs/DESIGN-WORKSPACE.md` §4.1 / §5。
+ *
+ * 这一组守三件事:
+ *   ① **空库上装得上**,四列形状正确(落点三列 NOT NULL、`commit_sha` 可空),
+ *      而 `body` 真的没了(`SELECT body` 响亮报错,不是回一个空值);
+ *   ② 被 `DROP TABLE` 带走的 **7** 条索引逐条原样重建(谓词 / DESC 不能丢),
+ *      三个外键与三个闭集一字未变 —— 重建最容易静默漂的正是这两处;
+ *   ③ **「老数据不要」是一条真的会响的约束**:非空库上 027 响亮失败并整体回滚,
+ *      而不是静默清空 `artifacts` 与它的 CASCADE 子表(012/016 那类事故形态)。
+ */
+describe("027 工件正文落文件(重建 artifacts:body → 落点四列)", () => {
+  function migration027() {
+    const m = FILES.find((f) => f.version === 27);
+    expect(m, "027 迁移文件缺失").toBeDefined();
+    return m!;
+  }
+
+  /**
+   * 到 026 为止的真 schema,**空表**。
+   *
+   * 「空」不是偷懒:027 的**前提**就是这一步 `artifacts` 是空的(输入 6:存量数据不要,
+   * 用户会 reset)。非空那一支由下面第 6 条专门钉住。
+   */
+  async function upTo026() {
+    const Database = (await import("better-sqlite3")).default;
+    const db = new Database(":memory:");
+    db.pragma("foreign_keys = ON");
+    for (const f of FILES) {
+      if (f.version >= 27) break;
+      try {
+        db.exec(f.sql);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        if (f.version === 2 && /vec0|no such module/i.test(msg)) continue;
+        throw err;
+      }
+    }
+    return db;
+  }
+
+  type Db = Awaited<ReturnType<typeof upTo026>>;
+
+  /**
+   * 应用 027。**必须走事务** —— 生产路径(`infra/migrations.ts`)就是
+   * `db.transaction`,而第 1 步的前置检查失败时要靠它整体回滚(负样本钉这一条)。
+   */
+  function apply027(db: Db): void {
+    db.transaction(() => { db.exec(migration027().sql); })();
+  }
+
+  /** 027 **之前**的工件写入(那时正文还在 `body` 列里)。 */
+  function rawArtifact026(db: Db, id: string, projectId: string, authorId: string, body: string): void {
+    db.prepare(
+      `INSERT INTO artifacts (id, project_id, conversation_id, kind, status, author_agent_id,
+                              title, body, metadata_json, created_at, updated_at, work_id, deliverable_type)
+       VALUES (?, ?, NULL, 'note', 'open', ?, '标题', ?, NULL, 1, 1, NULL, NULL)`,
+    ).run(id, projectId, authorId, body);
+  }
+
+  /** 027 **之后**的工件写入(落点与哈希)。`commitSha` 传 null 是合法状态。 */
+  function rawArtifact027(
+    db: Db,
+    id: string,
+    projectId: string,
+    authorId: string,
+    bodyPath: string,
+    commitSha: string | null,
+  ): void {
+    db.prepare(
+      `INSERT INTO artifacts (id, project_id, conversation_id, kind, status, author_agent_id,
+                              title, body_path, body_sha256, body_bytes, metadata_json,
+                              created_at, updated_at, work_id, deliverable_type, commit_sha)
+       VALUES (?, ?, NULL, 'note', 'open', ?, '标题', ?, 'sha256-of-content', 7, NULL, 1, 1, NULL, NULL, ?)`,
+    ).run(id, projectId, authorId, bodyPath, commitSha);
+  }
+
+  function seedProjectAndAgent(db: Db): { projectId: string; agentId: string } {
+    db.exec(`
+      INSERT INTO projects (id,name,client,goal,status,created_at)
+        VALUES ('pj_1','项目','甲方','目标','active',1);
+      INSERT INTO agents (id,role,specialization,display_name,created_at)
+        VALUES ('pm','project_manager',NULL,'项目经理',1);
+    `);
+    return { projectId: "pj_1", agentId: "pm" };
+  }
+
+  const column = (db: Db, name: string) =>
+    (db.pragma("table_info(artifacts)") as Array<{ name: string; type: string; notnull: number }>)
+      .find((c) => c.name === name);
+
+  const indexNames = (db: Db) =>
+    (db.pragma("index_list(artifacts)") as Array<{ name: string }>)
+      .map((r) => r.name)
+      .filter((n) => !n.startsWith("sqlite_autoindex"))
+      .sort();
+
+  it("正样本:空库上装得上;落点三列 NOT NULL、commit_sha 可空、body 不在", async () => {
+    const db = await upTo026();
+    expect(column(db, "body"), "前提不成立:026 的 schema 里 artifacts 应该还有 body 列").toBeDefined();
+    apply027(db);
+
+    expect(column(db, "body"), "027 之后 body 列必须消失(正文不再住库)").toBeUndefined();
+    expect(column(db, "body_path")).toMatchObject({ type: "TEXT", notnull: 1 });
+    expect(column(db, "body_sha256")).toMatchObject({ type: "TEXT", notnull: 1 });
+    expect(column(db, "body_bytes")).toMatchObject({ type: "INTEGER", notnull: 1 });
+    // `commit_sha` 是**后填**的 ⇒ 可空是判据的一部分(刚插行、还没提交)
+    expect(column(db, "commit_sha")).toMatchObject({ type: "TEXT", notnull: 0 });
+
+    // 正样本:四列真的写得进、读得回
+    const { projectId, agentId } = seedProjectAndAgent(db);
+    rawArtifact027(db, "a_1", projectId, agentId, "artifacts/a_1-report.html", null);
+    expect(db.prepare("SELECT body_path, commit_sha FROM artifacts WHERE id='a_1'").get())
+      .toEqual({ body_path: "artifacts/a_1-report.html", commit_sha: null });
+    // 提交回填之后同一行读得出 sha
+    db.prepare("UPDATE artifacts SET commit_sha = ? WHERE id = 'a_1'").run("deadbeef");
+    expect(db.prepare("SELECT commit_sha FROM artifacts WHERE id='a_1'").get())
+      .toEqual({ commit_sha: "deadbeef" });
+    db.close();
+  });
+
+  it("负样本:SELECT body 响亮报错(不是回空),落点缺一列被 NOT NULL 拒", async () => {
+    const db = await upTo026();
+    apply027(db);
+    const { projectId, agentId } = seedProjectAndAgent(db);
+
+    // 自检正样本:同一支探针在**存在**的列上不报错 —— 否则下面那条可能是「什么都拒」
+    expect(() => db.prepare("SELECT title FROM artifacts").all()).not.toThrow();
+    expect(() => db.prepare("SELECT body FROM artifacts").all(),
+      "body 列还在 —— 那就是「正文仍然住库」,读面会拿到一份假的正文").toThrow(/no such column: body/i);
+
+    const insert = (id: string, bodyPath: string | null, sha: string | null, bytes: number | null) =>
+      db.prepare(
+        `INSERT INTO artifacts (id, project_id, conversation_id, kind, status, author_agent_id,
+                                title, body_path, body_sha256, body_bytes, metadata_json,
+                                created_at, updated_at, work_id, deliverable_type, commit_sha)
+         VALUES (?, ?, NULL, 'note', 'open', ?, '标题', ?, ?, ?, NULL, 1, 1, NULL, NULL, NULL)`,
+      ).run(id, projectId, agentId, bodyPath, sha, bytes);
+
+    expect(() => insert("a_missing_path", null, "s", 1), "body_path 缺失必须响亮被拒").toThrow(/NOT NULL/i);
+    expect(() => insert("a_missing_sha", "artifacts/x.md", null, 1), "body_sha256 缺失必须响亮被拒").toThrow(/NOT NULL/i);
+    expect(() => insert("a_missing_bytes", "artifacts/x.md", "s", null), "body_bytes 缺失必须响亮被拒").toThrow(/NOT NULL/i);
+    // 正样本方向:三列齐了就写得进(证明上面三条不是「什么都拒」)
+    expect(() => insert("a_ok", "artifacts/x.md", "s", 1)).not.toThrow();
+    db.close();
+  });
+
+  it("正样本:7 条索引逐条重建 —— 名单、DESC 与部分谓词逐字不变", async () => {
+    const db = await upTo026();
+    const before = indexNames(db);
+    expect(before, "026 之后 artifacts 上是 7 条索引;少了就说明读面在退化").toHaveLength(7);
+    apply027(db);
+    expect(indexNames(db), "DROP TABLE 会连索引一起丢掉 —— 027 必须把 7 条全部原样重建").toEqual(before);
+
+    const sqlOf = (name: string) =>
+      (db.prepare(`SELECT sql FROM sqlite_master WHERE type='index' AND name=?`).get(name) as
+        | { sql: string }
+        | undefined)?.sql ?? "";
+    expect(sqlOf("idx_artifacts_work"), "部分索引的谓词丢了 = 静默退化成全表扫")
+      .toMatch(/WHERE\s+work_id\s+IS\s+NOT\s+NULL/i);
+    expect(sqlOf("idx_artifacts_deliverable"))
+      .toMatch(/WHERE\s+deliverable_type\s+IS\s+NOT\s+NULL/i);
+    expect(sqlOf("idx_artifacts_recent")).toMatch(/created_at\s+DESC/i);
+    db.close();
+  });
+
+  it("正样本:三个外键与三个闭集一字未变(重建最容易静默漂的两处)", async () => {
+    const db = await upTo026();
+    const fkBefore = db.pragma("foreign_key_list(artifacts)") as Array<Record<string, unknown>>;
+    apply027(db);
+    const fkAfter = db.pragma("foreign_key_list(artifacts)") as Array<Record<string, unknown>>;
+    expect(fkAfter, "外键及其动作(DROP/NO ACTION/SET NULL)必须逐条原样").toEqual(fkBefore);
+    expect(
+      fkAfter.map((f) => `${f.from}->${f.table}:${f.on_delete}`).sort(),
+      "字面点名:漏一条就是静默的语义漂移",
+    ).toEqual([
+      "author_agent_id->agents:NO ACTION",
+      "project_id->projects:CASCADE",
+      "work_id->works:SET NULL",
+    ]);
+
+    const { projectId, agentId } = seedProjectAndAgent(db);
+    const rejects = (sql: string, args: unknown[]) => {
+      try { db.prepare(sql).run(...(args as never[])); return false; } catch { return true; }
+    };
+    const insertArtifact = (id: string, kind: string, status: string, dt: string | null) =>
+      db.prepare(
+        `INSERT INTO artifacts (id, project_id, conversation_id, kind, status, author_agent_id,
+                                title, body_path, body_sha256, body_bytes, metadata_json,
+                                created_at, updated_at, work_id, deliverable_type, commit_sha)
+         VALUES (?, ?, NULL, ?, ?, ?, '标题', 'artifacts/x.md', 's', 1, NULL, 1, 1, NULL, ?, NULL)`,
+      ).run(id, projectId, kind, status, agentId, dt);
+
+    // 正样本:合法取值写得进(否则下面四条负样本可能只是「什么都拒」)
+    expect(() => insertArtifact("a_ok", "deliverable", "open", "code_service")).not.toThrow();
+    // 负样本:kind 11 值闭集 / status 4 值闭集 / deliverable_type 2 值闭集都还有牙
+    expect(() => insertArtifact("a_bad_kind", "nonsense", "open", null)).toThrow(/CHECK/i);
+    expect(() => insertArtifact("a_bad_status", "note", "archived", null)).toThrow(/CHECK/i);
+    expect(() => insertArtifact("a_bad_dt", "deliverable", "open", "git_repo")).toThrow(/CHECK/i);
+    expect(() => insertArtifact("a_dt_null", "note", "open", null)).not.toThrow();
+    db.close();
+  });
+
+  it("正样本:前置检查表不残留;外键与整体性检查干净", async () => {
+    const db = await upTo026();
+    apply027(db);
+    expect(
+      db.prepare("SELECT COUNT(*) n FROM sqlite_master WHERE name LIKE 'm027_%'").get(),
+      "中转 / 前置检查表用完必须删干净(留着会永久占一份工件快照)",
+    ).toEqual({ n: 0 });
+    expect(db.pragma("foreign_key_check"), "外键检查必须干净").toEqual([]);
+    expect(db.pragma("integrity_check")).toEqual([{ integrity_check: "ok" }]);
+    db.close();
+  });
+
+  it("**前提**:非空库上 027 响亮失败,老行一条不少 —— 不做数据迁移 ⇒ 必须先 reset", async () => {
+    const db = await upTo026();
+    const { projectId, agentId } = seedProjectAndAgent(db);
+    rawArtifact026(db, "a_old", projectId, agentId, "老正文");
+    const before = db.prepare("SELECT id, title, body FROM artifacts ORDER BY id").all();
+
+    expect(
+      () => apply027(db),
+      "非空库上 027 必须**响亮失败** —— 静默清空 artifacts(连同 CASCADE 子表)正是 012/016 的形态",
+    ).toThrow(/requires_empty_artifacts/);
+    // 失败整体回滚:行还在、正文还在、schema 还停在 026(body 列仍在)
+    expect(db.prepare("SELECT id, title, body FROM artifacts ORDER BY id").all()).toEqual(before);
+    expect(column(db, "body"), "失败之后 schema 不该被改到一半").toBeDefined();
+
+    // 自检:把老行清掉(这正是「reset」的等价物)之后,同一份 SQL 必须装得上
+    // —— 否则上面那条「响亮失败」可能只是「这条 SQL 永远失败」。
+    db.prepare("DELETE FROM artifacts").run();
+    expect(() => apply027(db)).not.toThrow();
+    expect(column(db, "body_path")).toBeDefined();
+    db.close();
+  });
+
+  it("文件形态:同名重建(不是 ALTER),没有数据搬运,登记进 INTENTIONAL_REBUILDS", () => {
+    const sql = migration027().sql;
+    // 登记:重名守卫要能命中,而且**只**登记 artifacts
+    const rebuilt = INTENTIONAL_REBUILDS.filter((r) => r.files.includes("027_artifact_body_files.sql"));
+    expect(rebuilt.map((r) => r.table), "027 重建的表必须逐条登记").toEqual(["artifacts"]);
+    expect(createdTables(sql), "必须是**同名** CREATE TABLE:改名法会让上面那条登记当场过期")
+      .toContain("artifacts");
+    // 中转 / 前置检查表必须带 m027_ 前缀(与 016 的 artifacts_backup 撞名会被守卫抓红)
+    expect(createdTables(sql).filter((t) => t !== "artifacts").every((t) => t.startsWith("m027_"))).toBe(true);
+    // 「没有数据迁移」是可验证的:一行 INSERT … SELECT 都没有
+    expect(stripSqlComments(sql), "027 不做数据迁移 —— 出现 INSERT INTO artifacts 就说明搬了老正文")
+      .not.toMatch(/INSERT\s+INTO\s+artifacts/i);
+    expect(stripSqlComments(sql)).not.toMatch(/ALTER\s+TABLE/i);
+    // 响亮不静默:关键语句不带 IF NOT EXISTS / IF EXISTS
+    expect(stripSqlComments(sql)).not.toMatch(/IF\s+(NOT\s+)?EXISTS/i);
   });
 });

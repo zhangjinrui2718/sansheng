@@ -25,10 +25,9 @@ import {
   type WorkRow,
 } from "../../src/platform/storage/repo/works.js";
 import {
-  insertArtifact, getArtifact, listArtifacts,
+  insertArtifact, getArtifact, listArtifacts, artifactBodyPaths, updateArtifactBody,
+  setArtifactCommitSha, type NewArtifactRow,
 } from "../../src/platform/storage/repo/artifacts.js";
-import { dispatch } from "../../src/platform/tools/registry.js";
-import type { ToolRunContext } from "../../src/platform/tools/types.js";
 import { solveToolset } from "../../src/platform/harness/authorize.js";
 import type { ProjectRole, Specialization } from "../../src/platform/identity/role.js";
 
@@ -75,6 +74,29 @@ function mkWork(
   insertWork(db, {
     id, projectId, parentWorkId: null, title: `工作${seq}`, goal: "做点什么",
     status: "open", assigneeAgentId, createdAt: T0 + seq, updatedAt: T0 + seq,
+    ...over,
+  });
+  return id;
+}
+
+/**
+ * 一件工件。**入参是落点与哈希,不是正文内容**(migration 027:正文住文件,
+ * 由调用方先写到盘上 —— 仓储不碰磁盘)。
+ *
+ * 落点按平台约定 `<artifactId>-<slug>.<ext>` 造(设计 §4.3),好让「落点由平台生成」
+ * 这条约定在测试里也是显式的。
+ */
+function mkArtifact(
+  projectId: string,
+  authorAgentId: string,
+  over: Partial<NewArtifactRow> = {},
+): string {
+  const id = `art${++seq}`;
+  insertArtifact(db, {
+    id, projectId, conversationId: null, kind: "note", status: "open",
+    authorAgentId, title: `工件${seq}`,
+    bodyPath: `artifacts/${id}.md`, bodySha256: `sha256-${id}`, bodyBytes: 3,
+    metadataJson: null, createdAt: T0 + seq, updatedAt: T0 + seq,
     ...over,
   });
   return id;
@@ -631,37 +653,23 @@ describe("接缝 · loadProjectForAuthz 喂给 solveToolset", () => {
   });
 });
 
-// ── 014 · 工件 → 工作项的产出边(migration 014 + board_write 的 workId)────
+// ── 014 · 工件 → 工作项的产出边(migration 014 的 artifacts.work_id)────
 //
 // 这条边补的是「这条工作项产出了什么」—— 在此之前它只能靠**项目级集合差**算
 // (`runtime/execution.ts` 的回合前后差集),那个判据连 author_agent_id 都不读,
 // 同项目两回合交叠时会互相认领对方的产出。
 //
-// 这里钉三件事:
-//   ① 写入路径真的能落这条边(而且只能落**同项目**的工作项);
+// 这里钉三件事(全在**仓储层**):
+//   ① 这条边真的落得下、能从 work id 反查回来;
 //   ② 不传 = null 是**合法状态**,不是缺参数;
-//   ③ 删工作项**不删产出**(SET NULL),而且从 work id 反查得到。
+//   ③ 删工作项**不删产出**(SET NULL),作用域仍然是 projectId 而不是 workId。
+//
+// ⚠️ 2026-10-08(027)起本组**不再经 `board_write` 走一遍**:那个工具现在先写文件、
+// 后插行(要 `ToolRunContext.workspace`),而它的入参校验(workId 必须存在、必须同项目)
+// 是**工具层**的活 —— 判据归 `tests/platform/blackboard.test.ts`(T3 写面任务)。
+// 本文件是仓储层的测试:插入一律走 `mkArtifact`(交**落点与哈希**;交正文内容的时代结束了)。
 
-describe("014 · 产出边(board_write 的 workId)", () => {
-  function ctxFor(agentId: string, projectId: string): ToolRunContext {
-    const row = getAgent(db, agentId)!;
-    return {
-      db,
-      agent: {
-        id: row.id,
-        role: row.role,
-        displayName: row.displayName,
-        ...(row.specialization !== null ? { specialization: row.specialization } : {}),
-      },
-      project: loadProjectForAuthz(db, projectId),
-      now: () => T0,
-      newId: (prefix) => `${prefix}_${++seq}`,
-    };
-  }
-
-  const write = (agentId: string, projectId: string, args: Record<string, unknown>) =>
-    dispatch("board_write", args, ctxFor(agentId, projectId));
-
+describe("014 · 产出边(仓储层:artifacts.work_id)", () => {
   /** 一个活跃项目 + 一个执行角色成员 + 一条分派给它的工作项 */
   function scene(): { pid: string; wk: string; workId: string } {
     const pid = mkProject("active");
@@ -671,92 +679,62 @@ describe("014 · 产出边(board_write 的 workId)", () => {
     return { pid, wk, workId };
   }
 
-  it("带 workId 写入 → 边真的落库,且能从 work id 反查回来", async () => {
+  it("带 workId 落库 → 边真的落库,且能从 work id 反查回来", () => {
     const { pid, wk, workId } = scene();
-    const r = await write(wk, pid, { kind: "evidence", title: "证据", body: "现场", workId });
-    expect(r.ok, r.ok ? "" : `${r.code}: ${r.message}`).toBe(true);
-    if (!r.ok) return;
-    expect(r.text).toContain(`产出工作项:${workId}`);
-
+    const id = mkArtifact(pid, wk, { kind: "evidence", title: "证据", workId });
     const arts = listArtifacts(db, pid, { workId });
     expect(arts).toHaveLength(1);
+    expect(arts[0]!.id).toBe(id);
     expect(arts[0]!.workId).toBe(workId);
-    // 正负样本对照:不过滤时项目里还有别的工件吗?这里只有这一条 ——
-    // 所以再加一条**没有**产出工作项的工件,证明过滤真的在筛。
-    await write(wk, pid, { kind: "note", title: "随手记", body: "b" });
+    // 正负样本对照:再加一条**没有**产出边的工件,证明过滤真的在筛。
+    const loose = mkArtifact(pid, wk, { kind: "note", title: "随手记" });
     expect(listArtifacts(db, pid)).toHaveLength(2);
     expect(listArtifacts(db, pid, { workId })).toHaveLength(1);
-    expect(getArtifact(db, arts[0]!.id)!.workId).toBe(workId);
+    expect(getArtifact(db, id)!.workId).toBe(workId);
+    expect(getArtifact(db, loose)!.workId).toBeNull();
   });
 
-  it("不传 workId = **合法状态**(work_id 为 null,不是填空缺)", async () => {
+  it("不传 workId = **合法状态**(work_id 为 null,不是填空缺)", () => {
     const { pid, wk } = scene();
-    const r = await write(wk, pid, { kind: "note", title: "立项笔记", body: "b" });
-    expect(r.ok).toBe(true);
-    if (!r.ok) return;
-    const a = listArtifacts(db, pid)[0]!;
-    expect(a.workId).toBeNull();
-    expect(r.text).not.toContain("产出工作项");
+    const id = mkArtifact(pid, wk, { kind: "note", title: "立项笔记" });
+    expect(getArtifact(db, id)!.workId).toBeNull();
+    expect(listArtifacts(db, pid).map((a) => a.workId)).toEqual([null]);
   });
 
-  it("workId 不存在 → not_found,且**不静默写出工件**", async () => {
-    const { pid, wk } = scene();
-    const r = await write(wk, pid, { kind: "evidence", title: "证据", body: "b", workId: "wk_ghost" });
-    expect(r.ok).toBe(false);
-    if (r.ok) return;
-    expect(r.code).toBe("not_found");
-    expect(r.message).toContain("wk_ghost");
-    expect(listArtifacts(db, pid)).toHaveLength(0);
-  });
-
-  it("workId 属于**别的项目** → not_found(库里这条边是合法的,只能在工具层拦)", async () => {
+  it("库里不拦跨项目引用 —— 那条校验是工具层独有的(所以它在 blackboard 那边另有判据)", () => {
     const { pid, wk } = scene();
     const other = mkProject("active");
     const otherWork = mkWork(other, wk);
-    const r = await write(wk, pid, { kind: "evidence", title: "证据", body: "b", workId: otherWork });
-    expect(r.ok).toBe(false);
-    if (r.ok) return;
-    expect(r.code).toBe("not_found");
-    expect(r.message).toContain(other);
-    expect(listArtifacts(db, pid)).toHaveLength(0);
-    // 库里确实不拦跨项目引用 —— 所以这条校验是工具层独有的,别删
-    expect(() =>
-      insertArtifact(db, {
-        id: `art_raw_${++seq}`, projectId: pid, conversationId: null, kind: "note",
-        status: "open", authorAgentId: wk, title: "t", body: "b", metadataJson: null,
-        createdAt: T0, updatedAt: T0, workId: otherWork,
-      }),
-    ).not.toThrow();
+    const raw = `art_raw_${++seq}`;
+    expect(() => mkArtifact(pid, wk, { id: raw, kind: "note", workId: otherWork })).not.toThrow();
+    expect(getArtifact(db, raw)!.workId).toBe(otherWork);
+    // 反查也不跨项目串:这条边落在 pid 上,从 other 查不到
+    expect(listArtifacts(db, other, { workId: otherWork })).toEqual([]);
   });
 
-  it("删掉工作项后:工件仍在,work_id 变 null(SET NULL,不是 CASCADE)", async () => {
+  it("删掉工作项后:工件仍在,work_id 变 null(SET NULL,不是 CASCADE)", () => {
     const { pid, wk, workId } = scene();
-    await write(wk, pid, { kind: "evidence", title: "证据", body: "现场", workId });
+    const id = mkArtifact(pid, wk, { kind: "evidence", title: "证据", workId });
     const before = listArtifacts(db, pid, { workId });
     expect(before).toHaveLength(1);
 
     deleteWork(db, workId);
     const all = listArtifacts(db, pid);
     expect(all, "删工作项把产出一起删了 —— 那是 CASCADE 的形态").toHaveLength(1);
-    expect(all[0]!.id).toBe(before[0]!.id);
-    expect(all[0]!.body).toBe("现场");
+    expect(all[0]!.id).toBe(id);
+    expect(all[0]!.bodyPath, "删工作项不该牵动正文落点(027:正文住文件)").toBe(before[0]!.bodyPath);
     expect(all[0]!.workId).toBeNull();
     expect(listArtifacts(db, pid, { workId })).toHaveLength(0);
     expect(db.pragma("foreign_key_check")).toEqual([]);
   });
 
-  it("workId 过滤不跨项目串(作用域仍然是 projectId,不是 workId)", async () => {
+  it("workId 过滤不跨项目串(作用域仍然是 projectId,不是 workId)", () => {
     const { pid, wk, workId } = scene();
-    await write(wk, pid, { kind: "evidence", title: "本项目产出", body: "b", workId });
-    const other = mkProject("active");
+    const mine = mkArtifact(pid, wk, { kind: "evidence", title: "本项目产出", workId });
     // 另一项目里一条**没有**产出边的工件
-    insertArtifact(db, {
-      id: `art_x_${++seq}`, projectId: other, conversationId: null, kind: "evidence",
-      status: "open", authorAgentId: wk, title: "别项目产出", body: "b", metadataJson: null,
-      createdAt: T0, updatedAt: T0,
-    });
+    mkArtifact(mkProject("active"), wk, { kind: "evidence", title: "别项目产出" });
+    expect(listArtifacts(db, pid, { workId }).map((a) => a.id)).toEqual([mine]);
     expect(listArtifacts(db, pid, { workId }).map((a) => a.title)).toEqual(["本项目产出"]);
-    expect(listArtifacts(db, other, { workId })).toEqual([]);
   });
 });
 
@@ -783,16 +761,19 @@ describe("014 · 产出边(board_write 的 workId)", () => {
  * `ArtifactKind` 联合里的 `deliverable` 是 C2 的活,本批次不碰 `identity/role.ts`。
  */
 describe("016 · deliverable 工件(真启动路径 + 仓储层)", () => {
+  // ⚠️ 027 起 `body` 换成了落点四列 —— 这里的裸 SQL 是**故意的**(见下面那条注释),
+  // 所以列清单必须跟着 schema 走,否则报错会落在「列不存在」而不是被测的闭集上。
   const A_COLS =
-    "id,project_id,conversation_id,kind,status,author_agent_id,title,body,metadata_json,created_at,updated_at,work_id";
+    "id,project_id,conversation_id,kind,status,author_agent_id,title," +
+    "body_path,body_sha256,body_bytes,metadata_json,created_at,updated_at,work_id,commit_sha";
   const KIND_016 = [
     "decision", "note", "evidence", "hypothesis", "project_brief", "work_brief",
     "meeting_note", "review_finding", "change_record", "client_question", "deliverable",
   ] as const;
 
   function rawArtifact(id: string, kind: string, projectId: string, authorId: string, workId: string | null): void {
-    db.prepare(`INSERT INTO artifacts (${A_COLS}) VALUES (?,?,NULL,?,'open',?,?,?,NULL,1,1,?)`)
-      .run(id, projectId, kind, authorId, "标题", "正文", workId);
+    db.prepare(`INSERT INTO artifacts (${A_COLS}) VALUES (?,?,NULL,?,'open',?,?,?,?,?,NULL,1,1,?,NULL)`)
+      .run(id, projectId, kind, authorId, "标题", `artifacts/${id}.md`, `sha256-${id}`, 6, workId);
   }
 
   it("真迁移器把库带到 16(不是只有手写 SQL 才认这个闭集)", () => {
@@ -823,12 +804,15 @@ describe("016 · deliverable 工件(真启动路径 + 仓储层)", () => {
     // listArtifacts 直接抛错**(读面比写面严)。C2 落地后这条读面才通 ——
     // 那是 DAG 上的下一步,不是本迁移能独自解决的事。
     const got = db.prepare(`SELECT * FROM artifacts WHERE id = ?`).get(id) as {
-      kind: string; title: string; body: string; work_id: string | null; status: string;
+      kind: string; title: string; body_path: string; body_bytes: number;
+      work_id: string | null; status: string;
     } | undefined;
     expect(got, "这条工件没写进去").toBeDefined();
     expect(got!.kind).toBe("deliverable");
     expect(got!.title).toBe("标题");
-    expect(got!.body).toBe("正文");
+    // 027 起正文不在库里:这一行只有**落点**(而内容由调用方先写到盘上)
+    expect(got!.body_path).toBe(`artifacts/${id}.md`);
+    expect(got!.body_bytes).toBe(6);
     expect(got!.status).toBe("open");
     // 016 的重建若照 008 抄列清单,这一列整列就没了(用户真机库 11 条工件里 10 条非空)
     expect(got!.work_id, "014 的产出边丢了 —— 016 重建时漏了 work_id 列").toBe(workId);
@@ -898,8 +882,10 @@ describe("016 · deliverable 工件(真启动路径 + 仓储层)", () => {
  * 证明那条守卫没有因为「两个闭集恰好相等」而退化成永真。
  */
 describe("C2 · deliverable 的读写面(设计 1 §2.11.5)", () => {
+  // 027 起 `body` → 落点四列(commit_sha 可空)。裸 SQL 的列清单必须跟着 schema 走。
   const A_COLS =
-    "id,project_id,conversation_id,kind,status,author_agent_id,title,body,metadata_json,created_at,updated_at,work_id";
+    "id,project_id,conversation_id,kind,status,author_agent_id,title," +
+    "body_path,body_sha256,body_bytes,metadata_json,created_at,updated_at,work_id,commit_sha";
 
   it("仓储写入口收得下 deliverable,读入口读得回(豁口关了)", () => {
     const pid = mkProject("active");
@@ -911,7 +897,8 @@ describe("C2 · deliverable 的读写面(设计 1 §2.11.5)", () => {
     // 类型层是第一道守卫,这条用例的存在本身就是它活着的证据。
     insertArtifact(db, {
       id, projectId: pid, conversationId: null, kind: "deliverable", status: "open",
-      authorAgentId: pm, title: "交付物", body: "整合后的交付", metadataJson: null,
+      authorAgentId: pm, title: "交付物", bodyPath: `artifacts/${id}.md`,
+      bodySha256: `sha256-${id}`, bodyBytes: 8, metadataJson: null,
       createdAt: T0 + seq, updatedAt: T0 + seq, workId: rootWork,
     });
 
@@ -920,6 +907,8 @@ describe("C2 · deliverable 的读写面(设计 1 §2.11.5)", () => {
     expect(got!.kind).toBe("deliverable");
     expect(got!.authorAgentId, "交付物由项目经理写(不是执行角色的 evidence 产出)").toBe(pm);
     expect(got!.workId, "014 的产出边要跟着一起读回来").toBe(rootWork);
+    expect(got!.bodyPath, "027 的落点列要跟着一起读回来").toBe(`artifacts/${id}.md`);
+    expect(got!.commitSha, "还没提交 ⇒ null 是合法状态").toBeNull();
     expect(listArtifacts(db, pid).map((a) => a.id), "整项目列表也必须读得动(不是只有单条)").toContain(id);
   });
 
@@ -928,8 +917,8 @@ describe("C2 · deliverable 的读写面(设计 1 §2.11.5)", () => {
     const pm = mkAgent("project_manager");
     const id = `a_c2_probe_${++seq}`;
     const insert = () =>
-      db.prepare(`INSERT INTO artifacts (${A_COLS}) VALUES (?,?,NULL,?,?,?,?,?,NULL,1,1,NULL)`)
-        .run(id, pid, "nonsense_kind", "open", pm, "标题", "正文");
+      db.prepare(`INSERT INTO artifacts (${A_COLS}) VALUES (?,?,NULL,?,?,?,?,?,?,?,NULL,1,1,NULL,NULL)`)
+        .run(id, pid, "nonsense_kind", "open", pm, "标题", `artifacts/${id}.md`, `sha256-${id}`, 6);
 
     // ① 正样本方向:不关 CHECK 就造不出这种行 —— 说明下面的行**只可能**来自
     //    「schema 先开、代码后跟」那个窗口,而不是测试自己写错了 SQL。
@@ -942,11 +931,82 @@ describe("C2 · deliverable 的读写面(设计 1 §2.11.5)", () => {
     // 关回去之后 CHECK 必须仍然有牙(否则「关掉」那一步才是真凶,不是窗口)
     expect(db.prepare(`SELECT COUNT(*) n FROM artifacts WHERE id = ?`).get(id)).toEqual({ n: 1 });
     expect(() => db.prepare(
-      `INSERT INTO artifacts (${A_COLS}) VALUES (?,?,NULL,?,?,?,?,?,NULL,1,1,NULL)`,
-    ).run(`${id}_x`, pid, "nonsense_kind", "open", pm, "标题", "正文")).toThrow(/CHECK/i);
+      `INSERT INTO artifacts (${A_COLS}) VALUES (?,?,NULL,?,?,?,?,?,?,?,NULL,1,1,NULL,NULL)`,
+    ).run(`${id}_x`, pid, "nonsense_kind", "open", pm, "标题", `artifacts/x.md`, "s", 6)).toThrow(/CHECK/i);
 
     // ③ 读面必须抛 —— 这是「代码侧闭集是读面的唯一守卫」的活证据
     expect(() => getArtifact(db, id), "未定义 kind 必须响亮抛错,不许静默透出").toThrow(/未定义 kind/);
     expect(() => listArtifacts(db, pid), "一条坏行会让**整个项目**的列表挂掉 —— 这正是 C1 的硬 DAG 约束").toThrow(/未定义 kind/);
+  });
+});
+
+/**
+ * 027 · 正文索引的三个写/读口(仓储层)
+ *
+ * `migrations.test.ts` 的 027 一组守的是 **schema**;这里守**仓储 API**:
+ * 入参换成落点与哈希之后,三类调用必须都能真的读写到位 ——
+ * `insertArtifact`(落点三列 + 可空的 commit_sha)、`updateArtifactBody`(对账收敛)、
+ * `artifactBodyPaths` / `setArtifactCommitSha`(workspace 对账与提交回填)。
+ */
+describe("027 · 正文索引的读口与写口", () => {
+  it("insertArtifact 收落点与哈希;commitSha 可省(= null,不是缺参数)", () => {
+    const pid = mkProject("active");
+    const wk = mkAgent("research_worker", "engineering");
+    const a = mkArtifact(pid, wk, { title: "有落点的工件" });
+    const got = getArtifact(db, a)!;
+    expect(got.bodyPath).toBe(`artifacts/${a}.md`);
+    expect(got.bodySha256).toBe(`sha256-${a}`);
+    expect(got.bodyBytes).toBe(3);
+    expect(got.commitSha).toBeNull();
+
+    const b = `art_committed_${++seq}`;
+    mkArtifact(pid, wk, { id: b, commitSha: "abc123" });
+    expect(getArtifact(db, b)!.commitSha).toBe("abc123");
+  });
+
+  it("updateArtifactBody 只动落点三列与 updated_at;不动 commit_sha", () => {
+    const pid = mkProject("active");
+    const wk = mkAgent("research_worker", "engineering");
+    const id = mkArtifact(pid, wk, { commitSha: "keepme" });
+    updateArtifactBody(db, id, { bodyPath: "artifacts/renamed.md", bodySha256: "newsha", bodyBytes: 42 }, T0 + 999);
+    const got = getArtifact(db, id)!;
+    expect(got).toMatchObject({
+      bodyPath: "artifacts/renamed.md", bodySha256: "newsha", bodyBytes: 42,
+      commitSha: "keepme", updatedAt: T0 + 999,
+    });
+    // 不存在的 id 是静默 no-op(SQLite 的 UPDATE 语义)—— 这里只钉「不抛」,
+    // 免得有人把它写成 upsert 之后误以为调用方拿到了新行。
+    expect(() => updateArtifactBody(db, "art_ghost", { bodyPath: "p", bodySha256: "s", bodyBytes: 1 }, T0)).not.toThrow();
+  });
+
+  it("setArtifactCommitSha 回填提交 sha,且不动机 updated_at", () => {
+    const pid = mkProject("active");
+    const wk = mkAgent("research_worker", "engineering");
+    const id = mkArtifact(pid, wk);
+    const before = getArtifact(db, id)!;
+    setArtifactCommitSha(db, id, "deadbeef");
+    const after = getArtifact(db, id)!;
+    expect(after.commitSha).toBe("deadbeef");
+    expect(after.updatedAt, "回填提交 sha 不是一次内容变更").toBe(before.updatedAt);
+  });
+
+  it("artifactBodyPaths 按项目列出落点(正负样本:别的项目的工件不许串进来)", () => {
+    const pid = mkProject("active");
+    const other = mkProject("active");
+    const wk = mkAgent("research_worker", "engineering");
+    const a1 = mkArtifact(pid, wk, { title: "甲" });
+    const a2 = mkArtifact(pid, wk, { title: "乙" });
+    const b1 = mkArtifact(other, wk, { title: "别项目" });
+
+    const paths = artifactBodyPaths(db, pid);
+    expect(paths, "本项目的两条都在,别项目的不在").toHaveLength(2);
+    expect(paths.map((p) => p.artifactId).sort()).toEqual([a1, a2].sort());
+    // 逐条带工件身份:workspace 路由报「库里有、盘上无」时要能点名是哪件工件
+    expect(paths.find((p) => p.artifactId === a1)).toEqual({
+      path: `artifacts/${a1}.md`, artifactId: a1, title: "甲",
+    });
+    expect(artifactBodyPaths(db, other).map((p) => p.artifactId)).toEqual([b1]);
+    expect(artifactBodyPaths(db, "pj_ghost"), "不存在的项目 = 空列表(它没有索引,不是读不到)")
+      .toEqual([]);
   });
 });
