@@ -197,10 +197,9 @@ async function startHost(): Promise<{
 
 /** 一个「子树已收口 + 交付物已验收」的现场(项目经理整合完、等业务经理交付)。 */
 function seed(db: Database.Database): void {
-  insertAgent(db, { id: "wk", role: "worker", specialization: "engineering", displayName: "工人", createdAt: 1 });
-  insertAgent(db, { id: "pm", role: "project_manager", specialization: null, displayName: "项目经理", createdAt: 1 });
-  insertAgent(db, { id: "bm", role: "business_manager", specialization: null, displayName: "业务经理", createdAt: 1 });
-  insertAgent(db, { id: "qa", role: "quality_reviewer", specialization: null, displayName: "质检", createdAt: 1 });
+  // ⚠️ **不在这里插 agent 行。** 宿主启动时已经 `ensureOrg` 过了(2026-10-08 起),
+  // 五个角色就在库里 —— 再插一遍会撞 `agents.id` 主键。这不是测试让步:
+  // 「组织由平台播种」本来就是生产行为,测试里手插一份反而是**重复了那份事实**。
   insertProject(db, {
     id: "p1", name: "语音机器人调研", client: "甲方",
     goal: "给出三条技术路线的对比与选型建议", status: "active", createdAt: 1,

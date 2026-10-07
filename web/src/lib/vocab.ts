@@ -121,10 +121,14 @@ export const ARTIFACT_STATUS_LABEL: Record<ArtifactStatus, string> = {
 
 export const DELIVERABLE_TYPE_LABEL: Record<DeliverableType, string> = {
   html_report: "HTML 报告",
+  code_service: "代码服务",
 };
 
 export const DELIVERABLE_TYPE_TONE: Record<DeliverableType, Tone> = {
   html_report: "jade",
+  // 与 html_report 的 jade 分开:**扫一眼列表就能分出「哪些是报告、哪些是仓库」**,
+  // 而它们点进去要做的事完全不同(读网页 vs 克隆/部署)。
+  code_service: "bamboo",
 };
 
 export const ARTIFACT_STATUS_TONE: Record<ArtifactStatus, Tone> = {
@@ -220,7 +224,8 @@ export const CHANGE_STATUS_TONE: Record<ChangeStatus, Tone> = {
 export const ROLE_LABEL: Record<ProjectRole, string> = {
   business_manager: "业务经理",
   project_manager: "项目经理",
-  worker: "工程师",
+  research_worker: "研究员",
+  coding_worker: "工程师",
   quality_reviewer: "质检",
 };
 

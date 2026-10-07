@@ -170,7 +170,8 @@ import {
   workStatusTone,
 } from "@/lib/vocab";
 import { HtmlReport } from "@/components/deliverable/HtmlReport";
-import { bodyMode, htmlReportFileName } from "@/lib/deliverable";
+import { CodeService } from "@/components/deliverable/CodeService";
+import { bodyMode, htmlReportFileName, shortSha } from "@/lib/deliverable";
 
 /** 展示顺序:结论类优先,过程类靠后。表里没有的 kind 落在末尾(不丢)。 */
 const KIND_ORDER: ArtifactKind[] = [
@@ -1201,7 +1202,15 @@ export function ArtifactRow({
   // HTML 报告的正文是**源文本** —— 把它当预览印在卡片上就是一片标签噪音,
   // 而且会让 `long` 判断失真(一份 30KB 的 HTML 恒为 long)。卡片只标出类型,
   // 正文留给详情里的沙箱渲染。
-  const isHtmlReport = bodyMode(a) === "html_report";
+  //
+  // 代码服务同理,而且更强:它的**主体是仓库坐标**(在 `metadata_json` 里),
+  // 正文只是一份 markdown 说明 —— 卡片上印一句「代码服务 · 分支 · 短 sha」
+  // 比印正文有用得多。
+  const mode = bodyMode(a);
+  const isHtmlReport = mode === "html_report";
+  const isCodeService = mode === "code_service";
+  // 坐标由**服务端**解析好(`transport/views.ts`),前端不再碰 metadata_json
+  const csMeta = isCodeService ? a.codeService : null;
   return (
     <article className="sansheng-card p-2.5" title={a.id}>
       <div className="flex items-center gap-2 flex-wrap">
@@ -1222,6 +1231,11 @@ export function ArtifactRow({
             {deliverableTypeLabel("html_report")}
           </Pill>
         )}
+        {isCodeService && (
+          <Pill tone={deliverableTypeTone("code_service")} title="deliverable_type">
+            {deliverableTypeLabel("code_service")}
+          </Pill>
+        )}
         <span className="ss-body" style={{ color: "var(--bone)" }}>
           {a.title || "(无标题)"}
         </span>
@@ -1239,6 +1253,15 @@ export function ArtifactRow({
       {isHtmlReport ? (
         <div className="ss-meta mt-1">
           一份 HTML 报告 —— 点「详情」在沙箱里渲染。
+        </div>
+      ) : isCodeService ? (
+        <div className="ss-meta mt-1">
+          代码服务
+          {csMeta?.service !== null && csMeta?.service !== undefined ? `「${csMeta.service}」` : ""}
+          {csMeta?.branch != null ? ` · 分支 ${csMeta.branch}` : ""}
+          {csMeta?.headCommit != null ? ` · ${shortSha(csMeta.headCommit)}` : ""}
+          {csMeta?.port != null ? ` · 端口 ${csMeta.port}` : ""}
+          {" —— 点「详情」看仓库坐标与部署命令。"}
         </div>
       ) : (
         a.body.length > 0 &&
@@ -1921,6 +1944,14 @@ function ArtifactDetail({ id, known }: { id: string; known: readonly ArtifactVie
                 fileName={htmlReportFileName(artifact.title, artifact.id)}
               />
             </>
+          ) : bodyMode(artifact) === "code_service" ? (
+            // 正文(说明)由 CodeService 自己渲染 —— 它要把坐标摆在正文之前,
+            // 所以不能复用下面那个只印 `<pre>` 的分支。
+            <CodeService
+              artifactId={artifact.id}
+              body={artifact.body}
+              service={artifact.codeService}
+            />
           ) : artifact.body.length > 0 ? (
             <>
               <div className="ss-section" style={{ fontSize: 12 }}>

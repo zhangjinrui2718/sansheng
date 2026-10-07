@@ -16,22 +16,63 @@ import {
   type ToolName,
 } from "../harness/capability.js";
 
-/** 四个全局角色。增删角色 = 改这个联合 + ROLE_SPECS,一次显式代码评审。 */
+/**
+ * 五个全局角色。增删角色 = 改这个联合 + `ROLE_SPECS`,一次显式代码评审。
+ *
+ * ── 2026-10-08:执行角色按**产出形态**一分为二 ────────────────────
+ *
+ * 用户原话:「新增一种 worker 类型叫做 coding worker,专门来写代码,现在的那个
+ * worker 改名叫做 research worker,专门用来产出文档、伪代码、架构图、汇报材料
+ * 等等」。
+ *
+ * 为什么是**两个角色**而不是给 `worker` 加一个「产出形态」字段:角色是
+ * **权限面的最小单位**(ceiling / writeKinds / promptUnits 都挂在它上面),
+ * 而这两件事的权限面真的不同 —— 编码工要动代码(`code.write`),
+ * 研究工交的是**信息**(html_report 交付物);它们要的提示词、能写的交付物类型
+ * 也各自不同。挂在角色上,「谁被叫醒来做这件事」在 `dispatch_events` /
+ * `pendingWork` / `checkRunnable` 三处都是**同一份事实**,不需要到处传一个
+ * 额外的枚举参数(那正是「两个真相源迟早漂」的形态)。
+ *
+ * ⚠️ **改名不是加别名**:`worker` 这个字符串在**代码与库里都不再存在**
+ * (migration 026 把存量行一并改掉)。留一类别名会让「我到底是什么角色」有两个
+ * 答案,而这个项目已经为「同一个角色三个名字」付过一次账(见 `runtime/org.ts`)。
+ */
 export type ProjectRole =
   | "business_manager" // 业务经理(唯一 clientFacing)
   | "project_manager" // 项目经理
-  | "worker" // 执行工种(可多个,分工程/算法/数据)
+  | "research_worker" // 研究工:产出文档 / 伪代码 / 架构图 / 汇报材料
+  | "coding_worker" // 编码工:写代码,交付可独立部署的代码服务
   | "quality_reviewer"; // 质检审查员
 
 export const PROJECT_ROLES = [
   "business_manager",
   "project_manager",
-  "worker",
+  "research_worker",
+  "coding_worker",
   "quality_reviewer",
 ] as const satisfies readonly ProjectRole[];
 
-/** worker 的领域细分。枚举而非自由文本 —— 自由文本会让「算法/工程/数据」的
- *  一致性无法校验,而这三个值直接参与 work 分派与歧义检查(设计 1 §3.3)。 */
+/**
+ * **执行角色** —— 平台会为它们唤醒「执行一个工作项」的回合
+ * (`runtime/execution.ts` 的 `checkRunnable`),`work_assign` 的负责人也只能是
+ * 它们。
+ *
+ * 抽成一个常量而不是在两处各写一次 `=== "research_worker" || === "coding_worker"`:
+ * 判据必须只有一处 —— 真机上「派给非执行角色的工作项永远停在原地、而谁也不被
+ * 叫醒」已经发生过一次(`fix_stranded_assignment` 规则就是为它加的)。
+ * 多一个执行角色时,漏改任何一处都会重新长出那类孤儿工作项。
+ */
+export const EXECUTOR_ROLES = [
+  "research_worker",
+  "coding_worker",
+] as const satisfies readonly ProjectRole[];
+
+/** 执行角色的领域细分。枚举而非自由文本 —— 自由文本会让「算法/工程/数据」的
+ *  一致性无法校验,而这三个值直接参与 work 分派与歧义检查(设计 1 §3.3)。
+ *
+ *  ⚠️ 它与「研究 / 编码」那条轴**正交**:角色说的是**产出形态**,
+ *  细分说的是**领域**。两个执行角色都可以带细分(它们都是「干具体活的人」),
+ *  这是 007 那个触发器在 026 里被放宽判据的原因。 */
 export type Specialization = "engineering" | "algorithm" | "data";
 
 export const SPECIALIZATIONS = [
@@ -50,7 +91,7 @@ export const SPECIALIZATIONS = [
  *
  * `deliverable`(C2 新增,设计 1 §2.11.5)是**项目经理**在**根工作项**上写下的
  * 整合产物 —— 它表达「这份交付已经整合完了」这个**结构化事实**,是 `integrate`
- * 规则的终止判据(不是项目的终态,也不是 worker 的产出;设计 1 §2.11.5 明写
+ * 规则的终止判据(不是项目的终态,也不是执行角色的产出;设计 1 §2.11.5 明写
  * 「交付物」有四个所指,不许单独写这三个字)。
  *
  * ⚠️ **本闭集与 `migrations/016` 的 `artifacts.kind` CHECK 必须恰好相等。**
@@ -118,8 +159,10 @@ export type PromptUnitId =
   | "business_manager.align"
   | "project_manager.core"
   | "project_manager.protocol"
-  | "worker.core"
-  | "worker.protocol"
+  | "research_worker.core"
+  | "research_worker.protocol"
+  | "coding_worker.core"
+  | "coding_worker.protocol"
   | "quality_reviewer.core"
   | "quality_reviewer.protocol"
   | "collaboration.ask"
@@ -193,8 +236,10 @@ export const ROLE_SPECS: Readonly<Record<ProjectRole, RoleSpec>> = {
       "blocker.open", "blocker.update", "blocker.read",
       "memory.read", "work.report",
     ],
-    // `deliverable` 只给项目经理:它是**整合的产物**(把子项产出收成一份交付),
-    // 别的角色不加 —— worker 交付的是 `evidence`(执行产出),质检写 `review_finding`。
+    // `deliverable` = **整合的产物**(把子项产出收成一份交付)。
+    // ⚠️ 2026-10-08 起它不再是项目经理独有:两个执行角色都持有它,因为它们
+    // 各自是「一份 HTML 报告 / 一个代码服务」的**产出的那个人**。
+    // 质检仍然只写 `review_finding`,执行角色的 `evidence` 仍然是「执行产出」。
     writeKinds: ["work_brief", "decision", "note", "deliverable"],
     promptUnits: [
       "project_manager.core", "project_manager.protocol",
@@ -204,9 +249,59 @@ export const ROLE_SPECS: Readonly<Record<ProjectRole, RoleSpec>> = {
     boundaryDeny: ["ask_client", "tell_client", "project_update", "project_close"],
   },
 
-  // ── Worker:唯一能动代码的角色 ───────────────────────────────────
-  worker: {
-    role: "worker",
+  // ── 研究工:产出**信息**,交付物是文档 ─────────────────────────────
+  //
+  // 用户原话(2026-10-08):「专门用来产出文档、伪代码、架构图、汇报材料等等」。
+  // 这条职责的**落点**是 `board_write(kind='deliverable',
+  // deliverableType='html_report')` —— 一份自包含的 HTML 文档,甲方在沙箱
+  // iframe 里看的就是它。所以它拿 `blackboard.write` 与 `deliverable` 写权。
+  //
+  // ⚠️ **它持 `code.read` 与 `code.exec`,不持 `code.write`。** 这条边界是
+  // **表达意图**的,不是沙箱:`code.exec` 里的 `bash` 当然也能改文件。
+  // 之所以仍然这么划:研究工要写的是**说明性材料**(读代码才能画架构图、
+  // 写伪代码;跑命令才能取到资料),而「产出产品代码」是编码工的活。
+  // 真正带牙齿的机械区分在**交付物类型**上 —— `code_service` 必须指向一个
+  // 真的 git 仓库 + Dockerfile,由平台当场核对(见 `codeservice/port.ts`);
+  // 不是「写个 type 字段」就成立。
+  research_worker: {
+    role: "research_worker",
+    clientFacing: false,
+    ceiling: [
+      "project.read",
+      "work.create", "work.update", "work.read", "work.list",
+      "collab.ask", "collab.escalate", "collab.answer", "collab.read",
+      "collab.meeting.read", "collab.meeting.respond",
+      "blackboard.read", "blackboard.write",
+      "change.propose", "change.review", "change.read",
+      "blocker.open", "blocker.update", "blocker.read",
+      "memory.read",
+      "code.read", "code.exec",
+      "work.report",
+    ],
+    // `deliverable` 从 2026-10-08 起**三个角色都持有**(研究工交 HTML 报告、
+    // 编码工交代码服务、项目经理做整合交付)。这不是「放松了」——
+    // `deliverable` 一直是「整合完了」这个结构化事实的载体,而**执行者自己
+    // 就是产出它的那个人**:一份报告是研究工写出来的,不是项目经理替它写的。
+    writeKinds: ["evidence", "hypothesis", "work_brief", "note", "deliverable"],
+    promptUnits: [
+      "research_worker.core", "research_worker.protocol",
+      "collaboration.ask", "change.propose",
+    ],
+    // 边界:不能见甲方、不能主持或收尾会议、不能改项目范围、不产出产品代码
+    boundaryDeny: [
+      "ask_client", "tell_client",
+      "convene", "meeting_conclude",
+      "project_update", "project_close",
+      "edit", "write",
+    ],
+  },
+
+  // ── 编码工:产出**可运行的东西**,交付物是 git 仓库 ────────────────
+  //
+  // 用户原话:「专门来写代码」。与研究的唯一 ceiling 差别是 **`code.write`**
+  // (edit / write 两个工具),外加提示词里那条「交付物是 `code_service`」的规矩。
+  coding_worker: {
+    role: "coding_worker",
     clientFacing: false,
     ceiling: [
       "project.read",
@@ -220,11 +315,12 @@ export const ROLE_SPECS: Readonly<Record<ProjectRole, RoleSpec>> = {
       "code.read", "code.write", "code.exec",
       "work.report",
     ],
-    writeKinds: ["evidence", "hypothesis", "work_brief", "note"],
+    writeKinds: ["evidence", "hypothesis", "work_brief", "note", "deliverable"],
     promptUnits: [
-      "worker.core", "worker.protocol", "collaboration.ask", "change.propose",
+      "coding_worker.core", "coding_worker.protocol",
+      "collaboration.ask", "change.propose",
     ],
-    // 边界:不能见甲方、不能主持或收尾会议、不能改项目范围
+    // 边界:与研究工相同 —— 不见甲方、不主持或收尾会议、不改项目范围
     boundaryDeny: [
       "ask_client", "tell_client",
       "convene", "meeting_conclude",
@@ -287,6 +383,20 @@ export function writableKinds(role: ProjectRole): readonly ArtifactKind[] {
 // ── module-level type guards(项目纪律:禁止宽类型断言,窄化一律写 guard)──
 export function isProjectRole(v: unknown): v is ProjectRole {
   return typeof v === "string" && (PROJECT_ROLES as readonly string[]).includes(v);
+}
+
+/**
+ * 这个角色**执行工作项**吗(平台会为它唤醒执行回合)。
+ *
+ * 判据只有这一处。三处消费者必须用同一个答案:
+ *   · `runtime/execution.ts` 的 `checkRunnable`(拒绝非执行角色)
+ *   · `runtime/pendingWork.ts` 的 `canExecuteWork`(非执行角色不因工作项被叫醒)
+ *   · `runtime/dispatcher.ts` 的 `execute_assigned_work` / `fix_stranded_assignment`
+ * 真机上「工作项派给了不执行它的角色 ⇒ 那条工作项永远停在原地、而谁也不被叫醒」
+ * 已经发生过一次(`fix_stranded_assignment` 那条规则就是为它加的)。
+ */
+export function isExecutorRole(v: unknown): v is (typeof EXECUTOR_ROLES)[number] {
+  return typeof v === "string" && (EXECUTOR_ROLES as readonly string[]).includes(v);
 }
 
 export function isSpecialization(v: unknown): v is Specialization {

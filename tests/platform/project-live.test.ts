@@ -52,12 +52,13 @@ beforeEach(() => {
   for (const [id, role, name] of [
     ["bm", "business_manager", "业务经理"],
     ["pm", "project_manager", "项目经理"],
-    ["wk", "worker", "工程师"],
+    ["wk", "research_worker", "研究员"],
+    ["cw", "coding_worker", "工程师"],
     ["qa", "quality_reviewer", "质检"],
   ] as const) {
     insertAgent(db, { id, role, specialization: null, displayName: name, createdAt: clock });
     // ⚠️ **成员表是 `project_assignments`,不是 `agents`** —— `listProjectMembers`
-    // 走的是 `listAssignments`。少这一步的话 `agents` 里四个角色都在,而读面返回
+    // 走的是 `listAssignments`。少这一步的话 `agents` 里五个角色都在,而读面返回
     // **空数组**(「本项目没有成员」),测试会在第一条断言上就红。
     addMember(db, P, id, clock);
   }
@@ -145,7 +146,7 @@ describe("① 运行期快照缺失时如实说「读不到」,不许冒充「�
 
     const live = await fetchLive();
     expect(live.runtime).toBe("unavailable");
-    expect(live.agents.length, "四个角色都要在(哪怕读不到运行期)").toBe(4);
+    expect(live.agents.length, "五个角色都要在(哪怕读不到运行期)").toBe(5);
     for (const a of live.agents) {
       expect(a.turn, `${a.agentId} 的回合读不到 ⇒ 必须是 null`).toBeNull();
     }

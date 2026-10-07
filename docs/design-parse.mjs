@@ -45,7 +45,7 @@ export function parseToolTable(md) {
 
 /** 设计 2:Capability × 角色 总矩阵 */
 export function parseMatrix(md) {
-  const m = md.match(/## 7\. Capability × 角色 总矩阵\n\n(\|[\s\S]*?)\n\n\*\*/);
+  const m = md.match(/## 8\. Capability × 角色 总矩阵\n\n(\|[\s\S]*?)\n\n\*\*/);
   if (!m) return null;
   const rows = m[1].split("\n").filter((l) => l.trim().startsWith("|"));
   const header = rows[0].split("|").slice(1, -1).map((c) => c.trim());
@@ -95,7 +95,7 @@ export function parseArtifactKinds(md) {
   return new Set([...m[1].matchAll(/"([a-z_]+)"/g)].map((x) => x[1]));
 }
 
-/** 设计 1 §6.4:DeliverableType 闭合联合(交付物类型,migration 025) */
+/** 设计 1 §6.4:DeliverableType 闭合联合(交付物类型,migration 025 / 026) */
 export function parseDeliverableTypes(md) {
   const m = md.match(/export type DeliverableType =([\s\S]*?)\n```/);
   if (!m) return null;
@@ -118,7 +118,7 @@ export function parseProtocolKinds(md) {
 
 /** 设计 2 §8:writeKinds 汇总表 */
 export function parseWriteKinds(md) {
-  const m = md.match(/## 8\. 写面权限\(writeKinds\)\n\n(\|[\s\S]*?)\n\n/);
+  const m = md.match(/## 9\. 写面权限\(writeKinds\)\n\n(\|[\s\S]*?)\n\n/);
   if (!m) return null;
   const map = new Map();
   for (const line of m[1].split("\n")) {

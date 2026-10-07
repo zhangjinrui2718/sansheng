@@ -43,7 +43,7 @@ import {
   collectTodos, DEFAULT_MAX_ATTEMPTS, type DriverTodo,
 } from "../runtime/dispatcher.js";
 import type {
-  AskView, ArtifactView, BlockerView, ChangeView, ClientQuestionView,
+  AskView, ArtifactView, BlockerView, ChangeView, ClientQuestionView, CodeServiceView,
   MemberActivityView, MemberView, MessageOrigin, ProjectDetail, ProjectLiveView,
   ProjectSummary, ProjectUsageView,
   SessionMessageView, TurnTrigger, TurnUsageView,
@@ -89,7 +89,11 @@ function parseObject(json: string | null): Record<string, unknown> {
 }
 
 function roleOf(raw: string): ProjectRole {
-  return isProjectRole(raw) ? raw : "worker";
+  // 兜底值不是「随便挑一个角色」,而是**最容易看出来的那一个**:库里出现
+  // 未定义角色时,仓储层 `rowToAgent` 已经会硬抛,所以这里几乎不可达;
+  // 真到了这里,返回一个真实存在的角色名比返回空串好 —— 屏幕上出现
+  // `research_worker` 是「这个字段没配上」,空串只是一片空白。
+  return isProjectRole(raw) ? raw : "research_worker";
 }
 
 // ── 工作项 ──────────────────────────────────────────────────────
@@ -136,6 +140,59 @@ export function toArtifactView(
     // migration 025。**`null` 原样透出** —— 非交付物工件没有类型,
     // 交付物也可能是存量 NULL(016 之后写的 markdown 正文)。
     deliverableType: row.deliverableType,
+    // migration 026。**只有 `code_service` 才有坐标**,其余一律 null
+    // (不给一个「空对象」—— 空对象在界面上会被读成「有坐标但全是空」,
+    //  而 `null` 读成「这不是代码服务」,两者是不同的信息)。
+    codeService:
+      row.deliverableType === "code_service" ? parseCodeServiceView(row.metadataJson) : null,
+  };
+}
+
+/**
+ * `metadata_json` → 代码服务坐标(migration 026)。
+ *
+ * ── 为什么在**服务端**解析,而不是把 `metadata_json` 原样丢给前端 ──────
+ *
+ *   ① `ArtifactView` 是列表端点的载荷(单次最多 500 条)。把原始 JSON 透出去
+ *      等于让每条工件都背一段没人读的字符串;
+ *   ② `metadata_json` 里有什么取决于**调用方传了什么**,把它原样交给前端就等于
+ *      让前端消费一个没有契约的形状 —— 而这份契约(`CodeServiceView`)只有一个
+ *      消费点,值得在边界处收口;
+ *   ③ 解析规则只有一处:老行 / 手改的行里可能有缺项或错类型,收口之后
+ *      「读不到」这件事只有一种说法。
+ *
+ * ⚠️ **缺一项就是 `null`,不许填默认值、不许抛。** 一条读不出来坐标的交付物
+ * 在界面上应当显示「读不到」—— 而编一个默认端口会让人照着一条错的命令去部署。
+ */
+function parseCodeServiceView(metadataJson: string | null): CodeServiceView {
+  const str = (v: unknown): string | null =>
+    typeof v === "string" && v.trim() !== "" ? v : null;
+  const num = (v: unknown): number | null =>
+    typeof v === "number" && Number.isFinite(v) ? v : null;
+  const empty: CodeServiceView = {
+    repoPath: null, repoName: null, branch: null, headCommit: null, headSubject: null,
+    commitCount: null, dockerfile: null, service: null, port: null, files: [],
+  };
+  if (metadataJson === null || metadataJson.trim() === "") return empty;
+  let raw: unknown;
+  try {
+    raw = JSON.parse(metadataJson);
+  } catch {
+    return empty;
+  }
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return empty;
+  const m = raw as Record<string, unknown>;
+  return {
+    repoPath: str(m["repoPath"]),
+    repoName: str(m["repoName"]),
+    branch: str(m["branch"]),
+    headCommit: str(m["headCommit"]),
+    headSubject: str(m["headSubject"]),
+    commitCount: num(m["commitCount"]),
+    dockerfile: str(m["dockerfile"]),
+    service: str(m["service"]),
+    port: num(m["port"]),
+    files: Array.isArray(m["files"]) ? m["files"].filter((x): x is string => typeof x === "string") : [],
   };
 }
 

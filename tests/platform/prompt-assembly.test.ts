@@ -64,7 +64,7 @@ describe("loadPromptUnits · 装载与缺失如实报出", () => {
   });
 
   it("单元 id 里的点保留在文件名里(与旧系统 communicator.decide.md 同一命名法)", () => {
-    expect(unitPath("/x", "worker.core")).toBe("/x/harness/system_prompts/worker.core.md");
+    expect(unitPath("/x", "research_worker.core")).toBe("/x/harness/system_prompts/research_worker.core.md");
   });
 });
 
@@ -86,8 +86,12 @@ describe("renderRoleBrief · 从 ROLE_SPECS 机械生成", () => {
     expect(b).toContain("向甲方提问");
   });
 
-  it("**其余三个角色:明确「不直接接触甲方」**", () => {
-    for (const role of ["project_manager", "worker", "quality_reviewer"] as ProjectRole[]) {
+  it("**其余四个角色:明确「不直接接触甲方」**", () => {
+    // 判据从 PROJECT_ROLES **推导**,不手写名单 —— 手写的那一份在加角色时
+    // 会静默地少测一个新角色(循环照跑、测试照绿)。
+    const nonClientFacing = PROJECT_ROLES.filter((r) => r !== "business_manager");
+    expect(nonClientFacing.length, "非客户接口角色不止一个,否则这圈是空转").toBe(4);
+    for (const role of nonClientFacing) {
       const b = renderRoleBrief(role);
       expect(b, `${role} 应写明不直接见甲方`).toContain("不直接接触甲方");
       expect(b).toContain("由业务经理转达");
@@ -104,13 +108,19 @@ describe("renderRoleBrief · 从 ROLE_SPECS 机械生成", () => {
   });
 
   it("简报列出该角色拿不到的工具(boundaryDeny)", () => {
-    const b = renderRoleBrief("worker");
+    const b = renderRoleBrief("research_worker");
     expect(b).toContain("tell_client");
     expect(b).toContain("convene");
+    // 研究工多一条**这次改动新增**的边界:不产出产品代码
+    expect(b).toContain("edit");
+    expect(b).toContain("write");
+    // 负样本:编码工没有这条边界(它**就是**写代码的那个)
+    const c = renderRoleBrief("coding_worker");
+    expect(c).not.toContain("下列工具不在你的权限内:tell_client, ask_client, convene, meeting_conclude, project_update, project_close, edit, write");
   });
 
   it("边界措辞是「机制保证」而不是「请你遵守」", () => {
-    const b = renderRoleBrief("worker");
+    const b = renderRoleBrief("research_worker");
     expect(b).toContain("会在**工具层被拒绝**");
     expect(b).toContain("不要尝试绕过");
   });
@@ -118,8 +128,8 @@ describe("renderRoleBrief · 从 ROLE_SPECS 机械生成", () => {
 
 describe("composeSystemPrompt · 简报 + 单元", () => {
   it("简报在前(身份与边界),单元在后(具体工作方式)", () => {
-    writeUnit("worker.core", "你负责动手实现。");
-    const c = composeSystemPrompt(dataDir, "worker");
+    writeUnit("coding_worker.core", "你负责动手实现。");
+    const c = composeSystemPrompt(dataDir, "coding_worker");
     expect(c.text.indexOf("# 你的角色:")).toBeLessThan(c.text.indexOf("你负责动手实现。"));
   });
 
@@ -134,13 +144,13 @@ describe("composeSystemPrompt · 简报 + 单元", () => {
   });
 
   it("写了哪个就装载哪个,没写的进 missing —— 不静默吞掉", () => {
-    const declared = ROLE_SPECS.worker.promptUnits;
+    const declared = ROLE_SPECS.research_worker.promptUnits;
     const first = declared[0]!;
-    writeUnit(first, "worker 的核心职责。");
-    const c = composeSystemPrompt(dataDir, "worker");
+    writeUnit(first, "研究工的核心职责。");
+    const c = composeSystemPrompt(dataDir, "research_worker");
     expect(c.loadedUnits).toEqual([first]);
     expect([...c.missingUnits].sort()).toEqual(declared.slice(1).sort());
-    expect(c.text).toContain("worker 的核心职责。");
+    expect(c.text).toContain("研究工的核心职责。");
   });
 
   it("即便一个单元都没有,简报仍在 —— 不会拼出空系统提示", () => {

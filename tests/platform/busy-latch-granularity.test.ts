@@ -430,7 +430,9 @@ const BM = "business_manager";
  *      同一条活叫醒 3 次)。所以假会话在回合结束时**把工作项置 `done`**
  *      (`markWorkDone` 那段)—— 真 worker 干完活也是这么做的。
  */
-const WK = "worker";
+// 执行角色的**角色名**:`ORG` 里 `wk` 的角色是 `research_worker`(026 起)。
+// 忙闩的键是 `(项目, 角色)`,写错这个字符串会让 key 对不上而静默失败。
+const WK = "research_worker";
 
 const workTurns = (projectId: string): Turn[] =>
   h.turns.filter((t) => t.projectId === projectId && t.workId !== null);
@@ -491,8 +493,8 @@ describe("A · 忙闩按 `(上下文, agent)` 记", () => {
 
 // ── ① worker 在跑时甲方发得出话 ────────────────────────────────
 
-describe("① 排空在跑 worker 时,甲方对业务经理说的话**发得出去**", () => {
-  itT("不被 `code=busy` 拒,且业务经理那条回合与 worker 那条**重叠**", async () => {
+describe("① 排空在跑执行角色时,甲方对业务经理说的话**发得出去**", () => {
+  itT("不被 `code=busy` 拒,且业务经理那条回合与研究工那条**重叠**", async () => {
     const s = await startHost();
     const db = s.db();
     seedProject(db, "pA", "wkA");
@@ -502,9 +504,9 @@ describe("① 排空在跑 worker 时,甲方对业务经理说的话**发得出�
     const pass = s.runTimerNow();
     expect(
       await until(() => hasWaiter(h, "pA", WK, "wkA")),
-      `worker 的回合必须先真的在跑 —— ${diag()}`,
+      `研究工的回合必须先真的在跑 —— ${diag()}`,
     ).toBe(true);
-    expect(host!.hub.isBusy("pA", "wk"), "worker 占着的是**它自己**那把闩").toBe(true);
+    expect(host!.hub.isBusy("pA", "wk"), "研究工占着的是**它自己**那把闩").toBe(true);
     expect(host!.hub.isBusy("pA", "bm"), "业务经理那把闩此时是空的").toBe(false);
 
     s.send({ type: "send", projectId: "pA", content: "在吗" });
@@ -514,7 +516,7 @@ describe("① 排空在跑 worker 时,甲方对业务经理说的话**发得出�
       `甲方那条消息必须**跑到业务经理那里**(旧实现这里会吃到 code=busy,根本不建回合)—— ${diag()}`,
     ).toBe(true);
     expect(busyErrors(), `**一条 busy 都不该有** —— ${diag()}`).toEqual([]);
-    expect(h.maxInflight, "worker ⊥ 业务经理两条回合必须真的同时在飞").toBeGreaterThanOrEqual(2);
+    expect(h.maxInflight, "研究工 ⊥ 业务经理两条回合必须真的同时在飞").toBeGreaterThanOrEqual(2);
     expect(h.maxPerSession, "同一个 `(上下文, 角色)` 里从来没有两条回合同时在飞").toBe(1);
 
     releaseTurn(h, "pA", WK, "wkA");
@@ -572,7 +574,7 @@ describe("② 业务经理自己正在回你时,再发一条**仍然被拒** `co
 // ── ③ 中断:同项目两角色并发,两个都停 ─────────────────────────
 
 describe("③ 同一项目里两个角色同时在跑时,一次中断**两个都停**", () => {
-  itT("worker ⊥ 业务经理两条回合都收到 abort;别的项目一点没被碰", async () => {
+  itT("研究工 ⊥ 业务经理两条回合都收到 abort;别的项目一点没被碰", async () => {
     const s = await startHost();
     const db = s.db();
     seedProject(db, "pA", "wkA");
@@ -584,7 +586,7 @@ describe("③ 同一项目里两个角色同时在跑时,一次中断**两个都
     const pass = s.runTimerNow();
     expect(
       await until(() => hasWaiter(h, "pA", WK, "wkA") && hasWaiter(h, "pB", WK, "wkB")),
-      `两个项目的 worker 回合都要先在跑 —— ${diag()}`,
+      `两个项目的研究工回合都要先在跑 —— ${diag()}`,
     ).toBe(true);
 
     // 甲方对 pA 说一句话 ⇒ 同一个项目里第二个角色(业务经理)也跑起来
@@ -645,7 +647,7 @@ describe("⑤ 同一个 `(项目, agent)` 并发两条 → 恰好一条被拒", 
 // ── ⑥/⑦ R1 的两条雷 ────────────────────────────────────────────
 
 describe("⑥ R1 的雷 (a):同一个 `(上下文, agent)` 不许建出两条会话", () => {
-  itT("worker ⊥ 业务经理并发之后,常驻会话数 = 两个角色各一条(不是三条、也不漏)", async () => {
+  itT("研究工 ⊥ 业务经理并发之后,常驻会话数 = 两个角色各一条(不是三条、也不漏)", async () => {
     const s = await startHost();
     const db = s.db();
     seedProject(db, "pA", "wkA");
@@ -654,7 +656,7 @@ describe("⑥ R1 的雷 (a):同一个 `(上下文, agent)` 不许建出两条会
 
     const pass = s.runTimerNow();
     expect(await until(() => hasWaiter(h, "pA", WK, "wkA")), diag()).toBe(true);
-    expect(h.sessionCreations, "worker 那条会话已建(计的是**真的建了几次**)").toBe(1);
+    expect(h.sessionCreations, "研究工那条会话已建(计的是**真的建了几次**)").toBe(1);
 
     s.send({ type: "send", projectId: "pA", content: "在吗" });
     expect(await until(() => hasWaiter(h, "pA", BM, null)), diag()).toBe(true);
@@ -683,7 +685,7 @@ describe("⑦ R1 的雷 (b):排空的回合撞上甲方那条路时**排队等**
     h.blockedWork.set("pA", "wkA");
     h.blockedRole.add(sessionKeyOf("pA", BM));
 
-    // 第 1 回合:worker 执行(卡住)
+    // 第 1 回合:研究工执行(卡住)
     const pass = s.runTimerNow();
     expect(await until(() => hasWaiter(h, "pA", WK, "wkA")), diag()).toBe(true);
 
@@ -700,7 +702,7 @@ describe("⑦ R1 的雷 (b):排空的回合撞上甲方那条路时**排队等**
       createdAt: 2,
     });
 
-    // 放掉 worker ⇒ 排空立刻想叫醒业务经理,而甲方那条路还占着
+    // 放掉研究工 ⇒ 排空立刻想叫醒业务经理,而甲方那条路还占着
     releaseTurn(h, "pA", WK, "wkA");
     await sleep(250);
 

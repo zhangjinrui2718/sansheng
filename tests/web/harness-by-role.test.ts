@@ -24,7 +24,7 @@
  * 钉住的都是**悄悄退回去**的东西(没有断言的话,下次有人「顺手」改一下也不会有
  * 任何东西红,而页面上看起来只是「又变长了」):
  *
- *   1. **一次只渲染一个角色**(面板层)—— 传入 worker 时,业务经理独有的单元
+ *   1. **一次只渲染一个角色**(面板层)—— 传入研究工时,业务经理独有的单元
  *      **不许出现**;
  *   2. **编辑器默认折叠** —— `<details>` 不带 `open`(否则又是一屏长正文)。
  *      ⚠️ 这一条自带正样本:同一个 `Disclosure` 组件在 `defaultOpen` 时**必须**
@@ -131,15 +131,15 @@ function role(
   };
 }
 
-/** 两个角色,共同声明 `collaboration.ask`;worker 那条 `worker.core` 盘上没有。 */
+/** 两个角色,共同声明 `collaboration.ask`;研究工那条 `research_worker.core` 盘上没有。 */
 const BM = role("business_manager", "业务经理", {
   clientFacing: true,
   tools: ["c1", "c2"],
   promptUnits: [unit("business_manager.core"), unit("collaboration.ask")],
 });
 
-const WK = role("worker", "工程师", {
-  promptUnits: [unit("collaboration.ask"), unit("worker.core", { loaded: false, content: "" })],
+const WK = role("research_worker", "研究员", {
+  promptUnits: [unit("collaboration.ask"), unit("research_worker.core", { loaded: false, content: "" })],
   // ⚠️ 刻意让「工具名个数(3)」≠「能力条目数(2)」—— 真机上就是这样
   // (一条能力展开成多个工具:blackboard.read → board_list + board_read)。
   // 这两个数**不许**被渲染成分数,下面的断言钉这一点。
@@ -181,7 +181,7 @@ const FULL: HarnessView = {
 const renderDisclosure = (over: Partial<Parameters<typeof RoleHarnessDisclosure>[0]> = {}) =>
   renderToStaticMarkup(
     createElement(RoleHarnessDisclosure, {
-      role: "worker",
+      role: "research_worker",
       view: FULL,
       loading: false,
       error: null,
@@ -205,16 +205,16 @@ const cardHead = (html: string): string => html.slice(0, html.indexOf("<details"
 // ── 判据 1:一次只渲染一个角色(面板层)──────────────────────────
 
 describe("① 一次只渲染一个角色(面板层;页签层已挪去成员页签的测试)", () => {
-  it("传 worker ⇒ 业务经理**独有**的单元不许出现", () => {
+  it("传研究工 ⇒ 业务经理**独有**的单元不许出现", () => {
     const html = renderPane(WK);
-    expect(html, "worker 面板里出现了 business_manager.core").not.toContain("business_manager.core");
+    expect(html, "研究工面板里出现了 business_manager.core").not.toContain("business_manager.core");
     expect(html).toContain("collaboration.ask");
-    expect(html).toContain("worker.core");
+    expect(html).toContain("research_worker.core");
   });
 
-  it("传业务经理 ⇒ worker 独有的单元不许出现", () => {
+  it("传业务经理 ⇒ 研究工独有的单元不许出现", () => {
     const html = renderPane(BM);
-    expect(html).not.toContain("worker.core");
+    expect(html).not.toContain("research_worker.core");
     expect(html).toContain("business_manager.core");
   });
 
@@ -273,7 +273,7 @@ describe("③ 共用单元标注「共用于 N 个角色」", () => {
   });
 
   it("`sharedUnitOwners` 自身:同一个单元出现在多个角色时列全,且不重复", () => {
-    expect(OWNERS.get("collaboration.ask")).toEqual(["业务经理", "工程师"]);
+    expect(OWNERS.get("collaboration.ask")).toEqual(["业务经理", "研究员"]);
     expect(OWNERS.get("business_manager.core")).toEqual(["业务经理"]);
     // 非空自检:夹具真的有两个角色、三个不同单元
     expect(OWNERS.size).toBe(3);
@@ -339,10 +339,10 @@ describe("⑤ 工具面「求解不了」不许显示成「0 个」", () => {
     // 那一例断言的是「`blockedByCeiling` 与 ceiling 的条目名都在屏幕上」——
     // 成员页那块只读视图删掉后,它必须由这里继续钉住。
     const html = renderPane(
-      role("worker", "工程师", {
+      role("research_worker", "研究员", {
         ceiling: ["board_list", "board_read", "code_write"],
         blockedByCeiling: ["org.reset"],
-        promptUnits: [unit("worker.core")],
+        promptUnits: [unit("research_worker.core")],
       }),
     );
     expect(html).toContain("超出架构上界");
@@ -354,10 +354,10 @@ describe("⑤ 工具面「求解不了」不许显示成「0 个」", () => {
 // ── 判据 4:四类「需要注意」都可见 + roleIssueCount 是它们的和 ────
 
 describe("④ 缺单元 / 集合文件坏 / 越权被拒 / 未知工具名 —— 四类都可见", () => {
-  it("四类告警都在 worker 面板里出现,且缺失单元点了名", () => {
+  it("四类告警都在研究工面板里出现,且缺失单元点了名", () => {
     const html = renderPane(WK);
     expect(html).toContain("有 1 个单元声明了但盘上没有文件");
-    expect(html).toContain("worker.core"); // 点名了哪一个
+    expect(html).toContain("research_worker.core"); // 点名了哪一个
     expect(html).toContain("集合文件无效");
     expect(html).toContain("JSON 解析失败"); // problem 原样显示
     expect(html).toContain("超出架构上界");
@@ -375,7 +375,7 @@ describe("④ 缺单元 / 集合文件坏 / 越权被拒 / 未知工具名 —�
     expect(html).not.toContain("盘上没有文件");
   });
 
-  it("`roleIssueCount` = 四类之和(worker 1+1+1+1 = 4;业务经理 = 0)", () => {
+  it("`roleIssueCount` = 四类之和(研究工 1+1+1+1 = 4;业务经理 = 0)", () => {
     expect(roleIssueCount(WK)).toBe(4);
     expect(roleIssueCount(BM)).toBe(0);
     // ⚠️ 这个数字**渲染**在哪里,断言就在哪里:它是**成员页签**上的告警角标
@@ -407,7 +407,7 @@ describe("⑥ 取数失败 / 还没取到 / 视图里没有这个角色 —— �
     expect(/<details[^>]*\sopen/.test(html), "默认折叠的承诺破了").toBe(false);
   });
 
-  it("有需要注意的处数时,卡片头上带出那个数(worker 4 处)", () => {
+  it("有需要注意的处数时,卡片头上带出那个数(研究工 4 处)", () => {
     const html = renderDisclosure({});
     expect(cardHead(html)).toContain("4 处需要注意");
   });
@@ -449,10 +449,10 @@ describe("⑥ 取数失败 / 还没取到 / 视图里没有这个角色 —— �
 // 地方」)。搬出来之后多了一条必须钉住的东西:**卡片头**在不展开时就要能回答
 // 「这个角色的 harness 正不正常」—— 否则用户只能靠展开一大堆正文去猜。
 describe("⑦ 卡片头状态摘要:不展开也读得到(单元 x/y · 能力 n 项 · 实得工具 m 个 · 集合文件状态)", () => {
-  it("worker(1/2 单元、能力 2、工具 3、集合文件坏)在**第一个 `<details>` 之前**就写明", () => {
+  it("研究工(1/2 单元、能力 2、工具 3、集合文件坏)在**第一个 `<details>` 之前**就写明", () => {
     const head = visible(cardHead(renderDisclosure()));
     expect(head, "标题不在卡片头").toContain("角色 harness");
-    expect(head, "角色名不在卡片头").toContain("工程师");
+    expect(head, "角色名不在卡片头").toContain("研究员");
     expect(head).toContain("单元 1/2 已加载");
     expect(head).toContain("能力 2 项");
     expect(head).toContain("实得工具 3 个");
@@ -514,7 +514,7 @@ describe("⑦ 卡片头状态摘要:不展开也读得到(单元 x/y · 能力 n
 
 describe("⑧ 卡片头告警 Pill 与 `embedded`(同一个角色名/标题不许画两遍)", () => {
   it("`roleIssueCount > 0` ⇒ 卡片头出现那个处数;= 0 ⇒ 一个字都不出现(负样本)", () => {
-    const dirtyHead = cardHead(renderDisclosure()); // worker 4 处
+    const dirtyHead = cardHead(renderDisclosure()); // 研究工 4 处
     expect(dirtyHead).toContain("4 处需要注意");
     expect(roleIssueCount(WK), "角标数字必须真的来自 roleIssueCount").toBe(4);
 
@@ -529,7 +529,7 @@ describe("⑧ 卡片头告警 Pill 与 `embedded`(同一个角色名/标题不�
   it("卡片里角色名只出现**一次**(嵌入的面板不再画一遍自己的标题)", () => {
     const text = visible(renderDisclosure());
     expect(
-      (text.match(/工程师/g) ?? []).length,
+      (text.match(/研究员/g) ?? []).length,
       "角色名在卡片里出现了两次 —— 卡片套卡片了",
     ).toBe(1);
   });
@@ -551,7 +551,7 @@ describe("⑧ 卡片头告警 Pill 与 `embedded`(同一个角色名/标题不�
     // 声明它的角色名(那是悬停才看得见的字,不是画出来的标题)。
     expect(visible(embedded), "角色名被画了第二遍").not.toContain(WK.displayName);
     // 内容还在 —— 证明上面两条不是「整块没渲染」的空转
-    expect(embedded).toContain("worker.core");
+    expect(embedded).toContain("research_worker.core");
     expect(embedded).toContain("提示词单元");
     expect(embedded).toContain("文件无效 · 已退化成 ceiling 全集");
 

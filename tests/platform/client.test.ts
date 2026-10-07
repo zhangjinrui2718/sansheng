@@ -82,7 +82,7 @@ beforeEach(() => {
   }
   ids.bm = mk("business_manager").id;
   ids.pm = mk("project_manager").id;
-  ids.wk = mk("worker").id;
+  ids.wk = mk("research_worker").id;
   ids.qa = mk("quality_reviewer").id;
 
   insertProject(db, { id: "p1", name: "测试", client: "甲", goal: "g", status: "active", createdAt: clock });

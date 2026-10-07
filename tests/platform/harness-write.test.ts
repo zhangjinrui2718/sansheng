@@ -37,8 +37,10 @@ afterEach(() => {
 });
 
 describe("规矩① · id 必须来自闭合注册表", () => {
-  it("注册表由 ROLE_SPECS 推导,含全部 12 个单元", () => {
-    expect(promptUnitIds()).toHaveLength(12);
+  it("注册表由 ROLE_SPECS 推导,含全部 14 个单元", () => {
+    // 12 → 14(2026-10-08):`worker.core/.protocol` 拆成
+    // `research_worker.*` 与 `coding_worker.*` 两套,净增两个唯一单元。
+    expect(promptUnitIds()).toHaveLength(14);
     expect(promptUnitIds()).toContain(ANY_UNIT);
     expect(promptUnitIds()).toContain("quality_reviewer.protocol");
   });
@@ -61,8 +63,9 @@ describe("规矩① · id 必须来自闭合注册表", () => {
 
   it("rolesForUnit 说明这个单元是给谁用的", () => {
     expect(rolesForUnit(ANY_UNIT)).toEqual(["business_manager"]);
+    // `collaboration.ask` 由四个角色声明(026 起两个执行角色各一份)
     expect(rolesForUnit("collaboration.ask").sort()).toEqual(
-      ["project_manager", "quality_reviewer", "worker"].sort(),
+      ["project_manager", "quality_reviewer", "research_worker", "coding_worker"].sort(),
     );
   });
 });

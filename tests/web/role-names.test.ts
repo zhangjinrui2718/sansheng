@@ -29,10 +29,11 @@
 import { describe, expect, it } from "vitest";
 import { ROLE_LABEL } from "@/lib/vocab";
 import { ORG, roleDisplayName } from "../../src/platform/runtime/org.js";
-import { PROJECT_ROLES } from "../../src/platform/identity/role.js";
+import { renderRoleBrief } from "../../src/platform/runtime/promptAssembly.js";
+import { PROJECT_ROLES, type ProjectRole } from "../../src/platform/identity/role.js";
 
 describe("角色中文名:后端 ORG ↔ 前端 ROLE_LABEL 逐项相同", () => {
-  it("四个角色一个不漏(漏了就是界面上少一个人)", () => {
+  it("五个角色一个不漏(漏了就是界面上少一个人)", () => {
     expect([...ORG].map((m) => m.role).sort()).toEqual([...PROJECT_ROLES].sort());
     expect(Object.keys(ROLE_LABEL).sort()).toEqual([...PROJECT_ROLES].sort());
   });
@@ -42,8 +43,9 @@ describe("角色中文名:后端 ORG ↔ 前端 ROLE_LABEL 逐项相同", () => 
       expect(ROLE_LABEL[role], `role=${role} 两边名字不一致`).toBe(roleDisplayName(role));
     }
     // 正样本自检:两张表都不是空的(否则上面那圈是空转)
-    expect(PROJECT_ROLES.length).toBe(4);
-    expect(roleDisplayName("worker")).toBe("工程师");
+    expect(PROJECT_ROLES.length).toBe(5);
+    expect(roleDisplayName("research_worker")).toBe("研究员");
+    expect(roleDisplayName("coding_worker")).toBe("工程师");
   });
 
   it("负样本:名字里不许有括号 / 斜杠 / 空格(「不要有解释」的机器表达)", () => {
@@ -59,6 +61,31 @@ describe("角色中文名:后端 ORG ↔ 前端 ROLE_LABEL 逐项相同", () => 
 
   it("`roleDisplayName` 查不到角色时**原样透出代号**,而不是空串", () => {
     // 兜底方向是可观测的:界面上出现 `nobody` 看得出「这名字没配」,空串看不出。
-    expect(roleDisplayName("worker")).toBe("工程师");
+    // ⚠️ 用的是一个**根本不存在**的角色名:`worker` 曾经可以这么写,但 2026-10-08
+    // 它已经不是角色了(改名叫 `research_worker`),拿它当「查不到」的样本会让
+    // 这条断言变成一次**类型错误而不是行为断言**。
+    const nobody = "nobody" as ProjectRole;
+    expect(roleDisplayName(nobody)).toBe("nobody");
+    expect(roleDisplayName(nobody)).not.toBe("");
+  });
+
+  /**
+   * 角色名的**第三处**写法:`runtime/promptAssembly.ts` 的 `ROLE_NAME`
+   * (系统提示里的「# 你的角色:X」)。
+   *
+   * 它此前写的是 `Worker(执行者)` —— 与 `ORG` 的 `工程师` 当场不同,而且
+   * **没有任何检查会红**(当时这份测试只对照 ORG ↔ ROLE_LABEL 两张表)。
+   * 2026-10-08 收编之后在这里补上跨边界对照:三张表逐项相同。
+   */
+  it("第三处:提示词简报里的角色名与 ORG 也逐项相同", () => {
+    for (const role of PROJECT_ROLES) {
+      const brief = renderRoleBrief(role);
+      expect(brief, `role=${role} 的简报里名字不是 ORG 那一份`).toContain(
+        `# 你的角色:${roleDisplayName(role)}`,
+      );
+    }
+    // 正样本自检 + 负样本:旧的写法必须**不再**出现
+    expect(renderRoleBrief("coding_worker")).toContain("# 你的角色:工程师");
+    expect(renderRoleBrief("coding_worker")).not.toContain("Worker(执行者)");
   });
 });

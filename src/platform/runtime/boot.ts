@@ -25,6 +25,7 @@ import { resolveModel, syncActiveProviderApiKeyEnv } from "../infra/providers.js
 import { openPlatformDb } from "../storage/db.js";
 import { SqliteMemory } from "../memory/sqliteMemory.js";
 import { createLoggingClientChannel } from "../client/port.js";
+import { createGitCodeService } from "../codeservice/git.js";
 import { resolveAllToolSets, strayToolSetFiles, toolSetForDataDir } from "../harness/toolSet.js";
 import { log } from "../../shared/log.js";
 import type { PlatformModel } from "./session.js";
@@ -42,6 +43,15 @@ export interface BootOptions {
   /** 注入时钟(id / now),测试可控 */
   readonly now?: () => number;
   readonly newId?: (prefix: string) => string;
+  /**
+   * **工作根** —— 会话 `cwd` / 代码服务仓库的根。
+   *
+   * 缺省 `settings.cwd`。显式给它是为了 `--cwd` 那条路:`sessionCwd()` 用的是
+   * `opts.cwd ?? settings.cwd`,而 `code_service` 的**包含性校验**必须与它同一个根。
+   * 两者不一致时会出现一种极难查的形态:仓库明明在「这次会话的工作目录」里,
+   * 核对却说它在工作根之外(见 `codeservice/git.ts` 的包含性校验)。
+   */
+  readonly workspaceRoot?: string;
 }
 
 export interface BootedPlatform {
@@ -151,6 +161,12 @@ export function bootPlatform(opts: BootOptions): BootedPlatform {
     now: opts.now ?? (() => Date.now()),
     newId: opts.newId ?? defaultNewId,
     toolSetFor,
+    // 代码服务的核对面(migration 026 的 `code_service` 交付物)。
+    // ⚠️ 根取 `workspaceRoot ?? settings.cwd`,与 `serve.ts` 的 `sessionCwd()`
+    // 走同一个默认值 —— 详见 `BootOptions.workspaceRoot`。
+    codeService: createGitCodeService({
+      workspaceRoot: opts.workspaceRoot ?? settings.cwd,
+    }),
   };
 
   return {

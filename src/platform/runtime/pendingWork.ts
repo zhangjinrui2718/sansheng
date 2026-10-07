@@ -31,7 +31,7 @@ import {
   listWorks, depsSatisfied, depState, workIdsWithChildren, type WorkRow,
 } from "../storage/repo/works.js";
 import { getProjectRow } from "../storage/repo/projects.js";
-import { ROLE_SPECS, isProjectRole, type ProjectRole } from "../identity/role.js";
+import { ROLE_SPECS, isProjectRole, isExecutorRole, type ProjectRole } from "../identity/role.js";
 
 export interface PendingWork {
   /** 在等我答的提问 —— **最高优先级**,有人因为我停着 */
@@ -198,9 +198,9 @@ export function collectPendingWork(
 export function hasActionableWork(w: PendingWork): boolean {
   const role = w.role;
   const canReviewChange = role === null || ROLE_SPECS[role].ceiling.includes("change.review");
-  // 执行只有 worker 能做(`runWorkItem` 的 checkRunnable 会拒绝别的角色),
-  // 所以派给别人的工作项不算「他此刻能动的事」。
-  const canExecuteWork = role === null || role === "worker";
+  // 执行只有**执行角色**(研究工 / 编码工)能做(`runWorkItem` 的 checkRunnable
+  // 会拒绝别的角色),所以派给别人的工作项不算「他此刻能动的事」。
+  const canExecuteWork = role === null || isExecutorRole(role);
   return (
     w.asksToAnswer.length > 0 ||
     w.meetingsToRespond.length > 0 ||

@@ -159,11 +159,11 @@ function qaPass(on: Database.Database = db): void {
 // ── ① 每个角色的可执行待办 ──────────────────────────────────────
 
 describe("collectPendingWork · 分派给我的工作项", () => {
-  it("派给 worker 的 open 工作项出现在 myOpenWorks 里", () => {
+  it("派给执行角色的 open 工作项出现在 myOpenWorks 里", () => {
     const w = mkWork();
     const pw = collectPendingWork(db, "wk", "p1", T0);
     expect(pw.myOpenWorks.map((x) => x.id)).toEqual([w]);
-    expect(pw.role).toBe("worker");
+    expect(pw.role).toBe("research_worker");
   });
 
   it("前置没满足的工作项进 myWaitingWorks,不算可开工", () => {
@@ -178,7 +178,7 @@ describe("collectPendingWork · 分派给我的工作项", () => {
     expect(collectPendingWork(db, "wk", "p1", T0 + 2).myOpenWorks.map((x) => x.id)).toEqual([downstream]);
   });
 
-  it("只有工作项算不算 actionable —— 算,而且只有 worker 算", () => {
+  it("只有工作项算不算 actionable —— 算,而且只有执行角色算", () => {
     mkWork();
     expect(hasActionableWork(collectPendingWork(db, "wk", "p1", T0))).toBe(true);
     // 同一条工作项派给项目经理:他不持 code.*,平台也不该叫他去执行
@@ -246,7 +246,7 @@ describe("collectTodos · 谁此刻能动手(纯查询,不接收任何「上次�
       .toBeLessThan(todos.findIndex((t) => t.kind === "execute_work"));
   });
 
-  it("worker 的工作项 → execute_work 且带目标 id", () => {
+  it("执行角色的工作项 → execute_work 且带目标 id", () => {
     const w = mkWork();
     const t = board("p1", T0).runnable.find((x) => x.kind === "execute_work");
     expect(t).toMatchObject({ agentId: "wk", target: w, key: `execute_work:${w}` });
@@ -301,7 +301,7 @@ describe("collectTodos · 谁此刻能动手(纯查询,不接收任何「上次�
     expect(board("p1", T0 + 2).runnable.some((t) => t.agentId === "wk")).toBe(false);
   });
 
-  it("派给非 worker 的存量工作项 → 叫醒派活的人去处置(真机现场的自愈路径)", () => {
+  it("派给非执行角色的存量工作项 → 叫醒派活的人去处置(真机现场的自愈路径)", () => {
     mkWork({ assignee: "bm", title: "与甲方对齐业务场景" });
     const t = board("p1", T0).runnable.find((x) => x.kind === "fix_work_assignment");
     expect(t).toMatchObject({ agentId: "pm" });
@@ -679,12 +679,13 @@ describe("排空器 · 重启后补跑(状态在库里)", () => {
 // ── 任务描述 ────────────────────────────────────────────────────
 
 describe("renderTask · 每个待办给 agent 的那一段", () => {
-  it("拆解那条明确说「不要自己动手做」,并限定负责人只能是 worker", () => {
+  it("拆解那条明确说「不要自己动手做」,并限定负责人只能是执行角色", () => {
     const t = board("p1", T0).runnable[0]!;
     const text = renderTask(db, t);
     expect(text).toContain("work_create");
     expect(text).toContain("不要自己动手做");
-    expect(text).toContain("负责人只能是 **worker**");
+    expect(text).toContain("负责人只能是**执行角色**");
+    expect(text).toContain("research_worker / coding_worker");
   });
 
   it("汇报那条明说「没有人向你提问」,并带上库里查出来的事件现场", () => {

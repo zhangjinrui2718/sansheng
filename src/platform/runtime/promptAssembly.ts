@@ -125,10 +125,17 @@ const CAPABILITY_LABEL: Readonly<Partial<Record<Capability, string>>> = {
   "work.report": "汇报进度",
 };
 
+/**
+ * 角色中文名。**必须与 `runtime/org.ts` 的 `ORG` 逐项相同** —— 这一份曾经
+ * 写成 `Worker(执行者)`(一个名字里塞进一句解释),而 `ORG` 写的是 `工程师`,
+ * 于是同一个角色在提示词与界面上有两个名字(2026-10-08 收编)。
+ * `tests/web/role-names.test.ts` 现在把这一份也纳入跨边界对照。
+ */
 const ROLE_NAME: Readonly<Record<ProjectRole, string>> = {
   business_manager: "业务经理",
   project_manager: "项目经理",
-  worker: "Worker(执行者)",
+  research_worker: "研究员",
+  coding_worker: "工程师",
   quality_reviewer: "质检审查员",
 };
 

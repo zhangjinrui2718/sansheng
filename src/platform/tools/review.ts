@@ -52,7 +52,7 @@ const reviewVerdict: PlatformTool = {
   capability: "work.review_verdict",
   description:
     "**你必须为每一次审查调用它** —— 写明这条产出是「通过」还是「不通过」。" +
-    "「不通过」会让平台把这条工作项重开、由 worker 再做一轮;不调用它,平台**不会**" +
+    "「不通过」会让平台把这条工作项重开、由原来的执行者再做一轮;不调用它,平台**不会**" +
     "认为你审过了(它只认这个调用,不看你写的正文)。" +
     "审查意见本身仍然要落成 review_finding 工件 —— 结论给人看,这个调用给机器看。",
   parameters: Type.Object({
@@ -129,7 +129,7 @@ const reviewVerdict: PlatformTool = {
     // 已经把 `done → in_progress` 定为「审查后退回重做」的那条边,而
     // `done → open` **不存在**(从 `done` 出发只有 `in_progress` 一个出边)。
     // 裁决 ① 的第 3 条正好覆盖我们要的效果:迁出 `done` 时 `review_state` 清成
-    // `none`,所以「等审」不会挂在一份已经退回重做的产出上 —— 它回 worker 了。
+    // `none`,所以「等审」不会挂在一份已经退回重做的产出上 —— 它回执行者了。
     //
     // 裁决 ① 里那条**已知代价**在这里原样成立:已经消费掉的 outbox 事件不会撤回,
     // 于是「已向甲方交代过完成」与「其实还没做完」可以同时成立。
@@ -147,7 +147,7 @@ const reviewVerdict: PlatformTool = {
     }
     return ok(
       `已记录审查结论:${work.title} = **不通过**(severity=${severity})。` +
-        `工作项已退回 in_progress,worker 会再跑一轮。` +
+        `工作项已退回 in_progress,原执行者会再跑一轮。` +
         (findingId !== undefined ? `审查意见见 ${findingId}。` : "") +
         `\n⚠️ 若这次完成此前已向甲方交代过,那次交代**不会**被撤回(迁移表【裁决 ①】` +
         `记着的已知代价)—— 需要时请主动向甲方说明。`,

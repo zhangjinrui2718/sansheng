@@ -55,7 +55,8 @@ beforeEach(() => {
   }
   ids.bm = mk("business_manager");
   ids.pm = mk("project_manager");
-  ids.wk = mk("worker", "algorithm");
+  ids.wk = mk("research_worker", "algorithm");
+  ids.cw = mk("coding_worker", "engineering");
   ids.qa = mk("quality_reviewer");
 
   insertProject(db, { id: "p1", name: "测试", client: "甲", goal: "g", status: "active", createdAt: clock });
@@ -116,7 +117,15 @@ describe("createPlatformSession · 接线成功路径", () => {
     if (!r.ok) throw new Error(r.detail);
     const custom = new Set(r.wiring.customToolNames);
     const builtinOnly = r.wiring.allowlist.filter((t) => !custom.has(t));
-    // worker 的 code.write → edit / write,所以是 7 个而非 6 个
+    // 研究工持 `code.read` + `code.exec` 而**不持** `code.write` ⇒ 没有 edit / write
+    expect(builtinOnly.sort()).toEqual(["bash", "find", "grep", "ls", "read"]);
+  });
+
+  it("编码工比研究工多 `code.write` ⇒ 内置面里多出 edit / write(唯一那条 ceiling 差别)", async () => {
+    const r = await createPlatformSession(deps, ids.cw, "p1", { ...OPTS, createSession: fakeSdk({ opts: null }) });
+    if (!r.ok) throw new Error(r.detail);
+    const custom = new Set(r.wiring.customToolNames);
+    const builtinOnly = r.wiring.allowlist.filter((t) => !custom.has(t));
     expect(builtinOnly.sort()).toEqual(["bash", "edit", "find", "grep", "ls", "read", "write"]);
   });
 
@@ -152,8 +161,8 @@ describe("createPlatformSession · 业务经理的甲方通道", () => {
     expect(r.wiring.customToolNames).toContain("tell_client");
   });
 
-  it("**其余三个角色的 customTools 里绝对没有它们**", async () => {
-    for (const key of ["pm", "wk", "qa"] as const) {
+  it("**其余四个角色的 customTools 里绝对没有它们**", async () => {
+    for (const key of ["pm", "wk", "cw", "qa"] as const) {
       const cap: Capture = { opts: null };
       const r = await createPlatformSession(deps, ids[key]!, "p1", { ...OPTS, createSession: fakeSdk(cap) });
       if (!r.ok) throw new Error(r.detail);

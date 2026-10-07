@@ -30,6 +30,7 @@ import {
 } from "../storage/repo/projects.js";
 import { getWork } from "../storage/repo/works.js";
 import { getArtifact } from "../storage/repo/artifacts.js";
+import type { CodeServicePort } from "../codeservice/port.js";
 import { resolveClientQuestion } from "../tools/client.js";
 import { ensureOrg, ensureProjectOrg, orgReady, roleDisplayName } from "../runtime/org.js";
 import { loadPromptUnits, unitPath } from "../runtime/promptAssembly.js";
@@ -105,6 +106,15 @@ export interface HttpDeps {
   readonly reset: () => ResetReport;
   /** harness 写面的两个目录(数据目录 + 出厂副本目录) */
   readonly harnessDirs: FactoryDirs;
+  /**
+   * **代码服务的核对面**(migration 026)。用来读一个代码服务交付物的**最近提交**
+   * —— 那是「这一版到底改了什么」的唯一现场,而它只有在盘上才读得到。
+   *
+   * ⚠️ **可选**:只挂 HTTP 的装配(测试、诊断)拿不到它,那时端点返回
+   * `runtime: "unavailable"`,而**不是**把读不到渲染成「没有提交」——
+   * 与 `live` 那条同源:读不到不是空。
+   */
+  readonly codeService?: CodeServicePort;
   /** 设置读写(复用旧 store —— 它是基础设施,不是旧系统的领域逻辑) */
   readonly settings: {
     read: () => unknown;
@@ -478,6 +488,68 @@ export function createPlatformApp(deps: HttpDeps): Hono {
     // (这个 bug 是并行 subagent 逐字段比对两个端点时发现的。)
     return c.json({
       artifact: toArtifactView(db, row, (id) => getAgent(db, id)?.displayName ?? id),
+    });
+  });
+
+  /**
+   * 代码服务交付物的**最近提交**(migration 026)。
+   *
+   * ── 为什么它不是「交付物的一部分」,而是一条**现读**的边 ────────────
+   *
+   * 写进 `metadata_json` 的坐标是**交付那一刻**的事实(HEAD 是哪个提交)。
+   * 而「这个仓库后来越改了什么」是**另一个问题**,它的答案是**现在**去盘上读 ——
+   * 存进库就会过期,而过期的快照看起来与新鲜的一模一样。
+   *
+   * 三条如实(都对应一种「屏幕上看不出」的错):
+   *   · 工件不存在 → 404;
+   *   · 工件不是 `code_service` → 400 并说明(不是回一个空列表);
+   *   · 没接核对面 / 坐标里没有 `repoPath` / git 读不出来 → `runtime: "unavailable"`
+   *     且带 `problem`,**不是** `commits: []`。
+   */
+  app.get("/api/artifacts/:id/commits", (c) => {
+    const row = getArtifact(db, c.req.param("id"));
+    if (row === null) return c.json(err("not_found", "工件不存在", 404).body, 404);
+    if (row.deliverableType !== "code_service") {
+      return c.json(
+        err(
+          "invalid_args",
+          `工件 ${row.id} 的 deliverableType 是 ${row.deliverableType ?? "null"},不是 code_service —— ` +
+            `只有代码服务交付物才有仓库提交可读。`,
+        ).body,
+        400,
+      );
+    }
+    const limitRaw = Number(c.req.query("limit"));
+    const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? Math.min(limitRaw, 100) : 20;
+    const cs = deps.codeService;
+    const view = toArtifactView(db, row, (id) => getAgent(db, id)?.displayName ?? id);
+    if (cs === undefined || view.codeService?.repoPath == null) {
+      return c.json({
+        runtime: "unavailable" as const,
+        commits: null,
+        head: view.codeService?.headCommit ?? null,
+        branch: view.codeService?.branch ?? null,
+        problem:
+          cs === undefined
+            ? "本次装配没有接上代码服务核对面(HTTP 侧拿不到磁盘)"
+            : "这条交付物的坐标里没有 repoPath,读不到仓库",
+      });
+    }
+    const commits = cs.recentCommits(view.codeService.repoPath, limit);
+    if (commits === null) {
+      return c.json({
+        runtime: "unavailable" as const,
+        commits: null,
+        head: view.codeService.headCommit,
+        branch: view.codeService.branch,
+        problem: `读不到仓库 ${view.codeService.repoPath} 的提交(目录被移走 / 删掉,或 git 不可用)`,
+      });
+    }
+    return c.json({
+      runtime: "ok" as const,
+      commits,
+      head: view.codeService.headCommit,
+      branch: view.codeService.branch,
     });
   });
 

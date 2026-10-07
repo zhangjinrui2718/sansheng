@@ -63,6 +63,15 @@ const docCaps = parseCapabilityUnion(p1);
 const docTools = parseToolTable(p1);
 const docMatrix = parseMatrix(p2);
 const docFactory = parseFactorySets(p2);
+
+/**
+ * 文档里的角色**显示名**清单 —— 从解析结果推导,**不再手写一份**。
+ *
+ * 手写的那一份是「同一个事实的第二种写法」:2026-10-08 加了研究工/编码工之后,
+ * 三处 `["业务经理","项目经理","Worker","质检审查员"]` 会**静默地少测两个角色**
+ * (循环照跑、测试照绿,而新角色一条断言都没覆盖)。
+ */
+const DOC_ROLE_DISPLAYS = docFactory.map((f) => f.role);
 const docKinds = parseArtifactKinds(p1);
 const docDeliverableTypes = parseDeliverableTypes(p1);
 const docProtocolKinds = parseProtocolKinds(p1);
@@ -99,12 +108,15 @@ describe("设计文档解析成功(前置)", () => {
   it("五份结构都解析到了", () => {
     expect(docCaps?.size, "设计 1 能力联合").toBeGreaterThan(0);
     expect(docTools?.size, "设计 1 工具展开表").toBeGreaterThan(0);
-    expect(docMatrix?.roles.length, "设计 2 角色矩阵").toBe(4);
-    expect(docFactory.length, "设计 2 出厂集合").toBe(4);
+    // 2026-10-08:执行角色一分为二(研究工 / 编码工)⇒ 4 → 5。
+    // 这两个数字是**正样本自检**:下面那些 `for (const display of …)` 循环
+    // 如果解析为空就是空转(全绿而什么都没测),这里把基数钉住。
+    expect(docMatrix?.roles.length, "设计 2 角色矩阵").toBe(5);
+    expect(docFactory.length, "设计 2 出厂集合").toBe(5);
     expect(docKinds?.size, "设计 1 ArtifactKind").toBeGreaterThan(0);
   });
 
-  it("四份出厂集合 JSON 都合法", () => {
+  it("五份出厂集合 JSON 都合法", () => {
     const bad = docFactory.filter((f) => f.parseError).map((f) => f.role);
     expect(bad, "这些角色的 JSON 解析失败,文档里可能有尾逗号").toEqual([]);
   });
@@ -163,7 +175,7 @@ describe("E3 · 角色代号 ↔ 文档标题", () => {
 });
 
 describe("E4 · 各角色 ceiling ↔ ROLE_SPECS", () => {
-  for (const display of ["业务经理", "项目经理", "Worker", "质检审查员"]) {
+  for (const display of DOC_ROLE_DISPLAYS) {
     it(`${display} 的 ceiling 与设计 2 一致`, () => {
       const code = displayToCode.get(display) as ProjectRole | undefined;
       expect(code, `文档里找不到角色「${display}」的代号`).toBeDefined();
@@ -178,7 +190,7 @@ describe("E4 · 各角色 ceiling ↔ ROLE_SPECS", () => {
 });
 
 describe("E5 · 各角色 writeKinds ↔ ROLE_SPECS", () => {
-  for (const display of ["业务经理", "项目经理", "Worker", "质检审查员"]) {
+  for (const display of DOC_ROLE_DISPLAYS) {
     it(`${display} 的 writeKinds 与设计 2 一致`, () => {
       const code = displayToCode.get(display) as ProjectRole;
       const docWK = docInlineWK?.get(display);
@@ -306,7 +318,7 @@ describe("E8 · 文档声称的计数", () => {
 });
 
 describe("E9 · 各角色 promptUnits ↔ 设计 2 提示词单元表", () => {
-  for (const display of ["业务经理", "项目经理", "Worker", "质检审查员"]) {
+  for (const display of DOC_ROLE_DISPLAYS) {
     it(`${display} 的 promptUnits 与文档一致`, () => {
       const code = displayToCode.get(display) as ProjectRole;
       const docUnits = docPromptUnits?.get(display);

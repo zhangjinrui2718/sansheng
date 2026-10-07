@@ -22,6 +22,7 @@ import { solveToolset, type Agent, type Project, type ToolSetFile } from "../har
 import type { Capability, ToolName } from "../harness/capability.js";
 import type { MemoryPort } from "../memory/port.js";
 import type { ClientChannel } from "../client/port.js";
+import type { CodeServicePort } from "../codeservice/port.js";
 import type { ToolRunContext } from "../tools/types.js";
 
 /** 进程级依赖。会话工厂持有一份,每次工具调用按 agent + project 组装。 */
@@ -29,6 +30,12 @@ export interface RuntimeDeps {
   readonly db: Database.Database;
   readonly memory?: MemoryPort;
   readonly client?: ClientChannel;
+  /**
+   * 代码服务的核对面。缺省 = **没有接线**:那时写 `code_service` 交付物会被
+   * 拒绝并说明是装配错误(`tools/types.ts` 的 `codeService` 注释)。
+   * 生产由 `bootPlatform` 注入真实现(`codeservice/git.ts`)。
+   */
+  readonly codeService?: CodeServicePort;
   /** 时钟注入(测试可控) */
   readonly now?: () => number;
   /** id 生成注入(测试可复现) */
@@ -141,6 +148,7 @@ export function buildToolContext(
     newId: deps.newId ?? defaultNewId,
     ...(deps.memory !== undefined ? { memory: deps.memory } : {}),
     ...(deps.client !== undefined ? { client: deps.client } : {}),
+    ...(deps.codeService !== undefined ? { codeService: deps.codeService } : {}),
     ...(deps.onStateChange !== undefined ? { nudge: deps.onStateChange } : {}),
   } satisfies Omit<ToolRunContext, "project">;
 

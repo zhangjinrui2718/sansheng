@@ -47,7 +47,7 @@ beforeEach(() => {
   for (const [id, role, name] of [
     ["bm", "business_manager", "业务经理"],
     ["pm", "project_manager", "项目经理"],
-    ["wk", "worker", "工程师"],
+    ["wk", "research_worker", "研究员"],
     ["qa", "quality_reviewer", "质检"],
   ] as const) {
     insertAgent(db, { id, role, specialization: null, displayName: name, createdAt: clock });
@@ -159,8 +159,8 @@ describe("A3 · 成员页清单:条数来自 SQL GROUP BY", () => {
     expect(bm?.role).toBe("business_manager");
     expect(bm?.agentName).toBe("业务经理");
     const wk = body.groups.find((g) => g.agentId === "wk");
-    expect(wk?.role).toBe("worker");
-    expect(wk?.agentName).toBe("工程师");
+    expect(wk?.role).toBe("research_worker");
+    expect(wk?.agentName).toBe("研究员");
   });
 
   it("截断时 total 仍是真值(拿 messages.length 冒充总数会红)", async () => {

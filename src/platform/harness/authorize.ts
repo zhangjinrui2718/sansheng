@@ -564,7 +564,11 @@ export function isActiveMember(project: Project, agentId: string): boolean {
  * 应改为明确的一级。见本批次报告。
  */
 export const ESCALATION_TARGET: Readonly<Record<ProjectRole, ProjectRole | null>> = {
-  worker: "project_manager",
+  // 两个执行角色的上一级都是项目经理 —— 它们平级,差别在**产出形态**
+  // (研究工交信息,编码工交代码),不在组织层级。见 `identity/role.ts` 的
+  // `EXECUTOR_ROLES` 注释。
+  research_worker: "project_manager",
+  coding_worker: "project_manager",
   project_manager: "business_manager",
   quality_reviewer: "business_manager",
   business_manager: null,

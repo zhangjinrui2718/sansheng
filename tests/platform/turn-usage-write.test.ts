@@ -56,7 +56,7 @@ let db: Database.Database;
 
 beforeEach(() => {
   db = openPlatformMemoryDb();
-  insertAgent(db, { id: "wk", role: "worker", specialization: "engineering", displayName: "工程师", createdAt: 1 });
+  insertAgent(db, { id: "wk", role: "research_worker", specialization: "engineering", displayName: "研究员", createdAt: 1 });
   insertAgent(db, { id: "pm", role: "project_manager", specialization: null, displayName: "项目经理", createdAt: 1 });
   insertProject(db, { id: "p1", name: "项目一", client: "甲", goal: "g", status: "active", createdAt: 1 });
   insertProject(db, { id: "p2", name: "项目二", client: "乙", goal: "g", status: "active", createdAt: 1 });

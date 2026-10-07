@@ -51,8 +51,8 @@ beforeEach(() => {
 
   ids.bm = mk("business_manager").id;
   ids.pm = mk("project_manager").id;
-  ids.wkAlgo = mk("worker", "algorithm").id;
-  ids.wkEng = mk("worker", "engineering").id;
+  ids.wkAlgo = mk("research_worker", "algorithm").id;
+  ids.wkEng = mk("research_worker", "engineering").id;
   ids.qa = mk("quality_reviewer").id;
 
   const pid = "pj_1";
@@ -136,7 +136,7 @@ describe("注册表 · 声明与能力必须一致(7-E 那个坑的机器防线)
   });
 
   it("角色工具建成状态:已实现 + 未实现 = 出厂工具集", () => {
-    for (const role of ["business_manager", "project_manager", "worker", "quality_reviewer"] as const) {
+    for (const role of ["business_manager", "project_manager", "research_worker", "coding_worker", "quality_reviewer"] as const) {
       const { implemented, notYetBuilt } = toolBuildStatusForRole(role);
       expect(implemented.length + notYetBuilt.length).toBeGreaterThan(0);
       for (const t of notYetBuilt) expect(TOOL_INDEX.has(t)).toBe(false);
@@ -165,7 +165,7 @@ describe("派发器 · 四道拦截", () => {
   });
 
   it("角色 ceiling 不含该能力 → denied(即便工具存在)", () => {
-    // worker 没有 project.open
+    // 研究工没有 project.open
     const e = errOf(call(ids.wkAlgo, "project_open", { name: "x", client: "y", goal: "z" }));
     expect(e.code).toBe("denied");
     expect(e.message).toContain("架构上界");
@@ -254,44 +254,61 @@ describe("BC1 工具 · work_*", () => {
   it("work_create 解析负责人并建项", () => {
     const t = okText(call(ids.pm, "work_create", {
       title: "实现算法", goal: "产出可复现结果",
-      assigneeRole: "worker", assigneeSpec: "algorithm",
+      assigneeRole: "research_worker", assigneeSpec: "algorithm",
     }));
     const wid = t.match(/已创建 (\S+?)「/)?.[1];
     expect(wid).toBeDefined();
     expect(getWork(db, wid!)?.assigneeAgentId).toBe(ids.wkAlgo);
   });
 
-  it("work_create 只有 worker 能当负责人 —— 别的角色在调用期被拒(结构化 + 回灌合法值)", () => {
+  it("work_create 只有执行角色能当负责人 —— 别的角色在调用期被拒(结构化 + 回灌合法值)", () => {
     // 批次 21:真机现场是「项目经理把活派给了 business_manager,那条工作项至今 open」——
-    // 平台只为 worker 执行工作项(`runWorkItem.checkRunnable` 拒绝别的角色)。
-    // 所以负责人不再是自由字符串,而是一个**只允许 worker** 的约束。
+    // 平台只为**执行角色**执行工作项(`runWorkItem.checkRunnable` 拒绝别的角色)。
+    // 所以负责人不再是自由字符串,而是一个**只允许执行角色**的约束。
+    // 2026-10-08:合法值从「一个」变成「两个」(`EXECUTOR_ROLES`),下面同时钉住
+    // 「两个都拒不了」与「两个都派得出去」—— 少了后半句,一个把执行角色全拒的
+    // 过度收紧也能让这组全绿。
     for (const role of ["business_manager", "project_manager", "quality_reviewer", "nonexistent"]) {
       const e = errOf(call(ids.pm, "work_create", { title: "x", goal: "y", assigneeRole: role }));
       expect(e.code, `角色 ${role} 不该被接受为负责人`).toBe("invalid_args");
-      expect(e.message).toContain("worker");
-      // 8-F:拒绝必须让模型能据此自纠
-      expect(e.alternatives).toEqual(["worker"]);
+      expect(e.message).toContain("执行角色");
+      // 8-F:拒绝必须让模型能据此自纠 —— 回灌的就是 `EXECUTOR_ROLES` 全量
+      expect(e.alternatives).toEqual(["research_worker", "coding_worker"]);
     }
-    // 合法的那一个还是要能跑通
+    // 合法的那两个都要能跑通(研究工默认那个、编码工新加那个)
     expect(okText(call(ids.pm, "work_create", {
-      title: "x", goal: "y", assigneeRole: "worker", assigneeSpec: "algorithm",
+      title: "x", goal: "y", assigneeRole: "research_worker", assigneeSpec: "algorithm",
     }))).toContain("已创建");
+    // 编码工这个现场在**用例内**建:放进 beforeEach 会让别处的成员数断言(6 个成员)
+    // 跟着漂 —— 它只是想证明「第二个执行角色也派得出去」,不是在所有用例里都存在。
+    const cwId = "ag_coding_worker_engineering";
+    insertAgent(db, {
+      id: cwId, role: "coding_worker", specialization: "engineering",
+      displayName: "工程师", createdAt: clock,
+    });
+    addMember(db, "pj_1", cwId, clock);
+    const cwWork = okText(call(ids.pm, "work_create", {
+      title: "写代码", goal: "交一个能跑的服务",
+      assigneeRole: "coding_worker", assigneeSpec: "engineering",
+    })).match(/已创建 (\S+?)「/)![1]!;
+    // 负样本的另一半:派给编码工的工作项,负责人**真的**是编码工(不是解析到研究工)
+    expect(getWork(db, cwWork)?.assigneeAgentId).toBe(cwId);
   });
 
-  it("work_assign 也不能把工作项改派给非 worker(改派与分派走同一条解析路径)", () => {
+  it("work_assign 也不能把工作项改派给非执行角色(改派与分派走同一条解析路径)", () => {
     const t = okText(call(ids.pm, "work_create", {
-      title: "A", goal: "g", assigneeRole: "worker", assigneeSpec: "algorithm",
+      title: "A", goal: "g", assigneeRole: "research_worker", assigneeSpec: "algorithm",
     }));
     const w = t.match(/已创建 (\S+?)「/)![1]!;
     const e = errOf(call(ids.pm, "work_assign", { workId: w, assigneeRole: "business_manager" }));
     expect(e.code).toBe("invalid_args");
-    expect(e.alternatives).toEqual(["worker"]);
+    expect(e.alternatives).toEqual(["research_worker", "coding_worker"]);
     expect(getWork(db, w)?.assigneeAgentId, "被拒的改派不该改库").toBe(ids.wkAlgo);
   });
 
   it("work_create 同角色多人且未给 spec → 报歧义,迫使明确", () => {
     const e = errOf(call(ids.pm, "work_create", {
-      title: "x", goal: "y", assigneeRole: "worker",
+      title: "x", goal: "y", assigneeRole: "research_worker",
     }));
     expect(e.code).toBe("not_found");
     expect(e.message).toContain("必须用 spec");
@@ -300,7 +317,7 @@ describe("BC1 工具 · work_*", () => {
 
   it("work_create 细分不存在 → 列出实际存在的细分", () => {
     const e = errOf(call(ids.pm, "work_create", {
-      title: "x", goal: "y", assigneeRole: "worker", assigneeSpec: "data",
+      title: "x", goal: "y", assigneeRole: "research_worker", assigneeSpec: "data",
     }));
     expect(e.code).toBe("not_found");
     expect(e.alternatives).toEqual(["algorithm", "engineering"]);
@@ -308,10 +325,10 @@ describe("BC1 工具 · work_*", () => {
 
   it("work_create 带合法依赖", () => {
     const a = okText(call(ids.pm, "work_create", {
-      title: "A", goal: "g", assigneeRole: "worker", assigneeSpec: "algorithm",
+      title: "A", goal: "g", assigneeRole: "research_worker", assigneeSpec: "algorithm",
     })).match(/已创建 (\S+?)「/)![1]!;
     const t = okText(call(ids.pm, "work_create", {
-      title: "B", goal: "g", assigneeRole: "worker", assigneeSpec: "engineering",
+      title: "B", goal: "g", assigneeRole: "research_worker", assigneeSpec: "engineering",
       dependsOn: [a],
     }));
     const b = t.match(/已创建 (\S+?)「/)![1]!;
@@ -320,16 +337,16 @@ describe("BC1 工具 · work_*", () => {
 
   it("依赖成环 → conflict,且**工作项回滚**(不留半成品)", () => {
     const a = okText(call(ids.pm, "work_create", {
-      title: "A", goal: "g", assigneeRole: "worker", assigneeSpec: "algorithm",
+      title: "A", goal: "g", assigneeRole: "research_worker", assigneeSpec: "algorithm",
     })).match(/已创建 (\S+?)「/)![1]!;
     const b = okText(call(ids.pm, "work_create", {
-      title: "B", goal: "g", assigneeRole: "worker", assigneeSpec: "engineering",
+      title: "B", goal: "g", assigneeRole: "research_worker", assigneeSpec: "engineering",
       dependsOn: [a],
     })).match(/已创建 (\S+?)「/)![1]!;
     // A 再依赖 B → 成环
     const before = db.prepare(`SELECT COUNT(*) AS n FROM works`).get() as { n: number };
     const e = errOf(call(ids.pm, "work_create", {
-      title: "C", goal: "g", assigneeRole: "worker", assigneeSpec: "algorithm",
+      title: "C", goal: "g", assigneeRole: "research_worker", assigneeSpec: "algorithm",
       dependsOn: [a, "wk_missing"],
     }));
     expect(e.code).toBe("conflict");
@@ -340,14 +357,14 @@ describe("BC1 工具 · work_*", () => {
 
   it("work_create 指定不存在的父项 → not_found", () => {
     expect(errOf(call(ids.pm, "work_create", {
-      title: "x", goal: "y", assigneeRole: "worker", assigneeSpec: "algorithm",
+      title: "x", goal: "y", assigneeRole: "research_worker", assigneeSpec: "algorithm",
       parentWorkId: "nope",
     })).code).toBe("not_found");
   });
 
   it("work_update 改状态;非法状态回灌闭集", () => {
     const t = okText(call(ids.pm, "work_create", {
-      title: "A", goal: "g", assigneeRole: "worker", assigneeSpec: "algorithm",
+      title: "A", goal: "g", assigneeRole: "research_worker", assigneeSpec: "algorithm",
     }));
     const w = t.match(/已创建 (\S+?)「/)![1]!;
     okText(call(ids.wkAlgo, "work_update", { workId: w, status: "in_progress" }));
@@ -359,18 +376,18 @@ describe("BC1 工具 · work_*", () => {
 
   it("work_assign 改派走同一套歧义检查", () => {
     const t = okText(call(ids.pm, "work_create", {
-      title: "A", goal: "g", assigneeRole: "worker", assigneeSpec: "algorithm",
+      title: "A", goal: "g", assigneeRole: "research_worker", assigneeSpec: "algorithm",
     }));
     const w = t.match(/已创建 (\S+?)「/)![1]!;
-    const e = errOf(call(ids.pm, "work_assign", { workId: w, assigneeRole: "worker" }));
+    const e = errOf(call(ids.pm, "work_assign", { workId: w, assigneeRole: "research_worker" }));
     expect(e.message, "改派也要做歧义检查,不因它是小操作而绕过").toContain("必须用 spec");
-    okText(call(ids.pm, "work_assign", { workId: w, assigneeRole: "worker", assigneeSpec: "engineering" }));
+    okText(call(ids.pm, "work_assign", { workId: w, assigneeRole: "research_worker", assigneeSpec: "engineering" }));
     expect(getWork(db, w)?.assigneeAgentId).toBe(ids.wkEng);
   });
 
   it("work_list / work_read 渲染", () => {
     okText(call(ids.pm, "work_create", {
-      title: "算法任务", goal: "g", assigneeRole: "worker", assigneeSpec: "algorithm",
+      title: "算法任务", goal: "g", assigneeRole: "research_worker", assigneeSpec: "algorithm",
     }));
     const list = okText(call(ids.pm, "work_list", {}));
     expect(list).toContain("算法任务");
@@ -386,7 +403,7 @@ describe("BC1 工具 · work_*", () => {
 
   it("report 记录进度,并可选改状态", () => {
     const t = okText(call(ids.pm, "work_create", {
-      title: "A", goal: "g", assigneeRole: "worker", assigneeSpec: "algorithm",
+      title: "A", goal: "g", assigneeRole: "research_worker", assigneeSpec: "algorithm",
     }));
     const w = t.match(/已创建 (\S+?)「/)![1]!;
     const r = okText(call(ids.wkAlgo, "report", { workId: w, summary: "跑通了基线", status: "in_progress" }));
@@ -418,7 +435,7 @@ describe("BC3 工具 · board_*", () => {
   });
 
   it("board_write 存在但本角色不能写 → **权限错**,只回灌该角色的合法值", () => {
-    // evidence 是合法 kind,但 worker 能写、质检不能
+    // evidence 是合法 kind,但执行角色能写、质检不能
     const e = errOf(call(ids.qa, "board_write", { kind: "evidence", title: "t", body: "b" }));
     expect(e.code).toBe("denied");
     // 只回灌该角色能写的 —— 换个别的值才有意义
@@ -493,7 +510,7 @@ describe("BC3 工具 · board_*", () => {
 describe("BC4 工具 · blocker_*", () => {
   function mkWork(): string {
     return okText(call(ids.pm, "work_create", {
-      title: "W", goal: "g", assigneeRole: "worker", assigneeSpec: "algorithm",
+      title: "W", goal: "g", assigneeRole: "research_worker", assigneeSpec: "algorithm",
     })).match(/已创建 (\S+?)「/)![1]!;
   }
 
@@ -559,7 +576,7 @@ describe("BC4 工具 · blocker_*", () => {
 describe("BC4 工具 · change_*", () => {
   it("change_propose 登记并关联受影响工作项", () => {
     const w = okText(call(ids.pm, "work_create", {
-      title: "W", goal: "g", assigneeRole: "worker", assigneeSpec: "algorithm",
+      title: "W", goal: "g", assigneeRole: "research_worker", assigneeSpec: "algorithm",
     })).match(/已创建 (\S+?)「/)![1]!;
     const t = okText(call(ids.bm, "change_propose", {
       title: "加字段", rationale: "甲方要求", impact: ["schema", "前端"],
@@ -617,7 +634,7 @@ describe("BC4 工具 · change_*", () => {
 // ── 端到端:一次完整的项目推进 ──────────────────────────────────
 
 describe("端到端 · 立项 → 拆解 → 干活 → 阻塞 → 变更 → 审查", () => {
-  it("四个角色各司其职跑通一条链", () => {
+  it("各角色各司其职跑通一条链(业务经理 / 项目经理 / 研究工 / 质检)", () => {
     // 业务经理立项
     const pid = okText(call(ids.bm, "project_open", { name: "真项目", client: "甲方", goal: "交付" }))
       .match(/已立项 (\S+?)「/)![1]!;
@@ -639,14 +656,14 @@ describe("端到端 · 立项 → 拆解 → 干活 → 阻塞 → 变更 → �
     // 项目经理拆解 + 记录进度
     const w = okText(run(pm, "work_create", {
       title: "实现核心", goal: "跑通 + 有可复现结果",
-      assigneeRole: "worker", assigneeSpec: "algorithm",
+      assigneeRole: "research_worker", assigneeSpec: "algorithm",
     })).match(/已创建 (\S+?)「/)![1]!;
 
-    // worker 干活 → 产出证据
+    // 研究工干活 → 产出证据
     okText(run(wk, "work_update", { workId: w, status: "in_progress" }));
     okText(run(wk, "board_write", { kind: "evidence", title: "跑通结果", body: "指标 X=0.9" }));
 
-    // worker 遇阻 → 登记阻塞并关联工作项
+    // 研究工遇阻 → 登记阻塞并关联工作项
     const b = okText(run(wk, "blocker_open", {
       title: "缺数据集", detail: "公开集下载失败;已试镜像", severity: "critical", blocksWorkIds: [w],
     })).match(/已登记阻塞 (\S+?)\(/)![1]!;
@@ -756,7 +773,7 @@ describe("派发器 · 门铃(nudge)", () => {
     let rings = 0;
     const ctx: ToolRunContext = { ...ctxFor(ids.pm), nudge: () => { rings++; } };
     const r = dispatch("work_create", {
-      title: "A", goal: "g", assigneeRole: "worker", assigneeSpec: "algorithm",
+      title: "A", goal: "g", assigneeRole: "research_worker", assigneeSpec: "algorithm",
     }, ctx);
     if (r instanceof Promise) throw new Error("work_create 是同步的");
     okOf(r);
@@ -789,7 +806,7 @@ describe("派发器 · 门铃(nudge)", () => {
       nudge: () => { throw new Error("宿主炸了"); },
     };
     const r = dispatch("work_create", {
-      title: "A", goal: "g", assigneeRole: "worker", assigneeSpec: "algorithm",
+      title: "A", goal: "g", assigneeRole: "research_worker", assigneeSpec: "algorithm",
     }, ctx);
     if (r instanceof Promise) throw new Error("work_create 是同步的");
     expect(r.ok).toBe(true);
@@ -797,7 +814,7 @@ describe("派发器 · 门铃(nudge)", () => {
 
   it("没注入门铃(纯工具单测)时什么都不发生", () => {
     const r = dispatch("work_create", {
-      title: "A", goal: "g", assigneeRole: "worker", assigneeSpec: "algorithm",
+      title: "A", goal: "g", assigneeRole: "research_worker", assigneeSpec: "algorithm",
     }, ctxFor(ids.pm));
     if (r instanceof Promise) throw new Error("work_create 是同步的");
     expect(r.ok).toBe(true);

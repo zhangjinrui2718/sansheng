@@ -124,7 +124,7 @@ import {
 import {
   consumeClientAnswers, getClientQuestions, listUnconsumedClientAnswers, type ClientQuestionRow,
 } from "../storage/repo/clientQuestions.js";
-import { ROLE_SPECS, isProjectRole, type ProjectRole } from "../identity/role.js";
+import { ROLE_SPECS, isProjectRole, isExecutorRole, EXECUTOR_ROLES, type ProjectRole } from "../identity/role.js";
 import { openDeliverableSession } from "../storage/repo/sessions.js";
 import type { Capability } from "../harness/capability.js";
 import type { ProjectStatus } from "../harness/authorize.js";
@@ -147,7 +147,7 @@ export const TODO_KINDS = [
   "attend_meeting",
   /** 有变更提案等我评审 */
   "review_change",
-  /** 有工作项被派给了非 worker(平台不会执行它)—— 派活的人必须改派或关掉 */
+  /** 有工作项被派给了非执行角色(平台不会执行它)—— 派活的人必须改派或关掉 */
   "fix_work_assignment",
   /**
    * 有工作项**停在 `blocked`** 而没有任何人在推它 —— 项目经理必须处置。
@@ -542,7 +542,7 @@ export interface RuleFacts {
   readonly now: number;
   /** 花名册(与 `loadProjectRoster` 同序),只含 `isProjectRole` 的人 */
   readonly members: readonly RuleMember[];
-  /** 非终态、且负责人**不存在或不是 worker** 的工作项(与成员无关,按项目算一次) */
+  /** 非终态、且负责人**不存在或不是执行角色**的工作项(与成员无关,按项目算一次) */
   readonly strandedWorks: readonly WorkRow[];
   /** outbox 里未消费的下游事件(`created_at, seq` 升序 —— `[0]` 就是最老的那条) */
   readonly events: readonly DispatchEventRow[];
@@ -718,7 +718,7 @@ export interface Rule {
  *
  *   1. **成员循环里那句 `if (!hasActionableWork(pw) && stranded.length === 0) continue;`
  *      整块删掉了。** 它是**短路优化**,不是判据:它列的条件与下面各条规则的判据
- *      一一对应(asks / meetings / `canReviewChange` 的变更 / worker 的工作项 /
+ *      一一对应(asks / meetings / `canReviewChange` 的变更 / 执行角色的工作项 /
  *      `needsDecomposition`),唯一的例外 `stranded` 由 `fix_stranded_assignment`
  *      自己按角色认领。删掉之后输出逐字相同 —— 试比较:guard 为假时,原来一个
  *      todo 也不会 push。
@@ -836,9 +836,11 @@ export const RULES: readonly Rule[] = [
     if: (q) => {
       const out: TodoDraft[] = [];
       for (const m of q.members) {
-        // 执行只有 worker 能做 —— `runWorkItem.checkRunnable` 会在角色不对时拒绝,
-        // 与其浪费一次唤醒,不如在这里就只认 worker。
-        if (m.role !== "worker") continue;
+        // 执行只有**执行角色**能做 —— `runWorkItem.checkRunnable` 会在角色不对时
+        // 拒绝,与其浪费一次唤醒,不如在这里就只认执行角色。
+        // 判据读 `EXECUTOR_ROLES` 而不是写死一个名字:写死会让新加的执行角色
+        // 永远收不到「该开工了」这条待办(2026-10-08 加编码工时正是这个坑)。
+        if (!isExecutorRole(m.role)) continue;
         for (const w of m.pending.myOpenWorks) {
           out.push({
             agentId: m.agentId, role: m.role, kind: "execute_work",
@@ -849,9 +851,12 @@ export const RULES: readonly Rule[] = [
       }
       return out;
     },
-    then: { kind: "execute_work", targetRole: "worker" },
+    // ⚠️ `targetRole` 只是**展示/日志**用的标注 —— 真正该谁跑,由上面每条
+    // 待办自己的 `role` 决定(`TodoDraft` 逐条带角色)。写死一个执行角色名
+    // 会让告警文案把编码工的活说成研究工的。
+    then: { kind: "execute_work", targetRole: EXECUTOR_ROLES[0] },
     why:
-      "`myOpenWorks` 曾经**不存在**:注入面的字段里没有「派给我的活」,于是 worker 的待办" +
+      "`myOpenWorks` 曾经**不存在**:注入面的字段里没有「派给我的活」,于是执行角色的待办" +
       "在系统里根本不存在,它只能靠主动 `work_list` 才看得到自己有活 —— 「测试通过但系统" +
       "不动」的典型形态(`pendingWork.ts` 的字段注释)。判据含 `in_progress`(重跑一条" +
       "已经在跑的工作项是合法的),不只是 `open`。",
@@ -876,7 +881,7 @@ export const RULES: readonly Rule[] = [
     then: { kind: "fix_work_assignment", targetRole: "project_manager" },
     why:
       "真机现场:项目经理把「与甲方对齐业务场景」派给了**业务经理**,那条工作项至今 `open`" +
-      " —— 平台不执行非 worker 的负责人,`needsDecomposition` 也不为真(项目里确实有工作项)," +
+      " —— 平台不执行非执行角色的负责人,`needsDecomposition` 也不为真(项目里确实有工作项)," +
       "于是它谁也不叫醒。这条规则是**存量数据**的自愈路径(新数据由 `work_create` / " +
       "`work_assign` 的调用期门直接拒收)。",
   },
@@ -914,7 +919,7 @@ export const RULES: readonly Rule[] = [
     then: { kind: "recover_failed_work", targetRole: "project_manager" },
     why:
       "**真机实测的静默停摆**(2026-10-06 22:35,项目「美股自动化交易平台方案设计·单报告" +
-      "合并版」):一条 worker 工作项在单回合读进去 **109,231 token** 之后撞上墙钟上界" +
+      "合并版」):一条执行角色工作项在单回合读进去 **109,231 token** 之后撞上墙钟上界" +
       "(10 分钟)被 `abort()` 打断,经 `updateWorkStatus` 这个唯一写口记成 `failed`。\n" +
       "`work_failed` outbox 事件被消费了(业务经理 22:38:48 确实被叫醒、去向甲方交代)—— " +
       "**然后就再也没有任何人被叫醒**。直接跑 `collectTodos`:`runnable: 0, exhausted: 0`。\n" +
@@ -922,7 +927,7 @@ export const RULES: readonly Rule[] = [
       "`failed`**(`blocked` 有 `resolve_blocked_work`,`failed` 一条都没有)。" +
       "而「零待办」与「组织已经把活干完了」在日志里长得**一模一样** —— " +
       "项目页上那个数字就是「什么都没在干,但项目还在进行中」。\n" +
-      "**为什么叫 PM 而不是让 worker 重跑**:`execution.ts` 的 `disposeTimeout` 注释里" +
+      "**为什么叫 PM 而不是让执行者重跑**:`execution.ts` 的 `disposeTimeout` 注释里" +
       "已经写明「一次卡到墙钟的回合,自动重跑只是把同一段卡死行为再买一遍」。" +
       "真机那条正是如此:目标太大(合并 7 份报告)⇒ 原样重跑会同样超时。" +
       "**该做的是重新划范围**——而「怎么划」是业务判断,PM 有 `work_create` / " +
@@ -986,7 +991,7 @@ export const RULES: readonly Rule[] = [
       "(⇒ 根 blocked 不卡 integrate,卡住的是**那条子项没人推**)。" +
       "判据的另一半是**不许把「等甲方」也当成「该叫 PM」**:甲方还没回话时(项目里有" +
       "未答复的 `client_question`)那条 `blocked` 等的就是**外部输入** —— 而向甲方开口只有" +
-      "业务经理做得到(`client.ask` 只在他的 ceiling 里;**worker 连 `ask_client` 都不持**)," +
+      "业务经理做得到(`client.ask` 只在他的 ceiling 里;**两个执行角色连 `ask_client` 都不持**)," +
       "PM 叫醒也只能空转一轮(抑制条件见规则的 `if`)。" +
       "⚠️ 它会**多叫醒 PM**(与合并唤醒「少打扰」反向),所以靠 `dispatch_attempts` 限流 —— " +
       "而限流**不是判据**:判据是上面那条「有工作项停在 blocked 且没有驱动者」,预算只决定" +
@@ -1173,7 +1178,7 @@ export const RULES: readonly Rule[] = [
         // ── 终止判据:这条交付物已经有交付会话了(§2.11.6 的那条边)──
         //
         // 判据**从库里查**(`project_sessions.deliverable_artifact_id`),不是从
-        // 本回合的产出里带 —— 一个回合的产出只有 worker 那条路、只有挂了 014 边的
+        // 本回合的产出里带 —— 一个回合的产出只有执行角色那条路、只有挂了 014 边的
         // 行、而且只有增量(B3 实测),拿它当触发会让交付这一环**静默不可见**。
         if (q.deliveredArtifactIds.has(a.id)) continue;
         out.push({
@@ -1544,13 +1549,14 @@ function collectRuleFacts(
   });
 
   /**
-   * 派给非 worker(或负责人已不存在)的**非终态**工作项 —— `fix_stranded_assignment`
-   * 的判据。它与成员无关,所以按项目算一次;角色条件留在规则里。
+   * 派给**非执行角色**(或负责人已不存在)的**非终态**工作项 ——
+   * `fix_stranded_assignment` 的判据。它与成员无关,所以按项目算一次;
+   * 角色条件留在规则里。
    */
   const strandedWorks = works.filter((w) => {
     if (isTerminalWorkStatus(w.status)) return false;
     const a = getAgent(db, w.assigneeAgentId);
-    return a === null || a.role !== "worker";
+    return a === null || !isExecutorRole(a.role);
   });
 
   const events = listPendingDispatchEvents(db, projectId);
@@ -1667,10 +1673,11 @@ export function renderTask(db: Database.Database, todo: DriverTodo): string {
     case "fix_work_assignment":
       return (
         "# 现在轮到你了:处置没人能执行的工作项\n\n" +
-        "下面这些工作项的负责人**不是 worker**,而平台只让 worker 执行工作项 —— " +
+        `下面这些工作项的负责人**不是执行角色**(${EXECUTOR_ROLES.join(" / ")}),` +
+        "而平台只让执行角色跑工作项 —— " +
         "它们会永远停在原地。\n\n" +
         renderStrandedWorks(db, todo) +
-        "\n\n用 `work_assign` 把它们改派给 worker(或者用 `work_update` 关掉不该存在的)," +
+        `\n\n用 \`work_assign\` 把它们改派给执行角色(或者用 \`work_update\` 关掉不该存在的),` +
         "然后在同一条回复里说明你怎么处置的。"
       );
     case "recover_failed_work":
@@ -1721,16 +1728,17 @@ export function renderTask(db: Database.Database, todo: DriverTodo): string {
         "1. 用 `blocker_read` 看它挂着的阻塞现场 —— `detail` 里写着「需要谁做什么决定」\n" +
         "2. 判它属于哪一种,然后动手:\n" +
         "   - **依赖边配错了**(例如下游指向了被取消的那一份)→ `work_update` 改 `dependsOn`\n" +
-        "   - **派错了 worker** → `work_assign` 改派(负责人**只能是 worker**:`work_create` /" +
+        "   - **派错了执行角色** → `work_assign` 改派(负责人**只能是执行角色**:" +
+        ` ${EXECUTOR_ROLES.join(" / ")};\`work_create\` /` +
         " `work_assign` 的调用期门都拒收别的角色)。⚠️ 容器(有子项的工作项)**不需要**归属正确" +
-        " —— 它不由执行者跑,所以「容器派给了 worker」**不是**要修的东西\n" +
+        " —— 它不由执行者跑,所以「容器派给了执行角色」**不是**要修的东西\n" +
         "   - **阻塞已经解决** → `blocker_update` 落 `resolved`(必须写 `resolution`)," +
         "再把工作项挪回 `open` / `in_progress`:**不挪回去它永远不会被跑**\n" +
         "   - **只有甲方能解**(缺数据 / 凭据 / 权限 / 决策)→ `ask_role` 让业务经理去问甲方。" +
         "**不要**替甲方假设答案,也不要自己承诺一个没有依据的期限\n" +
         "   - **这块范围不要了** → `work_update` 置 `cancelled`(取消 = 收口,不是失败)\n" +
         "3. 处置完在**同一条回复**里说清每条的去向 —— 下一 tick 平台会重新查库\n\n" +
-        "**不要自己动手做这些工作项里的活** —— 你不持 `code.*`,执行是 worker 的事。"
+        "**不要自己动手做这些工作项里的活** —— 你不持 `code.*`,执行是执行角色的事。"
       );
     case "decompose_project":
       return (
@@ -1739,11 +1747,19 @@ export function renderTask(db: Database.Database, todo: DriverTodo): string {
         "1. 先 `board_list` 看黑板上有没有人已经做过什么(重复规划是最贵的错误)\n" +
         "2. 用 `work_create` 拆出**能各自独立开工**的工作项;每个都给负责人与" +
         "**可验证的判据**,依赖关系用 `dependsOn` 显式写出来\n" +
-        "   —— 负责人只能是 **worker**(执行角色),别的角色不执行工作项\n" +
+        `   —— 负责人只能是**执行角色**:${EXECUTOR_ROLES.join(" / ")},别的角色不执行工作项\n` +
+        "   —— **这两个角色的区别是「要交出什么东西」,选错不会报错,只会产出错的东西**:\n" +
+        "     · `research_worker`(研究员)→ 交**信息**:技术方案 / 架构图 / 调研结论 /\n" +
+        "       汇报材料。落点是 `board_write(kind='deliverable', deliverableType='html_report')`\n" +
+        "     · `coding_worker`(工程师)→ 交**能跑的东西**:一份可独立部署到 Docker 的代码服务\n" +
+        "       (git 仓库 + Dockerfile)。落点是 `board_write(kind='deliverable',\n" +
+        "       deliverableType='code_service')`\n" +
+        "     一条工作项**只交一种**:要报告就派研究工,要代码就派编码工;\n" +
+        "     两者都要时拆成两条,别让一个角色去做另一个角色的产物\n" +
         "   多件产出同属**一个交付物**时,用 `parentWorkId` 把它们挂到一条根工作项下面\n" +
         "   —— 中间工作项的完成只对项目内部可见,整个交付物收口才向甲方交代一次\n" +
-        "3. 拆完**不要自己动手做** —— 你不持 `code.*`,执行是 worker 的事\n\n" +
-        "工作项一旦建出来,worker 会被自动唤醒去跑它们 —— 你不需要再去催。"
+        "3. 拆完**不要自己动手做** —— 你不持 `code.*`,执行是执行角色的事\n\n" +
+        "工作项一旦建出来,对应角色的执行者会被自动唤醒去跑它们 —— 你不需要再去催。"
       );
     case "review_work":
       return (
@@ -1770,7 +1786,7 @@ export function renderTask(db: Database.Database, todo: DriverTodo): string {
         "有审查意见工件就一并给 `findingArtifactId`)\n\n" +
         "⚠️ **第 2 步不是可选项**:平台**只认这个调用**,不读你写的正文。" +
         "不给结论 ⇒ 平台不认为你审过了,这条产出会被**重新交给你审**。" +
-        "而 `verdict='fail'` 会让平台把这条工作项**退回给 worker 重做一轮** —— " +
+        "而 `verdict='fail'` 会让平台把这条工作项**退回给原来的执行者重做一轮** —— " +
         "所以判 fail 之前先问一句:是「目标没达成」还是「形式没对齐」?" +
         "后者若不影响可用性,判 fail 会让整轮白跑。\n\n" +
         "**两份不是一回事**:工件是给人看的现场,`review_verdict` 是给机器读的判据。" +
@@ -1861,7 +1877,7 @@ export function renderTask(db: Database.Database, todo: DriverTodo): string {
         "   ⚠️ 反过来,如果 `goal` 就是要**分章节给**(措辞含「每章 / 分别 / 各自」)," +
         "那就按分章交 —— **判据是这条 goal,不是这句提示词**。\n\n" +
         "**不要自己动手补做子项里的活** —— 你持 `work.update`(该关的关掉、该登记的阻塞登记)," +
-        "但执行是 worker 的事。写完之后交付由业务经理接手,不需要你去催。"
+        "但执行是执行角色的事。写完之后交付由业务经理接手,不需要你去催。"
       );
     case "handover":
       // 这一支只说**事实**与**职责**,不承诺平台行为:建交付会话是 C4 的活
@@ -1919,7 +1935,7 @@ export function renderTask(db: Database.Database, todo: DriverTodo): string {
         "关错的代价是整个项目作废。"
       );
     case "execute_work":
-      // worker 那条不走这里 —— `runWorkItem` 自己拼 `composeWorkPrompt`。
+      // 执行角色那条不走这里 —— `runWorkItem` 自己拼 `composeWorkPrompt`。
       // 留着这一支是为了穷尽性:新增 TodoKind 时这里会编译失败。
       return "# 现在轮到你了:执行工作项\n";
   }
@@ -2209,7 +2225,7 @@ export interface DrainTurnReport {
   /** 会话没建出来 / 回合抛错 —— 这一回合什么都做不了,不能当作「已经交代过了」 */
   readonly failed?: boolean;
   /**
-   * **拒绝执行**(不是失败):待办本身不该被跑(例如工作项已是终态、负责人不是 worker)。
+   * **拒绝执行**(不是失败):待办本身不该被跑(例如工作项已是终态、负责人不是执行角色)。
    *
    * ⚠️ 与 `failed` 分开是有理由的:两者在界面上都表现为「这一次没成」,但**原因与
    * 该做什么**完全不同 —— 失败要重试 / 要人看,拒绝说明**判据漏了一条**(为什么

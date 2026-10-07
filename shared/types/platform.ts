@@ -46,7 +46,11 @@
 export type ProjectRole =
   | "business_manager"
   | "project_manager"
-  | "worker"
+  // 2026-10-08:执行角色按**产出形态**一分为二(原 `worker`)。
+  // `research_worker` 交信息(文档 / 伪代码 / 架构图 / 汇报材料),
+  // `coding_worker` 交能跑的东西(可独立部署到 Docker 的代码服务)。
+  | "research_worker"
+  | "coding_worker"
   | "quality_reviewer";
 
 export type Specialization = "engineering" | "algorithm" | "data";
@@ -79,16 +83,25 @@ export type ArtifactKind =
 export type ArtifactStatus = "open" | "accepted" | "rejected" | "superseded";
 
 /**
- * 交付物类型(migration 025)。**只有真正有写入口的类型才在这里。**
+ * 交付物类型(migration 025 / 026)。**只有真正有写入口的类型才在这里。**
  *
  * 与 `src/platform/storage/repo/artifacts.ts` 的 `DELIVERABLE_TYPES` 逐项相同 ——
  * 由 `tests/platform/deliverable-types.test.ts` 的跨边界对照钉住。
  *
- * `git_repo` / 仓库上的提交**刻意不在这里**:预留靠的是
+ *   · `html_report`  —— 「凡是只有信息交付的」:技术方案 / 架构图 / 汇报材料 /
+ *     评审结论 / 说明书。正文是一份自包含 HTML,读面在禁用脚本的沙箱 iframe 里渲染。
+ *   · `code_service` —— **代码服务**(026 新增,用户原话:「一个 git 仓库,
+ *     然后这个仓库可以独立部署到 docker 上面」)。交付物的坐标(仓库路径 / 分支 /
+ *     HEAD / Dockerfile / 服务名与端口)写在 `metadata`,而**写入口是带校验的**:
+ *     平台当场去盘上核对那个仓库真的存在、真的是 git 仓库、HEAD 就是记的那个提交、
+ *     根目录真的有 Dockerfile(`src/platform/codeservice/`)。所以「写个字段就算交付」
+ *     这条路是不通的。
+ *
+ * 更远的类型(仓库上的某几个提交、镜像、部署实例)**刻意不在这里**:预留靠的是
  * `artifacts.deliverable_type` 这一列的结构(加一种类型 = 纯加法),
  * 不是提前往闭集里塞一个平台造不出来的值(7-E:`enabledTools` 那四个名字)。
  */
-export type DeliverableType = "html_report";
+export type DeliverableType = "html_report" | "code_service";
 
 export type AskStatus =
   | "open"
@@ -204,6 +217,61 @@ export interface ArtifactView {
    * `kind` 再看类型,不能只按类型分支。
    */
   deliverableType: DeliverableType | null;
+  /**
+   * **代码服务的坐标**(`deliverableType === 'code_service'` 时非 null)。
+   *
+   * ⚠️ 这几个值是**平台在现场核实过的事实**,不是模型写的字符串 ——
+   * 写入那一刻 `codeservice` 端口去盘上读过一遍(存在 / 是 git / HEAD 一致 /
+   * 分支顶端 / 有 Dockerfile,见 `src/platform/codeservice/git.ts`)。
+   *
+   * ⚠️ **仍然可空**:`metadata_json` 里可能缺项(老行、手改的行)。缺的那一项
+   * 在 `CodeServiceView` 里是 `null`,读面如实写「读不到」—— **不猜、不编默认值**。
+   * 把它们都塞进字符串并拼上一句「大概是这样」,正是本项目反复拒绝的那种做法。
+   */
+  codeService: CodeServiceView | null;
+}
+
+/**
+ * 代码服务的坐标(读面用的形状)。每个字段都可空 —— 见 `ArtifactView.codeService`。
+ */
+export interface CodeServiceView {
+  readonly repoPath: string | null;
+  readonly repoName: string | null;
+  readonly branch: string | null;
+  readonly headCommit: string | null;
+  readonly headSubject: string | null;
+  readonly commitCount: number | null;
+  readonly dockerfile: string | null;
+  readonly service: string | null;
+  readonly port: number | null;
+  readonly files: readonly string[];
+}
+
+/**
+ * 代码服务交付物的**最近提交**(`GET /api/artifacts/:id/commits`)。
+ *
+ * ⚠️ **这是现读的,不是交付物的一部分**:写进 `metadata_json` 的 HEAD 是**交付
+ * 那一刻**的事实,而「这个仓库后来改了什么」只能现在去盘上读 —— 存进库就会过期,
+ * 而过期的快照看起来与新鲜的一模一样。
+ *
+ * ⚠️ `runtime: "unavailable"` 是**读不到**,不是「没有提交」。界面上**必须**
+ * 分开渲染:读不到渲染成空列表 = 把一次读失败说成「这个仓库是空的」。
+ * (与 `ProjectLiveView.runtime` 同一条纪律。)
+ */
+export interface RepoCommitsView {
+  readonly runtime: "ok" | "unavailable";
+  readonly commits: readonly {
+    readonly sha: string;
+    readonly shortSha: string;
+    readonly subject: string;
+    readonly committedAt: number;
+    readonly author: string;
+  }[] | null;
+  /** 交付物记下的 HEAD(不是当前 HEAD —— 那是**交付那一刻**的事实) */
+  readonly head: string | null;
+  readonly branch: string | null;
+  /** `runtime === "unavailable"` 时说明为什么读不到 */
+  readonly problem?: string;
 }
 
 /**

@@ -54,13 +54,7 @@ import { getProjectRow, listProjects, loadProjectRoster } from "../storage/repo/
 import { getAgent } from "../storage/repo/agents.js";
 import { isProjectRole, type ProjectRole } from "../identity/role.js";
 import type { ProjectStatus } from "../harness/authorize.js";
-
-const ROLE_NAME: Readonly<Record<ProjectRole, string>> = {
-  business_manager: "业务经理",
-  project_manager: "项目经理",
-  worker: "Worker(执行者)",
-  quality_reviewer: "质检审查员",
-};
+import { roleDisplayName } from "./org.js";
 
 const STATUS_NAME: Readonly<Record<string, string>> = {
   draft: "草稿",
@@ -172,7 +166,7 @@ export function renderProjectContext(
     `- 项目名:${project.name}`,
     `- 甲方:${project.client}`,
     `- 状态:${STATUS_NAME[project.status] ?? project.status}(${project.status})`,
-    `- 你是:${myRole !== null ? `${ROLE_NAME[myRole]}(\`${myRole}\`)` : `\`${agentId}\`(角色未知)`}`,
+    `- 你是:${myRole !== null ? `${roleDisplayName(myRole)}(\`${myRole}\`)` : `\`${agentId}\`(角色未知)`}`,
     "",
     "### 目标(立项时与甲方对齐的结论)",
     project.goal,

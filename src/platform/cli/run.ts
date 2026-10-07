@@ -46,7 +46,12 @@ const rule = (t: string) => out(`\n── ${t} ${"─".repeat(Math.max(0, 56 - t
 
 /** 新平台的固定组织:四个角色各一人。**幂等**。 */
 export async function runPlatformRun(opts: PlatformRunOptions): Promise<boolean> {
-  const booted = bootPlatform({ dataDir: opts.dataDir, clientLog: (l) => out(`  [client] ${l}`) });
+  const booted = bootPlatform({
+    dataDir: opts.dataDir,
+    clientLog: (l) => out(`  [client] ${l}`),
+    // 与下面 `createPlatformSession({ cwd: opts.cwd })` 同一个根(见 smoke.ts)。
+    workspaceRoot: opts.cwd,
+  });
   let session: Awaited<ReturnType<typeof createPlatformSession>> | null = null;
 
   try {

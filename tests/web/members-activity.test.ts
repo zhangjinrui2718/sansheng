@@ -115,17 +115,17 @@ const BM: MemberView = {
 
 const WK: MemberView = {
   id: WK_ID,
-  role: "worker",
-  displayName: "工程师",
+  role: "research_worker",
+  displayName: "研究员",
   specialization: "engineering",
 };
 
-/** 业务经理**独有**的三样东西 —— 负样本就靠它们(传 worker 时一个都不许出现)。 */
+/** 业务经理**独有**的三样东西 —— 负样本就靠它们(传研究工时一个都不许出现)。 */
 const BM_TODO_LABEL = "把这一批下游结果合并成一次汇报";
 const BM_ARTIFACT_TITLE = "甲方交付验收报告";
 const BM_MSG_EXCERPT = "我已经把本轮结论汇报给甲方";
 
-/** 工程师自己的三样(正样本)。 */
+/** 研究员自己的三样(正样本)。 */
 const WK_TODO_LABEL = "执行工作项:把导出接口写完";
 const WK_ARTIFACT_TITLE = "导出接口的实现说明";
 const WK_MSG_EXCERPT = "我把导出接口写完";
@@ -178,7 +178,7 @@ function artifact(id: string, over: Partial<ArtifactView> = {}): ArtifactView {
     title: `工件 ${id}`,
     body: "",
     authorAgentId: WK_ID,
-    authorName: "工程师",
+    authorName: "研究员",
     createdAt: 1_700_000_000_000,
     updatedAt: 1_700_000_000_000,
     links: [],
@@ -229,7 +229,7 @@ function roleHarness(
   };
 }
 
-const WK_HARNESS = roleHarness("worker", "工程师");
+const WK_HARNESS = roleHarness("research_worker", "研究员");
 
 /**
  * 两段删除之后**唯一**还会渲染的 body(如果它非空的话)需要的夹具。
@@ -251,13 +251,13 @@ const promptUnit = (id: string, over: Partial<PromptUnitView> = {}): PromptUnitV
 });
 
 const BM_ONLY_UNIT = "business_manager.core";
-const WK_ONLY_UNIT = "worker.core";
+const WK_ONLY_UNIT = "research_worker.core";
 const SHARED_UNIT = "collaboration.ask";
 
 const BM_HARNESS = roleHarness("business_manager", "业务经理", {
   promptUnits: [promptUnit(BM_ONLY_UNIT), promptUnit(SHARED_UNIT)],
 });
-const WK_HARNESS_FULL = roleHarness("worker", "工程师", {
+const WK_HARNESS_FULL = roleHarness("research_worker", "研究员", {
   promptUnits: [promptUnit(SHARED_UNIT), promptUnit(WK_ONLY_UNIT)],
 });
 
@@ -290,7 +290,7 @@ function activity(agentId: string, over: Partial<MemberActivityView> = {}): Memb
   };
 }
 
-/** 工程师那一份「正在做什么」:有回合在跑、手上有活、排空器有两条待办。 */
+/** 研究员那一份「正在做什么」:有回合在跑、手上有活、排空器有两条待办。 */
 const WK_ACTIVITY = activity(WK_ID, {
   turn: { elapsedMs: 65_000, trigger: { kind: "todo", todoKind: "execute_work" } },
   currentWorks: [{ id: "w1", title: "把导出接口写完", status: "in_progress", ageMs: 120_000 }],
@@ -339,21 +339,21 @@ const renderWorker = (over: Partial<Parameters<typeof renderPane>[0]> = {}) =>
 // ── 判据 1:一次只渲染一个成员 ──────────────────────────────────
 
 describe("① 一次只渲染一个成员(这一版要修的正是「四个人的内容同时铺开」)", () => {
-  it("传工程师 ⇒ 业务经理**独有**的内容一个都不许出现(负样本)", () => {
+  it("传研究员 ⇒ 业务经理**独有**的内容一个都不许出现(负样本)", () => {
     const text = visible(renderWorker({ activity: WK_ACTIVITY }));
-    expect(text, "工程师面板里出现了业务经理的显示名").not.toContain("业务经理");
+    expect(text, "研究员面板里出现了业务经理的显示名").not.toContain("业务经理");
     expect(text, "出现了业务经理独有的待办").not.toContain(BM_TODO_LABEL);
     expect(text, "出现了业务经理独有的工件").not.toContain(BM_ARTIFACT_TITLE);
     expect(text, "出现了业务经理独有的发言").not.toContain(BM_MSG_EXCERPT);
 
-    // 正样本:工程师自己的三样都在(证明上面的负样本不是「整页啥都没渲染」)
-    expect(text, "角色名(与 harness 页同一个词)").toContain("工程师");
+    // 正样本:研究员自己的三样都在(证明上面的负样本不是「整页啥都没渲染」)
+    expect(text, "角色名(与 harness 页同一个词)").toContain("研究员");
     expect(text).toContain(WK_TODO_LABEL);
     expect(text).toContain(WK_ARTIFACT_TITLE);
     expect(text).toContain(WK_MSG_EXCERPT);
   });
 
-  it("传业务经理 ⇒ 工程师独有的内容不许出现(反方向)", () => {
+  it("传业务经理 ⇒ 研究员独有的内容不许出现(反方向)", () => {
     const text = visible(
       renderPane({
         member: BM,
@@ -389,7 +389,7 @@ describe("① 一次只渲染一个成员(这一版要修的正是「四个人�
     expect((html.match(/aria-selected="true"/g) ?? []).length, "只有一个选中").toBe(1);
     const text = visible(html);
     expect(text).toContain("业务经理");
-    expect(text).toContain("工程师");
+    expect(text).toContain("研究员");
     // ⚠️ 页签上**只有角色名**(2026-10-06):以前页签是「人 + 角色 Pill」两段,
     // 而在「一人一角色」的组织里那两个词一模一样 ⇒ 屏幕上成了「工程师 执行者」。
     // 现在主体就是角色名(与 harness 页逐字相同),人的名字进 tooltip。
@@ -419,11 +419,11 @@ describe("① 一次只渲染一个成员(这一版要修的正是「四个人�
       );
 
     const asWorker = disclosure(WK.role);
-    expect(asWorker, "工程师那块里出现了业务经理独有的单元").not.toContain(BM_ONLY_UNIT);
-    expect(asWorker, "工程师自己的单元不在 ⇒ 上面的负样本是空转的").toContain(WK_ONLY_UNIT);
+    expect(asWorker, "研究员那块里出现了业务经理独有的单元").not.toContain(BM_ONLY_UNIT);
+    expect(asWorker, "研究员自己的单元不在 ⇒ 上面的负样本是空转的").toContain(WK_ONLY_UNIT);
 
     const asBm = disclosure(BM.role);
-    expect(asBm, "业务经理那块里出现了工程师独有的单元").not.toContain(WK_ONLY_UNIT);
+    expect(asBm, "业务经理那块里出现了研究员独有的单元").not.toContain(WK_ONLY_UNIT);
     expect(asBm).toContain(BM_ONLY_UNIT);
   });
 
@@ -771,7 +771,7 @@ describe("⑤ 页签角标 = 它欠着几件事(口径:readyWorks + todos.length
   // 挂在这里 —— 不搬就等于把那条可见性静默丢掉。
   it("⑩ 页签角标之二 = `roleIssueCount`(角色 harness 的告警),与「欠活」各有一个 title", () => {
     // 构造一个 `promptUnits` 里带 `loaded: false` 的角色 ⇒ 它的 roleIssueCount 是 1
-    const dirty = roleHarness("worker", "工程师", {
+    const dirty = roleHarness("research_worker", "研究员", {
       promptUnits: [promptUnit(WK_ONLY_UNIT, { loaded: false, content: "" })],
     });
     const clean = roleHarness("business_manager", "业务经理");
@@ -781,7 +781,7 @@ describe("⑤ 页签角标 = 它欠着几件事(口径:readyWorks + todos.length
       return r === undefined ? 0 : roleIssueCount(r);
     };
     // 那个数必须**真的**来自 `loaded: false`(不是手写的一个 1)
-    expect(issuesOf("worker"), "roleIssueCount 没把缺单元算进去").toBe(1);
+    expect(issuesOf("research_worker"), "roleIssueCount 没把缺单元算进去").toBe(1);
     expect(issuesOf("business_manager")).toBe(0);
 
     const activityOf = (id: string) =>

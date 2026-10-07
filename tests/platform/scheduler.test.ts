@@ -29,7 +29,7 @@ beforeEach(() => {
   seq = 0;
   for (const id of ["bm", "pm", "wk"]) {
     insertAgent(db, {
-      id, role: id === "bm" ? "business_manager" : id === "pm" ? "project_manager" : "worker",
+      id, role: id === "bm" ? "business_manager" : id === "pm" ? "project_manager" : "research_worker",
       specialization: null, displayName: id, createdAt: T0,
     });
   }

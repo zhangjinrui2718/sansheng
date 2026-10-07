@@ -57,7 +57,7 @@ beforeEach(() => {
 
   ids.bm = mk("business_manager").id;
   ids.pm = mk("project_manager").id;
-  ids.wk = mk("worker", "algorithm").id;
+  ids.wk = mk("research_worker", "algorithm").id;
   ids.qa = mk("quality_reviewer").id;
 
   const pid = "pj_1";
@@ -523,9 +523,9 @@ describe("BC2 工具 · 走派发器的完整链路", () => {
     expect(e.message).toContain("不是问你");
   });
 
-  it("escalate 按组织图升级:worker→pm→bm", () => {
+  it("escalate 按组织图升级:研究工→pm→bm", () => {
     const askId = okText(call(ids.wk, "ask_role", {
-      targetRole: "project_manager", question: "q", hypothesis: "worker 的猜测",
+      targetRole: "project_manager", question: "q", hypothesis: "研究工的猜测",
     })).match(/\((\S+?)\)/)![1]!;
 
     const t = okText(call(ids.pm, "escalate", {
@@ -537,7 +537,7 @@ describe("BC2 工具 · 走派发器的完整链路", () => {
     expect(getAsk(db, childId)?.parentAskId).toBe(askId);
     expect(getAsk(db, askId)?.status).toBe("escalated");
     // 升级后的假设里带上了下级的原因与原始假设
-    expect(getAsk(db, childId)?.hypothesis).toContain("worker 的猜测");
+    expect(getAsk(db, childId)?.hypothesis).toContain("研究工的猜测");
     expect(getAsk(db, childId)?.hypothesis).toContain("涉及甲方范围");
   });
 
@@ -576,7 +576,7 @@ describe("BC2 工具 · 走派发器的完整链路", () => {
   it("convene → meeting_respond → meeting_conclude 全链", () => {
     const t = okText(call(ids.bm, "convene", {
       topic: "排期对焦",
-      participants: [{ role: "project_manager" }, { role: "worker", spec: "algorithm" }],
+      participants: [{ role: "project_manager" }, { role: "research_worker", spec: "algorithm" }],
       agenda: ["确认交付时间"],
     }));
     const mid = t.match(/会议 (\S+?)「/)![1]!;
@@ -596,7 +596,7 @@ describe("BC2 工具 · 走派发器的完整链路", () => {
 
   it("meeting_respond 反对不给理由被拒", () => {
     const mid = okText(call(ids.bm, "convene", {
-      topic: "t", participants: [{ role: "worker", spec: "algorithm" }],
+      topic: "t", participants: [{ role: "research_worker", spec: "algorithm" }],
     })).match(/会议 (\S+?)「/)![1]!;
     const e = errOf(call(ids.wk, "meeting_respond", { meetingId: mid, stance: "oppose" }));
     expect(e.code).toBe("conflict");
@@ -626,9 +626,9 @@ describe("BC2 工具 · 走派发器的完整链路", () => {
 
 // ── 端到端:7-L 场景 ────────────────────────────────────────────
 
-describe("端到端 · 7-L 场景:worker 卡住 → 沟通员判断 → 能自答 / 才升级", () => {
+describe("端到端 · 7-L 场景:研究工卡住 → 沟通员判断 → 能自答 / 才升级", () => {
   it("沟通员能自答时,用户零打扰", () => {
-    // worker 提问
+    // 研究工提问
     const askId = okText(call(ids.wk, "ask_role", {
       targetRole: "project_manager", question: "实现细节用 A 还是 B?",
       hypothesis: "我倾向 A,因为现有代码已经用了 A 的模式",
@@ -640,7 +640,7 @@ describe("端到端 · 7-L 场景:worker 卡住 → 沟通员判断 → 能自�
 
     okText(call(ids.pm, "answer", { askId, body: "用 A,与现有模式一致" }));
 
-    // 结论:worker 解除阻塞,没有任何问升级到业务经理
+    // 结论:研究工解除阻塞,没有任何问升级到业务经理
     expect(askedByMeOpen(db, ids.wk)).toEqual([]);
     expect(listAsks(db, "pj_1", { toAgentId: ids.bm, actionableOnly: true })).toEqual([]);
   });
@@ -667,7 +667,7 @@ describe("端到端 · 7-L 场景:worker 卡住 → 沟通员判断 → 能自�
     expect(child.hypothesis).toContain("我倾向加一列");      // 下级的倾向
     expect(child.optionsJson).toContain("不动 schema");      // 候选方案继承下来
 
-    // 业务经理答复 → 一路回填,worker 解除阻塞
+    // 业务经理答复 → 一路回填,研究工解除阻塞
     okText(call(ids.bm, "answer", { askId: child.id, body: "约在下周二窗口,可以加列" }));
     expect(getAsk(db, askId)?.status).toBe("answered");
     expect(askedByMeOpen(db, ids.wk)).toEqual([]);

@@ -61,8 +61,8 @@ beforeEach(() => {
     displayName: "项目经理", createdAt: T0,
   });
   insertAgent(db, {
-    id: "wk", role: "worker", specialization: "engineering",
-    displayName: "工程师", createdAt: T0,
+    id: "wk", role: "research_worker", specialization: "engineering",
+    displayName: "研究员", createdAt: T0,
   });
   insertProject(db, {
     id: "p1", name: "语音机器人调研", client: "甲方",

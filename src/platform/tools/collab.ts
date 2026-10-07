@@ -37,6 +37,7 @@ const ARTIFACT_ACCEPTED: ArtifactStatus = "accepted";
 import { resolveAssignee } from "./resolve.js";
 import { getAgent } from "../storage/repo/agents.js";
 import { ESCALATION_TARGET } from "../harness/authorize.js";
+import { PROJECT_ROLES } from "../identity/role.js";
 import { fail, ok, requireProject, requireString, readString, readStringArray, readNumber,
   type PlatformTool, type ToolResult, type ToolRunContext } from "./types.js";
 
@@ -58,7 +59,8 @@ const askRole: PlatformTool = {
     "向项目内的某个角色提问,然后你会进入 blocked 直到有结论。**必须带 hypothesis** —— 没有你自己的判断,对方无从判断,只能把问题原样推给上级。能自己查清楚的不要问:先 board_list / work_read 看看是不是已经有答案了。",
   parameters: Type.Object({
     targetRole: Type.String({
-      description: "问谁:business_manager | project_manager | worker | quality_reviewer",
+      description: `问谁:${PROJECT_ROLES.join(" | ")}`,
+
     }),
     targetSpec: Type.Optional(Type.String({
       description: "目标角色的细分(engineering | algorithm | data),同角色多人时必填",

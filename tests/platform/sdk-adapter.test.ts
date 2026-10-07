@@ -42,6 +42,8 @@ let seq = 0;
 const clock = 1_700_000_000_000;
 let deps: RuntimeDeps;
 const ids: Record<string, string> = {};
+/** 角色 → 夹具 agent id。完整覆盖 `ProjectRole`(漏一个会在类型层报错,而不是静默 undefined)。 */
+let roleIds: Record<ProjectRole, string>;
 
 beforeEach(() => {
   db = openPlatformMemoryDb();
@@ -51,10 +53,18 @@ beforeEach(() => {
     insertAgent(db, { id, role, specialization: spec ?? null, displayName: `${role}${spec ?? ""}`, createdAt: clock });
     return id;
   }
-  ids.bm = mk("business_manager");
-  ids.pm = mk("project_manager");
-  ids.wk = mk("worker", "algorithm");
-  ids.qa = mk("quality_reviewer");
+  roleIds = {
+    business_manager: mk("business_manager"),
+    project_manager: mk("project_manager"),
+    research_worker: mk("research_worker", "algorithm"),
+    coding_worker: mk("coding_worker", "engineering"),
+    quality_reviewer: mk("quality_reviewer"),
+  };
+  ids.bm = roleIds.business_manager;
+  ids.pm = roleIds.project_manager;
+  ids.wk = roleIds.research_worker;
+  ids.cw = roleIds.coding_worker;
+  ids.qa = roleIds.quality_reviewer;
 
   insertProject(db, { id: "p1", name: "测试", client: "甲", goal: "g", status: "active", createdAt: clock });
   for (const id of Object.values(ids)) addMember(db, "p1", id, clock);
@@ -116,7 +126,7 @@ describe("assembly · planAgentSession 是接线核心", () => {
     if (!r.ok) return;
     // 与直接调用求解器的结果必须逐项一致
     const direct = solveToolset(
-      { id: ids.wk, role: "worker", specialization: "algorithm", displayName: "worker" },
+      { id: ids.wk, role: "research_worker", specialization: "algorithm", displayName: "研究工" },
       loadProjectForAuthz(db, "p1")!,
     );
     expect([...r.plan.tools].sort()).toEqual([...direct.tools].sort());
@@ -127,7 +137,7 @@ describe("assembly · planAgentSession 是接线核心", () => {
     if (!r.ok) throw new Error("期望成功");
     expect(r.plan.promptUnits).toEqual(ROLE_SPECS.project_manager.promptUnits);
     expect(r.plan.roster.map((m) => m.id).sort()).toEqual(
-      [ids.bm, ids.pm, ids.wk, ids.qa].sort(),
+      [ids.bm, ids.pm, ids.wk, ids.cw, ids.qa].sort(),
     );
   });
 
@@ -157,7 +167,9 @@ describe("assembly · planAgentSession 是接线核心", () => {
 describe("不变式 · 求解出的工具必须在池子里(8-A 同款防线)", () => {
   for (const role of PROJECT_ROLES) {
     it(`${role}:求解出的每个工具都**有归属**`, () => {
-      const r = planAgentSession(deps, ids[role === "worker" ? "wk" : role === "business_manager" ? "bm" : role === "project_manager" ? "pm" : "qa"]!, "p1");
+      // 角色 → 夹具 id 的映射写在一张表里:五元组里任何一个换名字,这里会**找不到**
+      // 而当场炸掉,不会静默退回某个默认 id(那是「拿别人的工具面测试」)。
+      const r = planAgentSession(deps, roleIds[role], "p1");
       if (!r.ok) throw new Error(`规划失败:${r.detail}`);
       const split = classifyToolset(r.plan.tools);
       expect(
@@ -175,7 +187,7 @@ describe("不变式 · 求解出的工具必须在池子里(8-A 同款防线)", 
     const r = planAgentSession(deps, ids.wk, "p1");
     if (!r.ok) throw new Error(r.detail);
     const split = classifyToolset(r.plan.tools);
-    // worker 有 code.* → 内置类里该有 read/bash
+    // 研究工有 code.read + code.exec → 内置类里该有 read/bash
     expect(split.builtinTools).toContain("read");
     expect(split.builtinTools).toContain("bash");
     // 而平台工具不该混进内置类
@@ -185,7 +197,7 @@ describe("不变式 · 求解出的工具必须在池子里(8-A 同款防线)", 
     expect(split.platformTools.map((t) => t.name)).toContain("board_write");
   });
 
-  it("全部四个角色的工具面都不含未实现项", () => {
+  it("全部五个角色的工具面都不含未实现项", () => {
     expect(notYetBuiltToolNames()).toEqual([]);
   });
 });
@@ -193,7 +205,7 @@ describe("不变式 · 求解出的工具必须在池子里(8-A 同款防线)", 
 // ── ADR §4 验证 ①:适配壳产出的名字 === 求解结果 ─────────────────
 
 describe("适配壳 · 名字集合必须与求解结果完全一致", () => {
-  for (const key of ["bm", "pm", "wk", "qa"] as const) {
+  for (const key of ["bm", "pm", "wk", "cw", "qa"] as const) {
     it(`${key}:adapter 产出的工具名 === solveToolset().tools`, () => {
       const planned = planAgentSession(deps, ids[key]!, "p1");
       if (!planned.ok) throw new Error(planned.detail);
@@ -214,14 +226,14 @@ describe("适配壳 · 名字集合必须与求解结果完全一致", () => {
     });
   }
 
-  it("worker 的求解结果不含越权工具(多给就是越权)", () => {
+  it("研究工的求解结果不含越权工具(多给就是越权)", () => {
     const planned = planAgentSession(deps, ids.wk, "p1");
     if (!planned.ok) throw new Error(planned.detail);
     for (const forbidden of [
       "tell_client", "ask_client", "convene", "meeting_conclude",
       "project_update", "project_close",
     ]) {
-      expect(planned.plan.tools, `worker 的求解结果不该含 ${forbidden}`).not.toContain(forbidden);
+      expect(planned.plan.tools, `研究工的求解结果不该含 ${forbidden}`).not.toContain(forbidden);
     }
   });
 });
@@ -273,7 +285,7 @@ describe("假 SDK 契约测试 · 装配 → 调用 → 结果 全链", () => {
     });
   });
 
-  it("worker 写证据经适配壳成功", async () => {
+  it("研究工写证据经适配壳成功", async () => {
     const r = await callViaAdapter(ids.wk, "board_write", {
       kind: "evidence", title: "证据", body: "结果 X",
     });
@@ -291,7 +303,7 @@ describe("假 SDK 契约测试 · 装配 → 调用 → 结果 全链", () => {
   });
 
   it("**被门控拒绝时返回文本而不是抛异常** —— 模型要能读到错误才能自纠", async () => {
-    // worker 的工具面里没有 tell_client,但即便硬调 dispatch 也会被拦
+    // 研究工的工具面里没有 tell_client,但即便硬调 dispatch 也会被拦
     const c = buildToolContext(deps, ids.wk, "p1");
     if (!c.ok) throw new Error(c.detail);
     const tellTool = TOOL_INDEX.get("tell_client")!;

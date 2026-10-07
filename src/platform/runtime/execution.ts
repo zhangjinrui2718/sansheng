@@ -55,7 +55,7 @@ import {
 import {
   listArtifacts, type ArtifactRow,
 } from "../storage/repo/artifacts.js";
-import type { ArtifactKind } from "../identity/role.js";
+import { isExecutorRole, EXECUTOR_ROLES, type ArtifactKind } from "../identity/role.js";
 import { listBlockers } from "../storage/repo/blockers.js";
 import { getAgent } from "../storage/repo/agents.js";
 import type { TurnUsageRow } from "../storage/repo/usage.js";
@@ -215,8 +215,14 @@ function checkRunnable(db: Database.Database, work: WorkRow): string | null {
   }
   const agent = getAgent(db, work.assigneeAgentId);
   if (agent === null) return `负责人 ${work.assigneeAgentId} 不存在`;
-  if (agent.role !== "worker") {
-    return `负责人 ${agent.displayName} 的角色是 ${agent.role},不是 worker —— 执行是 worker 的能力`;
+  // 判据是**执行角色集合**(`EXECUTOR_ROLES`),不是某一个具体角色名 ——
+  // 2026-10-08 起有两个执行角色(研究工 / 编码工),写死一个会让另一半
+  // 派出去的工作项永远停在原地,而平台不会叫醒任何人。
+  if (!isExecutorRole(agent.role)) {
+    return (
+      `负责人 ${agent.displayName} 的角色是 ${agent.role},不是执行角色` +
+      `(${EXECUTOR_ROLES.join(" / ")})—— 执行是执行角色的能力`
+    );
   }
   return null;
 }

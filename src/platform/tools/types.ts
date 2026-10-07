@@ -23,6 +23,7 @@ import type Database from "better-sqlite3";
 import type { Agent, Project } from "../harness/authorize.js";
 import type { MemoryPort } from "../memory/port.js";
 import type { ClientChannel } from "../client/port.js";
+import type { CodeServicePort } from "../codeservice/port.js";
 import type { Capability, ToolName } from "../harness/capability.js";
 import type { TSchema } from "@sinclair/typebox";
 
@@ -59,6 +60,16 @@ export interface ToolRunContext {
    * 缺省时 `client.*` 工具会如实报装配错误。
    */
   readonly client?: ClientChannel;
+  /**
+   * **代码服务的核对面**(`code_service` 交付物)。
+   *
+   * 与 `memory` / `client` 同一条理由:它是**可替换的依赖**,不是工具层该自己
+   * spawn 的东西。`board_write` 在写 `deliverableType='code_service'` 时**必须**
+   * 用它去盘上核对仓库坐标 —— 缺省时那条写入被**拒绝**(装配错误),
+   * 而不是被放行:`unavailableCodeService()` 的存在就是为了让「没接线」表现为
+   * 一次响亮的拒绝,而不是一次静默的通过(7-E:声明必须有读者)。
+   */
+  readonly codeService?: CodeServicePort;
   /**
    * **状态迁移的门铃**(排空器的触发点之一)。
    *

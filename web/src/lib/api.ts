@@ -53,6 +53,7 @@ import type {
   ProjectStatus,
   ProjectSummary,
   ProjectUsageResponse,
+  RepoCommitsView,
   WorkView,
 } from "@shared/types/platform";
 import type { ProviderInfo, SettingsPublic } from "@shared/types/settings";
@@ -368,6 +369,19 @@ function usageQuery(opts?: { days?: number; limit?: number }): string {
  */
 export function getArtifact(id: string): Promise<{ artifact: ArtifactView }> {
   return request<{ artifact: ArtifactView }>(`/artifacts/${encodeURIComponent(id)}`);
+}
+
+/**
+ * 代码服务交付物的最近提交(migration 026)。
+ *
+ * 与 `getArtifact` 分开的**另一条边**:详情回答「交付了什么」(那一刻的事实),
+ * 这一条回答「这个仓库现在长什么样」—— 后者只有盘上有,所以它可能
+ * `runtime: "unavailable"`,而**那不是**「没有提交」。界面上必须分开渲染。
+ */
+export function getRepoCommits(id: string, limit = 20): Promise<RepoCommitsView> {
+  return request<RepoCommitsView>(
+    `/artifacts/${encodeURIComponent(id)}/commits?limit=${encodeURIComponent(String(limit))}`,
+  );
 }
 
 /** 本项目成员(四个固定职能)。`ProjectDetail` 里也带 members,这一条给成员页单独用。 */

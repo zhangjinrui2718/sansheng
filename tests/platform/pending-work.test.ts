@@ -3,7 +3,7 @@
  *
  * 这一层的存在理由是「没有它,升级链在真实运行中会停摆,而单元测试全绿」。
  * 所以测试要覆盖的恰恰是**真实运行的那条路**:
- *   worker 提问 → 项目经理的待办里应当出现它 → 渲染出的文本里带着假设全文
+ *   执行角色提问 → 项目经理的待办里应当出现它 → 渲染出的文本里带着假设全文
  */
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import type Database from "better-sqlite3";
@@ -34,7 +34,7 @@ beforeEach(() => {
   }
   ids.bm = mk("business_manager");
   ids.pm = mk("project_manager");
-  ids.wk = mk("worker");
+  ids.wk = mk("research_worker");
   ids.qa = mk("quality_reviewer");
   insertProject(db, { id: "p1", name: "测试", client: "甲", goal: "g", status: "active", createdAt: clock });
   for (const id of Object.values(ids)) addMember(db, "p1", id, clock);
@@ -155,7 +155,7 @@ describe("renderPendingWork · 注入文本", () => {
     const text = renderPendingWork(db, collectPendingWork(db, ids.pm, "p1", clock));
     expect(text).toContain("等你的提问(1)");
     expect(text).toContain("有人因此停着");
-    expect(text).toContain("worker");                       // 提问者
+    expect(text).toContain("research_worker");              // 提问者
     expect(text).toContain("要不要改 schema?");              // 问题
     expect(text).toContain("我倾向不动");                    // ← 7-L 约束①:假设全文
     expect(text).toContain("answer");                        // 告诉它怎么办
@@ -219,7 +219,7 @@ describe("summarizePendingWork · 诊断摘要", () => {
 });
 
 describe("端到端 · 注入面让升级链真正转起来", () => {
-  it("worker 提问 → 项目经理**不必主动查**就知道有东西在等它", () => {
+  it("执行角色提问 → 项目经理**不必主动查**就知道有东西在等它", () => {
     // 这是 ADR §5.2 的核心断言:没有注入面,收到方只能靠显式 ask_list,
     // 而真实运行里没有人提醒它去查
     mkAsk(ids.wk, ids.pm, "实现细节用 A 还是 B?", "我倾向 A,因为现有代码已经用了 A 的模式");
@@ -230,6 +230,6 @@ describe("端到端 · 注入面让升级链真正转起来", () => {
     const injected = renderPendingWork(db, w);
     // 注入的文本里必须带足够的信息让它**不必再查一次**就能判断
     expect(injected).toContain("我倾向 A");
-    expect(injected).toContain("worker");
+    expect(injected).toContain("research_worker");
   });
 });

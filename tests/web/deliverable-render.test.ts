@@ -13,7 +13,7 @@
  * 并且这里带上那条最容易写反的分支:**先看 kind,再看类型**。
  */
 import { describe, expect, it } from "vitest";
-import type { ArtifactKind, DeliverableType } from "@shared/types/platform";
+import type { ArtifactKind, CodeServiceView, DeliverableType } from "@shared/types/platform";
 import { DELIVERABLE_TYPES } from "../../src/platform/storage/repo/artifacts.js";
 import {
   DELIVERABLE_TYPE_LABEL,
@@ -21,7 +21,7 @@ import {
   deliverableTypeLabel,
   deliverableTypeTone,
 } from "@/lib/vocab";
-import { bodyMode, htmlReportFileName } from "@/lib/deliverable";
+import { bodyMode, dockerCommands, htmlReportFileName, shortSha } from "@/lib/deliverable";
 
 const ALL_KINDS: ArtifactKind[] = [
   "decision", "note", "evidence", "hypothesis", "project_brief", "work_brief",
@@ -46,13 +46,55 @@ describe("交付物 · 正文呈现方式(bodyMode)", () => {
     }
   });
 
+  it("正样本:`deliverable` + `code_service` → 走代码服务那条渲染分支", () => {
+    expect(bodyMode({ kind: "deliverable", deliverableType: "code_service" })).toBe("code_service");
+  });
+
+  it("**`code_service` 不能落进 text / html_report** —— 它的正文是 markdown,主体是坐标", () => {
+    // 落进 html_report ⇒ 正文(一段 markdown 说明)被塞进沙箱 iframe = 一片空白;
+    // 落进 text ⇒ 坐标(这一页真正要给人看的东西)**根本渲染不出来**。
+    expect(bodyMode({ kind: "deliverable", deliverableType: "code_service" })).not.toBe("text");
+    expect(bodyMode({ kind: "deliverable", deliverableType: "code_service" })).not.toBe("html_report");
+  });
+
   it("负样本自检:判据真的在判,不是恒返回同一个值", () => {
     const seen = new Set(
       ALL_KINDS.flatMap((k) =>
-        [null, "html_report" as DeliverableType].map((t) => bodyMode({ kind: k, deliverableType: t })),
+        [null, "html_report", "code_service"].map((t) =>
+          bodyMode({ kind: k, deliverableType: t as DeliverableType }),
+        ),
       ),
     );
-    expect([...seen].sort()).toEqual(["html_report", "text"]);
+    expect([...seen].sort()).toEqual(["code_service", "html_report", "text"]);
+  });
+});
+
+describe("代码服务 · 展示辅助(短 sha / 部署命令)", () => {
+  const META = (over: Partial<CodeServiceView> = {}): CodeServiceView => ({
+    repoPath: "/w/billing", repoName: "billing", branch: "main",
+    headCommit: "0123456789abcdef0123456789abcdef01234567", headSubject: "交付计费服务",
+    commitCount: 3, dockerfile: "Dockerfile", service: "billing", port: 8080,
+    files: ["Dockerfile", "index.js", "package.json"], ...over,
+  });
+
+  it("短 sha 取 7 位;读不到就返回 null(界面上不许出现 undefined)", () => {
+    expect(shortSha(META().headCommit)).toBe("0123456");
+    expect(shortSha(null)).toBeNull();
+  });
+
+  it("两条命令由**核实过的坐标**生成 —— 端口来自交付物,不是模型手写的", () => {
+    const c = dockerCommands(META());
+    expect(c).not.toBeNull();
+    expect(c!.build).toBe("docker build -t billing .");
+    expect(c!.run).toBe("docker run --rm -p 8080:8080 billing");
+    // 负样本:坐标换了,命令必须跟着换(否则「生成」是假的)
+    expect(dockerCommands(META({ service: "api", port: 3000 }))!.run)
+      .toBe("docker run --rm -p 3000:3000 api");
+  });
+
+  it("**缺服务名或端口就不生成命令** —— 编一个默认端口会让人照着错的命令去部署", () => {
+    expect(dockerCommands(META({ service: null }))).toBeNull();
+    expect(dockerCommands(META({ port: null }))).toBeNull();
   });
 });
 

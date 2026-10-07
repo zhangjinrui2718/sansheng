@@ -9,20 +9,64 @@
  *   · 存量交付物(`kind='deliverable'` 且 `deliverable_type IS NULL`,真机 23 条)
  *     的正文是 markdown。**先看 kind 再看类型**;反过来写就是 23 片空白。
  *   · 非交付物工件一定没有类型。类型字段存在不等于它是交付物。
+ *   · `code_service`(migration 026)的正文是一份 **markdown 说明**,不是网页
+ *     —— 它的「主体」是仓库坐标,渲染在另一个组件里(`CodeService.tsx`)。
+ *     把它当 `html_report` 渲染 = 一片空白,而空白看起来像「平台坏了」。
  *
  * 所以它得能被单测钉住 —— 组件里内联一个三元表达式就没人会测它。
  */
-import type { ArtifactKind, DeliverableType } from "@shared/types/platform";
+import type { ArtifactKind, CodeServiceView, DeliverableType } from "@shared/types/platform";
 
-/** 正文呈现方式。`text` = 原来的 `<pre>`(markdown / 纯文本)。 */
-export type BodyMode = "html_report" | "text";
+/**
+ * 正文呈现方式。
+ *   · `html_report` —— 沙箱 iframe 渲染(HtmlReport.tsx)
+ *   · `code_service` —— **正文是 markdown**,主体(仓库坐标)另有组件
+ *   · `text` = 原来的 `<pre>`(存量 markdown / 纯文本)
+ */
+export type BodyMode = "html_report" | "code_service" | "text";
 
 export function bodyMode(a: {
   readonly kind: ArtifactKind;
   readonly deliverableType: DeliverableType | null;
 }): BodyMode {
   if (a.kind !== "deliverable") return "text";
-  return a.deliverableType === "html_report" ? "html_report" : "text";
+  // 未知类型(将来加的)与存量 NULL 都落到 `text` —— 「读不了就按正文读」,
+  // 而不是猜一种渲染方式(猜错的表现是空白页)。**先看 kind 再看类型**。
+  if (a.deliverableType === "html_report") return "html_report";
+  if (a.deliverableType === "code_service") return "code_service";
+  return "text";
+}
+
+// ── 代码服务的坐标(migration 026)────────────────────────────────
+//
+// ⚠️ **坐标的解析不在前端。** `metadata_json` → `CodeServiceView` 的翻译在
+// 服务端一处收口(`transport/views.ts` 的 `parseCodeServiceView`),理由是
+// 列表端点的载荷(单次最多 500 条)不该每条都背一段没人读的原始 JSON,
+// 而且「缺项怎么办」只该有一种说法。
+//
+// 这里只留**纯展示**的两个函数:短 sha 与两条部署命令。它们可测、无副作用,
+// 所以放在 `lib/` 里而不是组件里(组件里内联一个三元表达式就没人会测它)。
+
+/** 短 sha(7 位)。读不到就如实返回 null —— 界面上写 `undefined` 是最糟的形态。 */
+export function shortSha(sha: string | null): string | null {
+  return sha !== null && sha.length >= 7 ? sha.slice(0, 7) : sha;
+}
+
+/**
+ * 两条可直接复制的命令。
+ *
+ * **为什么由前端拼**:这两条命令的判据是「甲方能照着跑起来」,而 `service` 与
+ * `port` 是交付物自己的事实 —— 让模型在正文里手写一遍,就会有第三种写法
+ * (它可能写错端口)。命令从**核实过的坐标**生成,正文只负责讲为什么。
+ *
+ * `service` 或 `port` 缺一项时返回 null(渲染成「读不到」),**不编一个默认值**。
+ */
+export function dockerCommands(meta: CodeServiceView): { build: string; run: string } | null {
+  if (meta.service === null || meta.port === null) return null;
+  return {
+    build: `docker build -t ${meta.service} .`,
+    run: `docker run --rm -p ${meta.port}:${meta.port} ${meta.service}`,
+  };
 }
 
 /**

@@ -138,7 +138,8 @@ ProjectAssignment (实体)
 ```
 ProjectRole = "business_manager"      业务经理(唯一 clientFacing)
             | "project_manager"       项目经理
-            | "worker"                执行工种(可多个,分工程/算法/数据)
+            | "research_worker"       研究工:交信息(文档 / 伪代码 / 架构图 / 汇报材料)
+            | "coding_worker"         编码工:交能跑的东西(可独立部署到 Docker 的代码服务)
             | "quality_reviewer"      质检审查员
 ```
 
@@ -218,7 +219,7 @@ Blocker        open → acknowledged → resolved | deferred | rejected
 | `Blocker` + 命中记录 | 实体 + 边 | `blockers` / `blocker_blocks` | 1 Blocker — **M:N** Work | `blocker_open` / `blocker_update` |
 | `ChangeRequest` + 影响记录 | 实体 + 边 | `change_requests` / `change_affects` | 1 Change — **M:N** Work | `change_propose` / `change_review` |
 | `ProjectSession` / `SessionMessage` | 实体 | `project_sessions` / `session_messages` | 1 Project — **1:N** Session(结构允许 N);1 Session — N Message | 平台(建会话、落消息)。`project_id IS NULL` 的那一条 = **接待会话**,全局唯一(§9.3) |
-| 记忆 | 实体(跨项目) | `memory_fragments` / `memory_profile` | **不挂项目** | `memory_remember`;只有业务经理持 `memory.write`(设计 2 §10.4) |
+| 记忆 | 实体(跨项目) | `memory_fragments` / `memory_profile` | **不挂项目** | `memory_remember`;只有业务经理持 `memory.write`(设计 2 §11.4) |
 | **待办 Todo** | **投影(读模型)** | **无表** | 每次 tick 现算 | **平台代码**:`collectTodos`(`runtime/dispatcher.ts:186`) |
 | `WorkStatus` / `ReviewState` / `ArtifactStatus` / `AskStatus` / … | 值对象 | TS 闭合联合 + SQL CHECK | — | 代码评审(改它 = 一次显式评审) |
 | `Capability` / `Scope` / `ToolSetFile` / `RoleSpec` / `WriteKindPolicy` | 值对象 | 代码内常量 | — | 代码评审(§7.1) |
@@ -395,7 +396,7 @@ CREATE INDEX IF NOT EXISTS idx_artifacts_work
 
 **四条设计选择,各有理由**:
 
-1. **`ON DELETE SET NULL` 而不是 `CASCADE`** —— 删掉一条工作项**不该删掉它的产出**:工件是审计面(设计 2 §10.2 的判据:工件不衰减、必须比产生它的东西活得久)。用 CASCADE 就是 012 那条静默删数据的路,只不过删的是工件。
+1. **`ON DELETE SET NULL` 而不是 `CASCADE`** —— 删掉一条工作项**不该删掉它的产出**:工件是审计面(设计 2 §11.2 的判据:工件不衰减、必须比产生它的东西活得久)。用 CASCADE 就是 012 那条静默删数据的路,只不过删的是工件。
 2. **不能加 `UNIQUE`** —— SQLite 拒绝 `Cannot add a UNIQUE column`(实测),而「N 个产出」本来就该允许。
 3. **可空、不给 `DEFAULT`** —— `ADD COLUMN` 带 `REFERENCES` 时默认值必须是常量;可空天然满足,而且「这条工件没有产出工作项」是真事实,不该被一个占位值掩盖。
 4. **部分索引 `WHERE work_id IS NOT NULL`** —— 现有多数工件(`client_question` / `meeting_note` / `change_record`)的 `work_id` 都是 `NULL`,不该进索引。
@@ -1510,9 +1511,9 @@ Meeting:   convened → in_progress → concluded
 Project:   draft → active → paused → done | abandoned
 ```
 
-### 6.4 交付物类型(`deliverable_type`,migration 025)
+### 6.4 交付物类型(`deliverable_type`,migration 025 / 026)
 
-> 「交付物」有四个所指(§2.11.5):①worker 的产出工件 ②根工作项 ③`projects.status` 终态
+> 「交付物」有四个所指(§2.11.5):①执行角色的产出工件 ②根工作项 ③`projects.status` 终态
 > ④一条 `deliverable` 工件。**本节只讲第 ④ 种。**
 
 016 之后 `deliverable` 只有两件事:**存在性**(`integrate` / `handover` 两条规则的终止判据)
@@ -1523,9 +1524,13 @@ Project:   draft → active → paused → done | abandoned
 (技术方案、架构图、汇报材料等等,但凡是只有信息交付的,都可以用 html 产出),同时预留其他类型的
 交付物,比如说 git 仓库以及 git 仓库上的一些提交」。
 
+**用户的要求(2026-10-08)**:「加一个新的交付物类型,叫做**代码服务**,这个是一个 git 仓库,
+然后这个仓库可以**独立部署到 docker 上面**」。
+
 ```ts
 export type DeliverableType =
   | "html_report"        // 只有信息交付:技术方案 / 架构图 / 汇报材料 / 评审结论 / 说明书
+  | "code_service"       // 代码服务:一个真的 git 仓库,能独立部署到 Docker(migration 026)
 ```
 
 #### ① 为什么是**一列**,而不是给 kind 加取值
@@ -1535,23 +1540,27 @@ export type DeliverableType =
 | `kind` 加 `deliverable_html_report` | ① `kind` 的值是**角色写面白名单**的成员(E8/E9 逐条校验),而「类型」是交付物自己的属性;② `integrate` / `handover` / 版本链都按 `kind='deliverable'` 查,每加一种类型就改一处规则;③ 「交付」这一件事在 11 个 kind 里裂成 N 个 |
 | **`artifacts.deliverable_type` 一列** | `kind='deliverable'` 的 1:N 属性。加一种类型 = **纯加法**:不改表、不改迁移、不动那两条规则 |
 
-#### ② 预留:**结构**预留,不是**名字**预留
+#### ② 加一种类型的**判据**是「有没有写入口」,不是「该不该有名字」
 
-`git_repo`(以及仓库上的提交)**刻意不在上面这个闭集里**。预留靠的是结构:
+`html_report` 与 `code_service` 都在闭集里,而「仓库上的某几个提交」「镜像」「部署实例」
+**刻意不在**。预留靠的是结构:
 
 | 预留的机制 | 位置 |
 |---|---|
 | 类型是一**列**,不是 kind 的取值 | `migrations/025` 的 `artifacts.deliverable_type` |
 | 类型专属坐标落 `metadata_json`,按类型分派读法 | 与 `kind` 无关的那部分保持不变 |
 | 读面按 `deliverable_type` 分支渲染 | `web/src/lib/deliverable.ts` 的 `bodyMode` |
-| 届时要改的只有三处 | 闭集 + 025 的 CHECK + `validateDeliverableBody` 加一条分支 |
+| 加一种类型时改的只有四处 | 闭集 + 迁移里的 CHECK + `validateDeliverableBody` 加一条分支 + **写入口的类型专属校验** |
 
-⚠️ **为什么不提前把 `git_repo` 写进闭集**:7-E 的病是「代码里声明了一个平台造不出来的东西」
+⚠️ **为什么当初不把 `git_repo` 写进闭集、后来却写进了 `code_service`**:判据不是「谁更该有名字」,
+而是**有没有写入口**。7-E 的病是「代码里声明了一个平台造不出来的东西」
 (`enabledTools: ["fs_read","fs_write","shell","http"]` —— 四个名字在 SDK 闭集里根本不存在,
 却摆在 `/api/harness` 里像个配置项)。一个**没有写入口**的类型值进闭集,就是对外声明平台
 造得出这个东西 —— 而模型会照着声明去 `board_write(deliverableType="git_repo")`。
-⇒ **闭集里每一个值都必须有一条真的写入口。**
-(`tests/platform/deliverable-types.test.ts` 里有一条**故意现在就该红**的负样本断言盯着这件事。)
+
+⇒ **闭集里每一个值都必须有一条真的写入口。** `code_service` 之所以现在能进,是因为
+它有了:写入那一刻平台会**去盘上核对**那个仓库(见 ④)。
+(`tests/platform/deliverable-types.test.ts` 里有一条负样本断言盯着「闭集里的每个值都要有真写入口」。)
 
 #### ③ 存量 `NULL` 是**有意义的取值**
 
@@ -1584,6 +1593,33 @@ export type DeliverableType =
 
 ⚠️ **脚本不执行是设计的一部分**,所以校验层在**写入时**就拒绝带 `<script>` 的正文 ——
 让模型当场拿到一条可执行的处置,而不是甲方收到一页空白(7-N:见不到现场等于没有现场)。
+
+#### ⑤ `code_service` = 一个**真的 git 仓库**,由平台当场核对
+
+| | |
+|---|---|
+| 写入 | `board_write({ kind:"deliverable", deliverableType:"code_service", body:"<markdown 说明>", metadata:{ repoPath, branch, headCommit, service, port } })` |
+| 校验(形状) | `validateCodeServiceBody`:正文必须是 **markdown**,不能是一份 HTML 文档(读面按 markdown 渲染它) |
+| 校验(**事实**) | `codeservice` 端口(`src/platform/codeservice/git.ts`)去盘上读一遍 |
+| 渲染 | 坐标 + `docker build` / `docker run` 命令 + 正文(`web/src/components/deliverable/CodeService.tsx`) |
+
+**核对的是六件事,一件不过就拒收**(每条拒绝都带可执行的处置,7-D/8-F):
+
+| # | 核对什么 | 为什么 |
+|---|---|---|
+| ① | 路径存在,且**在工作根之内**(realpath 之后比,拦符号链接逃逸) | 交付物要能在甲方那台机器上被找到;顺带挡住「指向 `/etc` 也算交付」 |
+| ② | 它**真的是 git 工作区** | 「一个 git 仓库」是用户原话里的定义 |
+| ③ | 它**有提交**(HEAD 解析得出来) | 没有提交的仓库 clone 下来是空目录,无法部署 |
+| ④ | `headCommit` 与**真实 HEAD 一致**(前缀匹配后按全 sha 存) | 交付物的意义是「甲方拿到的是**这一个**提交」 |
+| ⑤ | `branch` 存在,且**它的顶端就是那个提交** | 记的是「一个分支的当前顶端」,不是任意一个 sha |
+| ⑥ | 仓库**根目录有 `Dockerfile`** | 「可以独立部署到 docker 上面」这句话的**机械判据** |
+
+核对通过之后,写进 `metadata_json` 的坐标是**平台读到的值**(模型写短 sha 会存全 sha;
+另补 `headSubject` / `commitCount` / `files` / `verifiedAt`),模型自己给的其它键原样保留。
+
+⚠️ **没接上核对面时拒绝,不放行**(`tools/blackboard.ts` 的 `verifyCodeService`)。
+缺省放行等于「在这台机器上写一条假交付物是合法的」—— 而那种环境差异不会有人发现,
+正是本项目反复栽的那个坑(7-E:声明必须有读者)。
 
 ---
 
@@ -2144,7 +2180,7 @@ AgentRuntime
 
 ### 仍未决
 
-**3. 横向沟通的留痕密度?** `ask_role` 横向畅通,但同级之间聊了什么是否需要默认落库?留痕太密会淹没审计面,太疏则横向协调变成黑箱。(与设计 2 §11 第 5 条同题)
+**3. 横向沟通的留痕密度?** `ask_role` 横向畅通,但同级之间聊了什么是否需要默认落库?留痕太密会淹没审计面,太疏则横向协调变成黑箱。(与设计 2 §12 第 5 条同题)
 
 **6. 调度器的巡检策略**(2026-10-04 新增)。`listOverdueAsks` / `expireAsk` 已实现但无调用方。超时之后该做什么有几种选择:只surface 给知情方(当前注入文本的处置)、自动升级给上一级、还是标记为失效。7-L 的 fail-safe 原则(「判断轮缺席/超时/解析失败一律退回升级」)倾向于自动升级,但那会产生噪音。**前置依赖:阶段 12 的宿主进程** —— 没有长驻进程时这题连实验都做不了。
 

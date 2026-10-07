@@ -37,7 +37,7 @@ import { bootPlatform, type BootedPlatform } from "../runtime/boot.js";
 import { createPlatformSession, type CreateSessionFn } from "../runtime/session.js";
 import { runTurn, type TurnResult, type ToolCallRecord } from "../runtime/turn.js";
 import { runWorkItem } from "../runtime/execution.js";
-import { ORG, ensureOrg, orgReady } from "../runtime/org.js";
+import { ORG, ensureOrg, orgReady, syncOrgForExistingProjects } from "../runtime/org.js";
 import {
   drainProject,
   formatIdleTrail,
@@ -339,10 +339,51 @@ export interface PlatformHost {
  * 装配宿主(不监听)。测试可以直接拿 `app` 打请求,不必占端口。
  */
 export function createPlatformHost(opts: ServeOptions): PlatformHost {
-  const booted = bootPlatform({ dataDir: opts.dataDir, clientLog: (l) => log.muted(l) });
+  const booted = bootPlatform({
+    dataDir: opts.dataDir,
+    clientLog: (l) => log.muted(l),
+    // ⚠️ **必须与下面那个 `const cwd = opts.cwd ?? booted.settings.cwd` 同一个根。**
+    // 代码服务的包含性校验(`codeservice/git.ts`)按它算,而会话 cwd 按 `cwd` 算;
+    // 两者不一致时,仓库明明在会话的工作目录里,核对却说它在工作根之外。
+    ...(opts.cwd !== undefined ? { workspaceRoot: opts.cwd } : {}),
+  });
   const db = booted.deps.db;
   const now = booted.now;
   const newId = booted.newId;
+
+  /**
+   * 启动时把组织补进**每一个已存在的项目**(幂等)。
+   *
+   * ── 为什么必须在启动时做一次(2026-10-08,加 `coding_worker` 时发现)──
+   *
+   * `ensureOrg` 只保证「组织里有哪些人」,而**「谁在哪个项目里」**是另一张表
+   * (`project_assignments`),它此前只在**立项那一刻**写过一次。于是**新增一个
+   * 角色**这件事对存量项目是**结构性不发生**的:
+   *
+   *   · 老的库里 `cw` 会被 `ensureOrg` 建出来(组织级),但它不是任何已存在项目的成员
+   *   · `buildToolContext` 对非成员返回 `agent_not_assigned` ⇒ 它连会话都建不出来
+   *   · 项目经理 `work_create(assigneeRole='coding_worker')` 会撞上
+   *     「项目里没有这个角色的成员」⇒ 编码工**永远不会被派活**
+   *
+   * 而屏幕上是**看不出**这件事的:成员页列出的是「这个项目里有谁」,
+   * 少的那个角色只是不出现,看起来和「还没派到它」一模一样 —— 又一次 7-E。
+   *
+   * 放在**启动**而不是每次消息:这是**一次性对齐**(升级完成之后每轮都是空转),
+   * 而每条消息都跑一遍会让「谁在项目里」多一条与用户操作竞争写的路径。
+   * `ensureProjectOrg` 只补**一行都没有**的人,不复活被移出的成员(见它的注释)。
+   */
+  {
+    // ⚠️ **两步都要**,顺序也不能反:`ensureOrg` 先把「组织里有哪几个人」补齐
+    // **并校准显示名**(角色改名之后库里那一行还停在旧名的就是这种情况),
+    // `syncOrgForExistingProjects` 再把缺的人补进各个项目。
+    // 只做第二步时 `cw` 也能进项目(`ensureProjectOrg` 自己会补种 agent),
+    // 但 **`wk` 的显示名会一直是「工程师」** —— 那就是「同一个角色两个名字」
+    // 那种看不见的漂移,`tests/web/role-names.test.ts` 的存在就是为了它。
+    const org = ensureOrg(db, now());
+    for (const c of org) log.muted(`platform: 组织播种/校准 —— ${c}`);
+    const lines = syncOrgForExistingProjects(db, now());
+    for (const l of lines) log.muted(`platform: 组织对齐 —— ${l}`);
+  }
 
   const cwd = opts.cwd ?? booted.settings.cwd;
 
@@ -1765,6 +1806,9 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
      * (`dispatch: () => ({ lastRunAt: dispatchTimer.lastRunAt() })` 之外的任何
      * 提前取值)会在启动时撞上 TDZ —— 这正是把它写成函数的原因。
      */
+    // 代码服务交付物的**现读**边(最近提交)—— 与工具层同一个端口实例
+    // (`booted.deps.codeService` 已按 `workspaceRoot` 建好,这里只是把它交出去)。
+    ...(booted.deps.codeService !== undefined ? { codeService: booted.deps.codeService } : {}),
     live: {
       turns: () => hub.runningTurns(),
       dispatch: () => ({

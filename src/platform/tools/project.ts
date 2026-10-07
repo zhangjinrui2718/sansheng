@@ -16,6 +16,7 @@ import {
 } from "../storage/repo/works.js";
 import { getAgent } from "../storage/repo/agents.js";
 import { ensureProjectOrg } from "../runtime/org.js";
+import { EXECUTOR_ROLES, isExecutorRole } from "../identity/role.js";
 import { resolveAssignee } from "./resolve.js";
 import {
   fail, ok, requireProject, requireString, readString, readNumber,
@@ -398,17 +399,22 @@ function cancelWarning(db: ToolRunContext["db"], workId: string): string[] {
 }
 
 /**
- * 负责人只能是 **worker**(执行角色)。
+ * 负责人只能是**执行角色**(`EXECUTOR_ROLES` = 研究工 / 编码工)。
  *
  * ── 为什么在调用期拒收,而不是让它建出来 ─────────────────────────
  *
  * 真机现场:项目经理把「与甲方对齐业务场景」派给了 `business_manager`,
- * 那条工作项至今 `open` —— 因为平台**只为 worker 执行工作项**
+ * 那条工作项至今 `open` —— 因为平台**只为执行角色跑工作项**
  * (`runWorkItem.checkRunnable` 拒绝别的角色),而它也不会让「项目零工作项」
  * 为真(项目里确实有工作项),于是它谁也不叫醒。
  *
  * `work_create` 的 `assigneeRole` 此前只是一个自由字符串(类型是 `Type.String`,
- * 四个角色名只是**给模型看的提示**,不是约束),所以这条路是敞开的。
+ * 角色名只是**给模型看的提示**,不是约束),所以这条路是敞开的。
+ *
+ * ⚠️ **2026-10-08:合法值从「一个」变成「两个」,而判据改成读常量。**
+ * 之前是硬编码的 `role === "worker"` —— 那种写法在角色集变化时**不会报错**,
+ * 只会让新的执行角色被静默拒收(「编码工怎么派都派不出去」)。现在合法值由
+ * `EXECUTOR_ROLES` 推导,`fail` 回灌的也是同一份清单。
  *
  * 结构化拒绝 + 回灌合法值(8-F:拒绝必须让模型能据此自纠)。
  * `work_assign` 走同一条判定 —— 设计 1 §3.3 明写「改派与分派走同一条解析路径」,
@@ -416,14 +422,16 @@ function cancelWarning(db: ToolRunContext["db"], workId: string): string[] {
  */
 function requireExecutorRole(args: Readonly<Record<string, unknown>>): ToolResult | null {
   const role = args["assigneeRole"];
-  if (role === "worker") return null;
+  if (isExecutorRole(role)) return null;
   return fail(
     "invalid_args",
-    `负责人只能是执行角色 **worker**(收到「${String(role)}」)。` +
+    `负责人只能是**执行角色**(收到「${String(role)}」)。合法值:` +
+      EXECUTOR_ROLES.map((r) => `**${r}**`).join(" / ") +
+      `(前者产出文档类交付物,后者产出代码服务)。` +
       `工作项的意义就是被**执行**:business_manager / project_manager / quality_reviewer ` +
       `都不执行工作项,平台也不会为他们唤醒执行(那条工作项会永远停在 open)。` +
       `要请别的角色做一件事,用 ask_role 提问;要调度已有工作项,用 work_assign 改组内分工。`,
-    ["worker"],
+    [...EXECUTOR_ROLES],
   );
 }
 
@@ -431,14 +439,20 @@ const workCreate: PlatformTool = {
   name: "work_create",
   capability: "work.create",
   description:
-    "拆解出一个工作项并**指定负责人与依赖**。负责人必填,而且只能是 **worker**(执行角色)—— " +
-    "business_manager / project_manager / quality_reviewer 都不执行工作项。开工前先 board_list 查重,重复拆解是最常见也最贵的失败。",
+    "拆解出一个工作项并**指定负责人与依赖**。负责人必填,而且只能是**执行角色**" +
+    `(${EXECUTOR_ROLES.join(" / ")})—— business_manager / project_manager / ` +
+    "quality_reviewer 都不执行工作项。开工前先 board_list 查重,重复拆解是最常见也最贵的失败。",
   parameters: Type.Object({
     projectId: Type.Optional(Type.String({ description: "缺省 = 当前项目" })),
     title: Type.String(),
     goal: Type.String({ description: "要产出什么 + 怎么算做完(可验证的判据)" }),
-    assigneeRole: Type.String({ description: "执行角色:只有 worker(别的角色不执行工作项)" }),
-    assigneeSpec: Type.Optional(Type.String({ description: "worker 的细分:engineering | algorithm | data" })),
+    assigneeRole: Type.String({
+      description:
+        `执行角色:${EXECUTOR_ROLES.join(" | ")}。` +
+        "`research_worker` = 产出文档 / 伪代码 / 架构图 / 汇报材料(HTML 报告);" +
+        "`coding_worker` = 写代码,交付可独立部署到 Docker 的代码服务(git 仓库)。",
+    }),
+    assigneeSpec: Type.Optional(Type.String({ description: "执行角色的领域细分:engineering | algorithm | data" })),
     dependsOn: Type.Optional(Type.Array(Type.String(), { description: "前置工作项 id" })),
     parentWorkId: Type.Optional(Type.String({ description: "父工作项(做工作分解树时给)" })),
   }),
@@ -581,11 +595,11 @@ const workAssign: PlatformTool = {
   name: "work_assign",
   capability: "work.assign",
   description:
-    "改派工作项。与 work_create 走同一套负责人解析与同一条约束:目标必须是 **worker** —— " +
-    "改派给不执行工作项的角色,等于把它变成没人能跑的孤儿。",
+    "改派工作项。与 work_create 走同一套负责人解析与同一条约束:目标必须是**执行角色**" +
+    `(${EXECUTOR_ROLES.join(" / ")})—— 改派给不执行工作项的角色,等于把它变成没人能跑的孤儿。`,
   parameters: Type.Object({
     workId: Type.String(),
-    assigneeRole: Type.String({ description: "执行角色:只有 worker" }),
+    assigneeRole: Type.String({ description: `执行角色:${EXECUTOR_ROLES.join(" | ")}` }),
     assigneeSpec: Type.Optional(Type.String()),
     reason: Type.Optional(Type.String()),
   }),

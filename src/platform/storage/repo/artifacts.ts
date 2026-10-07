@@ -27,34 +27,38 @@ import {
  * 评审结论、说明书。正文是一份**自包含的 HTML 文档**,读面在**禁用脚本的
  * 沙箱 iframe** 里渲染它(`web/src/components/deliverable/HtmlReport.tsx`)。
  *
- * ⚠️ **本闭集必须与 `migrations/025` 的 `deliverable_type` CHECK 恰好相等**,
+ * `code_service`(**026 新增**)= **代码服务**:用户原话「这个是一个 git 仓库,
+ * 然后这个仓库可以独立部署到 docker 上面」。它是**唯一一个正文之外还有硬坐标**
+ * 的类型 —— 仓库路径 / 分支 / HEAD / Dockerfile / 服务名与端口写在 `metadata_json`,
+ * 而**写入口带现场核对**:`tools/blackboard.ts` 会调 `codeservice` 端口去盘上
+ * 把这几件事读一遍,读不到就不让写(`src/platform/codeservice/git.ts`)。
+ * 所以「写个 type 字段就算交付」这条路不通 —— 7-E 的教训是
+ * 「**闭集里每一个值都必须有一条真的写入口**」,`code_service` 的写入口就是
+ * 那次核对,不是一个字符串枚举。
+ *
+ * ⚠️ **本闭集必须与 `migrations/026` 的 `deliverable_type` CHECK 恰好相等**,
  * 理由与上面 `ArtifactKind` 那段完全相同:schema 先开、代码后跟的那段窗口里,
  * 读面是**关**的 —— `rowToArtifact` 对未定义类型**硬抛**。
  *
  * ── 预留类型(刻意**不在**这个闭集里)─────────────────────────────
  *
- * 用户原话(2026-10-07):「同时预留其他类型的交付物,比如说 **git 仓库**以及
- * **git 仓库上的一些提交**」。预留的方式是**结构**而不是**名字**:
+ * 「git 仓库上的某几个提交」「镜像」「部署实例」都还没有写入口。预留的方式是
+ * **结构**而不是**名字**:`artifacts.deliverable_type` 是一列
+ * (`kind='deliverable'` 的 1:N 属性),类型专属坐标落 `metadata_json`,
+ * 加一种类型只需:往本闭集加一个值 → 往 026 那条 CHECK 里同步 → 在
+ * `board_write` 加一条类型专属校验 + 在读面加一个渲染分支,
+ * **不改表、不改迁移、不动 `integrate` / `handover` 两条规则**(它们按 `kind` 查)。
  *
- *   ① `artifacts.deliverable_type` 是一列(`kind='deliverable'` 的 1:N 属性),
- *      所以加一种类型**不需要改表**、不需要迁移、不需要动 integrate /
- *      handover 两条规则(它们按 `kind` 查,不按类型查);
- *   ② 类型专属的坐标(仓库地址、分支、提交区间)落 `metadata_json`,
- *      按 `deliverable_type` 分派读法 —— 与 `kind` 无关的那部分保持不变;
- *   ③ 届时只需:往本闭集加一个值 → 往 025 那条 CHECK 里同步 → 在
- *      `board_write` 加一条类型专属校验 + 在读面加一个渲染分支。
- *
- * ⚠️ **为什么不把 `git_repo` 现在就写进闭集**:7-E 的教训是「代码里写了逻辑
- * ≠ 它有读者」。一个**没有写入口**的类型值进闭集,就是对外声明平台造得出
- * 这个东西 —— 而模型会照着这个声明去 `board_write(kind='deliverable',
- * deliverableType='git_repo')`,然后拿到一条「这个类型还没实现」的错误,
- * 或者更糟:进闭集后被静默接受、写出一条没有坐标的假仓库交付。
- * **闭集里每一个值都必须有一条真的写入口。**
+ * ⚠️ **为什么当初不把 `git_repo` 写进闭集、而现在写进了 `code_service`**:
+ * 判据不是「谁更该有名字」,而是**有没有写入口**。025 那版闭集里写进去,
+ * 模型就会照着声明去写一条平台造不出来的交付物;现在写进去,是因为
+ * `codeservice` 端口能在写入那一刻**把假的东西挡在门外**。
  */
-export type DeliverableType = "html_report";
+export type DeliverableType = "html_report" | "code_service";
 
 export const DELIVERABLE_TYPES = [
   "html_report",
+  "code_service",
 ] as const satisfies readonly DeliverableType[];
 
 export function isDeliverableType(v: unknown): v is DeliverableType {
@@ -111,6 +115,33 @@ export function validateHtmlReport(body: string): string | null {
 }
 
 /**
+ * `code_service` 正文的**最小验收判据**。
+ *
+ * 正文是给甲方读的**说明**(这个服务是什么、怎么跑、怎么部署、外部依赖是什么),
+ * 读面按 **markdown** 渲染它 —— 所以判据只有一条:**它不能是一份 HTML 文档**。
+ * 把 HTML 塞进来会原样显示成一堆标签(读面不会为它开沙箱 iframe ——
+ * 那是 `html_report` 的待遇)。这与 `validateHtmlReport` 恰好互为反向,
+ * 而两条都**不做**内容质量判断:平台不替模型评价「这份说明写得好不好」。
+ *
+ * ⚠️ **仓库坐标的核对不在这里。** 它是**纯函数**层的校验,拿不到磁盘;
+ * 真核对在 `tools/blackboard.ts` → `codeservice/port.ts`(需要 workspaceRoot)。
+ * 类型专属判据因此分两层:**形状**(这里)与**事实**(端口)。
+ */
+const HTML_DOC_HEAD = /^\s*<(?:!doctype\s+html|html)\b/i;
+
+export function validateCodeServiceBody(body: string): string | null {
+  if (HTML_DOC_HEAD.test(body)) {
+    return (
+      "`code_service` 的正文是给甲方读的**说明文档**(markdown),不是 HTML 页面 —— " +
+      "把 HTML 塞进来,读面会原样显示成一堆标签。请用 markdown 写:这个服务是什么、" +
+      "怎么构建、怎么跑起来、怎么部署到 Docker、端口与外部依赖是什么。" +
+      "如果你的交付物**只有信息**(一份报告),那它该写成 `html_report`。"
+    );
+  }
+  return null;
+}
+
+/**
  * 类型专属的正文校验。新增一种类型就在这里加一条分支 ——
  * **闭集里每个值都必须在这里有分支**,否则 `null` 意味着「不校验」而不是「合法」。
  */
@@ -118,6 +149,8 @@ export function validateDeliverableBody(type: DeliverableType, body: string): st
   switch (type) {
     case "html_report":
       return validateHtmlReport(body);
+    case "code_service":
+      return validateCodeServiceBody(body);
   }
 }
 

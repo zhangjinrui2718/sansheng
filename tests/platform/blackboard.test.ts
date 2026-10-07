@@ -46,7 +46,7 @@ beforeEach(() => {
   });
   agentA = `ag${++seq}`;
   agentB = `ag${++seq}`;
-  insertAgent(db, { id: agentA, role: "worker", specialization: "algorithm", displayName: "算法", createdAt: T0 });
+  insertAgent(db, { id: agentA, role: "research_worker", specialization: "algorithm", displayName: "算法", createdAt: T0 });
   insertAgent(db, { id: agentB, role: "quality_reviewer", specialization: null, displayName: "质检", createdAt: T0 });
 });
 afterEach(() => db.close());

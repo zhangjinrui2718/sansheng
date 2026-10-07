@@ -4,7 +4,7 @@
  * 测的重点不是 CRUD 能不能跑通,而是**约束是不是真的在生效**:
  *   - 闭合集 CHECK(role / status / specialization)
  *   - 外键 REFERENCES(SQLite 默认 OFF,忘了开 pragma 就全形同虚设)
- *   - 「只有 worker 有 specialization」的触发器
+ *   - 「只有**执行角色**有 specialization」的触发器(026 起是两个执行角色)
  *   - **DAG 环检测** —— 旧代码在这里踩过「DAG 通配 bug」,死循环的表现是
  *     「计划永远跑不完」,事后极难归因
  */
@@ -133,9 +133,9 @@ describe("migration 007 · 表就位", () => {
 
 describe("BC0 · agents", () => {
   it("插入与读取", () => {
-    const id = mkAgent("worker", "algorithm");
+    const id = mkAgent("research_worker", "algorithm");
     const a = getAgent(db, id);
-    expect(a).toMatchObject({ id, role: "worker", specialization: "algorithm" });
+    expect(a).toMatchObject({ id, role: "research_worker", specialization: "algorithm" });
   });
 
   it("非法 role 被 CHECK 拒绝", () => {
@@ -151,35 +151,44 @@ describe("BC0 · agents", () => {
     expect(() =>
       db.prepare(
         `INSERT INTO agents (id, role, specialization, display_name, created_at)
-         VALUES ('x','worker','frontend','x',1)`,
+         VALUES ('x','research_worker','frontend','x',1)`,
       ).run(),
     ).toThrow(/CHECK/i);
   });
 
-  it("非 worker 带 specialization 被触发器拒绝", () => {
+  it("非执行角色带 specialization 被触发器拒绝", () => {
     expect(() =>
       db.prepare(
         `INSERT INTO agents (id, role, specialization, display_name, created_at)
          VALUES ('x','project_manager','data','x',1)`,
       ).run(),
-    ).toThrow(/specialization 只对 worker 有意义/);
+    ).toThrow(/specialization 只对执行角色\(research_worker \/ coding_worker\)有意义/);
+  });
+
+  // ── 026(2026-10-08):判据从「只对 worker」放宽到「只对执行角色」──
+  // 正样本:两个执行角色**都**能带细分(否则上面那条负样本可能只是「什么都拒」)。
+  it("两个执行角色都能带 specialization(研究工 / 编码工都由触发器放行)", () => {
+    expect(() => mkAgent("research_worker", "algorithm")).not.toThrow();
+    expect(() => mkAgent("coding_worker", "engineering")).not.toThrow();
+    expect(getAgent(db, listAgentsByRole(db, "coding_worker")[0]!.id)?.specialization)
+      .toBe("engineering");
   });
 
   it("listAgentsByRole / findAgents 按角色与细分过滤", () => {
-    const algo = mkAgent("worker", "algorithm");
-    const eng = mkAgent("worker", "engineering");
+    const algo = mkAgent("research_worker", "algorithm");
+    const eng = mkAgent("research_worker", "engineering");
     mkAgent("project_manager");
 
-    expect(listAgentsByRole(db, "worker").map((a) => a.id).sort()).toEqual([algo, eng].sort());
-    expect(findAgents(db, "worker", "algorithm").map((a) => a.id)).toEqual([algo]);
-    expect(findAgents(db, "worker", "data")).toEqual([]);
+    expect(listAgentsByRole(db, "research_worker").map((a) => a.id).sort()).toEqual([algo, eng].sort());
+    expect(findAgents(db, "research_worker", "algorithm").map((a) => a.id)).toEqual([algo]);
+    expect(findAgents(db, "research_worker", "data")).toEqual([]);
     // 不给 spec → 全部候选(歧义由调用方处理,不隐式挑一个)
-    expect(findAgents(db, "worker").length).toBe(2);
+    expect(findAgents(db, "research_worker").length).toBe(2);
   });
 
   it("行 → 领域对象的边界校验:数据库里出现未知 role 会抛错而不是静默放行", () => {
     // 绕过 CHECK 直接改(模拟旧数据/外部写入)
-    const id = mkAgent("worker");
+    const id = mkAgent("research_worker");
     db.pragma("ignore_check_constraints = ON");
     db.prepare(`UPDATE agents SET role = 'ceo' WHERE id = ?`).run(id);
     db.pragma("ignore_check_constraints = OFF");
@@ -195,9 +204,10 @@ describe("BC0 · agents", () => {
   it("listAgents 覆盖全部角色", () => {
     mkAgent("business_manager");
     mkAgent("project_manager");
-    mkAgent("worker", "data");
+    mkAgent("research_worker", "data");
+    mkAgent("coding_worker", "engineering");
     mkAgent("quality_reviewer");
-    expect(listAgents(db)).toHaveLength(4);
+    expect(listAgents(db)).toHaveLength(5);
   });
 });
 
@@ -260,7 +270,7 @@ describe("BC1 · projects", () => {
 describe("BC1 · project_assignments", () => {
   it("加入与列出", () => {
     const p = mkProject();
-    const a = mkAgent("worker", "engineering");
+    const a = mkAgent("research_worker", "engineering");
     addMember(db, p, a, T0);
     expect(listAssignments(db, p)).toEqual([{ agentId: a }]);
   });
@@ -268,12 +278,12 @@ describe("BC1 · project_assignments", () => {
   it("外键挡住不存在的项目/agent", () => {
     const p = mkProject();
     expect(() => addMember(db, p, "ghost", T0)).toThrow(/FOREIGN KEY/i);
-    expect(() => addMember(db, "ghost-project", mkAgent("worker"), T0)).toThrow(/FOREIGN KEY/i);
+    expect(() => addMember(db, "ghost-project", mkAgent("research_worker"), T0)).toThrow(/FOREIGN KEY/i);
   });
 
   it("移出是软删除:removedAt 落值,行还在", () => {
     const p = mkProject();
-    const a = mkAgent("worker");
+    const a = mkAgent("research_worker");
     addMember(db, p, a, T0);
     removeMember(db, p, a, T0 + 5);
     const list = listAssignments(db, p);
@@ -283,7 +293,7 @@ describe("BC1 · project_assignments", () => {
 
   it("移出后重新加入 → removedAt 清空(历史痕迹不留成「已移出」状态)", () => {
     const p = mkProject();
-    const a = mkAgent("worker");
+    const a = mkAgent("research_worker");
     addMember(db, p, a, T0);
     removeMember(db, p, a, T0 + 5);
     addMember(db, p, a, T0 + 10);
@@ -292,7 +302,7 @@ describe("BC1 · project_assignments", () => {
 
   it("级联:删项目带走它的成员关系", () => {
     const p = mkProject();
-    const a = mkAgent("worker");
+    const a = mkAgent("research_worker");
     addMember(db, p, a, T0);
     db.prepare(`DELETE FROM projects WHERE id = ?`).run(p);
     expect(listAssignments(db, p)).toEqual([]);
@@ -304,7 +314,7 @@ describe("BC1 · project_assignments", () => {
 describe("BC1 · works", () => {
   it("插入与读取", () => {
     const p = mkProject();
-    const a = mkAgent("worker", "algorithm");
+    const a = mkAgent("research_worker", "algorithm");
     const w = mkWork(p, a);
     expect(getWork(db, w)).toMatchObject({ projectId: p, assigneeAgentId: a, status: "open" });
   });
@@ -321,7 +331,7 @@ describe("BC1 · works", () => {
 
   it("非法 status 被 CHECK 拒绝", () => {
     const p = mkProject();
-    const a = mkAgent("worker");
+    const a = mkAgent("research_worker");
     expect(() =>
       db.prepare(
         `INSERT INTO works (id,project_id,parent_work_id,title,goal,status,assignee_agent_id,created_at,updated_at)
@@ -337,8 +347,8 @@ describe("BC1 · works", () => {
 
   it("listWorks 支持按状态 / 负责人 / 父项 / 顶层过滤", () => {
     const p = mkProject();
-    const a1 = mkAgent("worker", "algorithm");
-    const a2 = mkAgent("worker", "engineering");
+    const a1 = mkAgent("research_worker", "algorithm");
+    const a2 = mkAgent("research_worker", "engineering");
     const root = mkWork(p, a1);
     const child = mkWork(p, a2, { parentWorkId: root });
     mkWork(p, a1, { status: "in_progress" });
@@ -352,8 +362,8 @@ describe("BC1 · works", () => {
 
   it("updateWorkStatus / assignWork", () => {
     const p = mkProject();
-    const a1 = mkAgent("worker", "algorithm");
-    const a2 = mkAgent("worker", "data");
+    const a1 = mkAgent("research_worker", "algorithm");
+    const a2 = mkAgent("research_worker", "data");
     const w = mkWork(p, a1);
     updateWorkStatus(db, w, "in_progress", T0 + 100);
     assignWork(db, w, a2, T0 + 101);
@@ -384,7 +394,7 @@ describe("BC1 · works", () => {
 describe("BC1 · work_deps 环检测(旧代码在这里踩过 DAG 通配 bug)", () => {
   it("正常依赖可加,listDeps / listDependents 双向可查", () => {
     const p = mkProject();
-    const a = mkAgent("worker");
+    const a = mkAgent("research_worker");
     const w1 = mkWork(p, a);
     const w2 = mkWork(p, a);
     expect(addDep(db, w2, w1)).toEqual({ ok: true });
@@ -394,14 +404,14 @@ describe("BC1 · work_deps 环检测(旧代码在这里踩过 DAG 通配 bug)", 
 
   it("自环被拒", () => {
     const p = mkProject();
-    const w = mkWork(p, mkAgent("worker"));
+    const w = mkWork(p, mkAgent("research_worker"));
     expect(addDep(db, w, w)).toEqual({ ok: false, reason: "self" });
     expect(createsCycle(db, w, w)).toBe(true);
   });
 
   it("两跳环 A→B→A 被拒", () => {
     const p = mkProject();
-    const a = mkAgent("worker");
+    const a = mkAgent("research_worker");
     const w1 = mkWork(p, a);
     const w2 = mkWork(p, a);
     expect(addDep(db, w2, w1)).toEqual({ ok: true }); // w2 依赖 w1
@@ -412,7 +422,7 @@ describe("BC1 · work_deps 环检测(旧代码在这里踩过 DAG 通配 bug)", 
 
   it("多跳环 A→B→C→A 被拒", () => {
     const p = mkProject();
-    const a = mkAgent("worker");
+    const a = mkAgent("research_worker");
     const w1 = mkWork(p, a), w2 = mkWork(p, a), w3 = mkWork(p, a);
     expect(addDep(db, w2, w1).ok).toBe(true);
     expect(addDep(db, w3, w2).ok).toBe(true);
@@ -421,7 +431,7 @@ describe("BC1 · work_deps 环检测(旧代码在这里踩过 DAG 通配 bug)", 
 
   it("菱形依赖不算环(A→B, A→C, B→D, C→D 合法)", () => {
     const p = mkProject();
-    const a = mkAgent("worker");
+    const a = mkAgent("research_worker");
     const A = mkWork(p, a), B = mkWork(p, a), C = mkWork(p, a), D = mkWork(p, a);
     expect(addDep(db, B, A).ok).toBe(true);
     expect(addDep(db, C, A).ok).toBe(true);
@@ -432,7 +442,7 @@ describe("BC1 · work_deps 环检测(旧代码在这里踩过 DAG 通配 bug)", 
 
   it("重复边被拒,但不算环", () => {
     const p = mkProject();
-    const a = mkAgent("worker");
+    const a = mkAgent("research_worker");
     const w1 = mkWork(p, a), w2 = mkWork(p, a);
     addDep(db, w2, w1);
     expect(addDep(db, w2, w1)).toEqual({ ok: false, reason: "duplicate" });
@@ -440,13 +450,13 @@ describe("BC1 · work_deps 环检测(旧代码在这里踩过 DAG 通配 bug)", 
 
   it("指向不存在的工作项被拒", () => {
     const p = mkProject();
-    const w = mkWork(p, mkAgent("worker"));
+    const w = mkWork(p, mkAgent("research_worker"));
     expect(addDep(db, w, "ghost")).toEqual({ ok: false, reason: "not_found" });
   });
 
   it("自环由 schema 的 CHECK 再兜一道", () => {
     const p = mkProject();
-    const w = mkWork(p, mkAgent("worker"));
+    const w = mkWork(p, mkAgent("research_worker"));
     expect(() =>
       db.prepare(`INSERT INTO work_deps (work_id, depends_on_work_id) VALUES (?, ?)`).run(w, w),
     ).toThrow(/CHECK/i);
@@ -454,7 +464,7 @@ describe("BC1 · work_deps 环检测(旧代码在这里踩过 DAG 通配 bug)", 
 
   it("删工作项级联带走依赖边", () => {
     const p = mkProject();
-    const a = mkAgent("worker");
+    const a = mkAgent("research_worker");
     const w1 = mkWork(p, a), w2 = mkWork(p, a);
     addDep(db, w2, w1);
     db.prepare(`DELETE FROM works WHERE id = ?`).run(w1);
@@ -463,7 +473,7 @@ describe("BC1 · work_deps 环检测(旧代码在这里踩过 DAG 通配 bug)", 
 
   it("removeDep 生效", () => {
     const p = mkProject();
-    const a = mkAgent("worker");
+    const a = mkAgent("research_worker");
     const w1 = mkWork(p, a), w2 = mkWork(p, a);
     addDep(db, w2, w1);
     removeDep(db, w2, w1);
@@ -476,7 +486,7 @@ describe("BC1 · work_deps 环检测(旧代码在这里踩过 DAG 通配 bug)", 
 describe("BC1 · depState 四态(failed 才真正等不到;cancelled 不阻塞但要可见)", () => {
   it("前置 done → satisfied", () => {
     const p = mkProject();
-    const a = mkAgent("worker");
+    const a = mkAgent("research_worker");
     const d = mkWork(p, a), w = mkWork(p, a);
     updateWorkStatus(db, d, "done", T0);
     addDep(db, w, d);
@@ -486,7 +496,7 @@ describe("BC1 · depState 四态(failed 才真正等不到;cancelled 不阻塞�
 
   it("前置仍在跑 → pending,不能开工", () => {
     const p = mkProject();
-    const a = mkAgent("worker");
+    const a = mkAgent("research_worker");
     const d = mkWork(p, a), w = mkWork(p, a);
     updateWorkStatus(db, d, "in_progress", T0);
     addDep(db, w, d);
@@ -496,7 +506,7 @@ describe("BC1 · depState 四态(failed 才真正等不到;cancelled 不阻塞�
 
   it("前置 failed → failed,调用方应级联失败而不是等", () => {
     const p = mkProject();
-    const a = mkAgent("worker");
+    const a = mkAgent("research_worker");
     const d = mkWork(p, a), w = mkWork(p, a);
     updateWorkStatus(db, d, "failed", T0);
     addDep(db, w, d);
@@ -514,7 +524,7 @@ describe("BC1 · depState 四态(failed 才真正等不到;cancelled 不阻塞�
     // 取消的语义是「这块范围不要了」,不是「这条活失败了」。两者混淆的代价是
     // 下游永远等一个不会有人做的活。
     const p = mkProject();
-    const a = mkAgent("worker");
+    const a = mkAgent("research_worker");
     const d = mkWork(p, a), w = mkWork(p, a);
     updateWorkStatus(db, d, "cancelled", T0);
     addDep(db, w, d);
@@ -528,7 +538,7 @@ describe("BC1 · depState 四态(failed 才真正等不到;cancelled 不阻塞�
     // 精确复现用户数据里的形状:PM 取消了 W,新建了同名 W′,
     // 而下游 D 的 dependsOn 仍指向被取消的 W。
     const p = mkProject();
-    const a = mkAgent("worker");
+    const a = mkAgent("research_worker");
     const cancelled = mkWork(p, a), replacement = mkWork(p, a), downstream = mkWork(p, a);
     updateWorkStatus(db, cancelled, "cancelled", T0);
     addDep(db, downstream, cancelled); // ← 指向旧的那份(现实里就是这么发生的)
@@ -541,7 +551,7 @@ describe("BC1 · depState 四态(failed 才真正等不到;cancelled 不阻塞�
 
   it("混合各态各归各位", () => {
     const p = mkProject();
-    const a = mkAgent("worker");
+    const a = mkAgent("research_worker");
     const okD = mkWork(p, a), badD = mkWork(p, a), waitD = mkWork(p, a);
     const goneD = mkWork(p, a), w = mkWork(p, a);
     updateWorkStatus(db, okD, "done", T0);
@@ -559,7 +569,7 @@ describe("BC1 · depState 四态(failed 才真正等不到;cancelled 不阻塞�
 
   it("无依赖 → 可以开工", () => {
     const p = mkProject();
-    const w = mkWork(p, mkAgent("worker"));
+    const w = mkWork(p, mkAgent("research_worker"));
     expect(depsSatisfied(db, w)).toBe(true);
     expect(depState(db, w)).toEqual({
       satisfied: [], cancelled: [], failed: [], pending: [], missing: [],
@@ -574,7 +584,7 @@ describe("接缝 · loadProjectForAuthz 喂给 solveToolset", () => {
     const p = mkProject("active");
     const bm = mkAgent("business_manager");
     const pm = mkAgent("project_manager");
-    const wk = mkAgent("worker", "algorithm");
+    const wk = mkAgent("research_worker", "algorithm");
     addMember(db, p, bm, T0);
     addMember(db, p, pm, T0);
     addMember(db, p, wk, T0);
@@ -590,7 +600,7 @@ describe("接缝 · loadProjectForAuthz 喂给 solveToolset", () => {
 
   it("项目被关掉后,项目内能力被 scope 门挡下", () => {
     const p = mkProject("active");
-    const wk = mkAgent("worker", "algorithm");
+    const wk = mkAgent("research_worker", "algorithm");
     addMember(db, p, wk, T0);
     closeProject(db, p, "done", T0 + 1);
 
@@ -604,7 +614,7 @@ describe("接缝 · loadProjectForAuthz 喂给 solveToolset", () => {
 
   it("被移出项目的成员不再是参与方 → 不是通信合法目标", () => {
     const p = mkProject("active");
-    const wk = mkAgent("worker");
+    const wk = mkAgent("research_worker");
     const qa = mkAgent("quality_reviewer");
     addMember(db, p, wk, T0);
     addMember(db, p, qa, T0);
@@ -652,10 +662,10 @@ describe("014 · 产出边(board_write 的 workId)", () => {
   const write = (agentId: string, projectId: string, args: Record<string, unknown>) =>
     dispatch("board_write", args, ctxFor(agentId, projectId));
 
-  /** 一个活跃项目 + 一个 worker 成员 + 一条分派给它的工作项 */
+  /** 一个活跃项目 + 一个执行角色成员 + 一条分派给它的工作项 */
   function scene(): { pid: string; wk: string; workId: string } {
     const pid = mkProject("active");
-    const wk = mkAgent("worker", "algorithm");
+    const wk = mkAgent("research_worker", "algorithm");
     addMember(db, pid, wk, T0);
     const workId = mkWork(pid, wk);
     return { pid, wk, workId };
@@ -801,7 +811,7 @@ describe("016 · deliverable 工件(真启动路径 + 仓储层)", () => {
 
   it("deliverable 写得进,013/014 的列与产出边跟着一起活着", () => {
     const pid = mkProject("active");
-    const wk = mkAgent("worker", "engineering");
+    const wk = mkAgent("research_worker", "engineering");
     const workId = mkWork(pid, wk);
     const id = `a016_keep_${++seq}`;
     rawArtifact(id, "deliverable", pid, wk, workId);
@@ -829,7 +839,7 @@ describe("016 · deliverable 工件(真启动路径 + 仓储层)", () => {
 
   it("**负样本**:闭集是被放宽,不是被拆掉 —— nonsense 仍被拒,旧 10 个取值仍可用", () => {
     const pid = mkProject("active");
-    const wk = mkAgent("worker", "engineering");
+    const wk = mkAgent("research_worker", "engineering");
     // 正样本:同一支探针在合法取值上不报错(否则下面两条可能是「什么都拒」)
     expect(() => rawArtifact(`a016_ok_${++seq}`, "deliverable", pid, wk, null)).not.toThrow();
     // 负样本两条
@@ -894,7 +904,7 @@ describe("C2 · deliverable 的读写面(设计 1 §2.11.5)", () => {
   it("仓储写入口收得下 deliverable,读入口读得回(豁口关了)", () => {
     const pid = mkProject("active");
     const pm = mkAgent("project_manager");
-    const rootWork = mkWork(pid, mkAgent("worker", "engineering"));
+    const rootWork = mkWork(pid, mkAgent("research_worker", "engineering"));
     const id = `a_c2_${++seq}`;
 
     // 这一行在 C2 之前**编译不过**(ArtifactKind 联合里没有 deliverable)——
@@ -908,7 +918,7 @@ describe("C2 · deliverable 的读写面(设计 1 §2.11.5)", () => {
     const got = getArtifact(db, id);
     expect(got, "deliverable 行读不回来 —— rowToArtifact 的 isArtifactKind 不认识它").not.toBeNull();
     expect(got!.kind).toBe("deliverable");
-    expect(got!.authorAgentId, "交付物由项目经理写(不是 worker 的产出)").toBe(pm);
+    expect(got!.authorAgentId, "交付物由项目经理写(不是执行角色的 evidence 产出)").toBe(pm);
     expect(got!.workId, "014 的产出边要跟着一起读回来").toBe(rootWork);
     expect(listArtifacts(db, pid).map((a) => a.id), "整项目列表也必须读得动(不是只有单条)").toContain(id);
   });

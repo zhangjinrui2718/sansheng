@@ -2,7 +2,73 @@
 
 ---
 
-# ⚡ 最新一轮 · W15(2026-10-07)· 交付物**类型**:先落地 HTML 报告,给 git 仓库留好位
+# ⚡ 最新一轮 · W16(2026-10-08)· 执行角色一分为二 + 交付物类型加 **代码服务**
+
+> 用户原话:「我现在想加一个新的交付物类型,叫做**代码服务**,这个是一个 git 仓库,然后
+> 这个仓库可以**独立部署到 docker 上面**。新增一种 worker 类型叫做 **coding worker**,
+> 专门来写代码,现在的那个 worker 改名叫做 **research worker**,专门用来产出文档、
+> 伪代码、架构图、汇报材料等等」。
+
+```
+migration 026 · ProjectRole 4 → 5(research_worker + coding_worker)
+             · DeliverableType ["html_report"] → ["html_report", "code_service"]
+1672 passed / 82 files · 两条 typecheck 0 · npm run build 绿 · check:design E1–E14 绿(5 角色)
+```
+
+## ① 角色按**产出形态**分,不按层级分
+
+| 角色 | 交什么 | 交付物类型 | ceiling 的差别 |
+|---|---|---|---|
+| `research_worker` 研究工 | 信息:方案 / 架构图 / 伪代码 / 汇报材料 | `html_report` | `code.read` + `code.exec`,**无 `code.write`** |
+| `coding_worker` 编码工 | 能跑的东西:可独立部署到 Docker 的代码服务 | `code_service` | 三个都有 |
+
+⚠️ **`worker` 这个字符串在代码与库里都不再存在。** 「谁能执行工作项」只有一处判据:
+`identity/role.ts` 的 `EXECUTOR_ROLES` / `isExecutorRole()`(三处消费者:execution 的
+`checkRunnable`、pendingWork 的 `canExecuteWork`、dispatcher 的两条规则)。**别再写死角色名** ——
+硬编码 `role === "worker"` 在角色集变化时不报错,只会让新角色**静默不工作**。
+
+## ② `deliverable` 的写权从「只有项目经理」放宽到**三个角色**
+
+一份 HTML 报告是研究工写出来的,一个代码服务是编码工做出来的 —— **执行者自己就是产出它的人**。
+质检仍然只写 `review_finding`。
+
+## ③ `code_service` 的写入口 = 平台**当场去盘上核对**(这次唯一的新机制)
+
+`metadata` 必带 `repoPath` / `branch` / `headCommit` / `service` / `port`,写入那一刻
+`codeservice` 端口(`src/platform/codeservice/git.ts`)去读一遍,**六件事一件不过就拒收**:
+① 路径存在且在工作根之内(realpath 后比);② 它**就是仓库根**(`--show-toplevel`);
+③ 真的是 git 工作区;④ 有提交;⑤ `headCommit` 与真实 HEAD 一致、`branch` 顶端就是它;
+⑥ **仓库根有 `Dockerfile`**。通过之后写进库的是**平台读到的值**(短 sha 归一成全 sha),
+并原样回灌给模型。没接上核对面时**拒绝,不放行**。
+
+⇒ 这就是「闭集里每个值都必须有真的写入口」那句话的兑现:`git_repo` 仍然不在闭集里,
+而 `code_service` 能进,是因为它有**带牙齿的写入口**。
+
+## ④ 这次踩到并处置的三个坑(都有回归)
+
+| 坑 | 现象 | 处置 |
+|---|---|---|
+| **`agents` 重建不能用「改名换表法」** | 数据少时它**不报错而静默清空 `project_assignments`**(`foreign_key_check` 干净);数据多时才响亮失败 | `PRAGMA defer_foreign_keys = ON` + 只备份那一条 CASCADE 子表。**该迁移必须跑在事务里**(迁移器天然满足),回归含事务外失败那条负样本 |
+| **025 的子表清单是错的** | 它漏了 `client_questions` ×2(含主键)与 `review_verdicts` ×1;照它处置会**静默删光待答台账** | 判据改成**动态的** `PRAGMA foreign_key_list`;026 备份并灌回 `client_questions` |
+| **`GIT_DIR=""` 会让 git 报「不是一个仓库」** | 空串被 git 当成**路径** → 每次核对都失败,而错误读起来像「这不是 git 仓库」 | 清环境变量要 **`delete` 键**,不是设成 `""` |
+
+## ⑤ 新增角色必须能进入**已存在的项目**
+
+`ensureOrg` 管「组织里有谁」,`ensureProjectOrg` 管「谁在哪个项目里」—— 后者此前只在立项时跑,
+于是新角色**建得出来却不是任何老项目的成员** ⇒ 会话建不出来 ⇒ 永远不被派活,而成员页
+只显示「这个项目里有谁」(少的那个只是不出现)。⇒ 宿主启动时 `syncOrgForExistingProjects`。
+⚠️ 它只补「一行都没有」的人,**不复活被移出的成员**。回归:`tests/platform/org-sync.test.ts`。
+
+## ⑥ 读面
+
+`ArtifactView.codeService`(服务端从 `metadata_json` 解析)+ `GET /api/artifacts/:id/commits`
+(**现读**的最近提交 —— 交付时记的 HEAD 是那一刻的事实,而「后来改了什么」只能现在读)。
+`runtime: "unavailable"` 是**读不到**,不是「没有提交」。渲染面
+`web/src/components/deliverable/CodeService.tsx`(坐标 + 由坐标生成的 docker 命令 + README)。
+
+---
+
+# W15(2026-10-07)· 交付物**类型**:先落地 HTML 报告,给 git 仓库留好位
 
 > 用户原话:「定义一下交付物都有哪些类型,先实现一个最简单的,html 的报告(技术方案、
 > 架构图、汇报材料等等,但凡是只有信息交付的,都可以用 html 产出),同时预留其他类型的

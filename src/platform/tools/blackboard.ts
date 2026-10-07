@@ -22,10 +22,11 @@ import {
   type ArtifactStatus, type ArtifactLinkRel, type DeliverableType,
 } from "../storage/repo/artifacts.js";
 import { isArtifactKind, ARTIFACT_KINDS, type ArtifactKind } from "../identity/role.js";
+import { CODE_SERVICE_REQUIRED_META, type CodeServiceFacts } from "../codeservice/port.js";
 import { getWork } from "../storage/repo/works.js";
 import {
   fail, ok, requireString, requireProject, readString, readStringArray,
-  type PlatformTool, type ToolResult,
+  type PlatformTool, type ToolRunContext, type ToolResult,
 } from "./types.js";
 
 const boardList: PlatformTool = {
@@ -138,6 +139,104 @@ const boardRead: PlatformTool = {
   },
 };
 
+/**
+ * 核对一份 `code_service` 交付物的坐标,并把它**翻译成平台读到的事实**。
+ *
+ * 返回的 `metadata` 是「模型给的键 ∪ 平台核实到的键」,而**重叠的键以平台为准**:
+ *   · `repoPath`  → 解析 + 包含性校验之后的绝对路径(realpath)
+ *   · `branch`    → 已确认存在于 `refs/heads/`
+ *   · `headCommit`→ 40 位全 sha(模型给短 sha 也接受,存进去的是全的)
+ *   · 另补 `repoName` / `headSubject` / `commitCount` / `files` / `verifiedAt`
+ *
+ * 模型自己给的其它键(比如 `image` / `env` / 部署备注)**原样保留** ——
+ * 平台只覆盖它能核实的那几个,不替模型删它说过的话。
+ */
+function verifyCodeService(
+  ctx: ToolRunContext,
+  rawMetadata: unknown,
+): { ok: true; metadata: Record<string, unknown> } | { ok: false; result: ToolResult } {
+  const md: Record<string, unknown> =
+    rawMetadata !== null && typeof rawMetadata === "object" && !Array.isArray(rawMetadata)
+      ? { ...(rawMetadata as Record<string, unknown>) }
+      : {};
+
+  // ① 坐标键必须齐。缺哪个**点名**哪个(8-F:拒绝必须让模型能据此自纠)。
+  const missing = CODE_SERVICE_REQUIRED_META.filter((k) => {
+    const v = md[k];
+    if (v === undefined || v === null) return true;
+    return typeof v === "string" && v.trim() === "";
+  });
+  if (missing.length > 0) {
+    return {
+      ok: false,
+      result: fail(
+        "invalid_args",
+        `\`code_service\` 交付物的 metadata 缺这几项:${missing.join(" / ")}。` +
+          `一份代码服务必须把坐标写清楚 —— 甲方靠它找到仓库、构建镜像、跑起来:\n` +
+          "  · `repoPath`   仓库在磁盘上的路径(工作根之下)\n" +
+          "  · `branch`     分支名(HEAD 必须是它的顶端)\n" +
+          "  · `headCommit` 这次交付的提交 sha(在仓库里跑 \`git rev-parse HEAD\`)\n" +
+          "  · `service`    服务名(镜像名 / 容器名,例如 `billing-api`)\n" +
+          "  · `port`       容器暴露的端口(数字)\n" +
+          "平台会**当场去盘上核对**这几项,核对不过这条交付物写不进去。",
+        [...CODE_SERVICE_REQUIRED_META],
+      ),
+    };
+  }
+
+  const port = md["port"];
+  if (typeof port !== "number" || !Number.isInteger(port) || port <= 0 || port > 65535) {
+    return {
+      ok: false,
+      result: fail(
+        "invalid_args",
+        `\`port\` 必须是 1–65535 的整数(收到 ${JSON.stringify(md["port"])})。` +
+          "它是容器暴露的端口,甲方 `docker run -p` 要用它。",
+      ),
+    };
+  }
+
+  // ② 没有核对面 = 装配错误。**拒绝,不放行** —— 见上面那段注释。
+  const svc = ctx.codeService;
+  if (svc === undefined) {
+    return {
+      ok: false,
+      result: fail(
+        "internal",
+        "本次装配没有接上**代码服务核对面**(`codeService` 端口),所以平台无法核对这份 " +
+          "`code_service` 的仓库坐标。这是**装配错误**,不是你的参数问题 —— " +
+          "在修好之前不要把交付物写成 `code_service`:若你手上只有信息,写成 " +
+          "`html_report`;若确实交了一个仓库,请把这件事登记成阻塞(`blocker_open`)让平台修。",
+      ),
+    };
+  }
+
+  // ③ 去盘上读事实。
+  const inspected = svc.inspect({
+    repoPath: String(md["repoPath"]),
+    branch: String(md["branch"]),
+    headCommit: String(md["headCommit"]),
+  });
+  if (!inspected.ok) return { ok: false, result: fail("invalid_args", inspected.reason) };
+
+  const facts: CodeServiceFacts = inspected.facts;
+  return {
+    ok: true,
+    metadata: {
+      ...md,
+      repoPath: facts.repoPath,
+      repoName: facts.repoName,
+      branch: facts.branch,
+      headCommit: facts.headCommit,
+      headSubject: facts.headSubject,
+      commitCount: facts.commitCount,
+      dockerfile: facts.dockerfile,
+      files: [...facts.files],
+      verifiedAt: ctx.now(),
+    },
+  };
+}
+
 const boardWrite: PlatformTool = {
   name: "board_write",
   capability: "blackboard.write",
@@ -153,14 +252,21 @@ const boardWrite: PlatformTool = {
           `合法值:${DELIVERABLE_TYPES.join(" | ")}。` +
           "`html_report` = 只有信息交付的东西(技术方案 / 架构图 / 汇报材料 / " +
           "评审结论 / 说明书):正文写**一份自包含的 HTML 文档**(内联 <style>," +
-          "架构图用内联 SVG),平台在禁用脚本的沙箱里把它渲染成给甲方看的网页。",
+          "架构图用内联 SVG),平台在禁用脚本的沙箱里把它渲染成给甲方看的网页。" +
+          "`code_service` = **代码服务**:一个真的 git 仓库,能独立部署到 Docker。" +
+          "正文写 markdown 说明(怎么构建/怎么跑/端口),并在 `metadata` 里给齐坐标 —— " +
+          "`repoPath` / `branch` / `headCommit` / `service` / `port`。" +
+          "⚠️ 平台会**当场去盘上核对**那个仓库(存在吗 / 是 git 吗 / HEAD 与记的一致吗 / " +
+          "分支顶端就是它吗 / 根目录有 Dockerfile 吗),核对不过写不进去 —— " +
+          "所以先把仓库建好、提交好、Dockerfile 写好,再来写这条交付物。",
       }),
     ),
     title: Type.String(),
     body: Type.String({
       description:
         "正文。要能被事后独立读懂 —— 见不到现场等于没有现场。" +
-        "`kind='deliverable' + `deliverableType='html_report'` 时,它是**一份 HTML 文档**。",
+        "`html_report` 时它是一份 HTML 文档;`code_service` 时它是一份 markdown " +
+        "说明(这个服务是什么 / 怎么构建 / 怎么部署到 Docker / 端口与外部依赖)。",
     }),
     status: Type.Optional(Type.String({ description: `${ARTIFACT_STATUSES.join(" | ")}(默认 open)` })),
     metadata: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
@@ -251,6 +357,28 @@ const boardWrite: PlatformTool = {
       );
     }
 
+    // ── `code_service`:**去盘上把坐标核对一遍**(migration 026)────────
+    //
+    // 这是「交付物类型」这件事第一次长出**牙齿**:`html_report` 的判据只能看
+    // 正文本身(是不是 HTML),而一份代码服务的真假只有磁盘知道。
+    //
+    // 三条判据,缺一条这条交付物就是假的:
+    //   ① `metadata` 必须带齐坐标(repoPath / branch / headCommit / service / port);
+    //   ② 端口去核对仓库**真的存在、真的是 git、HEAD 与记的一致、分支顶端就是它、
+    //      根目录有 Dockerfile**;
+    //   ③ 核对通过之后,写进库的坐标是**平台读到的值**,不是模型写的值 ——
+    //      模型把 headCommit 写成短 sha,库里就存全 sha;模型写错路径,
+    //      压根进不来。
+    //
+    // ⚠️ **没有注入端口时拒绝,不放行。** 缺省放行等于「在这台机器上写一条
+    // 假交付物是合法的」,而那种环境差异不会有人发现。
+    let metadata = args["metadata"];
+    if (deliverableType === "code_service") {
+      const verified = verifyCodeService(ctx, metadata);
+      if (!verified.ok) return verified.result;
+      metadata = verified.metadata;
+    }
+
     const statusRaw = readString(args, "status") ?? "open";
     if (!isArtifactStatus(statusRaw)) {
       return fail("invalid_args", `未知状态「${statusRaw}」`, ARTIFACT_STATUSES);
@@ -288,7 +416,6 @@ const boardWrite: PlatformTool = {
 
     const id = ctx.newId("art");
     const at = ctx.now();
-    const metadata = args["metadata"];
     try {
       insertArtifact(ctx.db, {
         id,
@@ -335,9 +462,23 @@ const boardWrite: PlatformTool = {
       if (!r.ok) warnings.push(`rel=${rel}→${target} 未建立(${r.reason})`);
     }
 
+    // 代码服务的坐标**如实回灌**:模型看不到自己写进去的是什么的话,它无法确认
+    // 「平台核实到的 HEAD」是哪一个 —— 而下一轮它可能照着记忆再写一遍(7-D)。
+    const csEcho = (() => {
+      if (deliverableType !== "code_service" || metadata === null || typeof metadata !== "object") return "";
+      const m = metadata as Record<string, unknown>;
+      return (
+        `\n· 仓库:${String(m["repoPath"] ?? "?")}(分支 ${String(m["branch"] ?? "?")})` +
+        `\n· HEAD:${String(m["headCommit"] ?? "?")} · ${String(m["headSubject"] ?? "")}` +
+        `\n· 提交数:${String(m["commitCount"] ?? "?")} · Dockerfile:${String(m["dockerfile"] ?? "?")}` +
+        `\n· 服务名/端口:${String(m["service"] ?? "?")}:${String(m["port"] ?? "?")}` +
+        `\n(以上是平台去盘上**核实过**的值,不是你写进来的原话)`
+      );
+    })();
     return ok(
       `已写工件 ${id}(${kind} · ${statusRaw})「${title.value}」` +
         (deliverableType !== null ? ` · 交付物类型:${deliverableType}` : "") +
+        csEcho +
         (warnings.length > 0 ? `\n⚠️ 部分关联未建立:${warnings.join(";")}` : "") +
         // 把产出边如实回灌给模型 —— 否则它无法从工具输出里确认自己填对了,
         // 而下一次「这条工作项产出了什么」正是靠这行字。

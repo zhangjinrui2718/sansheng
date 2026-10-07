@@ -5,7 +5,10 @@
 
 ## 项目速览
 
-- **Sansheng(三生)** = 单用户本机常驻 Node 服务:Pi SDK 驱动**四个角色的 agent 组织**,SQLite 持久化,HTTP + WS + 托管前端。
+- **Sansheng(三生)** = 单用户本机常驻 Node 服务:Pi SDK 驱动**五个角色的 agent 组织**,SQLite 持久化,HTTP + WS + 托管前端。
+  **2026-10-08**:执行角色按**产出形态**一分为二 —— 原来的 `worker` 改名 **研究工** `research_worker`
+  (交信息:文档 / 伪代码 / 架构图 / 汇报材料),新增 **编码工** `coding_worker`
+  (交能跑的东西:可独立部署到 Docker 的**代码服务**)。
 - **组织架构是一等数据**:`agents` / `projects` / `project_assignments` 在库里,**角色属性在代码里**(`ROLE_SPECS`)。制品是工件(`artifacts` 表),不是聊天记录。
 - 默认 `127.0.0.1:2719`;数据目录默认 `~/.sansheng/`,可用 `--data` 或 `SANSHENG_DATA` 覆盖。
 - **「此刻」的读面只有一处**:`GET /api/projects/:id/live`(`ProjectLiveView`)—— 成员页的
@@ -40,7 +43,7 @@
   判据的一部分:同一对节点上两类边**方向一致**时不是环(真机那份数据就是这样),方向相反
   才是环(`mutualPairs` 会点名是哪两条边)。写反会让「交付」跑到最左、并且把一个不存在的
   环报出来(`web/src/lib/workGraph.ts` 的 `collectEdges`)。
-- 基线:**1603 passed / 79 test files** · 两条 typecheck 0 error · `check:design` E1–E14 全绿。
+- 基线:**1672 passed / 82 test files** · 两条 typecheck 0 error · `check:design` E1–E14 全绿(5 角色)。
 - **角色中文名只有一处**:`src/platform/runtime/org.ts` 的 `ORG`(播种 + `RoleHarnessView.displayName`
   共用);前端兜底表 `web/src/lib/vocab.ts` 的 `ROLE_LABEL` 必须逐项相同,由
   `tests/web/role-names.test.ts` 跨边界对照。**不许在某个页面里再写一张名字表**
@@ -57,6 +60,7 @@ src/platform/transport/  传输:http(API)/ hub(WS 广播)/ views
 src/platform/runtime/    boot session turn execution assembly promptAssembly pendingWork
                          projectContext dispatcher org sdkAdapter
 src/platform/tools/      工具层:9 个文件、34 个平台工具定义 + registry.ts 的 dispatch()
+src/platform/codeservice/ 代码服务:port.ts(端口)+ git.ts(真实现,盘上核对仓库)
 src/platform/harness/    授权:capability(能力↔工具表)/ authorize(三道门)/ toolSet(L2 集合文件读盘)/ write(提示词写盘)
 src/platform/identity/   角色:role.ts 的 ROLE_SPECS
 src/platform/storage/    db.ts + repo/ 下 10 个仓储
@@ -66,7 +70,7 @@ src/platform/client/     ClientChannel 端口
 shared/types/            跨端协议类型(platform.ts / settings.ts)
 ```
 
-工具表合计 **41 个工具 = 34 平台 + 7 SDK 内置**,能力 **33** 条 —— 这四个数字由 `check:design` 每次核对。
+工具表合计 **41 个工具 = 34 平台 + 7 SDK 内置**,能力 **34** 条 —— 这四个数字由 `check:design` 每次核对。
 
 > **不要按「单向分层」的假设推理依赖方向。** 实测 `identity ↔ harness` 之间有**值级 import 环**(`src/platform/identity/role.ts` 从 `src/platform/harness/capability.ts` 取能力表,`src/platform/harness/authorize.ts` 从 `src/platform/identity/role.ts` 取 `ROLE_SPECS`),`transport` 也会向上引 `host`。这是现状,不代表可以随手加新的反向依赖。
 
@@ -75,7 +79,7 @@ shared/types/            跨端协议类型(platform.ts / settings.ts)
 | 要改的东西 | 先读 |
 |---|---|
 | 结构、能力模型、授权、存储、运行时拓扑 | `docs/DESIGN-PLATFORM.md` |
-| 四个角色的职责 / ceiling / 出厂集合 / 提示词单元 | `docs/DESIGN-AGENTS.md` |
+| 五个角色的职责 / ceiling / 出厂集合 / 提示词单元 | `docs/DESIGN-AGENTS.md` |
 | 会话在哪建、平台工具怎么变成 SDK 的 customTools | `docs/ADR-001-harness-wiring.md` |
 | 当前进度与批次 | `HANDOFF.md` |
 
@@ -83,13 +87,47 @@ shared/types/            跨端协议类型(platform.ts / settings.ts)
 
 > 三份设计文档**有已知的与代码不符处**(例如 §8.1 的表名仍写成 `fragments`/`user_profile`)。**以代码为准,文档是意图**;改到相关结构时顺手把不符处改掉 —— 批次 19 顺手修掉了 §7.1 的 `RoleSpec` 形状(它写了一个代码里不存在的 `factorySet` 字段)与 §7.4 的闭合注册表名(`PROMPT_UNIT_IDS` / `TOOL_ROLES` → 实际的 `promptUnitIds()` / `PROJECT_ROLES`)。
 
-## 四个角色
+## 五个角色
 
-`PROJECT_ROLES` = `business_manager` / `project_manager` / `worker` / `quality_reviewer`。
+`PROJECT_ROLES` = `business_manager` / `project_manager` / `research_worker` / `coding_worker` / `quality_reviewer`。
 
 - **只有 business_manager 是甲方接口**(`clientFacing: true`)。这是「甲方只与业务经理交互」的机器表达,是**代码内常量** —— 不入库,所以不存在被数据篡改的路径。
 - 完整规格在 `src/platform/identity/role.ts` 的 `ROLE_SPECS`:`ceiling`(架构上界)/ `writeKinds` / `promptUnits` / `boundaryDeny`(**仅供 UI 展示,不参与授权判定**)。
 - 出厂工具集**不另存名单**,由 `ceiling` 推导(`factoryToolset`)。增删角色 = 改联合 + `ROLE_SPECS`,一次显式代码评审。
+
+### 两个执行角色(2026-10-08 拆分)
+
+| 角色 | 交什么 | 交付物类型 | ceiling 的差别 |
+|---|---|---|---|
+| `research_worker` 研究工 | **信息**:技术方案 / 架构图 / 伪代码 / 调研结论 / 汇报材料 | `html_report` | 有 `code.read` + `code.exec`,**没有 `code.write`** |
+| `coding_worker` 编码工 | **能跑的东西**:可独立部署到 Docker 的**代码服务**(git 仓库) | `code_service` | 三个都有(唯一差别就是 `code.write`) |
+
+> ⚠️ **`worker` 这个字符串在代码与库里都不再存在**(026 把存量行改成 `research_worker`)。
+> **判断「谁能执行工作项」只有一处判据**:`identity/role.ts` 的 `EXECUTOR_ROLES` + `isExecutorRole()`。
+> 三处消费者必须用同一个答案 —— `runtime/execution.ts` 的 `checkRunnable`、
+> `runtime/pendingWork.ts` 的 `canExecuteWork`、`runtime/dispatcher.ts` 的
+> `execute_assigned_work` / `fix_stranded_assignment`。**别再写死一个角色名**:
+> 硬编码 `role === "worker"` 在角色集变化时不会报错,只会让新角色**静默不工作**
+> (「编码工怎么派都派不出去」)。
+>
+> ⚠️ **`deliverable` 这个 kind 从 2026-10-08 起三个角色都持有**(pm + 两个执行角色)。
+> 理由:一份报告是研究工写出来的,一个代码服务是编码工做出来的 —— 执行者自己就是产出它的人。
+> 质检仍然只能写 `review_finding`。
+
+### 新增角色之后必须做的一件事:把组织补进**已存在的项目**
+
+`ensureOrg` 管「组织里有哪几个人」,`ensureProjectOrg` 管「谁在哪个项目里」——**两张表**。
+后者此前只在**立项那一刻**跑,于是新增一个角色对存量项目是**结构性不发生**的:
+`cw` 建得出来,但不是任何已存在项目的成员 ⇒ `buildToolContext` 回 `agent_not_assigned`
+⇒ 会话建不出来 ⇒ **它永远不会被派活**,而成员页只显示「这个项目里有谁」(少的那个只是不出现)。
+⇒ `host/serve.ts` 启动时调 `syncOrgForExistingProjects(db, now())`。
+
+⚠️ **它只补「一行都没有」的人,不复活被移出的成员** —— 否则「用户把某人移出项目」
+这个动作会在下次启动时被静静撤销。回归:`tests/platform/org-sync.test.ts`(两个方向都有判据)。
+
+⚠️ **`ensureOrg` 现在也校准 `display_name`**:`ORG` 是中文名的唯一来源,而库里那一行
+此前只写一次、永不跟改 —— 026 把 `wk` 改成研究工之后,库里的名字还停在「工程师」,
+与 `ORG` / 前端兜底表**当场漂开而没有任何检查会红**。
 
 ## 核心机制:三道门,只减不增
 
@@ -124,8 +162,8 @@ shared/types/            跨端协议类型(platform.ts / settings.ts)
 | 角色 | 待办判据 | 判据从哪来 |
 |---|---|---|
 | `business_manager` | 有人问它 / **有下游结果还没向甲方交代**(**且过了合并窗口**:攒够 N 条或最老的一条等到 T;失败与高危阻塞**绕过**窗口) / **甲方答复到了还没处置**(`resume_client`) / **有已验收交付物还没交付**(`handover`) / **这个项目没有一件没做完的事了**(`close_project`) | 库里的 `open` ask + **`dispatch_events`(outbox)里未消费的行** + `client_questions.consumed_at` + `project_sessions.deliverable_artifact_id` + `projects.status` |
-| `project_manager` | 有人问它 / 有变更待评 / **项目零工作项** / **有工作项被派给了非 worker** / **有工作项停在 `failed`** → 重新划范围(`recover_failed_work`) | `pendingWork.ts` + `works` + `works.status='failed'` |
-| `worker` | **分派给它、前置已满足、还没终态**的工作项 | `pendingWork.ts` 的 `myOpenWorks` |
+| `project_manager` | 有人问它 / 有变更待评 / **项目零工作项** / **有工作项被派给了非执行角色** / **有工作项停在 `failed`** → 重新划范围(`recover_failed_work`) | `pendingWork.ts` + `works` + `works.status='failed'` |
+| `research_worker` / `coding_worker` | **分派给它、前置已满足、还没终态**的工作项 | `pendingWork.ts` 的 `myOpenWorks` |
 | `quality_reviewer` | 有人问它 / 有变更待评 / **有做完但没审的产出** | `works.status='done' AND review_state='pending'` |
 
 > ✅ **「等待审查」现在是库里的真状态**(`works.review_state = none | pending | done`,migration 013)。迁入 `done` → `pending`,质检回合**成功结束后**由平台置 `done`;维护点是 `works.status` 的唯一写口 `repo/works.ts` 的 `updateWorkStatus`。所以质检的待办就是**一条查询**,重启后补跑。批次 20 那句「不要把它写成一条 SQL 查询」随这次重构作废 —— 当时它是对的(语义为假),现在是假的(状态真的存在了)。
@@ -162,7 +200,7 @@ shared/types/            跨端协议类型(platform.ts / settings.ts)
 >
 > 判据:`SELECT COUNT(*) FROM works WHERE parent_work_id IS NOT NULL`。**不是** `grep -rn parentWorkId harness/` —— 那个 grep 当时漏了运行期任务提示词,让我把归因搞错了(见上)。
 
-> 会话池的键是 `(上下文, agent)` 而不是上下文 —— 一个项目里四个角色各要一条自己的会话(工具面不同)。原先 BM 独占,键是 `string | null`。
+> 会话池的键是 `(上下文, agent)` 而不是上下文 —— 一个项目里五个角色各要一条自己的会话(工具面不同)。原先 BM 独占,键是 `string | null`。
 
 ### 「甲方问了但没得到答复」与「重启后模型失忆」(2026-10-07 真机事故)
 
@@ -283,8 +321,8 @@ dev/prod + CI/CD」,09:54 业务经理只回了一句「我先看下你之前留
 
 ## 数据与存储
 
-- 迁移在 `migrations/`:**007–010 建平台表**,**011 把旧系统的 7 张表 DROP**(`blackboards` / `conversations` / `messages` / `fragments` / `user_profile` / `agent_states` / `fragments_vec`),**012 接待会话**(重建 `project_sessions` 放宽 `project_id` 可空,已登记进 `INTENTIONAL_REBUILDS`),**013 排空器状态**(`works.review_state` + `dispatch_events` + `dispatch_attempts`,纯加法),**014 产出边**(`artifacts.work_id` + 一条部分索引,纯加法),**015 放宽 `dispatch_events.kind`**(加 `work_cancelled`;闭集**只能靠重建表**放宽,已登记进 `INTENTIONAL_REBUILDS`),**016 交付物 kind**(重建 `artifacts`),**017 交付会话**(`project_sessions.deliverable_artifact_id` + `channel`,纯加法),**018 `turn_usage` 表**(纯加法),**019 会话消息的封套**(`session_messages.origin_source` + `trigger_kind`,纯加法;两列各有自己的 CHECK),**020 `client_questions` 台账**,**021 `review_verdicts`**,**022 `session_messages.todo_kind`**(纯加法、**不建 CHECK** —— 取值域随 `TODO_KINDS` 变,闭集在读写两侧的 TS 里),**023 项目版本链**(`projects.version` + `parent_project_id`,`ON DELETE SET NULL`),**024 对话一等实体**(`project_sessions.kind` + `title`;`kind` **有** CHECK —— 两值闭集,与 022 相反),**025 交付物类型**(`artifacts.deliverable_type` + 一条部分索引,纯加法)。
-- ⚠️ **`artifacts.work_id` 一条边承载两个语义**(「产出」∪「关于」,migration 014):worker 写 `evidence` 是产出,质检把 `review_finding` 挂到**被审的那条**上是「关于」。取「这条工作项交付了什么」必须自己区分(`runtime/execution.ts` 用 `work_id` + 作者 + `kind ∉ ABOUT_ONLY_ARTIFACT_KINDS` 三条判据);**不要删那些边** —— 它是 `review_finding` 唯一能表达「审的是哪一条」的地方。
+- 迁移在 `migrations/`:**007–010 建平台表**,**011 把旧系统的 7 张表 DROP**(`blackboards` / `conversations` / `messages` / `fragments` / `user_profile` / `agent_states` / `fragments_vec`),**012 接待会话**(重建 `project_sessions` 放宽 `project_id` 可空,已登记进 `INTENTIONAL_REBUILDS`),**013 排空器状态**(`works.review_state` + `dispatch_events` + `dispatch_attempts`,纯加法),**014 产出边**(`artifacts.work_id` + 一条部分索引,纯加法),**015 放宽 `dispatch_events.kind`**(加 `work_cancelled`;闭集**只能靠重建表**放宽,已登记进 `INTENTIONAL_REBUILDS`),**016 交付物 kind**(重建 `artifacts`),**017 交付会话**(`project_sessions.deliverable_artifact_id` + `channel`,纯加法),**018 `turn_usage` 表**(纯加法),**019 会话消息的封套**(`session_messages.origin_source` + `trigger_kind`,纯加法;两列各有自己的 CHECK),**020 `client_questions` 台账**,**021 `review_verdicts`**,**022 `session_messages.todo_kind`**(纯加法、**不建 CHECK** —— 取值域随 `TODO_KINDS` 变,闭集在读写两侧的 TS 里),**023 项目版本链**(`projects.version` + `parent_project_id`,`ON DELETE SET NULL`),**024 对话一等实体**(`project_sessions.kind` + `title`;`kind` **有** CHECK —— 两值闭集,与 022 相反),**025 交付物类型**(`artifacts.deliverable_type` + 一条部分索引,纯加法),**026 执行角色一分为二 + 交付物类型加 `code_service`**(⚠️ **重建两张表**:`agents` 的 role 闭集 4→5 值并改名 + `artifacts` 的 `deliverable_type` 闭集 1→2 值;两张都登记进 `INTENTIONAL_REBUILDS`)。
+- ⚠️ **`artifacts.work_id` 一条边承载两个语义**(「产出」∪「关于」,migration 014):执行角色写 `evidence` 是产出,质检把 `review_finding` 挂到**被审的那条**上是「关于」。取「这条工作项交付了什么」必须自己区分(`runtime/execution.ts` 用 `work_id` + 作者 + `kind ∉ ABOUT_ONLY_ARTIFACT_KINDS` 三条判据);**不要删那些边** —— 它是 `review_finding` 唯一能表达「审的是哪一条」的地方。
 - `artifacts` 直接挂项目 —— **没有 blackboard 容器层**。记忆在 `memory_fragments` / `memory_profile`,不是 `fragments`:`fragments` 是旧名字,001 已占用。
 - 平台表**不得复用旧表名**:`CREATE TABLE IF NOT EXISTS` 撞名时静默无操作,新表根本建不出来(见下 §三类静默失败)。加表前先 `ls migrations/` 查名。
 - 外键一律指向 `agent_id`,不存 `role` 字符串 —— 角色属性只有一处真相。
@@ -321,31 +359,59 @@ dev/prod + CI/CD」,09:54 业务经理只回了一句「我先看下你之前留
 > 回归:`tests/platform/client-question-closed-project.test.ts`(含一条源码 grep 钉住
 > 「排空器只跑 active」—— 那条 grep 带正负样本自检)。
 
-### 交付物**类型**(2026-10-07,migration 025)
+### 交付物**类型**(2026-10-07 / 2026-10-08,migration 025 / 026)
 
-用户原话:「定义一下交付物都有哪些类型,先实现一个最简单的,html 的报告(技术方案、架构图、
-汇报材料等等,但凡是只有信息交付的,都可以用 html 产出),同时预留其他类型的交付物,比如说
-git 仓库以及 git 仓库上的一些提交」。
+用户原话(2026-10-07):「定义一下交付物都有哪些类型,先实现一个最简单的,html 的报告(技术方案、
+架构图、汇报材料等等,但凡是只有信息交付的,都可以用 html 产出),同时预留其他类型的交付物,
+比如说 git 仓库以及 git 仓库上的一些提交」。
 
-**闭集 `DeliverableType` = `["html_report"]`**,在 `src/platform/storage/repo/artifacts.ts`
-(与 `ARTIFACT_STATUSES` / `ARTIFACT_LINK_RELS` 同一个位置);契约侧同名联合在
-`shared/types/platform.ts`。`board_write` 加了 `deliverableType` 参数。
+用户原话(2026-10-08):「加一个新的交付物类型,叫做**代码服务**,这个是一个 git 仓库,然后这个
+仓库可以**独立部署到 docker 上面**」。
 
-⚠️ **三条纪律,三个不同的方向**:
+**闭集 `DeliverableType` = `["html_report", "code_service"]`**,在
+`src/platform/storage/repo/artifacts.ts`(与 `ARTIFACT_STATUSES` / `ARTIFACT_LINK_RELS`
+同一个位置);契约侧同名联合在 `shared/types/platform.ts`。`board_write` 的
+`deliverableType` 参数不变。
 
-- **`git_repo` 与仓库上的提交刻意不在闭集里。** 预留靠的是**结构**:`artifacts.deliverable_type`
-  是一列(`kind='deliverable'` 的 1:N 属性),类型专属坐标落 `metadata_json`,按类型分派读法。
-  加一种类型是**纯加法**:闭集 + 025 的 CHECK + `validateDeliverableBody` 加一条分支,
-  **不改表、不改迁移、不动 `integrate` / `handover` 两条规则**(它们按 `kind` 查)。
-  7-E 的病是「代码里声明了一个平台造不出来的东西」—— 提前把 `git_repo` 写进闭集,模型就会
-  照着这个声明去 `board_write(deliverableType="git_repo")`。**闭集里每个值都必须有真的写入口。**
-  `tests/platform/deliverable-types.test.ts` 有一条**故意现在就该红**的负样本盯着这件事。
+⚠️ **四条纪律,四个不同的方向**:
+
+- **加一种类型的判据是「有没有真的写入口」,不是「该不该有名字」。** `git_repo`、仓库上的
+  某几个提交、镜像、部署实例**都还不在闭集里**;`code_service` 在,因为它的写入口**带现场核对**
+  (见下)。7-E 的病是「代码里声明了一个平台造不出来的东西」—— 提前写进闭集,模型就会照着
+  这个声明去 `board_write`,然后拿到一条「还没实现」的错误。**闭集里每个值都必须有真的写入口。**
+  预留靠的是**结构**:`artifacts.deliverable_type` 是一列(`kind='deliverable'` 的 1:N 属性),
+  类型专属坐标落 `metadata_json`,按类型分派读法。
 - **`kind='deliverable'` 必须给类型,非交付物不许给类型。** 缺了就拒收并回灌闭集;
   多给了也拒收 —— 静默丢掉参数 = 替模型把它没做的事抹平了(7-D)。
 - **交付物上的 `deliverable_type IS NULL` 是合法状态**(真机 23 条,全是 016 之后的 markdown)。
   读面**必须先看 `kind` 再看类型**(`web/src/lib/deliverable.ts` 的 `bodyMode`,有单测):
   把那 23 条当 `html_report` 渲染 = 23 片空白,而空白看起来像「平台坏了」。
   新写入被强制带类型,所以 NULL 只会减少;**不许为了「整齐」去改写历史行**。
+- **两个类型的正文语义不同**:`html_report` 的正文**就是交付物**(一份 HTML 文档),
+  `code_service` 的正文只是一份 markdown 说明,**主体是 `metadata_json` 里的仓库坐标**。
+
+#### `code_service` 的写入口 = 平台**当场去盘上核对**
+
+`metadata` 必带五项:`repoPath` / `branch` / `headCommit` / `service` / `port`。
+写入那一刻 `tools/blackboard.ts` 的 `verifyCodeService` 调 `codeservice` 端口
+(`src/platform/codeservice/git.ts`)去读一遍,**六件事一件不过就拒收**(每条拒绝都带可执行的处置):
+
+① 路径存在且**在工作根之内**(realpath 之后比,符号链接也拦得住);② 它**就是仓库根**
+(`git rev-parse --show-toplevel` 必须等于它,不是子目录);③ 真的是 git 工作区;
+④ 有提交(HEAD 解析得出来);⑤ `headCommit` 与真实 HEAD 一致、`branch` 的顶端就是它;
+⑥ **仓库根有 `Dockerfile`**。
+
+核对通过之后,写进库的坐标是**平台读到的值**(短 sha 归一成全 sha,另补
+`headSubject` / `commitCount` / `files` / `verifiedAt`),并**原样回灌给模型**。
+⚠️ **没接上核对面时拒绝,不放行** —— 缺省放行等于「在这台机器上写一条假交付物是合法的」。
+⚠️ `GIT_DIR` 这类环境变量必须 **`delete` 而不是设成 `""`**:空串会被 git 当成一个路径
+(`fatal: not a git repository: ''`),于是每次核对都失败,而错误读起来像「这不是 git 仓库」。
+
+**读面两条边**(`ArtifactView.codeService` 由服务端 `views.ts` 从 `metadata_json` 解析;
+`GET /api/artifacts/:id/commits` 是**现读**的最近提交):
+⚠️ 交付时记的 HEAD 是**那一刻**的事实,而「这个仓库后来改了什么」只能现在读 ——
+存进库就会过期,而过期的快照看起来与新鲜的一模一样。
+`runtime: "unavailable"` 是**读不到**,不是「没有提交」(同 `ProjectLiveView` 那条纪律)。
 
 **渲染面 = `<iframe sandbox="" srcDoc>`**(`web/src/components/deliverable/HtmlReport.tsx`),
 不是 `dangerouslySetInnerHTML`:内容是模型写的 HTML,而模型会照抄它读过的东西(worker 抓来的
@@ -355,11 +421,16 @@ git 仓库以及 git 仓库上的一些提交」。
 写入层因此**拒绝**带 `<script>`/`<iframe>`/`<object>`/`<embed>` 的正文(≤512 KiB),
 好让模型当场拿到可执行的处置,而不是甲方收到一页空白。
 
+**第二种类型 `code_service` 的渲染面完全不同**(`web/src/components/deliverable/CodeService.tsx`):
+它的**主体是仓库坐标**(在 `metadata_json` 里),正文只是一份 markdown 说明。
+所以 `bodyMode` 有三个分支,把它当 `html_report` 渲染 = 一片空白、当 `text` 渲染 = 坐标根本看不到。
+
 ## 提示词(harness)
 
-- 单元内容在 `harness/system_prompts/`,**12 个唯一单元**;构建时由 `scripts/copy-harness.mjs` 拷进 `dist/harness/`(出厂副本)。
+- 单元内容在 `harness/system_prompts/`,**14 个唯一单元**;构建时由 `scripts/copy-harness.mjs` 拷进 `dist/harness/`(出厂副本)。
 - 运行时从**数据目录**读:`<dataDir>/harness/system_prompts/{unitId}.md`(`src/platform/runtime/promptAssembly.ts`)。
-- 角色→单元的声明在 `ROLE_SPECS[].promptUnits`:4 个角色共 **15 处声明**、12 个唯一单元。跨角色共享的只有两个 —— `collaboration.ask`(3 个角色)与 `collaboration.convene`(2 个角色)。
+- 角色→单元的声明在 `ROLE_SPECS[].promptUnits`:5 个角色共 **19 处声明**、14 个唯一单元。跨角色共享的只有两个 —— `collaboration.ask`(4 个角色)与 `collaboration.convene`(2 个角色)。
+- **角色中文名的第三处写法已收编**(2026-10-08):`runtime/promptAssembly.ts` 的 `ROLE_NAME`(系统提示里的「# 你的角色:X」)此前写着 `Worker(执行者)`,已改成与 `ORG` 逐项相同,并由 `tests/web/role-names.test.ts` 一并对照。
 - 系统提示 = 机械生成的角色简报(从 `ROLE_SPECS` 转写)+ 盘上真正装载到的单元。**盘上没有的单元如实报为 missing,不静默吞掉。**
 - **工具集合文件**在 `<dataDir>/harness/tools/{role}.json`(L2;文件名必须正好是角色名,写错了不会被读取,成员页该角色的 harness 面板会把落空的文件名列出来)。读取 = `src/platform/harness/toolSet.ts`,对用户可见 = `GET /api/harness` 每个角色的 `toolSet`。**不提供写面** —— 直接编辑文件即可,改完不用重启(每个新会话现读一次)。
 
@@ -394,7 +465,7 @@ help
 ```
 npx tsc -p tsconfig.server.json --noEmit
 npx tsc -p tsconfig.web.json --noEmit
-npm test                  # 1603 passed / 79 files
+npm test                  # 1672 passed / 82 files
 npm run build
 npm run check:design      # 设计一致性 E1–E14
 ```
@@ -457,13 +528,13 @@ npm run check:design      # 设计一致性 E1–E14
 ## 明确不存在的东西(别再找)
 
 - **路径**:`src/server/`(批次 19 已连空目录壳一起删掉)、`src/shared/jsonRepair.ts`、`shared/prompts/`(4 个 md / 536 行)、`scripts/diagnose.mjs` 与 `npm run diagnose`(批次 19 删)、`tests/agents|cli|server|shared|storage|tools/`、根目录的 ARCHITECTURE.md 与 PLAN.md(都已删除)。
-- **角色**:communicator / planner / executor / critic / harness_manager / memory / reflection。
+- **角色**:communicator / planner / executor / critic / harness_manager / memory / reflection;以及 **`worker`**(2026-10-08 已一分为二,见「五个角色」)。
 - **机制**:`ROLE_CEILING` / `FACTORY_SETS` / `LEGACY_TOOL_SETS` / `enabledTools` / `MessageBus` / `BlackboardScope` / `orchestrator` / `kernel` / `completeSimple` / `toolLoop` / `PI_OFFLINE` / `blackboards` 表 / `fragments_vec`。
 - 这些名字在 `src/` 里**只剩注释里的历史说明**,没有任何活代码。看到它们说明你在读注释,不是接口。
 
 ## 历史文档(读之前先知道它描述的是什么)
 
-- `README.md` 已于批次 19 **改写为现行系统**的说明(四个角色 / 2719 / `platform-serve` / 验证链)。它不再是历史文档。
+- `README.md` 已于批次 19 **改写为现行系统**的说明(角色 / 2719 / `platform-serve` / 验证链)。它不再是历史文档。
 - `docs/TROUBLESHOOTING.md` 已于批次 19 改成一份**「已失效」说明**:原文描述旧系统(读 `blackboards` / `conversations`,那两张表已被 `011_drop_legacy.sql` DROP),配套的 `scripts/diagnose.mjs` 与 `npm run diagnose` 已删除。**不要照着它排查**,它现在只做两件事:标出失效原因、把仍然成立的教训指回本文。原文逐字在 git 历史里:`git show e3d2812:docs/TROUBLESHOOTING.md`。
 - `docs/PRODUCT-DESIGN-2026-10-02.md`、`docs/CODE-REVIEW-2026-10-01.md`、`docs/AGENT-AUDIT-2026-10-03.md`、`docs/SECURITY-NOTES.md`、`MIGRATION-HANDOFF.md` 是**带日期的历史记录**(描述当时发生了什么):里面的路径、测试名、表名多已不存在。当历史读,**不要当操作手册**;也不要改它们 —— 改了是篡改。
 - `MIGRATION-HANDOFF.md` 是 pi → DSH 的迁移记录;`docs/pi-memory/` 是旧记忆全量归档。

@@ -55,7 +55,8 @@ export interface PlatformSmokeOptions {
 const DEMO_AGENTS: ReadonlyArray<{ id: string; role: ProjectRole; spec?: Specialization }> = [
   { id: "demo-bm", role: "business_manager" },
   { id: "demo-pm", role: "project_manager" },
-  { id: "demo-wk", role: "worker", spec: "algorithm" },
+  { id: "demo-rw", role: "research_worker", spec: "algorithm" },
+  { id: "demo-cw", role: "coding_worker", spec: "engineering" },
   { id: "demo-qa", role: "quality_reviewer" },
 ];
 
@@ -69,6 +70,9 @@ export async function runPlatformSmoke(opts: PlatformSmokeOptions): Promise<bool
     dataDir: opts.dataDir,
     dbPath: join(temp, "smoke.db"),
     clientLog: (l) => out(`  [client] ${l}`),
+    // 与下面 `createPlatformSession({ cwd: opts.cwd })` **同一个根** ——
+    // 代码服务的包含性校验按这个根算(`BootOptions.workspaceRoot`)。
+    workspaceRoot: opts.cwd,
   });
 
   try {

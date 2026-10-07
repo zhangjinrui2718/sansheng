@@ -34,12 +34,12 @@ beforeEach(() => {
   memory = new SqliteMemory(db, { newId: (p) => `${p}_${++seq}`, now: () => clock });
 
   insertAgent(db, { id: "bm", role: "business_manager", specialization: null, displayName: "业务经理", createdAt: clock });
-  insertAgent(db, { id: "wk", role: "worker", specialization: "algorithm", displayName: "算法", createdAt: clock });
+  insertAgent(db, { id: "wk", role: "research_worker", specialization: "algorithm", displayName: "算法", createdAt: clock });
   insertProject(db, { id: "p1", name: "测试", client: "甲", goal: "g", status: "active", createdAt: clock });
   addMember(db, "p1", "bm", clock);
   addMember(db, "p1", "wk", clock);
   project = loadProjectForAuthz(db, "p1")!;
-  wk = { id: "wk", role: "worker", specialization: "algorithm", displayName: "算法" };
+  wk = { id: "wk", role: "research_worker", specialization: "algorithm", displayName: "算法" };
 });
 afterEach(() => db.close());
 
@@ -292,13 +292,13 @@ describe("BC7 工具", () => {
     expect(gap).toEqual([]);
   });
 
-  it("memory_remember → memory_search 闭环(业务经理写,worker 也能读)", async () => {
+  it("memory_remember → memory_search 闭环(业务经理写,研究工也能读)", async () => {
     okText(await call("memory_remember", { kind: "preference", content: "用户偏好简洁的代码风格" }, bmCtx()));
     const t = okText(await call("memory_search", { query: "他喜欢什么样的代码" }));
     expect(t).toContain("简洁的代码风格");
   });
 
-  it("**worker 不能写记忆**(memory.write 只给业务经理)", async () => {
+  it("**研究工不能写记忆**(memory.write 只给业务经理)", async () => {
     const e = errOf(await call("memory_remember", { kind: "fact", content: "x" }, ctx()));
     expect(e.code).toBe("denied");
     expect(e.message).toContain("架构上界");

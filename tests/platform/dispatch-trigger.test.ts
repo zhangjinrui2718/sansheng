@@ -229,7 +229,7 @@ describe("硬上界不会被门铃的重跑绕过(真机跑出来的洞)", () =>
     const db = h.db();
 
     // 直接造「一个项目 + 两条派给 worker 的工作项」——不经过立项,免得混进别的变量
-    insertAgent(db, { id: "wk1", role: "worker", specialization: "engineering", displayName: "工", createdAt: 1 });
+    insertAgent(db, { id: "wk1", role: "research_worker", specialization: "engineering", displayName: "工", createdAt: 1 });
     insertAgent(db, { id: "pm1", role: "project_manager", specialization: null, displayName: "经", createdAt: 1 });
     insertAgent(db, { id: "bm1", role: "business_manager", specialization: null, displayName: "业", createdAt: 1 });
     insertProject(db, { id: "pj_x", name: "x", client: "甲", goal: "g", status: "active", createdAt: 1 });
@@ -361,9 +361,11 @@ describe("A1 · 说话者身份在每条驱动路径上都传对(不硬编码 bm
     // ⚠️ 业务经理这一条**只能**用 ORG 的 id:用户消息那条路由 `handleUserMessage`
     // 按 `ORG` 常量选人(`serve.ts`),不按项目成员选 —— 这是本次复核发现的另一处
     // 「id 来自代码常量」,不在 A1 的改动范围内(见报告)。
-    insertAgent(db, { id: "bm", role: "business_manager", specialization: null, displayName: "业", createdAt: 1 });
+    // ⚠️ **`bm` 不在这里插** —— 宿主启动时已由 `ensureOrg` 播种(2026-10-08 起)。
+    // 本用例的判据恰恰是「业务经理那个 id 来自代码常量 `ORG`」,所以它本来就该是
+    // 平台播下的那一个,而不是测试自己插的一个长得一样的。
     insertAgent(db, { id: "pm1", role: "project_manager", specialization: null, displayName: "经", createdAt: 1 });
-    insertAgent(db, { id: "wk1", role: "worker", specialization: "engineering", displayName: "工", createdAt: 1 });
+    insertAgent(db, { id: "wk1", role: "research_worker", specialization: "engineering", displayName: "工", createdAt: 1 });
     insertProject(db, { id: "pj_a", name: "a", client: "甲", goal: "g", status: "active", createdAt: 1 });
     for (const id of ["bm", "pm1", "wk1"]) addMember(db, "pj_a", id, 1);
     insertWork(db, {

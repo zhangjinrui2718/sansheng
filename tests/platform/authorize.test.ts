@@ -36,7 +36,9 @@ function agent(role: ProjectRole, id?: string): Agent {
     id: id ?? `agent-${role}`,
     role,
     displayName: role,
-    ...(role === "worker" ? { specialization: "engineering" as const } : {}),
+    ...(role === "research_worker" || role === "coding_worker"
+      ? { specialization: "engineering" as const }
+      : {}),
   };
 }
 
@@ -51,9 +53,10 @@ function project(status: ProjectStatus, members: readonly Agent[]): Project {
 
 const BM = agent("business_manager");
 const PM = agent("project_manager");
-const WK = agent("worker");
+const WK = agent("research_worker");
+const CW = agent("coding_worker");
 const QA = agent("quality_reviewer");
-const ALL = [BM, PM, WK, QA];
+const ALL = [BM, PM, WK, CW, QA];
 
 const ACTIVE = project("active", ALL);
 const DRAFT = project("draft", ALL);
@@ -79,8 +82,8 @@ describe("求解期 · 无集合文件 → 出厂行为", () => {
     expect(r.tools).toContain("tell_client");
   });
 
-  it("其余三个角色的出厂工具面不含 client.* 工具", () => {
-    for (const a of [PM, WK, QA]) {
+  it("其余四个角色的出厂工具面不含 client.* 工具", () => {
+    for (const a of [PM, WK, CW, QA]) {
       const r = solveToolset(a, ACTIVE);
       expect(r.tools, `${a.role} 不该拿到 ask_client`).not.toContain("ask_client");
       expect(r.tools, `${a.role} 不该拿到 tell_client`).not.toContain("tell_client");
@@ -89,7 +92,7 @@ describe("求解期 · 无集合文件 → 出厂行为", () => {
 });
 
 describe("求解期 · ceiling 门(集合文件越权必须可见)", () => {
-  it("worker 手写 tell_client → 被 ceiling 挡下,且理由可见", () => {
+  it("研究工手写 tell_client → 被 ceiling 挡下,且理由可见", () => {
     const r = solveToolset(WK, ACTIVE, { allow: ["tell_client"], deny: [] });
     expect(r.tools).toEqual([]);
     expect(r.blockedByCeiling).toHaveLength(1);
@@ -102,8 +105,8 @@ describe("求解期 · ceiling 门(集合文件越权必须可见)", () => {
     expect(d.reason.length, "拒绝理由不能是空串 —— 7-E:提权失败必须对用户可见").toBeGreaterThan(10);
   });
 
-  it("四个非客户接口角色都无法通过集合文件拿到 client.*", () => {
-    for (const a of [PM, WK, QA]) {
+  it("五个非客户接口角色都无法通过集合文件拿到 client.*", () => {
+    for (const a of [PM, WK, CW, QA]) {
       const r = solveToolset(a, ACTIVE, { allow: ["ask_client", "tell_client"], deny: [] });
       expect(r.tools, `${a.role} 不该拿到 client.* 工具`).toEqual([]);
       expect(r.blockedByCeiling.length).toBeGreaterThan(0);
@@ -111,7 +114,7 @@ describe("求解期 · ceiling 门(集合文件越权必须可见)", () => {
   });
 
   it("ceiling 只减不增:集合文件给了上界外的能力,结果里一定没有它", () => {
-    // worker 没有 convene(发起会议)
+    // 研究工没有 convene(发起会议)
     const r = solveToolset(WK, ACTIVE, { allow: ["convene", "board_write"], deny: [] });
     expect(r.tools).toContain("board_write");
     expect(r.tools).not.toContain("convene");
@@ -252,7 +255,7 @@ describe("R1 不变量 · 甲方那道门只有一个把手", () => {
 // ── 调用期:writeKind 门 ────────────────────────────────────────
 
 describe("调用期 · writeKind 门(第三道门)", () => {
-  it("worker 写 evidence → 放行", () => {
+  it("研究工写 evidence → 放行", () => {
     const v = authorizeCall("blackboard.write", { kind: "evidence" }, { agent: WK, project: ACTIVE });
     expect(v.ok).toBe(true);
   });
@@ -272,7 +275,7 @@ describe("调用期 · writeKind 门(第三道门)", () => {
     expect(v.denial.alternatives).toEqual(["review_finding"]);
   });
 
-  it("worker 写 review_finding → 拒绝(角色边界对称)", () => {
+  it("研究工写 review_finding → 拒绝(角色边界对称)", () => {
     const v = authorizeCall("blackboard.write", { kind: "review_finding" }, { agent: WK, project: ACTIVE });
     expect(v.ok).toBe(false);
     if (v.ok) return;
@@ -307,7 +310,7 @@ describe("调用期 · writeKind 门(第三道门)", () => {
       const v = authorizeCall("blackboard.write", { kind: "decision" }, { agent: a, project: ACTIVE });
       expect(v.ok, `${a.role} 应该能写 decision`).toBe(true);
     }
-    // worker 的 writeKinds 里没有 decision
+    // 研究工的 writeKinds 里没有 decision
     const v = authorizeCall("blackboard.write", { kind: "decision" }, { agent: WK, project: ACTIVE });
     expect(v.ok).toBe(false);
   });
@@ -372,8 +375,11 @@ describe("调用期 · 规则 2(通信目标须在本项目内)", () => {
 // ── 升级路由 ────────────────────────────────────────────────────
 
 describe("升级路由 · 目标由平台计算,模型无法指定", () => {
-  it("worker → project_manager", () => {
+  it("两个执行角色都 → project_manager", () => {
     expect(resolveEscalationTarget(WK, ACTIVE, ALL)?.id).toBe(PM.id);
+    expect(resolveEscalationTarget(CW, ACTIVE, ALL)?.id).toBe(PM.id);
+    expect(ESCALATION_TARGET.research_worker).toBe("project_manager");
+    expect(ESCALATION_TARGET.coding_worker).toBe("project_manager");
   });
 
   it("project_manager → business_manager", () => {
@@ -391,9 +397,11 @@ describe("升级路由 · 目标由平台计算,模型无法指定", () => {
   });
 
   it("strictly 向上一层:不存在越级", () => {
-    // worker 绝不能直接落到 business_manager
-    expect(ESCALATION_TARGET.worker).not.toBe("business_manager");
-    expect(ESCALATION_TARGET.worker).toBe("project_manager");
+    // 执行角色绝不能直接落到 business_manager
+    for (const role of ["research_worker", "coding_worker"] as const) {
+      expect(ESCALATION_TARGET[role]).not.toBe("business_manager");
+      expect(ESCALATION_TARGET[role]).toBe("project_manager");
+    }
   });
 
   it("项目里没有目标角色的人 → null(调用方必须显式处理,不许静默丢消息)", () => {
@@ -534,23 +542,35 @@ describe("调用期 · 接待模式下的参数级门", () => {
   });
 });
 
-// ── C2:新 kind `deliverable` 的写面(只给项目经理)──────────────
+// ── C2:新 kind `deliverable` 的写面(026 起:项目经理 + 两个执行角色)──
 
 /**
  * `deliverable` 是**整合的产物**(设计 1 §2.11.5):项目经理在根工作项上写下它,
- * 表达「这条交付已经整合完了」。别的角色不该有它 —— worker 交付的是 `evidence`
- * (执行产出),质检写 `review_finding`。DAG 的下一环(C3 的 `handover` 规则)
- * 就按「存在 kind='deliverable' 的工件」叫醒业务经理,所以**这一条是谁能写**
- * 是那条规则的输入前提。
+ * 表达「这条交付已经整合完了」。
+ *
+ * ⚠️ **2026-10-08(026):持它的角色从「只有项目经理」放宽到「项目经理 + 两个执行角色」。**
+ * 理由不是放松:一份 HTML 报告是**研究工**写出来的、一个代码服务是**编码工**写出来的 ——
+ * 产出它的那个人就是执行者自己,`deliverable` 只是「这份交付整合完了」这个结构化
+ * 事实的载体。**质检与业务经理仍然不持它**(质检写 `review_finding`,业务经理写
+ * `project_brief`)。DAG 的下一环(C3 的 `handover` 规则)就按「存在
+ * kind='deliverable' 的工件」叫醒业务经理,所以**这一条是谁能写**是那条规则的输入前提。
  */
 describe("调用期 · deliverable 的 writeKind 门(C2)", () => {
   it("项目经理写 deliverable → 放行", () => {
     const v = authorizeCall("blackboard.write", { kind: "deliverable" }, { agent: PM, project: ACTIVE });
-    expect(v.ok, "项目经理是唯一被设计指定写交付物的角色").toBe(true);
+    expect(v.ok, "项目经理在根工作项上写下整合产物").toBe(true);
   });
 
-  it("其余三个角色写 deliverable → 都拒绝,且回灌的是它们各自的合法 kind", () => {
-    for (const a of [BM, WK, QA]) {
+  it("两个执行角色写 deliverable 也放行(执行者就是产出它的那个人)", () => {
+    for (const a of [WK, CW]) {
+      const v = authorizeCall("blackboard.write", { kind: "deliverable" }, { agent: a, project: ACTIVE });
+      expect(v.ok, `${a.role} 应当能写 deliverable(它的 writeKinds 里有它)`).toBe(true);
+      expect(ROLE_SPECS[a.role].writeKinds).toContain("deliverable");
+    }
+  });
+
+  it("业务经理与质检写 deliverable → 都拒绝,且回灌的是它们各自的合法 kind", () => {
+    for (const a of [BM, QA]) {
       const v = authorizeCall("blackboard.write", { kind: "deliverable" }, { agent: a, project: ACTIVE });
       expect(v.ok, `${a.role} 不该能写 deliverable`).toBe(false);
       if (v.ok) continue;

@@ -35,8 +35,8 @@ beforeEach(() => {
   db = openPlatformMemoryDb();
   seq = 0;
   insertAgent(db, { id: "pm", role: "project_manager", specialization: null, displayName: "项目经理", createdAt: AT });
-  insertAgent(db, { id: "wk", role: "worker", specialization: "engineering", displayName: "工程师", createdAt: AT });
-  insertAgent(db, { id: "wk2", role: "worker", specialization: "data", displayName: "数据", createdAt: AT });
+  insertAgent(db, { id: "wk", role: "research_worker", specialization: "engineering", displayName: "研究员", createdAt: AT });
+  insertAgent(db, { id: "wk2", role: "research_worker", specialization: "data", displayName: "数据", createdAt: AT });
   insertProject(db, { id: "p1", name: "测试", client: "甲", goal: "g", status: "active", createdAt: AT });
   for (const id of ["pm", "wk", "wk2"]) addMember(db, "p1", id, AT);
 });
@@ -104,12 +104,12 @@ describe("runWorkItem · 不该跑的就不跑", () => {
     });
   }
 
-  it("负责人不是 worker → refused", async () => {
+  it("负责人不是执行角色 → refused", async () => {
     const w = mkWork({ assigneeAgentId: "pm" });
     const r = await run(w.id, saidDone());
     expect(r.outcome).toBe("refused");
-    expect(r.refusalReason).toContain("不是 worker");
-    expect(r.refusalReason).toContain("执行是 worker 的能力");
+    expect(r.refusalReason).toContain("不是执行角色");
+    expect(r.refusalReason).toContain("执行是执行角色的能力");
   });
 
   it("负责人不存在 → refused(这条分支被 schema 挡着,只能靠外部损坏触发)", async () => {

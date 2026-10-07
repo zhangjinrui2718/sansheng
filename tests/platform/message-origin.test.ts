@@ -60,7 +60,7 @@ beforeEach(() => {
   insertSession(db, { id: S, projectId: P, createdAt: clock });
   for (const [id, role, name] of [
     ["bm", "business_manager", "业务经理"],
-    ["wk", "worker", "工程师"],
+    ["wk", "research_worker", "研究员"],
   ] as const) {
     insertAgent(db, { id, role, specialization: null, displayName: name, createdAt: clock });
   }

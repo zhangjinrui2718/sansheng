@@ -64,7 +64,7 @@ const INTENTIONAL_REBUILDS: ReadonlyArray<{
   },
   {
     table: "artifacts",
-    files: ["008_blackboard_change.sql", "016_artifacts_deliverable.sql"],
+    files: ["008_blackboard_change.sql", "016_artifacts_deliverable.sql", "026_worker_split_and_code_service.sql"],
     why:
       "016 把 kind 的 CHECK 闭集从 10 个取值放宽到 11 个(加 deliverable —— 设计 1 §2.11.5:" +
       "「整合完没有 / 交付了没有」由 deliverable 工件的存在性表达)。同 015:SQLite 改不了已有 " +
@@ -74,7 +74,26 @@ const INTENTIONAL_REBUILDS: ReadonlyArray<{
       "NO ACTION —— 朴素重建会静默清空 artifact_links(实测 1 → 0,foreign_key_check 一声不响)," +
       "所以必须先备份子表再灌回;asks 那条 NO ACTION 会让 DROP 响亮失败,所以先置 NULL 再回填。" +
       "(2) 它有 **6** 条索引(008 五条 + 014 的 idx_artifacts_work),DROP TABLE 会全部带走;" +
-      "新表还必须带上 014 的 work_id 列(用户真机库 11 条工件里 10 条 work_id 非空)",
+      "新表还必须带上 014 的 work_id 列(用户真机库 11 条工件里 10 条 work_id 非空)。" +
+      "⚠️ 026 **又重建了一次**(交付物类型闭集加 code_service)—— 同一条理由(SQLite 改不了 CHECK)," +
+      "而这次多了一个 016 没遇到的坑:**025 注释里那份子表清单是错的**,漏了 client_questions ×2 " +
+      "与 review_verdicts ×1 三条外键。`DROP TABLE artifacts` 会**级联清空整张 client_questions**" +
+      "(待答台账),而 foreign_key_check 一声不响。判据是**动态的**:`PRAGMA foreign_key_list(<每张表>)`," +
+      "不是 `grep -rn 'REFERENCES artifacts' migrations/`(那只数历史文件里的行)",
+  },
+  {
+    table: "agents",
+    files: ["007_platform_core.sql", "026_worker_split_and_code_service.sql"],
+    why:
+      "026 把 role 的 CHECK 闭集从 4 个取值放宽到 5 个(worker 改名 research_worker + 新增 coding_worker," +
+      "并同步放宽了 `agents_spec_only_worker` 触发器的判据)。SQLite 改不了已有 CHECK,只能重建表。" +
+      "⚠️ 本表的失败形态与 artifacts 不同,026 文件头有完整实测:它被 **15 条**外键指着,其中" +
+      "**只有 project_assignments 一条是 CASCADE**(动态核对:`PRAGMA foreign_key_list`;静态 grep 会数出 16," +
+      "因为 016/015 重建过的表会被数两次)。所以处置是 `PRAGMA defer_foreign_keys = ON`" +
+      "(唯一能在事务里生效的放宽手段,`PRAGMA foreign_keys` 在事务内是 no-op)+ 备份那一条 CASCADE 子表。" +
+      "⚠️ 另一条路「改名 agents_old → 建新表 → DROP agents_old」**看起来最干净、实测最危险**:" +
+      "数据少时它不报错而**静默清空 project_assignments**(foreign_key_check 干净)," +
+      "数据多时同一套 SQL 才响亮失败 —— 「在我机器上它报错了」不可移植",
   },
 ];
 
@@ -1504,5 +1523,292 @@ describe("017 交付会话(纯加法:两个新列)", () => {
     expect(cols, "少了那一列,读面(`deliveredArtifactIds`)就只能如实退化 —— 上面那条存在性断言不是空话")
       .not.toContain("deliverable_artifact_id");
     noColumn.close();
+  });
+});
+
+/**
+ * 026 · 两段重建 + 一处改名(执行角色一分为二 + 交付物类型加 code_service)
+ *
+ * ── 这个迁移的失败方式全是静默的,所以守卫必须逐条钉 ────────────────
+ *
+ * 发布前用 `.probe/026-rebuild-probe.mjs` 做过一轮探针(带正负样本自检,
+ * 33/33 通过),本组把它**固化成回归** —— 探针是临时的,测试是留下的。
+ *
+ * 三条判据尤其重要:
+ *   ① `agents` 被 **15 条**外键指着,其中只有 `project_assignments` 是 CASCADE。
+ *      朴素 `DROP TABLE agents` 会**响亮失败**(安全),但「改名换表法」在
+ *      **数据少时静默清空 project_assignments 而 foreign_key_check 干净**。
+ *   ② `025` 注释里那份 artifacts 子表清单**是错的**,漏了 `client_questions`
+ *      (两条,含主键)与 `review_verdicts`(一条)。照它处置会静默删光待答台账。
+ *   ③ `defer_foreign_keys` 是唯一能在事务里生效的放宽手段,而它**提交后必须复位**
+ *      —— 漏给后续迁移会让之后每一次写库都变成「提交时才报错」。
+ */
+describe("026 执行角色一分为二 + 交付物类型加 code_service", () => {
+  function migration026() {
+    const m = FILES.find((f) => f.version === 26);
+    expect(m, "026 迁移文件缺失").toBeDefined();
+    return m!;
+  }
+
+  /** 到 025 为止的真 schema + **每一条子表外键都有非空行**的种子数据。 */
+  async function seeded025() {
+    const Database = (await import("better-sqlite3")).default;
+    const db = new Database(":memory:");
+    db.pragma("foreign_keys = ON");
+    for (const f of FILES) {
+      if (f.version >= 26) break;
+      try {
+        db.exec(f.sql);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        if (f.version === 2 && /vec0|no such module/i.test(msg)) continue;
+        throw err;
+      }
+    }
+    // ⚠️ 数据必须**非空**:016 探针的教训是「不变」在空数据上是空话
+    // (artifact_links 1 → 0 而 foreign_key_check 一声不响)。
+    db.exec(`
+      INSERT INTO projects (id,name,client,goal,status,created_at)
+        VALUES ('pj_1','项目','甲方','目标','active',1);
+      INSERT INTO agents (id,role,specialization,display_name,created_at) VALUES
+        ('bm','business_manager',NULL,'业务经理',1),
+        ('pm','project_manager',NULL,'项目经理',1),
+        ('wk','worker','engineering','工程师',1),
+        ('qa','quality_reviewer',NULL,'质检',1);
+      INSERT INTO project_assignments (project_id,agent_id,added_at) VALUES
+        ('pj_1','bm',1),('pj_1','pm',1),('pj_1','wk',1),('pj_1','qa',1);
+      INSERT INTO works (id,project_id,title,goal,status,assignee_agent_id,created_at,updated_at)
+        VALUES ('w_1','pj_1','活','做完','open','wk',1,1);
+      INSERT INTO works (id,project_id,title,goal,status,assignee_agent_id,created_at,updated_at)
+        VALUES ('w_2','pj_1','活2','做完','open','qa',1,1);
+      INSERT INTO artifacts (id,project_id,kind,status,author_agent_id,title,body,created_at,updated_at,work_id)
+        VALUES ('a_1','pj_1','evidence','open','wk','证据','正文 "引号" 中文',1,1,'w_1');
+      INSERT INTO artifacts (id,project_id,kind,status,author_agent_id,title,body,created_at,updated_at,deliverable_type)
+        VALUES ('a_2','pj_1','deliverable','open','pm','交付','正文',1,1,'html_report');
+      INSERT INTO artifact_links (artifact_id,rel,target_artifact_id) VALUES ('a_2','depends_on','a_1');
+      INSERT INTO asks (id,project_id,from_agent_id,to_agent_id,question,hypothesis,status,created_at,resolution_artifact_id)
+        VALUES ('q_1','pj_1','wk','pm','问题','假设','answered',1,'a_1');
+      INSERT INTO project_sessions (id,project_id,created_at,channel,kind,title,deliverable_artifact_id)
+        VALUES ('s_1','pj_1',1,'internal','main','主对话','a_2');
+      INSERT INTO client_questions (question_artifact_id,project_id,asked_by,asked_at,answer_artifact_id,answered_at,consumed_at,consumed_by)
+        VALUES ('a_1','pj_1','bm',1,'a_2',2,3,'pm');
+      INSERT INTO review_verdicts (work_id,project_id,verdict,severity,finding_artifact_id,reviewed_by,created_at)
+        VALUES ('w_1','pj_1','pass','low','a_1','qa',1);
+      INSERT INTO turn_usage (id,project_id,session_id,agent_id,work_id,created_at)
+        VALUES ('tu_1','pj_1','s_1','wk','w_1',1);
+      INSERT INTO blockers (id,project_id,raised_by_agent_id,title,detail,severity,status,created_at)
+        VALUES ('b_1','pj_1','wk','阻塞','细节','high','open',1);
+      INSERT INTO change_requests (id,project_id,title,rationale,status,created_at,decided_by_agent_id)
+        VALUES ('c_1','pj_1','变更','理由','accepted',1,'pm');
+      INSERT INTO sessions_backup_probe (x) VALUES (1);
+    `.replace("INSERT INTO sessions_backup_probe (x) VALUES (1);", ""));
+    return db;
+  }
+
+  type Db = Awaited<ReturnType<typeof seeded025>>;
+
+  /**
+   * 应用 026。**必须走事务** —— `PRAGMA defer_foreign_keys` 只在事务**之内**有意义
+   * (`PRAGMA foreign_keys` 在事务内是 no-op,而 defer 需要有一个「提交点」去推迟到)。
+   * 生产路径天然满足:`infra/migrations.ts` 用 `db.transaction(() => db.exec(sql))`。
+   *
+   * ⚠️ 事务外直接 `db.exec(026)` 会得到 `FOREIGN KEY constraint failed` —— 那是
+   * **响亮失败**(不是静默删数据),所以这个前提不成立时不会有人看不出。
+   * 本组有一条负样本专门钉这件事。
+   */
+  function apply026(db: Db): void {
+    db.transaction(() => { db.exec(migration026().sql); })();
+  }
+
+  /** 逐表行数 —— 重建前后必须逐项相同。 */
+  const TABLES = [
+    "agents", "project_assignments", "works", "artifacts", "artifact_links", "asks",
+    "project_sessions", "client_questions", "review_verdicts", "turn_usage",
+    "blockers", "change_requests",
+  ];
+  const counts = (db: Db) =>
+    Object.fromEntries(TABLES.map((t) => [t, db.prepare(`SELECT COUNT(*) n FROM ${t}`).get() as { n: number }]));
+
+  /** 动态判据:某张表上指向 parent 的外键(不是 grep 历史文件)。 */
+  function inboundFks(db: Db, parent: string) {
+    const out: Array<{ table: string; from: string; onDelete: string }> = [];
+    const tables = (db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as Array<{ name: string }>)
+      .map((r) => r.name);
+    for (const t of tables) {
+      for (const fk of db.pragma(`foreign_key_list(${t})`) as Array<{ table: string; from: string; on_delete: string }>) {
+        if (fk.table === parent) out.push({ table: t, from: fk.from, onDelete: fk.on_delete });
+      }
+    }
+    return out;
+  }
+
+  it("探测器自检:指向 agents 的 CASCADE **只有** project_assignments(负样本:数错表名得 0)", async () => {
+    const db = await seeded025();
+    const fks = inboundFks(db, "agents");
+    expect(fks.length, "指向 agents 的外键条数(静态 grep 会数出 16,因为重建过的表被数两次)").toBe(15);
+    expect([...new Set(fks.filter((f) => f.onDelete === "CASCADE").map((f) => f.table))])
+      .toEqual(["project_assignments"]);
+    expect(inboundFks(db, "agentz"), "负样本:错误表名必须是 0 —— 否则上面的探测器在数空气").toEqual([]);
+    // 025 注释漏掉的那张表:这条就是「那份清单是错的」的判据
+    expect(inboundFks(db, "artifacts").filter((f) => f.table === "client_questions").length).toBe(2);
+    expect(inboundFks(db, "artifacts").filter((f) => f.table === "review_verdicts").length).toBe(1);
+    db.close();
+  });
+
+  it("正样本:应用 026 —— 不报错、行数逐项不变、外键干净、中转表不残留", async () => {
+    const db = await seeded025();
+    const before = counts(db);
+    expect(() => apply026(db)).not.toThrow();
+
+    expect(counts(db), "重建前后行数漂了 —— 那就是静默删数据").toEqual(before);
+    expect(db.pragma("foreign_key_check"), "外键检查必须干净").toEqual([]);
+    expect(
+      db.prepare("SELECT COUNT(*) n FROM sqlite_master WHERE name LIKE 'm026_%'").get(),
+      "中转表用完必须删干净(留着会永久占一份快照)",
+    ).toEqual({ n: 0 });
+    // ⚠️ defer_foreign_keys 必须**提交后自动复位**:漏给后续迁移 = 之后每次写库
+    // 都变成「提交时才报错」,而那时错误已经离现场很远了。
+    expect(db.pragma("defer_foreign_keys", { simple: true })).toBe(0);
+    db.close();
+  });
+
+  it("正样本:角色改名落库、specialization 原样保留、成员关系一条不少", async () => {
+    const db = await seeded025();
+    apply026(db);
+    expect(db.prepare("SELECT COUNT(*) n FROM agents WHERE role='worker'").get()).toEqual({ n: 0 });
+    expect(db.prepare("SELECT role,specialization,display_name FROM agents WHERE id='wk'").get())
+      .toEqual({ role: "research_worker", specialization: "engineering", display_name: "工程师" });
+    expect(
+      (db.prepare("SELECT agent_id FROM project_assignments ORDER BY agent_id").all() as Array<{ agent_id: string }>)
+        .map((r) => r.agent_id),
+      "成员关系被 CASCADE 清空了 —— 这就是「D 级静默失败」那一类",
+    ).toEqual(["bm", "pm", "qa", "wk"]);
+    db.close();
+  });
+
+  it("正样本:待答台账(client_questions)逐字未变 —— 025 清单漏掉的那张表", async () => {
+    const db = await seeded025();
+    const before = db.prepare("SELECT * FROM client_questions").get();
+    apply026(db);
+    expect(db.prepare("SELECT * FROM client_questions").get()).toEqual(before);
+    // 另外三条 NO ACTION 的边也要还在(靠 defer,不是靠置 NULL 再回填)
+    expect(db.prepare("SELECT resolution_artifact_id FROM asks WHERE id='q_1'").get())
+      .toEqual({ resolution_artifact_id: "a_1" });
+    expect(db.prepare("SELECT deliverable_artifact_id FROM project_sessions WHERE id='s_1'").get())
+      .toEqual({ deliverable_artifact_id: "a_2" });
+    expect(db.prepare("SELECT finding_artifact_id FROM review_verdicts WHERE work_id='w_1'").get())
+      .toEqual({ finding_artifact_id: "a_1" });
+    db.close();
+  });
+
+  it("正样本:两个新闭集**真的生效**(四个方向都要有牙)", async () => {
+    const db = await seeded025();
+    apply026(db);
+    const rejects = (sql: string) => {
+      try { db.exec(sql); return false; } catch { return true; }
+    };
+    // ① 旧角色值必须被拒
+    expect(rejects("INSERT INTO agents VALUES ('x1','worker',NULL,'旧名',1)"), "worker 该被拒").toBe(true);
+    // ② 两个新角色值必须可写
+    expect(() => db.exec(`
+      INSERT INTO agents VALUES ('x2','research_worker','algorithm','研究员',1);
+      INSERT INTO agents VALUES ('x3','coding_worker','engineering','工程师',1);
+    `)).not.toThrow();
+    // ③ 触发器判据跟着放宽 / 跟着收紧
+    expect(rejects("INSERT INTO agents VALUES ('x4','business_manager','data','越权',1)"),
+      "非执行角色带 specialization 必须被触发器拒").toBe(true);
+    // ④ 交付物类型:旧的预留名仍被拒,新值可写,存量 NULL 合法
+    expect(rejects("UPDATE artifacts SET deliverable_type='git_repo' WHERE id='a_2'")).toBe(true);
+    expect(() => db.exec("UPDATE artifacts SET deliverable_type='code_service' WHERE id='a_2'")).not.toThrow();
+    expect(() => db.exec("UPDATE artifacts SET deliverable_type=NULL WHERE id='a_2'")).not.toThrow();
+    db.close();
+  });
+
+  it("正样本:索引一条不少也不多(agents 1 条 / artifacts 7 条)", async () => {
+    const db = await seeded025();
+    const idx = (t: string) =>
+      (db.prepare(
+        "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name=? AND name NOT LIKE 'sqlite_autoindex%' ORDER BY name",
+      ).all(t) as Array<{ name: string }>).map((r) => r.name);
+    const before = { agents: idx("agents"), artifacts: idx("artifacts") };
+    expect(before.artifacts.length, "025 之后 artifacts 上是 7 条索引,少了就说明读面在退化").toBe(7);
+    apply026(db);
+    expect({ agents: idx("agents"), artifacts: idx("artifacts") }, "DROP TABLE 会带走索引,必须逐条重建").toEqual(before);
+    db.close();
+  });
+
+  it("负样本:朴素 `DROP TABLE agents` **响亮失败**(安全分支,但不能靠它)", async () => {
+    const db = await seeded025();
+    const before = counts(db);
+    expect(() => db.transaction(() => { db.exec("DROP TABLE agents;"); })())
+      .toThrow(/FOREIGN KEY/i);
+    expect(counts(db), "失败必须整体回滚").toEqual(before);
+    db.close();
+  });
+
+  it("负样本:改名换表法在**数据少**时会**静默清空** project_assignments", async () => {
+    // 这一条是 026 不用「改名法」的判据,也是本项目最贵的那条教训的又一次现身:
+    // 同一个 recipe,数据少时不报错而删数据、数据多时才响亮失败 ——
+    // 「在我机器上它报错了,所以我加了对的处置」不可移植。
+    const Database = (await import("better-sqlite3")).default;
+    const db = new Database(":memory:");
+    db.pragma("foreign_keys = ON");
+    for (const f of FILES) {
+      if (f.version >= 26) break;
+      try { db.exec(f.sql); } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        if (f.version === 2 && /vec0|no such module/i.test(msg)) continue;
+        throw err;
+      }
+    }
+    db.exec(`
+      INSERT INTO projects (id,name,client,goal,status,created_at) VALUES ('pj_1','p','c','g','active',1);
+      INSERT INTO agents (id,role,display_name,created_at) VALUES
+        ('wk','worker','工程师',1),('qa','quality_reviewer','质检',1);
+      INSERT INTO project_assignments (project_id,agent_id,added_at) VALUES ('pj_1','wk',1),('pj_1','qa',1);
+    `);
+    expect(() =>
+      db.transaction(() => {
+        db.exec(`
+          PRAGMA legacy_alter_table = ON;
+          ALTER TABLE agents RENAME TO agents_old;
+          CREATE TABLE agents (
+            id TEXT PRIMARY KEY,
+            role TEXT NOT NULL CHECK (role IN ('business_manager','project_manager','research_worker','coding_worker','quality_reviewer')),
+            specialization TEXT CHECK (specialization IS NULL OR specialization IN ('engineering','algorithm','data')),
+            display_name TEXT NOT NULL, created_at INTEGER NOT NULL);
+          INSERT INTO agents (id,role,specialization,display_name,created_at)
+            SELECT id, CASE role WHEN 'worker' THEN 'research_worker' ELSE role END, specialization, display_name, created_at FROM agents_old;
+          DROP TABLE agents_old;
+        `);
+      })(),
+      "改名法在数据少时**不报错** —— 那正是危险处",
+    ).not.toThrow();
+    expect(db.prepare("SELECT COUNT(*) n FROM project_assignments").get(),
+      "而它静默清空了成员关系(负样本的判据:这条必须为 0,否则本条的结论被推翻,要重新判定)")
+      .toEqual({ n: 0 });
+    expect(db.pragma("foreign_key_check"), "而检查依旧干净 —— 所以检查也抓不住它").toEqual([]);
+    db.close();
+  });
+
+  it("负样本:026 在**事务之外**应用会响亮失败(defer 需要事务)", async () => {
+    // 不是缺陷,是**判据的边界**:`PRAGMA defer_foreign_keys` 需要一个提交点才能
+    // 「推迟到提交时」。生产路径(`infra/migrations.ts`)天然包在 `db.transaction` 里;
+    // 这一条钉的是「前提不成立时失败**响亮**」—— 静默删数据才是要防的。
+    const db = await seeded025();
+    const before = counts(db);
+    expect(() => db.exec(migration026().sql)).toThrow(/FOREIGN KEY/i);
+    expect(counts(db), "响亮失败之后什么都不该变").toEqual(before);
+    db.close();
+  });
+
+  it("文件形态:两段重建 + 一处改名,登记进 INTENTIONAL_REBUILDS", () => {
+    const sql = migration026().sql;
+    const rebuilt = INTENTIONAL_REBUILDS.filter((r) => r.files.includes("026_worker_split_and_code_service.sql"));
+    expect(rebuilt.map((r) => r.table).sort(), "026 重建的两张表必须逐条登记").toEqual(["agents", "artifacts"]);
+    // 它是**重建表**那一类 ⇒ 允许出现 CREATE TABLE 同名;但中转表必须带前缀,
+    // 免得与 016 的 `artifacts_backup` 撞名(撞名就被上面那条不变量抓红)。
+    expect(createdTables(sql).filter((t) => t.endsWith("_backup")).every((t) => t.startsWith("m026_")),
+      "中转表必须带 m026_ 前缀:与 016 的 artifacts_backup 撞名会被守卫抓到").toBe(true);
   });
 });

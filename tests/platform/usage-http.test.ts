@@ -41,7 +41,7 @@ beforeEach(() => {
   }
   insertAgent(db, { id: "bm", role: "business_manager", specialization: null, displayName: "业务经理", createdAt: 1 });
   insertAgent(db, { id: "pm", role: "project_manager", specialization: null, displayName: "项目经理", createdAt: 1 });
-  insertAgent(db, { id: "wk", role: "worker", specialization: "engineering", displayName: "工程师", createdAt: 1 });
+  insertAgent(db, { id: "wk", role: "research_worker", specialization: "engineering", displayName: "研究员", createdAt: 1 });
   addMember(db, P1, "pm", 1);
   addMember(db, P1, "wk", 1);
   addMember(db, P2, "wk", 1);
@@ -136,7 +136,7 @@ describe("GET /api/projects/:id/usage · 正样本", () => {
     expect(u.today).toEqual({ input: 300, output: 30, cacheRead: 12, turns: 2 });
     expect(u.byAgent.map((b) => [b.agentId, b.agentName, b.role, b.input])).toEqual([
       ["pm", "项目经理", "project_manager", 200],
-      ["wk", "工程师", "worker", 107],
+      ["wk", "研究员", "research_worker", 107],
     ]);
     expect(u.byDay.map((d) => [d.day, d.input])).toHaveLength(2);
     expect(u.byDayTruncated).toBe(false);

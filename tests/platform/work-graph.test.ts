@@ -256,7 +256,7 @@ describe("任务 1 · work_create 与 work_update 共用同一套依赖判定", 
     const a = mkWork(), b = mkWork();
     // create:b 依赖 a
     okText(callPm("work_create", {
-      title: "B", goal: "g", assigneeRole: "worker", assigneeSpec: "engineering",
+      title: "B", goal: "g", assigneeRole: "research_worker", assigneeSpec: "engineering",
       dependsOn: [a],
     }));
     const bNew = listDependents(db, a)[0]!;
@@ -271,7 +271,7 @@ describe("任务 1 · work_create 与 work_update 共用同一套依赖判定", 
   it("create 的 dependsOn 也走严格读法:给了字符串而不是数组 → 拒绝,且**不建工作项**", () => {
     const before = (db.prepare(`SELECT COUNT(*) AS n FROM works`).get() as { n: number }).n;
     const e = errOf(callPm("work_create", {
-      title: "X", goal: "g", assigneeRole: "worker", assigneeSpec: "engineering",
+      title: "X", goal: "g", assigneeRole: "research_worker", assigneeSpec: "engineering",
       dependsOn: "wk_1",
     }));
     expect(e.code).toBe("invalid_args");
@@ -522,7 +522,7 @@ describe("任务 2 · 写口判定(updateWorkStatus 是唯一写口)", () => {
 describe("任务 2 · 现有合法路径一条都没被挡死(逐条对真实调用方)", () => {
   const REAL_PATHS: ReadonlyArray<[WorkStatus, WorkStatus, string]> = [
     ["open", "in_progress", "runWorkItem 自动开工(execution.ts)"],
-    ["in_progress", "blocked", "worker 登记阻塞"],
+    ["in_progress", "blocked", "研究工登记阻塞"],
     ["blocked", "in_progress", "阻塞解除、重跑(checkRunnable 允许 blocked)"],
     ["blocked", "open", "放回队列"],
     ["open", "done", "一次回合之内跑完(storage.test 的既定形状)"],
@@ -873,7 +873,7 @@ describe("真机事故复现:取消旧项 + 新建同名项 + 下游指向被取
     okText(callPm("work_create", {
       title: "三段式 vs omni 综合对比与替代路径分析",
       goal: "重做对比",
-      assigneeRole: "worker", assigneeSpec: "engineering",
+      assigneeRole: "research_worker", assigneeSpec: "engineering",
     }));
     const comparisonNew = (db.prepare(
       `SELECT id FROM works WHERE title LIKE '三段式 vs omni%' AND status = 'open'`,
