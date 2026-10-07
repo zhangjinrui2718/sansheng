@@ -21,7 +21,7 @@ import {
   listWorks, listDeps, type WorkRow,
 } from "../storage/repo/works.js";
 import {
-  listArtifacts, listLinkEdges, type ArtifactRow,
+  getArtifact, listArtifacts, listLinkEdges, type ArtifactRow,
 } from "../storage/repo/artifacts.js";
 import { listAsks, type AskRow } from "../storage/repo/asks.js";
 import {
@@ -42,9 +42,18 @@ import { collectPendingWork } from "../runtime/pendingWork.js";
 import {
   collectTodos, DEFAULT_MAX_ATTEMPTS, type DriverTodo,
 } from "../runtime/dispatcher.js";
+import {
+  getKnowledgeChunk, knowledgeOverviewStats, listPendingSources, listProjectKnowledgeStats,
+  listRecentKnowledgeChunks, searchKnowledgeChunks,
+  type KnowledgeChunkRow,
+} from "../storage/repo/knowledge.js";
+import { makeArtifactTextReader, materializeChunk, type Materialization } from "../knowledge/sources.js";
+import { buildMatchQuery } from "../knowledge/query.js";
+import type { WorkspacePort } from "../workspace/port.js";
 import type {
   AskView, ArtifactView, BlockerView, ChangeView, ClientQuestionView, CodeServiceView,
   IntakeLiveView,
+  KnowledgeChunkView, KnowledgeOverviewView, KnowledgePendingSourceView, KnowledgeProjectStatsView,
   MemberActivityView, MemberView, MessageOrigin, ProjectDetail, ProjectLiveView,
   ProjectSummary, ProjectUsageView,
   SessionMessageView, TurnTrigger, TurnUsageView,
@@ -936,3 +945,138 @@ function excerpt(text: string, n: number): string {
   return flat.length > n ? `${flat.slice(0, n)}…` : flat;
 }
 
+// ── 知识语料(只读检索;设计 `docs/DESIGN-KNOWLEDGE.md`)──────────────
+//
+// 这一族视图服务的是**记忆页的「知识语料」段**:用户要在这里看到
+// 「现在构建的状态 / 量级 / 时效性,以及这个机制有没有在正常运行」。
+// 所以概览里给的全是**能判定的数字**(计数、时间戳、行数差),不是装饰。
+
+/**
+ * 概览。**读不到就是读不到**:
+ * 迁移没跑(表不在)、库损坏这类情况一律回 `runtime: "unavailable"` + `problem`,
+ * 前端必须如实显示 —— 把「读不到」渲染成「0 条语料」正是这个项目反复栽的那类错。
+ */
+export function toKnowledgeOverview(db: Database.Database, at: number): KnowledgeOverviewView {
+  try {
+    const stats = knowledgeOverviewStats(db);
+    const projects: KnowledgeProjectStatsView[] = listProjectKnowledgeStats(db).map((p) => ({
+      projectId: p.projectId,
+      name: p.name,
+      status: (p.status as KnowledgeProjectStatsView["status"]) ?? "active",
+      chunks: p.chunks,
+      sourcesIndexed: p.sourcesIndexed,
+      pending: p.pending,
+      lastIndexedAt: p.lastIndexedAt,
+    }));
+    const preview: KnowledgePendingSourceView[] = listPendingSources(db, 5).map((r) => ({
+      sourceKind: r.sourceKind,
+      sourceId: r.sourceId,
+      projectId: r.projectId,
+      label: r.label,
+    }));
+    const lagMs =
+      stats.lastIndexedAt === null || stats.newestSourceAt === null
+        ? null
+        : Math.max(0, stats.newestSourceAt - stats.lastIndexedAt);
+    return {
+      runtime: "ok",
+      problem: null,
+      at,
+      chunks: stats.chunks,
+      ftsRows: stats.ftsRows,
+      sourcesIndexed: stats.sourcesIndexed,
+      pending: { ...stats.pending, preview },
+      lastIndexedAt: stats.lastIndexedAt,
+      newestSourceAt: stats.newestSourceAt,
+      lagMs,
+      projects,
+    };
+  } catch (e) {
+    return {
+      runtime: "unavailable",
+      problem:
+        `${e instanceof Error ? e.message : String(e)} —— ` +
+        "语料表读不到(迁移 028 没应用 / 库损坏)。这是**读不到**,不是「语料是空的」: " +
+        "重启一次 `platform-serve` 会把它应用上。",
+      at,
+      chunks: 0,
+      ftsRows: 0,
+      sourcesIndexed: { artifacts: 0, messages: 0 },
+      pending: { artifacts: 0, messages: 0, preview: [] },
+      lastIndexedAt: null,
+      newestSourceAt: null,
+      lagMs: null,
+      projects: [],
+    };
+  }
+}
+
+/** 一条块的视图。`state !== "ok"` 时把 `problem` 一起带出去(前端必须显示)。 */
+export function toKnowledgeChunkView(
+  db: Database.Database,
+  chunk: KnowledgeChunkRow,
+  m: Materialization,
+  projectName: (id: string) => string | null = () => null,
+): KnowledgeChunkView {
+  const artifact = chunk.artifactId === null ? null : getArtifact(db, chunk.artifactId);
+  return {
+    id: chunk.id,
+    sourceKind: chunk.sourceKind,
+    sourceId: chunk.sourceId,
+    projectId: chunk.projectId,
+    projectName: chunk.projectId === null ? null : projectName(chunk.projectId),
+    artifactId: chunk.artifactId,
+    artifactTitle: artifact?.title ?? null,
+    bodyPath: artifact?.bodyPath ?? null,
+    commitSha: artifact?.commitSha ?? null,
+    messageId: chunk.messageId,
+    seq: chunk.seq,
+    offset: chunk.offset,
+    length: chunk.length,
+    updatedAt: chunk.updatedAt,
+    state: m.state,
+    problem: m.problem,
+    excerpt: excerpt(m.slice, 200),
+    text: m.state === "unavailable" ? "" : m.slice,
+  };
+}
+
+export interface KnowledgeChunkQuery {
+  /** 空 / 缺省 = 按时间浏览;有值 = FTS 检索(切不出词由调用方拒收,见 http) */
+  readonly q?: string;
+  readonly projectId?: string;
+  readonly limit?: number;
+}
+
+/**
+ * 明细列表。`q` 有值走检索(按相关度),没有值走最近索引(按时间)——
+ * 两条路的**排序语义不同**,所以不能合成一条 SQL。
+ */
+export function listKnowledgeChunkViews(
+  db: Database.Database,
+  query: KnowledgeChunkQuery,
+  workspace: { readonly workspace?: WorkspacePort; readonly workspaceRoot?: string },
+): KnowledgeChunkView[] {
+  const limit = Math.min(Math.max(query.limit ?? 20, 1), 100);
+  const reader = makeArtifactTextReader(workspace);
+  const q = query.q?.trim() ?? "";
+
+  const rows: KnowledgeChunkRow[] =
+    q === ""
+      ? listRecentKnowledgeChunks(db, {
+          ...(query.projectId !== undefined ? { projectId: query.projectId } : {}),
+          limit,
+        })
+      : searchKnowledgeChunks(db, buildMatchQuery(q) ?? "", {
+          limit,
+          ...(query.projectId !== undefined ? { projectId: query.projectId } : {}),
+        })
+          .map((h) => h.chunk);
+
+  const nameCache = new Map<string, string | null>();
+  const projectName = (id: string): string | null => {
+    if (!nameCache.has(id)) nameCache.set(id, getProjectRow(db, id)?.name ?? null);
+    return nameCache.get(id) ?? null;
+  };
+  return rows.map((c) => toKnowledgeChunkView(db, c, materializeChunk(db, reader, c), projectName));
+}

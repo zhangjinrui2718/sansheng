@@ -93,6 +93,22 @@ housekeeping 里那一次是**同步**的(与它现有的提交/回填同一纪�
 摘要 ≤ 200 字符/条、单次检索返回 ≤ 20 条、`knowledge_read` 单块 ≤ 1200 字符。
 "要全文"是**再调一次**的动作,不是默认行为。
 
+### §6.2 HTTP 读面(记忆页第三段)
+
+工具口是给 **agent** 的(要守提示词预算:200 字摘录);人看的读面是另一条 ——
+**2026-10-08 补上**:用户要求把它放进**记忆 tab**,并要求看到「构建状态 / 量级 / 时效性 /
+机制有没有在跑」,需要时能查明细。
+
+- `GET /api/knowledge` → 量级 + 时效 + **机制判据** + 按项目分行:
+  `chunks` / `ftsRows`(**必须相等**,不等 = 索引坏了)、`sourcesIndexed`、
+  `pending`(还差几条 + 最多 5 条明细)、`lastIndexedAt` / `newestSourceAt` / `lagMs`。
+- `GET /api/knowledge/chunks?q=&projectId=&limit=` → `q` 有值走 FTS 检索、**没值按时间浏览**;
+  每条带出处(工件标题 + `bodyPath@commitSha` / 消息 id)、字符区间、三态、摘录与**块正文**
+  (块本身 ≤ `CHUNK_MAX`,所以给人看是 bounded 的)。
+- 状态判据是**前端纯函数** `web/src/lib/knowledgeState.ts` 的 `corpusStatus`,顺序 = 严重程度:
+  **读不到 > 索引与行不一致 > 空 > 落后 > 正常**;`runtime: "unavailable"` **不是**「0 条语料」。
+- 不开服务时的可见口:`.probe/knowledge-peek.mts`(CLI,会写库 —— 先拷数据目录)。
+
 **三态**:`knowledge_read` 的读取状态不是 ok 就都不是"空正文" ——
 `unavailable`(来源文件/行读不到)、`drifted`(现读文本的 sha256 与索引记的不一致:人工改过),
 后者照常返回切片但**如实标出**"索引与正文不一致,下一次 reindex 会收回一致"。
@@ -112,7 +128,8 @@ housekeeping 里那一次是**同步**的(与它现有的提交/回填同一纪�
 
 1. `scope` / `tainted` / 内部对外边界(§7)。
 2. 编译层:karpathy 那套"LLM 更新页 + 矛盾标注 + index.md/log.md"——它是**往同一个语料里再放一类文档**,不冲突。
-3. HTTP 读面与 UI(记忆页不动;将来给"知识/语料"一个独立读面,别塞进记忆页)。
+3. ~~HTTP 读面~~ —— **已做**(§6.2,记忆页第三段)。仍未做:独立的语料浏览器
+   (从命中跳到工件正文、按 kind / 时间筛选、分页)。
 4. `work` / `project` 两类来源(现在只有 `artifact` / `message`)。
 5. 向量检索、rerank、第三方搜索服务。
 6. 接待会话(`projectId === null`)里的检索:能力**不进** `INTAKE_CAPABILITIES`(fail-closed,先不开)。
@@ -124,6 +141,10 @@ housekeeping 里那一次是**同步**的(与它现有的提交/回填同一纪�
 - **切片**:块的 `offset`/`length` 拼回去等于来源正文的对应区间(不丢字、不串位)。
 - **三态**:`knowledge_read` 在来源缺失时 `unavailable`、在正文被改后 `drifted`,都不是空正文。
 - **预算**:`limit` 与摘要长度上限在**工具层**生效(不是只在 repo 层)。
+- **读面回归**(`tests/platform/knowledge-http.test.ts`,11 条):行与 FTS 相等;写一条新来源
+  **不重建**时 `pending` 与 `lagMs` 必须当场动(一个永远回 0 的计数器与"一切正常"长得一样);
+  表不在 ⇒ `runtime: "unavailable"` + problem(**不是** 0 条);正文读不到 ⇒ 该块
+  `state: "unavailable"` 且 `text` 空、`problem` 非空;`q` 切不出词 ⇒ 400。
 - **能力加法的一致性义务**(改这一处必须同时改这五处,否则 `check:design` / `design-conformance` 红):
   `capability.ts`(联合 + `CAPABILITIES` + `CAPABILITY_TOOLS` + `PlatformToolName`)、
   `role.ts` 五个 ceiling、`promptAssembly.ts` 能力描述、

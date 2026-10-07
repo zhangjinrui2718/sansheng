@@ -1716,12 +1716,21 @@ export function eventProjectId(ev: ServerEvent): string | null {
 //   PUT    /api/profile/:key                  { value }           → { ok, key, value, updatedAt }
 //   ── 记忆 ──
 //   GET    /api/memory/fragments              → { fragments: MemoryFragmentView[] }
+//   ── 知识语料(只读检索;设计 docs/DESIGN-KNOWLEDGE.md)──
+//   GET    /api/knowledge                     → KnowledgeOverviewView
+//                                                (量级 / 时效 / 机制状态;记忆页「知识语料」段用它)
+//   GET    /api/knowledge/chunks?q=&projectId=&limit=
+//                                             → { chunks: KnowledgeChunkView[] }
+//                                                q 空 = 最近索引的块(浏览);q 有 = FTS 检索。
+//                                                ⚠️ 块可能 `state: "drifted" | "unavailable"`
+//                                                —— **不是 ok 就都不是空正文**。
 //
 // 查询参数:
 //   /api/projects?status=draft|active|paused|done|abandoned
 //   /api/projects/:id/artifacts?kind=&status=&limit=
 //   /api/projects/:id/member-conversations?limit=   (每组消息条数,默认 200,上限 500)
 //   /api/memory/fragments?limit=
+//   /api/knowledge/chunks?q=&projectId=&limit=      (limit 默认 20、上限 100)
 //   /api/projects/:id/usage?days=&limit=            (days 默认 7、上限 365;
 //                                                    limit 只截 byDay,默认 = days)
 //   /api/intake/usage?days=&limit=                  (同上)
@@ -1754,6 +1763,91 @@ export interface MemoryFragmentView {
   importance: number;
   accessCount: number;
   createdAt: number;
+}
+
+/**
+ * 知识语料(只读检索语料)· 概览
+ *
+ * ⚠️ 它**不是记忆**:记忆关于**用户**(偏好 / 事实,会淡忘、模型写);
+ * 语料关于**项目 / 组织**(对话正文 + 工件正文,不淡忘、**平台写、agent 只读**)。
+ * 记忆页把两者并列展示,但必须各自成段 —— 混成一张列表会丢掉这个区别。
+ *
+ * 这几个数字就是「机制有没有在正常运行」的判据:
+ *   · `chunks` vs `ftsRows` 不等  ⇒ 行与 FTS 索引对不上(索引坏了)
+ *   · `pending` 非 0              ⇒ 有来源还没进语料(落后,下一个回合边界/下次启动补)
+ *   · `lagMs`                     ⇒ 最新来源 与 上次索引 之间差多久(时效性)
+ *   · `runtime: "unavailable"`    ⇒ **读不到**,不是「空语料」(迁移没跑 / 库坏了)
+ */
+export interface KnowledgeOverviewView {
+  runtime: "ok" | "unavailable";
+  /** 只在 `runtime === "unavailable"` 时有值 —— 必须显示出来,不许渲染成空 */
+  problem: string | null;
+  at: number;
+  chunks: number;
+  /** FTS5 索引里的条目数;与 `chunks` 不等 = 索引与行不一致 */
+  ftsRows: number;
+  sourcesIndexed: { artifacts: number; messages: number };
+  pending: {
+    artifacts: number;
+    messages: number;
+    /** 最多 5 条,让「哪几条没进语料」可见(不然那两个数字只能靠猜) */
+    preview: KnowledgePendingSourceView[];
+  };
+  lastIndexedAt: number | null;
+  newestSourceAt: number | null;
+  /** `max(0, newestSourceAt - lastIndexedAt)`;两边都没有来源时为 `null` */
+  lagMs: number | null;
+  projects: KnowledgeProjectStatsView[];
+}
+
+/** 一条「来源在库里、语料里还没有」的明细(概览的 `pending.preview`)。 */
+export interface KnowledgePendingSourceView {
+  sourceKind: "artifact" | "message";
+  sourceId: string;
+  projectId: string | null;
+  /** 工件标题 / 消息开头 —— 给人看的,不是 id */
+  label: string;
+}
+
+/** 一个项目的语料量与时效(概览按项目分行)。 */
+export interface KnowledgeProjectStatsView {
+  projectId: string;
+  name: string;
+  status: ProjectStatus;
+  chunks: number;
+  sourcesIndexed: { artifacts: number; messages: number };
+  pending: { artifacts: number; messages: number };
+  lastIndexedAt: number | null;
+}
+
+/**
+ * 一条语料块(明细)。正文**不随列表返回**的老规矩在这里**不适用**:
+ * 块本身就是切片,`text` 被索引时的切块上限(`CHUNK_MAX = 1200` 字符)约束着,
+ * 所以它是 bounded 的 —— 给出来才能「查明细」。而 agent 走的工具口仍然只给 200 字摘录
+ * (那是**提示词预算**,与人看的读面是两件事)。
+ */
+export interface KnowledgeChunkView {
+  id: string;
+  sourceKind: "artifact" | "message";
+  sourceId: string;
+  projectId: string | null;
+  projectName: string | null;
+  artifactId: string | null;
+  artifactTitle: string | null;
+  bodyPath: string | null;
+  commitSha: string | null;
+  messageId: string | null;
+  seq: number;
+  offset: number;
+  length: number;
+  updatedAt: number;
+  /** 现读三态 —— **不是 ok 就都不是空正文** */
+  state: "ok" | "drifted" | "unavailable";
+  problem: string | null;
+  /** 展示用摘录(折叠空白 + 截断到 200 字) */
+  excerpt: string;
+  /** 该块正文(≤ 1200 字);`state === "unavailable"` 时是空串 */
+  text: string;
 }
 
 // 注意:`SettingsPublic` / `ProviderInfo` **不在这里重定义** —— 它们在

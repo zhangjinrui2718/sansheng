@@ -46,6 +46,8 @@ import type {
   IntakeMessagesResponse,
   MemberConversationsResponse,
   MemberView,
+  KnowledgeChunkView,
+  KnowledgeOverviewView,
   MemoryFragmentView,
   MessagesResponse,
   ProjectDetail,
@@ -571,6 +573,40 @@ export function putProfile(
 export function listMemoryFragments(limit?: number): Promise<{ fragments: MemoryFragmentView[] }> {
   const q = limit !== undefined ? `?limit=${limit}` : "";
   return request<{ fragments: MemoryFragmentView[] }>(`/memory/fragments${q}`);
+}
+
+// ── 知识语料(只读检索语料;设计 `docs/DESIGN-KNOWLEDGE.md`)──────────
+//
+// ⚠️ **它不是记忆**:记忆关于**用户**(模型写、会淡忘),语料关于**项目 / 组织**
+// (平台索引、agent 只读、不淡忘)。记忆页把两者并列,但各自成段 —— 这里也分开两个函数。
+
+/**
+ * 语料概览 —— 记忆页「知识语料」段的第一屏就是它。
+ *
+ * 这几个数字是**判据**不是装饰:`chunks` vs `ftsRows`(索引坏没坏)、
+ * `pending`(有没有来源还没进)、`lagMs`(时效落后多少)、
+ * `runtime`(读不到 ≠ 空语料 —— 那条要如实渲染)。
+ */
+export function getKnowledgeOverview(): Promise<KnowledgeOverviewView> {
+  return request<KnowledgeOverviewView>("/knowledge");
+}
+
+/**
+ * 语料明细。
+ *
+ * `q` 空 = 按时间浏览最近索引的块;`q` 有值 = FTS 检索(切不出检索词时后端 400,
+ * 调用方要如实显示那句话,别把它说成「没有结果」)。
+ * 每条块都带 `state`(`ok` / `drifted` / `unavailable`)与 `problem` —— 三态不许被抹平。
+ */
+export function listKnowledgeChunks(
+  opts: { q?: string; projectId?: string; limit?: number } = {},
+): Promise<{ chunks: KnowledgeChunkView[] }> {
+  const p = new URLSearchParams();
+  if (opts.q !== undefined && opts.q.trim() !== "") p.set("q", opts.q.trim());
+  if (opts.projectId !== undefined && opts.projectId !== "") p.set("projectId", opts.projectId);
+  if (opts.limit !== undefined) p.set("limit", String(opts.limit));
+  const qs = p.toString();
+  return request<{ chunks: KnowledgeChunkView[] }>(`/knowledge/chunks${qs === "" ? "" : `?${qs}`}`);
 }
 
 // ── 维护动作(不在平台的接口面里)────────────────────────────────

@@ -247,12 +247,19 @@ export interface KnowledgeHit {
 export function searchKnowledgeChunks(
   db: Database.Database,
   matchQuery: string,
-  opts: { readonly limit?: number; readonly kind?: KnowledgeSourceKind } = {},
+  opts: {
+    readonly limit?: number;
+    readonly kind?: KnowledgeSourceKind;
+    /** 只在这个项目里搜(记忆页按项目过滤;工具口不过滤 = 全局共享语料) */
+    readonly projectId?: string;
+  } = {},
 ): KnowledgeHit[] {
-  const limit = Math.min(Math.max(opts.limit ?? 5, 1), 20);
+  const limit = Math.min(Math.max(opts.limit ?? 5, 1), 100);
   const kindFilter = opts.kind !== undefined ? ` AND c.source_kind = ?` : "";
+  const projectFilter = opts.projectId !== undefined ? ` AND c.project_id = ?` : "";
   const vals: unknown[] = [matchQuery];
   if (opts.kind !== undefined) vals.push(opts.kind);
+  if (opts.projectId !== undefined) vals.push(opts.projectId);
   vals.push(limit);
 
   const rows = db
@@ -260,7 +267,7 @@ export function searchKnowledgeChunks(
       `SELECT c.*, bm25(knowledge_fts) AS score
          FROM knowledge_fts
          JOIN knowledge_chunks c ON c.chunk_rowid = knowledge_fts.rowid
-        WHERE knowledge_fts MATCH ?${kindFilter}
+        WHERE knowledge_fts MATCH ?${kindFilter}${projectFilter}
         ORDER BY score ASC
         LIMIT ?`,
     )
@@ -281,4 +288,189 @@ export function countProjectKnowledge(db: Database.Database, projectId: string):
     .prepare(`SELECT COUNT(*) AS n FROM knowledge_chunks WHERE project_id = ?`)
     .get(projectId) as { n: number };
   return r.n;
+}
+
+// ── 概览统计(记忆页「知识语料」段的读面)──────────────────────────
+//
+// ⚠️ 全部是**只读、结构化的计数**,不读盘、不调模型 —— 页面刷新一次就能拿到
+// 「机制有没有在跑」的全部判据:
+//   · `chunks` vs `ftsRows` 不等 ⇒ 行与 FTS 索引对不上(索引坏了)
+//   · `pending` 非 0 ⇒ 有来源还没进语料(落后)
+//   · `lagMs` ⇒ 最新来源与上次索引差多久(时效性)
+
+export interface KnowledgeOverviewStats {
+  readonly chunks: number;
+  /** FTS5 索引里的条目数。它与 `chunks` 不等就是索引坏了,不是"没数据" */
+  readonly ftsRows: number;
+  readonly sourcesIndexed: { readonly artifacts: number; readonly messages: number };
+  readonly pending: { readonly artifacts: number; readonly messages: number };
+  readonly lastIndexedAt: number | null;
+  readonly newestSourceAt: number | null;
+}
+
+/** **可索引**的消息口径 —— 与索引器同一条(只收 user/assistant 且有内容)。 */
+const INDEXABLE_MESSAGE_WHERE = `m.kind IN ('user', 'assistant') AND length(trim(m.content)) > 0`;
+
+export function knowledgeOverviewStats(db: Database.Database): KnowledgeOverviewStats {
+  const chunks = countKnowledgeChunks(db);
+  const ftsRows = (
+    db.prepare(`SELECT COUNT(*) AS n FROM knowledge_fts`).get() as { n: number }
+  ).n;
+  const indexed = db
+    .prepare(
+      `SELECT
+         (SELECT COUNT(DISTINCT source_id) FROM knowledge_chunks WHERE source_kind = 'artifact') AS artifacts,
+         (SELECT COUNT(DISTINCT source_id) FROM knowledge_chunks WHERE source_kind = 'message')  AS messages`,
+    )
+    .get() as { artifacts: number; messages: number };
+  const pending = db
+    .prepare(
+      `SELECT
+         (SELECT COUNT(*) FROM artifacts a
+           WHERE NOT EXISTS (SELECT 1 FROM knowledge_chunks c
+                              WHERE c.source_kind = 'artifact' AND c.source_id = a.id)) AS artifacts,
+         (SELECT COUNT(*) FROM session_messages m
+            JOIN project_sessions ps ON ps.id = m.session_id
+           WHERE ${INDEXABLE_MESSAGE_WHERE}
+             AND NOT EXISTS (SELECT 1 FROM knowledge_chunks c
+                              WHERE c.source_kind = 'message' AND c.source_id = m.id)) AS messages`,
+    )
+    .get() as { artifacts: number; messages: number };
+  const lastIndexedAt = (
+    db.prepare(`SELECT MAX(updated_at) AS t FROM knowledge_chunks`).get() as { t: number | null }
+  ).t;
+  // 最新来源(可索引口径)—— 与 `lastIndexedAt` 一比就是"落后多久"
+  const newestSourceAt = (
+    db.prepare(
+      `SELECT MAX(t) AS t FROM (
+         SELECT MAX(updated_at) AS t FROM artifacts
+         UNION ALL
+         SELECT MAX(m.created_at) AS t FROM session_messages m
+           JOIN project_sessions ps ON ps.id = m.session_id
+          WHERE ${INDEXABLE_MESSAGE_WHERE}
+       )`,
+    ).get() as { t: number | null }
+  ).t;
+  return {
+    chunks,
+    ftsRows,
+    sourcesIndexed: { artifacts: indexed.artifacts, messages: indexed.messages },
+    pending: { artifacts: pending.artifacts, messages: pending.messages },
+    lastIndexedAt,
+    newestSourceAt,
+  };
+}
+
+export interface KnowledgeProjectStats {
+  readonly projectId: string;
+  readonly name: string;
+  readonly status: string;
+  readonly chunks: number;
+  readonly sourcesIndexed: { readonly artifacts: number; readonly messages: number };
+  readonly pending: { readonly artifacts: number; readonly messages: number };
+  readonly lastIndexedAt: number | null;
+}
+
+/** 按项目分行的量与时效(含**零语料**的项目 —— 那正是"机制没跑到"的样子)。 */
+export function listProjectKnowledgeStats(db: Database.Database): KnowledgeProjectStats[] {
+  const rows = db
+    .prepare(
+      `SELECT p.id, p.name, p.status,
+              (SELECT COUNT(*) FROM knowledge_chunks c WHERE c.project_id = p.id) AS chunks,
+              (SELECT COUNT(DISTINCT c.source_id) FROM knowledge_chunks c
+                WHERE c.project_id = p.id AND c.source_kind = 'artifact') AS indexed_artifacts,
+              (SELECT COUNT(DISTINCT c.source_id) FROM knowledge_chunks c
+                WHERE c.project_id = p.id AND c.source_kind = 'message') AS indexed_messages,
+              (SELECT MAX(c.updated_at) FROM knowledge_chunks c WHERE c.project_id = p.id) AS last_indexed_at,
+              (SELECT COUNT(*) FROM artifacts a
+                WHERE a.project_id = p.id
+                  AND NOT EXISTS (SELECT 1 FROM knowledge_chunks c
+                                   WHERE c.source_kind = 'artifact' AND c.source_id = a.id)) AS pending_artifacts,
+              (SELECT COUNT(*) FROM session_messages m
+                 JOIN project_sessions ps ON ps.id = m.session_id
+                WHERE ps.project_id = p.id AND ${INDEXABLE_MESSAGE_WHERE}
+                  AND NOT EXISTS (SELECT 1 FROM knowledge_chunks c
+                                   WHERE c.source_kind = 'message' AND c.source_id = m.id)) AS pending_messages
+         FROM projects p
+        ORDER BY last_indexed_at DESC NULLS LAST, p.created_at DESC`,
+    )
+    .all() as Array<{
+      id: string; name: string; status: string; chunks: number;
+      indexed_artifacts: number; indexed_messages: number; last_indexed_at: number | null;
+      pending_artifacts: number; pending_messages: number;
+    }>;
+  return rows.map((r) => ({
+    projectId: r.id,
+    name: r.name,
+    status: r.status,
+    chunks: r.chunks,
+    sourcesIndexed: { artifacts: r.indexed_artifacts, messages: r.indexed_messages },
+    pending: { artifacts: r.pending_artifacts, messages: r.pending_messages },
+    lastIndexedAt: r.last_indexed_at,
+  }));
+}
+
+export interface PendingSourceRow {
+  readonly sourceKind: KnowledgeSourceKind;
+  readonly sourceId: string;
+  readonly projectId: string | null;
+  readonly label: string;
+}
+
+/** 明细用:哪几条来源还没进语料(最多 `limit` 条)。 */
+export function listPendingSources(db: Database.Database, limit = 5): PendingSourceRow[] {
+  const n = Math.min(Math.max(limit, 1), 20);
+  const rows = db
+    .prepare(
+      `SELECT * FROM (
+         SELECT 'artifact' AS source_kind, a.id AS source_id, a.project_id AS project_id,
+                a.title AS label, a.created_at AS at
+           FROM artifacts a
+          WHERE NOT EXISTS (SELECT 1 FROM knowledge_chunks c
+                             WHERE c.source_kind = 'artifact' AND c.source_id = a.id)
+         UNION ALL
+         SELECT 'message', m.id, ps.project_id, substr(m.content, 1, 60), m.created_at
+           FROM session_messages m
+           JOIN project_sessions ps ON ps.id = m.session_id
+          WHERE ${INDEXABLE_MESSAGE_WHERE}
+            AND NOT EXISTS (SELECT 1 FROM knowledge_chunks c
+                             WHERE c.source_kind = 'message' AND c.source_id = m.id)
+       )
+       ORDER BY at DESC LIMIT ?`,
+    )
+    .all(n) as Array<{ source_kind: string; source_id: string; project_id: string | null; label: string }>;
+  return rows.map((r) => ({
+    sourceKind: r.source_kind === "artifact" ? "artifact" : "message",
+    sourceId: r.source_id,
+    projectId: r.project_id,
+    label: r.label,
+  }));
+}
+
+/**
+ * 最近的块(浏览用;`q` 为空时那一路)。
+ *
+ * ⚠️ 这与工具层那条「查询切不出词就**拒绝**」的纪律不冲突:那是**检索**
+ * (模型会把它当"库里没有"),这里是**浏览**(人知道自己在按时间翻)。
+ */
+export function listRecentKnowledgeChunks(
+  db: Database.Database,
+  opts: { readonly projectId?: string; readonly limit?: number } = {},
+): KnowledgeChunkRow[] {
+  const limit = Math.min(Math.max(opts.limit ?? 20, 1), 100);
+  const rows = (
+    opts.projectId !== undefined
+      ? db
+          .prepare(
+            `SELECT * FROM knowledge_chunks WHERE project_id = ?
+              ORDER BY updated_at DESC, chunk_rowid DESC LIMIT ?`,
+          )
+          .all(opts.projectId, limit)
+      : db
+          .prepare(
+            `SELECT * FROM knowledge_chunks ORDER BY updated_at DESC, chunk_rowid DESC LIMIT ?`,
+          )
+          .all(limit)
+  ) as RawChunk[];
+  return rows.map(rowToChunk);
 }

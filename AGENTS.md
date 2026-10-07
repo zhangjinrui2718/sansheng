@@ -19,6 +19,8 @@
 - **导航现在只有 7 个 tab**:对话 / 项目 / 工作项 / 待办 / 成员 / 记忆 / 设置。两次合并:
   **「工件」并入「工作项」**(`web/src/routes/Works.tsx`,2026-10-06)与
   **「Harness」并入「成员」**(`web/src/components/members/RoleHarness.tsx`,同日)。
+  **「记忆」页三段是两套东西**:用户画像 / 记忆碎片(关于**用户**,模型写、会淡忘)+
+  **知识语料(只读)**(关于**项目 / 组织**,平台索引、agent 只读 —— 见下「知识语料」一节)。
   **工作项页的信息顺序 = 依赖关系图 → 推进图 → 选中的环节**(前者**不折叠**,用户点名的顺序);
   推进图是时间轴泳道(`web/src/lib/timeline.ts`,纯函数:x = 时间,一条工作项一道、一种工件
   kind 一道;点绿色条 ⇒ 下面显示那条工作项挂着的工件),依赖图是分层 DAG
@@ -46,7 +48,7 @@
   判据的一部分:同一对节点上两类边**方向一致**时不是环(真机那份数据就是这样),方向相反
   才是环(`mutualPairs` 会点名是哪两条边)。写反会让「交付」跑到最左、并且把一个不存在的
   环报出来(`web/src/lib/workGraph.ts` 的 `collectEdges`)。
-- 基线:**1830 passed / 89 test files** · 两条 typecheck 0 error · `check:design` E1–E14 全绿(5 角色)。
+- 基线:**1851 passed / 91 test files** · 两条 typecheck 0 error · `check:design` E1–E14 全绿(5 角色)。
 - **角色中文名只有一处**:`src/platform/runtime/org.ts` 的 `ORG`(播种 + `RoleHarnessView.displayName`
   共用);前端兜底表 `web/src/lib/vocab.ts` 的 `ROLE_LABEL` 必须逐项相同,由
   `tests/web/role-names.test.ts` 跨边界对照。**不许在某个页面里再写一张名字表**
@@ -402,7 +404,11 @@ dev/prod + CI/CD」,09:54 业务经理只回了一句「我先看下你之前留
   工件数撞 500 单次上限时**跳过按来源对账并如实报出**。
 - **可见性缺口如实记**:P1 是**跨项目全局可读**,没有 `tainted` / scope 列(闭集里每个值都要有真写入口)
   —— 那是 P2 第一件事(设计 §7/§8)。收口之后 `knowledge.read` **仍然可用**(与 `memory.*` 同理)。
-- **前端暂无读面**(P2);工具是 agent 的消费口。
+- **读面(2026-10-08 补)**:记忆页第三段「知识语料(只读)」= `GET /api/knowledge`(量级 / 时效 /
+  机制状态)+ `GET /api/knowledge/chunks?q=&projectId=&limit=`(`q` 有值=检索、没值=按时间浏览)。
+  状态判据在 `web/src/lib/knowledgeState.ts` 的 `corpusStatus`(纯函数 + 单测):
+  **读不到 > 索引与行不一致 > 空 > 落后 > 正常**;`runtime: "unavailable"` **不是**「0 条语料」。
+  同目录的 `.probe/knowledge-peek.mts` 是不开服务时的 CLI 查看器(会写库,先拷数据目录)。
 
 ### 「待答」队列:**收口项目的提问不是待答**(2026-10-07 真机事故)
 
@@ -553,7 +559,7 @@ help
 ```
 npx tsc -p tsconfig.server.json --noEmit
 npx tsc -p tsconfig.web.json --noEmit
-npm test                  # 1830 passed / 89 files
+npm test                  # 1851 passed / 91 files
 npm run build
 npm run check:design      # 设计一致性 E1–E14
 ```

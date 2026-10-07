@@ -55,8 +55,10 @@ import {
   toProjectSummary,
   toMessageView, toProjectUsageView,
   toWorkView,
+  toKnowledgeOverview, listKnowledgeChunkViews,
   type LiveCollectOptions, type LiveRuntimeSnapshot,
 } from "./views.js";
+import { buildMatchQuery } from "../knowledge/query.js";
 import {
   aggregateProjectUsage, normalizeUsageDayLimit, normalizeUsageDays,
 } from "../storage/repo/usage.js";
@@ -1082,6 +1084,49 @@ app.get("/api/client-questions", (c) => c.json(listAllClientQuestions(db)));
         id: r.id, kind: r.kind, content: r.content,
         importance: r.importance, accessCount: r.access_count, createdAt: r.created_at,
       })),
+    });
+  });
+
+  // ── 知识语料(只读检索语料;设计 `docs/DESIGN-KNOWLEDGE.md`)────────
+  //
+  // 它不是记忆:记忆关于**用户**(模型写、会淡忘),语料关于**项目 / 组织**
+  // (平台写、不淡忘)。记忆页把两者并列展示,但**各自成段**。
+  //
+  // 这一族端点的用途是「机制有没有在正常运行」的可见面:
+  //   · `/api/knowledge`      —— 量级 / 时效 / 行与 FTS 索引对不对得上 / 哪些来源还没进
+  //   · `/api/knowledge/chunks` —— 明细:`q` 有值走检索,没值按时间浏览
+  // 两个都是**只读**,不写库、不调模型。
+  app.get("/api/knowledge", (c) => c.json(toKnowledgeOverview(db, deps.now())));
+
+  app.get("/api/knowledge/chunks", (c) => {
+    const q = (c.req.query("q") ?? "").trim();
+    const projectIdRaw = c.req.query("projectId");
+    const projectId = projectIdRaw !== undefined && projectIdRaw.trim() !== "" ? projectIdRaw.trim() : undefined;
+    const limitRaw = Number(c.req.query("limit"));
+    const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? Math.min(Math.floor(limitRaw), 100) : 20;
+
+    // 与工具层同一条纪律:切不出检索词就**拒收**,不退化成一个"看起来像检索"的东西。
+    // 但浏览(不传 q)是合法用法 —— 那条路按时间给最近索引的块。
+    if (q !== "" && buildMatchQuery(q) === null) {
+      return c.json(
+        err(
+          "invalid_args",
+          `查询词「${q}」太短 —— 中文至少 2 个字、英文至少 2 个字符才切得出检索词` +
+            "(语料按相邻两字切词)。要浏览最近索引的块,不传 q 即可。",
+        ).body,
+        400,
+      );
+    }
+
+    return c.json({
+      chunks: listKnowledgeChunkViews(
+        db,
+        { ...(q !== "" ? { q } : {}), ...(projectId !== undefined ? { projectId } : {}), limit },
+        {
+          ...(deps.workspace !== undefined ? { workspace: deps.workspace } : {}),
+          workspaceRoot: deps.cwd,
+        },
+      ),
     });
   });
 

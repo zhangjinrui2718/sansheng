@@ -41,13 +41,28 @@
 ```
 npx tsc -p tsconfig.server.json --noEmit   → 0 error
 npx tsc -p tsconfig.web.json --noEmit      → 0 error
-npm test                                   → 89 files / 1830 passed(新增 knowledge.test.ts 24 条)
+npm test                                   → 91 files / 1851 passed
+                                             (新增 knowledge.test.ts / knowledge-http.test.ts / knowledge-state.test.ts)
 npm run build                              → ✓
 npm run check:design                       → E1–E14 全绿(能力 35 · 工具 45 · 角色 5 · 出厂集合 5)
 grep -rn 'as any' src/ web/src/            → 0
 真机(临时 --data,真 provider 配置)        → 001→028 应用成功;/api/health ok;
                                              启动日志报名「知识语料 项目 …: 工件 N · 消息 M · 语料 K」
 ```
+
+## 读面(同日追加):记忆页第三段「知识语料(只读)」
+
+用户要求把它放进**记忆 tab**,并要求看到**构建状态 / 量级 / 时效性 / 机制有没有在跑**,需要时能查明细。
+
+- `GET /api/knowledge` → 量级(`chunks` / 已索引来源)+ 时效(`lastIndexedAt` / `lagMs`)+
+  **机制判据**(`chunks` vs `ftsRows` 是否相等、`pending` 还差几条 + 最多 5 条明细)+ 按项目分行。
+- `GET /api/knowledge/chunks?q=&projectId=&limit=` → `q` 有值走 FTS 检索、没值**按时间浏览**;
+  每条带出处(工件标题 + `bodyPath@commitSha` / 消息 id)+ 字符区间 + 三态(`ok|drifted|unavailable`)。
+- 前端判据是纯函数 `web/src/lib/knowledgeState.ts` 的 `corpusStatus`:
+  **读不到 > 索引坏了 > 空 > 落后 > 正常**,`runtime: "unavailable"` 不许渲染成「0 条语料」。
+- 真机(临时 `--data` 起服务,真库副本):
+  `/api/knowledge` → `chunks 136 · ftsRows 136 · 工件 22 + 消息 31 · pending 0 · lagMs 0`;
+  `/api/knowledge/chunks?q=催收` 命中并带得出处;`q=!` → **400**。
 
 ## 两处值得留的点
 
