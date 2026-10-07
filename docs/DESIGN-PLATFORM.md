@@ -1594,25 +1594,32 @@ export type DeliverableType =
 ⚠️ **脚本不执行是设计的一部分**,所以校验层在**写入时**就拒绝带 `<script>` 的正文 ——
 让模型当场拿到一条可执行的处置,而不是甲方收到一页空白(7-N:见不到现场等于没有现场)。
 
-#### ⑤ `code_service` = 一个**真的 git 仓库**,由平台当场核对
+#### ⑤ `code_service` = 项目仓里一个**能部署的服务目录**,由平台当场核对
+
+> ⚠️ **2026-10-08 修订(用户裁决)**:代码服务**不再有独立仓库** —— 直接复用**项目仓**
+> (`<工作根>/projects/<projectId>`,见 `docs/DESIGN-WORKSPACE.md`)。
+> 交付物的**边界**因此由 `servicePath`(仓内相对路径,如 `services/billing-api`)表达,
+> 坐标从 5 项变 **6 项**。理由:项目根里还有 `artifacts/` 与 `work/`,拿它当交付物等于
+> 把内部工作记录也算进交付物;而且一个项目交**两个**服务时两条交付物的 `repoPath` 会完全相同。
 
 | | |
 |---|---|
-| 写入 | `board_write({ kind:"deliverable", deliverableType:"code_service", body:"<markdown 说明>", metadata:{ repoPath, branch, headCommit, service, port } })` |
+| 写入 | `board_write({ kind:"deliverable", deliverableType:"code_service", body:"<markdown 说明>", metadata:{ repoPath, servicePath, branch, headCommit, service, port } })` |
 | 校验(形状) | `validateCodeServiceBody`:正文必须是 **markdown**,不能是一份 HTML 文档(读面按 markdown 渲染它) |
 | 校验(**事实**) | `codeservice` 端口(`src/platform/codeservice/git.ts`)去盘上读一遍 |
-| 渲染 | 坐标 + `docker build` / `docker run` 命令 + 正文(`web/src/components/deliverable/CodeService.tsx`) |
+| 渲染 | 坐标 + `docker build services/<名>` / `docker run` 命令 + 正文(`web/src/components/deliverable/CodeService.tsx`) |
 
-**核对的是六件事,一件不过就拒收**(每条拒绝都带可执行的处置,7-D/8-F):
+**核对的是七件事,一件不过就拒收**(每条拒绝都带可执行的处置,7-D/8-F):
 
 | # | 核对什么 | 为什么 |
 |---|---|---|
 | ① | 路径存在,且**在工作根之内**(realpath 之后比,拦符号链接逃逸) | 交付物要能在甲方那台机器上被找到;顺带挡住「指向 `/etc` 也算交付」 |
-| ② | 它**真的是 git 工作区** | 「一个 git 仓库」是用户原话里的定义 |
+| ② | `repoPath` **就是仓库根**(`git rev-parse --show-toplevel` 等于它,不是子目录) | 交付物的内容是**被 git 跟踪的文件**,不是磁盘上的一个目录 |
 | ③ | 它**有提交**(HEAD 解析得出来) | 没有提交的仓库 clone 下来是空目录,无法部署 |
 | ④ | `headCommit` 与**真实 HEAD 一致**(前缀匹配后按全 sha 存) | 交付物的意义是「甲方拿到的是**这一个**提交」 |
 | ⑤ | `branch` 存在,且**它的顶端就是那个提交** | 记的是「一个分支的当前顶端」,不是任意一个 sha |
-| ⑥ | 仓库**根目录有 `Dockerfile`** | 「可以独立部署到 docker 上面」这句话的**机械判据** |
+| ⑥ | `servicePath` **在仓库内、存在、是目录,且里面有 `Dockerfile`** | 「可以独立部署到 docker 上面」这句话的**机械判据**,而且它落在**服务目录**上 |
+| ⑦ | 服务目录里**至少有一条被提交的文件** | 否则 `git log -1 -- <servicePath>` 给不出 sha;而**回退到 HEAD 就是把「交付物根本没进版本库」说成「这版就是 HEAD」** —— 一句自信的假话 |
 
 核对通过之后,写进 `metadata_json` 的坐标是**平台读到的值**(模型写短 sha 会存全 sha;
 另补 `headSubject` / `commitCount` / `files` / `verifiedAt`),模型自己给的其它键原样保留。
@@ -1747,8 +1754,14 @@ works(id PK, project_id, parent_work_id, title, goal, status,
 work_deps(work_id, depends_on_work_id)
 
 artifacts(id PK, project_id, conversation_id, kind, status, author_agent_id,
-          title, body, metadata_json, created_at, updated_at,
-          work_id NULL)                          -- ← migration 014(见 §2.6)
+          title, body_path, body_sha256, body_bytes, metadata_json,
+          created_at, updated_at, work_id NULL, commit_sha NULL)
+          -- ← migration 014(work_id)、027(正文落文件,见 §8.6)
+          -- ⚠️ **正文不再住库**:`body` 三列换成 `body_path`(项目根相对路径)/
+          --    `body_sha256` / `body_bytes`,另加 `commit_sha`(引入这份正文的提交)。
+          --    于是工件详情页显示的是**落点**,正文走 `GET /api/artifacts/:id/content?at=<sha>`
+          --    现读 —— 索引记了 sha ⇒ 内容按 sha 可寻址 ⇒ `git revert` 回滚之后照样读得出来。
+          --    写成这行的**唯一**实现是 `tools/artifactBody.ts`(先写文件、后插行)。
 artifact_links(artifact_id, rel: parent|depends_on|answers, target_artifact_id)
 
 asks(id PK, project_id, from_agent_id, to_agent_id, question, hypothesis,

@@ -249,8 +249,9 @@
 
 > ⚠️ **这条边界是「表达意图」的,不是沙箱。** `code.exec` 里的 `bash` 当然也能改文件。
 > 之所以仍然这么划:研究工要写的是**说明性材料**,而「产出产品代码」是编码工的活。
-> 真正带牙齿的机械区分在**交付物类型**上 —— `code_service` 必须指向一个真的
-> git 仓库 + Dockerfile,由平台当场核对(设计 1 §6.4);不是「写个 type 字段」就成立。
+> 真正带牙齿的机械区分在**交付物类型**上 —— `code_service` 必须指向**项目仓里一个真的
+> 服务目录**(`servicePath` 之内有 Dockerfile,且至少有一条被提交的文件),
+> 由平台当场去盘上核对(设计 1 §6.4\*;**2026-10-08 起不再有独立仓库**,它复用项目仓)。
 
 **注意它有 `collab.meeting.respond` 但没有 `collab.meeting.conclude`** —— 它能表态,不能替主持人收尾。
 
@@ -365,7 +366,9 @@
 
 | 失败模式 | 防线 |
 |---|---|
-| **写一条指向不存在仓库的交付物** | 写入层调 `codeservice` 端口去盘上核对(存在 / 是 git / HEAD 一致 / 分支顶端 / 有 Dockerfile),核对不过写不进去 |
+| **写一条指向不存在服务的交付物** | 写入层调 `codeservice` 端口去盘上核对(仓库根 / 有提交 / HEAD 一致 / 分支顶端 / `servicePath` 之内有 Dockerfile / 服务目录里至少一条被提交的文件),核对不过写不进去 |
+| **代码写了但没提交,就来 `board_write`** | 第 ⑦ 条核对直接拒(交付物在 git 里不存在,clone 下来是空的);提示词把顺序写死:**先 `git add services/<名> && git commit`,再 `board_write`** |
+| 交付物版本被平台自己的提交带跑 | 坐标同时记 `headCommit`(交付那刻的仓库现场)与 `deliverableCommit`(= `git log -1 -- <servicePath>`);读面说「这版交付物是什么」用后者 |
 | 「有个 Dockerfile 就算能部署」 | 提示词要求**构建一遍再交**;构建不了就在正文里如实写明「未验证」 |
 | 交付物坐标凭记忆写 sha | 平台核对 `headCommit`,不一致当场拒收并**告诉它真实 sha** |
 | 代码躺在磁盘上、黑板上没有交付物 | `work.update(done)` 之后平台按 `deliverable` 工件判交付;少了它收口判据不成立 |
@@ -532,7 +535,7 @@
 | 业务经理 | 甲方消息 / 下属升级 / 会议结论 | ✅ | 收到执行角色提问 → 跑判断轮 → 能自答则 `answer`,不能则 `ask_client` |
 | 项目经理 | 业务经理立项 / 工作项完成 / 会议纪要 | ✅ | 读立项书 → `work_create` 拆解(按产出形态派给研究工或编码工)→ `report` 进度 |
 | 研究工 | 有分派工作项 / 被提问 / 被提问升级 | ✅ | 读工作项 → 读资料与代码 → `board_write(deliverable/html_report)` → 遇阻 `ask_role` |
-| 编码工 | 有分派工作项 / 被提问 / 被提问升级 | ✅ | 读工作项 → `code.*` 干活 + 建仓库 + 构建 → `board_write(deliverable/code_service)` → 遇阻 `ask_role` |
+| 编码工 | 有分派工作项 / 被提问 / 被提问升级 | ✅ | 读工作项 → `code.*` 干活(服务写进**项目仓**的 `services/<名>/`)+ 构建 → **先 `git commit` 再** `board_write(deliverable/code_service)` → 遇阻 `ask_role` |
 | 质检审查员 | 工作项转「待审」/ 会议 / 被点名 | ✅ | `board_read` 目标与产出 → `board_write(review_finding)` → `review_verdict` |
 
 **全部五个角色都走工具循环。** 现状是只有 `communicator` 一个角色 `enforced: true`,其余六个 `enforced: false`(「已就位、未接线」)。本次升级后应当**取消 `enforced` 这个字段本身** —— 四角色全部真实接线,再区分「已接线/未接线」就没有意义了,留着反而会再次诱发「给没接线的角色写一份假装生效的名单」。
