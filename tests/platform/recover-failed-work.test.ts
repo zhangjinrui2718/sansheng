@@ -18,6 +18,9 @@
  */
 import { beforeEach, afterEach, describe, expect, it } from "vitest";
 import { createHash } from "node:crypto";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import Database from "better-sqlite3";
 import { openPlatformMemoryDb } from "../../src/platform/storage/index.js";
 import { runMigrations } from "../../src/platform/infra/migrations.js";
@@ -28,6 +31,7 @@ import { insertDispatchEvent } from "../../src/platform/storage/repo/dispatch.js
 import { insertArtifact } from "../../src/platform/storage/repo/artifacts.js";
 import { resolveClientQuestion } from "../../src/platform/tools/client.js";
 import { ensureOrg } from "../../src/platform/runtime/org.js";
+import { createGitWorkspace } from "../../src/platform/workspace/git.js";
 
 const T0 = 1_700_000_000_000;
 /**
@@ -45,8 +49,15 @@ function bodyAt(path: string, content: string) {
 
 let db: Database.Database;
 let pmId: string;
+/**
+ * 工作根(T3 起 `resolveClientQuestion` 也走「先写文件、后插行」:
+ * `decision` 的正文落 `<workRoot>/projects/p1/…`,落点三列 NOT NULL)。
+ * 每个用例一个 mkdtemp,绝不碰真实 HOME / `~/.sansheng/`。
+ */
+let workRoot: string;
 
 beforeEach(() => {
+  workRoot = mkdtempSync(join(tmpdir(), "sansheng-recover-failed-"));
   db = openPlatformMemoryDb();
   runMigrations(db);
   ensureOrg(db, T0);
@@ -62,7 +73,10 @@ beforeEach(() => {
   // 那会让所有依赖项目经理的规则**静默不产待办**,而测试看起来只是「没产出」。
   for (const id of ["bm", "pm", "wk", "qa"]) addMember(db, "p1", id, T0);
 });
-afterEach(() => db.close());
+afterEach(() => {
+  db.close();
+  rmSync(workRoot, { recursive: true, force: true });
+});
 
 function addWork(id: string, status: "open" | "in_progress" | "done" | "failed"): void {
   insertWork(db, {
@@ -272,6 +286,10 @@ describe("⑥ 球在甲方那边时,不再追加新的交代回合", () => {
     // 而它要钉的其实是「球回来之后能不能继续交代」。
     resolveClientQuestion(db, "q_t1", "A —— 已经看过了", T0 + 60_000, {
       newId: (p: string) => `${p}_ans`, answeredByAgentId: "bm",
+      // T3:`decision` 的正文先落盘、后插行 ⇒ 这一对现在必填。缺装配时它回
+      // `{ok:false, reason:"content_write_failed"}`(不是 TypeError)—— 那样这条
+      // 正样本会因为**答复没落库**而红,而红的原因看着像判据坏了。
+      workspace: createGitWorkspace(), workspaceRoot: workRoot,
     });
     expect(
       board().runnable.some((t) => t.kind === "report_downstream"),

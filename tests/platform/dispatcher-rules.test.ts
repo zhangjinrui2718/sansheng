@@ -19,6 +19,9 @@
  */
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { createHash } from "node:crypto";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type Database from "better-sqlite3";
 import { openPlatformMemoryDb } from "../../src/platform/storage/index.js";
 import { getAgent } from "../../src/platform/storage/repo/agents.js";
@@ -34,6 +37,7 @@ import {
 import { dispatch } from "../../src/platform/tools/registry.js";
 import type { ToolRunContext, ToolResult } from "../../src/platform/tools/types.js";
 import type { Agent } from "../../src/platform/harness/authorize.js";
+import { createGitWorkspace } from "../../src/platform/workspace/git.js";
 
 /**
  * 027 起正文住文件:测试里仍从「想写的正文」造出**落点三列** ——
@@ -51,8 +55,14 @@ function bodyAt(path: string, content: string) {
 let db: Database.Database;
 let seq = 0;
 const T0 = 1_700_000_000_000;
+/**
+ * 工作根(T3 起 `board_write` 先写文件、后插行:正文落 `<workRoot>/projects/p1/…`)。
+ * 每个用例一个 mkdtemp,绝不碰真实 HOME / `~/.sansheng/`。
+ */
+let workRoot: string;
 
 beforeEach(() => {
+  workRoot = mkdtempSync(join(tmpdir(), "sansheng-dispatch-rules-"));
   db = openPlatformMemoryDb();
   seq = 0;
   insertProject(db, {
@@ -61,7 +71,10 @@ beforeEach(() => {
   });
   ensureProjectOrg(db, "p1", T0);
 });
-afterEach(() => db.close());
+afterEach(() => {
+  db.close();
+  rmSync(workRoot, { recursive: true, force: true });
+});
 
 function mkWork(): string {
   const id = `wk_${++seq}`;
@@ -96,7 +109,13 @@ function ctxFor(agentId: string): ToolRunContext {
     id: row.id, role: row.role, displayName: row.displayName,
     ...(row.specialization !== null ? { specialization: row.specialization } : {}),
   };
-  return { db, agent, project, now: () => T0, newId: (p) => `${p}_rules${++seq}` };
+  return {
+    db, agent, project, now: () => T0, newId: (p) => `${p}_rules${++seq}`,
+    // T3:写正文的工具(board_write 等)需要这一对,缺了 fail-closed 报装配错误。
+    // 两个字段必须成对出现,且 `workspaceRoot` 就是会话 cwd 那个根。
+    workspace: createGitWorkspace(),
+    workspaceRoot: workRoot,
+  };
 }
 
 function sync(r: Promise<ToolResult> | ToolResult): ToolResult {
