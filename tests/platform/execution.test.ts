@@ -11,6 +11,7 @@
  * 必须如实报 unconverged,而不是因为「模型说了完成了」就标 done。
  */
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { createHash } from "node:crypto";
 import type Database from "better-sqlite3";
 import type { AgentSession, AgentSessionEvent } from "@earendil-works/pi-coding-agent";
 import { openPlatformMemoryDb } from "../../src/platform/storage/index.js";
@@ -26,6 +27,19 @@ import { collectPendingWork } from "../../src/platform/runtime/pendingWork.js";
 import {
   runWorkItem, composeWorkPrompt, renderExecutionReport, type ExecutionResult,
 } from "../../src/platform/runtime/execution.js";
+
+/**
+ * 027 起正文住文件:测试里仍从「想写的正文」造出**落点三列** ——
+ * sha256 与字节数都是真的(`node:crypto` 现算),不是占位串;正文本身不再进库。
+ * 夹具仍然说得出「这件工件的正文是这一句」,只是表达成 (落点, 哈希, 字节数)。
+ */
+function bodyAt(path: string, content: string) {
+  return {
+    bodyPath: path,
+    bodySha256: createHash("sha256").update(content, "utf8").digest("hex"),
+    bodyBytes: Buffer.byteLength(content, "utf8"),
+  };
+}
 
 let db: Database.Database;
 let seq = 0;
@@ -195,19 +209,19 @@ describe("runWorkItem · 产出与现场", () => {
     const w = mkWork();
     insertArtifact(db, {
       id: "art_old", projectId: "p1", conversationId: null, kind: "note", status: "open",
-      authorAgentId: "wk", title: "旧的", body: "b", metadataJson: null,
+      authorAgentId: "wk", title: "旧的", ...bodyAt("artifacts/art_old.md", "b"), metadataJson: null,
       createdAt: AT, updatedAt: AT, workId: w.id,
     });
     // 同项目、同一作者、但**没有**挂到这条工作项上的工件(别的回合的产出)
     insertArtifact(db, {
       id: "art_loose", projectId: "p1", conversationId: null, kind: "evidence", status: "open",
-      authorAgentId: "wk", title: "没挂边", body: "b", metadataJson: null,
+      authorAgentId: "wk", title: "没挂边", ...bodyAt("artifacts/art_loose.md", "b"), metadataJson: null,
       createdAt: AT, updatedAt: AT,
     });
     const r = await run(w.id, fakeSession(() => {
       insertArtifact(db, {
         id: "art_new", projectId: "p1", conversationId: null, kind: "evidence", status: "open",
-        authorAgentId: "wk", title: "新的", body: "b", metadataJson: null,
+        authorAgentId: "wk", title: "新的", ...bodyAt("artifacts/art_new.md", "b"), metadataJson: null,
         createdAt: AT + 1, updatedAt: AT + 1, workId: w.id,
       });
     }));
@@ -463,12 +477,12 @@ describe("任务 1 · 产出采集走 014 的产出边", () => {
       // 交叠的另一个回合:它产出的是**它自己那条**工作项的工件
       insertArtifact(db, {
         id: "art_theirs", projectId: "p1", conversationId: null, kind: "evidence", status: "open",
-        authorAgentId: "wk", title: "别人的", body: "b", metadataJson: null,
+        authorAgentId: "wk", title: "别人的", ...bodyAt("artifacts/art_theirs.md", "b"), metadataJson: null,
         createdAt: AT + 1, updatedAt: AT + 1, workId: other.id,
       });
       insertArtifact(db, {
         id: "art_mine", projectId: "p1", conversationId: null, kind: "evidence", status: "open",
-        authorAgentId: "wk", title: "我的", body: "b", metadataJson: null,
+        authorAgentId: "wk", title: "我的", ...bodyAt("artifacts/art_mine.md", "b"), metadataJson: null,
         createdAt: AT + 1, updatedAt: AT + 1, workId: mine.id,
       });
     }));
@@ -491,7 +505,7 @@ describe("任务 1 · 产出采集走 014 的产出边", () => {
       insertArtifact(db, {
         id: "art_finding", projectId: "p1", conversationId: null,
         kind: "review_finding", status: "open",
-        authorAgentId: "qa", title: "审查意见", body: "b", metadataJson: null,
+        authorAgentId: "qa", title: "审查意见", ...bodyAt("artifacts/art_finding.md", "b"), metadataJson: null,
         createdAt: AT + 1, updatedAt: AT + 1, workId: w.id,
       });
     }));
@@ -507,12 +521,12 @@ describe("任务 1 · 产出采集走 014 的产出边", () => {
     const r = await run(w.id, fakeSession(() => {
       insertArtifact(db, {
         id: "art_pm", projectId: "p1", conversationId: null, kind: "work_brief", status: "open",
-        authorAgentId: "pm", title: "项目经理补充的简述", body: "b", metadataJson: null,
+        authorAgentId: "pm", title: "项目经理补充的简述", ...bodyAt("artifacts/art_pm.md", "b"), metadataJson: null,
         createdAt: AT + 1, updatedAt: AT + 1, workId: w.id,
       });
       insertArtifact(db, {
         id: "art_wk", projectId: "p1", conversationId: null, kind: "evidence", status: "open",
-        authorAgentId: "wk", title: "我的证据", body: "b", metadataJson: null,
+        authorAgentId: "wk", title: "我的证据", ...bodyAt("artifacts/art_wk.md", "b"), metadataJson: null,
         createdAt: AT + 1, updatedAt: AT + 1, workId: w.id,
       });
     }));
@@ -524,7 +538,7 @@ describe("任务 1 · 产出采集走 014 的产出边", () => {
     const r = await run(w.id, fakeSession(() => {
       insertArtifact(db, {
         id: "art_no_edge", projectId: "p1", conversationId: null, kind: "note", status: "open",
-        authorAgentId: "wk", title: "忘了挂边", body: "b", metadataJson: null,
+        authorAgentId: "wk", title: "忘了挂边", ...bodyAt("artifacts/art_no_edge.md", "b"), metadataJson: null,
         createdAt: AT + 1, updatedAt: AT + 1,
       });
     }));

@@ -15,6 +15,7 @@
  * 时候停),不是「跟模型说话」。真模型那条路由真机端到端覆盖。
  */
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { createHash } from "node:crypto";
 import { rmSync } from "node:fs";
 import { join } from "node:path";
 import type Database from "better-sqlite3";
@@ -45,6 +46,19 @@ import {
 import {
   renderProjectContext,
 } from "../../src/platform/runtime/projectContext.js";
+
+/**
+ * 027 起正文住文件:测试里仍从「想写的正文」造出**落点三列** ——
+ * sha256 与字节数都是真的(`node:crypto` 现算),不是占位串;正文本身不再进库。
+ * 夹具仍然说得出「这件工件的正文是这一句」,只是表达成 (落点, 哈希, 字节数)。
+ */
+function bodyAt(path: string, content: string) {
+  return {
+    bodyPath: path,
+    bodySha256: createHash("sha256").update(content, "utf8").digest("hex"),
+    bodyBytes: Buffer.byteLength(content, "utf8"),
+  };
+}
 
 let db: Database.Database;
 const T0 = 1_700_000_000_000;
@@ -80,7 +94,7 @@ function mkArtifact(id: string, authorAgentId = "wk"): void {
   insertArtifact(db, {
     id, projectId: "p1", conversationId: null,
     kind: "evidence", status: "open", authorAgentId,
-    title: id, body: "现场", metadataJson: null,
+    title: id, ...bodyAt(`artifacts/${id}.md`, "现场"), metadataJson: null,
     createdAt: T0 + 1, updatedAt: T0 + 1,
   });
 }
@@ -129,7 +143,7 @@ function pmIntegrate(agentId: string, task: string, on: Database.Database = db):
     insertArtifact(on, {
       id: newId("art_deliv"), projectId: "p1", conversationId: null,
       kind: "deliverable", status: "open", authorAgentId: "pm",
-      title: `${root.title} 的交付`, body: "整合完成:结论与依据见子项产出",
+      title: `${root.title} 的交付`, ...bodyAt(`artifacts/deliv-${root.id}.md`, "整合完成:结论与依据见子项产出"),
       metadataJson: null, createdAt: T0 + 100, updatedAt: T0 + 100, workId: root.id,
     });
   }
@@ -322,7 +336,7 @@ describe("drainProject · 没有待办就什么都不做", () => {
     insertArtifact(db, {
       id: "art_已整合", projectId: "p1", conversationId: null,
       kind: "deliverable", status: "open", authorAgentId: "pm",
-      title: "调研路线的交付", body: "整合完成", metadataJson: null,
+      title: "调研路线的交付", ...bodyAt("artifacts/art_已整合.md", "整合完成"), metadataJson: null,
       createdAt: T0 + 1, updatedAt: T0 + 1, workId: w,
     });
     const r = await drainProject({

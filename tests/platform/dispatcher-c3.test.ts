@@ -27,6 +27,7 @@
  *     就会把项目经理叫来整合)。
  */
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { createHash } from "node:crypto";
 import type Database from "better-sqlite3";
 import { openPlatformMemoryDb } from "../../src/platform/storage/index.js";
 import { insertProject } from "../../src/platform/storage/repo/projects.js";
@@ -40,6 +41,19 @@ import {
   collectTodos, drainProject, renderTask, RULES,
   type DrainTurnReport,
 } from "../../src/platform/runtime/dispatcher.js";
+
+/**
+ * 027 起正文住文件:测试里仍从「想写的正文」造出**落点三列** ——
+ * sha256 与字节数都是真的(`node:crypto` 现算),不是占位串;正文本身不再进库。
+ * 夹具仍然说得出「这件工件的正文是这一句」,只是表达成 (落点, 哈希, 字节数)。
+ */
+function bodyAt(path: string, content: string) {
+  return {
+    bodyPath: path,
+    bodySha256: createHash("sha256").update(content, "utf8").digest("hex"),
+    bodyBytes: Buffer.byteLength(content, "utf8"),
+  };
+}
 
 let db: Database.Database;
 let seq = 0;
@@ -86,7 +100,7 @@ function mkArtifact(over: {
     kind: (over.kind ?? "evidence") as "evidence",
     status: (over.status ?? "open") as "open",
     authorAgentId: over.author ?? "pm",
-    title: `工件 ${id}`, body: "正文(判定不该读它)",
+    title: `工件 ${id}`, ...bodyAt(`artifacts/${id}.md`, "正文(判定不该读它)"),
     metadataJson: null, createdAt: T0 + 900, updatedAt: T0 + 900,
     workId: over.workId ?? null,
   });

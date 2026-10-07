@@ -30,6 +30,7 @@
  *      「判据在提示词里、达成目标的定义不在」是这个洞的准确形状。
  */
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { createHash } from "node:crypto";
 import Database from "better-sqlite3";
 import { openPlatformMemoryDb } from "../../src/platform/storage/index.js";
 import { insertProject, closeProject, getProjectRow } from "../../src/platform/storage/repo/projects.js";
@@ -47,6 +48,19 @@ import type { TodoBoard } from "../../src/platform/runtime/dispatcher.js";
 const T0 = 1_700_000_000_000;
 const P = "p_close";
 const BM = "bm";
+
+/**
+ * 027 起正文住文件:测试里仍从「想写的正文」造出**落点三列** ——
+ * sha256 与字节数都是真的(`node:crypto` 现算),不是占位串;正文本身不再进库。
+ * 夹具仍然说得出「这件工件的正文是这一句」,只是表达成 (落点, 哈希, 字节数)。
+ */
+function bodyAt(path: string, content: string) {
+  return {
+    bodyPath: path,
+    bodySha256: createHash("sha256").update(content, "utf8").digest("hex"),
+    bodyBytes: Buffer.byteLength(content, "utf8"),
+  };
+}
 
 let db: Database.Database;
 
@@ -88,7 +102,7 @@ function seedFinishedProject(over: {
   insertArtifact(db, {
     id: "art_d1", projectId: P, conversationId: null, kind: "deliverable",
     status: over.deliverableStatus ?? "accepted", authorAgentId: "pm",
-    title: "美股自动化交易平台完整方案", body: "正文",
+    title: "美股自动化交易平台完整方案", ...bodyAt("artifacts/art_d1.md", "正文"),
     metadataJson: null, createdAt: T0 + 1, updatedAt: T0 + 1, workId: "wk_root",
   });
 
@@ -101,7 +115,7 @@ function seedFinishedProject(over: {
   if (over.pendingQuestion === true) {
     insertArtifact(db, {
       id: "q_open", projectId: P, conversationId: null, kind: "client_question",
-      status: "open", authorAgentId: BM, title: "还有一项要您拍板", body: "正文",
+      status: "open", authorAgentId: BM, title: "还有一项要您拍板", ...bodyAt("artifacts/q_open.md", "正文"),
       metadataJson: null, createdAt: T0 + 3, updatedAt: T0 + 3, workId: null,
     });
   }
@@ -110,7 +124,7 @@ function seedFinishedProject(over: {
     // 「答复到了、业务经理还没处置」在库里是一条**独立**的行。
     insertArtifact(db, {
       id: "q_ans", projectId: P, conversationId: null, kind: "client_question",
-      status: "accepted", authorAgentId: BM, title: "您选了 A", body: "正文",
+      status: "accepted", authorAgentId: BM, title: "您选了 A", ...bodyAt("artifacts/q_ans.md", "正文"),
       metadataJson: null, createdAt: T0 + 4, updatedAt: T0 + 4, workId: null,
     });
     db.prepare(

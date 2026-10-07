@@ -25,6 +25,7 @@
  *      (读面 `runtime/dispatcher.ts` 的 `deliveredArtifactIds` 读的就是这一列)。
  */
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { createHash } from "node:crypto";
 import type Database from "better-sqlite3";
 import { openPlatformMemoryDb } from "../../src/platform/storage/index.js";
 import { insertProject } from "../../src/platform/storage/repo/projects.js";
@@ -55,12 +56,24 @@ beforeEach(() => {
 });
 afterEach(() => db.close());
 
+/**
+ * 027 起正文住文件:测试里仍从「想写的正文」造出**落点三列** ——
+ * sha256 与字节数都是真的(`node:crypto` 现算),不是占位串;正文本身不再进库。
+ */
+function bodyAt(path: string, content: string) {
+  return {
+    bodyPath: path,
+    bodySha256: createHash("sha256").update(content, "utf8").digest("hex"),
+    bodyBytes: Buffer.byteLength(content, "utf8"),
+  };
+}
+
 /** 一条已验收的交付物(项目经理整合完的现场)。 */
 function mkDeliverable(id = "d1"): string {
   insertArtifact(db, {
     id, projectId: "p1", conversationId: null,
     kind: "deliverable", status: "accepted", authorAgentId: "pm",
-    title: `交付物 ${id}`, body: "正文", metadataJson: null,
+    title: `交付物 ${id}`, ...bodyAt(`artifacts/${id}.md`, "正文"), metadataJson: null,
     createdAt: T0 + 100, updatedAt: T0 + 100, workId: null,
   });
   return id;

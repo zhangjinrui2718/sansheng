@@ -18,6 +18,7 @@
  * ②③ 合起来才是那一条纪律的完整形式:**事件只是 nudge,判定永远重新查库。**
  */
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { createHash } from "node:crypto";
 import type Database from "better-sqlite3";
 import { openPlatformMemoryDb } from "../../src/platform/storage/index.js";
 import { getAgent } from "../../src/platform/storage/repo/agents.js";
@@ -33,6 +34,19 @@ import {
 import { dispatch } from "../../src/platform/tools/registry.js";
 import type { ToolRunContext, ToolResult } from "../../src/platform/tools/types.js";
 import type { Agent } from "../../src/platform/harness/authorize.js";
+
+/**
+ * 027 起正文住文件:测试里仍从「想写的正文」造出**落点三列** ——
+ * sha256 与字节数都是真的(`node:crypto` 现算),不是占位串;正文本身不再进库。
+ * 夹具仍然说得出「这件工件的正文是这一句」,只是表达成 (落点, 哈希, 字节数)。
+ */
+function bodyAt(path: string, content: string) {
+  return {
+    bodyPath: path,
+    bodySha256: createHash("sha256").update(content, "utf8").digest("hex"),
+    bodyBytes: Buffer.byteLength(content, "utf8"),
+  };
+}
 
 let db: Database.Database;
 let seq = 0;
@@ -62,7 +76,7 @@ function mkArtifact(id: string, body: string): void {
   insertArtifact(db, {
     id, projectId: "p1", conversationId: null,
     kind: "evidence", status: "open", authorAgentId: "wk",
-    title: "路线 A 的实测数据", body, metadataJson: null,
+    title: "路线 A 的实测数据", ...bodyAt(`artifacts/${id}.md`, body), metadataJson: null,
     createdAt: T0 + 1, updatedAt: T0 + 1,
   });
 }

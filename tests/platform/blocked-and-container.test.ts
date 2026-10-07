@@ -39,6 +39,7 @@
  * 逐条钉死,因为判据是纯查询、与库的来源无关。
  */
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { createHash } from "node:crypto";
 import type Database from "better-sqlite3";
 import { openPlatformMemoryDb } from "../../src/platform/storage/index.js";
 import { insertProject } from "../../src/platform/storage/repo/projects.js";
@@ -72,6 +73,19 @@ beforeEach(() => {
 });
 afterEach(() => db.close());
 
+/**
+ * 027 起正文住文件:测试里仍从「想写的正文」造出**落点三列** ——
+ * sha256 与字节数都是真的(`node:crypto` 现算),不是占位串;正文本身不再进库。
+ * 这样夹具仍然说得出「这件工件的正文是这一句」,只是表达成 (落点, 哈希, 字节数)。
+ */
+function bodyAt(path: string, content: string) {
+  return {
+    bodyPath: path,
+    bodySha256: createHash("sha256").update(content, "utf8").digest("hex"),
+    bodyBytes: Buffer.byteLength(content, "utf8"),
+  };
+}
+
 function mkWork(over: {
   id?: string; parent?: string | null; title?: string; status?: WorkStatus; assignee?: string;
 } = {}): string {
@@ -96,7 +110,7 @@ function mkDeliverable(id: string, workId: string | null, status = "open"): void
   insertArtifact(db, {
     id, projectId: "p1", conversationId: null,
     kind: "deliverable", status: status as "open", authorAgentId: "pm",
-    title: `交付物 ${id}`, body: "整合产物", metadataJson: null,
+    title: `交付物 ${id}`, ...bodyAt(`artifacts/${id}.md`, "整合产物"), metadataJson: null,
     createdAt: T0 + 900, updatedAt: T0 + 900, workId,
   });
 }
@@ -106,7 +120,7 @@ function mkOpenClientQuestion(id: string): void {
   insertArtifact(db, {
     id, projectId: "p1", conversationId: null,
     kind: "client_question", status: "open", authorAgentId: "bm",
-    title: "试运行生产队列具体怎么安排?", body: "候选 A / B / C", metadataJson: null,
+    title: "试运行生产队列具体怎么安排?", ...bodyAt(`artifacts/${id}.md`, "候选 A / B / C"), metadataJson: null,
     createdAt: T0 + 950, updatedAt: T0 + 950,
   });
 }

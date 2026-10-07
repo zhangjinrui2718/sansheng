@@ -23,6 +23,7 @@
  * 闭集里),所以 `tsc` 抓不住 —— 只有一条真的把待办跑过去的测试抓得住。
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { createHash } from "node:crypto";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -44,6 +45,19 @@ import {
 } from "../../src/platform/host/serve.js";
 import type { TurnTrigger } from "@shared/types/platform.js";
 import type { CreateSessionFn } from "../../src/platform/runtime/session.js";
+
+/**
+ * 027 起正文住文件:测试里仍从「想写的正文」造出**落点三列** ——
+ * sha256 与字节数都是真的(`node:crypto` 现算),不是占位串;正文本身不再进库。
+ * 夹具仍然说得出「这件工件的正文是这一句」,只是表达成 (落点, 哈希, 字节数)。
+ */
+function bodyAt(path: string, content: string) {
+  return {
+    bodyPath: path,
+    bodySha256: createHash("sha256").update(content, "utf8").digest("hex"),
+    bodyBytes: Buffer.byteLength(content, "utf8"),
+  };
+}
 
 const T0 = 1_700_000_000_000;
 
@@ -116,7 +130,7 @@ describe("① `drainProject` 把 `todo.kind` 原样传给两条回合路(不是�
     insertArtifact(db, {
       id: newId("art"), projectId: "pB", conversationId: null,
       kind: "deliverable", status: "open", authorAgentId: "pm",
-      title: "交付物", body: "现场", metadataJson: null,
+      title: "交付物", ...bodyAt("artifacts/w2c-deliverable.md", "现场"), metadataJson: null,
       createdAt: T0 + 6, updatedAt: T0 + 6, workId: idB,
     });
     const rB = await drainProject({

@@ -23,6 +23,7 @@
  * 与负样本(`decision` 的边是 `null`)都要断言。
  */
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { createHash } from "node:crypto";
 import type Database from "better-sqlite3";
 import { openPlatformMemoryDb } from "../../src/platform/storage/index.js";
 import { addMember, insertProject } from "../../src/platform/storage/repo/projects.js";
@@ -36,6 +37,19 @@ import type { ArtifactView, ProjectLiveView } from "@shared/types/platform.js";
 
 const P = "p-live";
 const S = "s-live";
+/**
+ * 027 起正文住文件:测试里仍从「想写的正文」造出**落点三列** ——
+ * sha256 与字节数都是真的(`node:crypto` 现算),不是占位串;正文本身不再进库。
+ * 夹具仍然说得出「这件工件的正文是这一句」,只是表达成 (落点, 哈希, 字节数)。
+ */
+function bodyAt(path: string, content: string) {
+  return {
+    bodyPath: path,
+    bodySha256: createHash("sha256").update(content, "utf8").digest("hex"),
+    bodyBytes: Buffer.byteLength(content, "utf8"),
+  };
+}
+
 let db: Database.Database;
 let seq = 0;
 let clock = 1_700_000_000_000;
@@ -293,12 +307,12 @@ describe("② 三个来源(内存回合 / 库里的活 / 排空器的待办)各�
   it("等甲方答的问题数 = 库里 open 的 client_question 工件数", async () => {
     insertArtifact(db, {
       id: "a-q1", projectId: P, conversationId: null, kind: "client_question",
-      status: "open", authorAgentId: "bm", title: "用哪种部署形态?", body: "",
+      status: "open", authorAgentId: "bm", title: "用哪种部署形态?", ...bodyAt("artifacts/a-q1.md", ""),
       metadataJson: null, createdAt: clock, updatedAt: clock,
     });
     insertArtifact(db, {
       id: "a-q2", projectId: P, conversationId: null, kind: "client_question",
-      status: "accepted", authorAgentId: "bm", title: "已答的问题", body: "",
+      status: "accepted", authorAgentId: "bm", title: "已答的问题", ...bodyAt("artifacts/a-q2.md", ""),
       metadataJson: null, createdAt: clock, updatedAt: clock,
     });
 
@@ -319,12 +333,12 @@ describe("③ `ArtifactView.workId`:把工件挂回产出它的环节", () => {
     work("w1", { status: "done", assignee: "wk", reviewState: "done" });
     insertArtifact(db, {
       id: "a-ev", projectId: P, conversationId: null, kind: "evidence",
-      status: "open", authorAgentId: "wk", title: "证据", body: "正文",
+      status: "open", authorAgentId: "wk", title: "证据", ...bodyAt("artifacts/a-ev.md", "正文"),
       metadataJson: null, createdAt: clock, updatedAt: clock, workId: "w1",
     });
     insertArtifact(db, {
       id: "a-dec", projectId: P, conversationId: null, kind: "decision",
-      status: "open", authorAgentId: "bm", title: "决策", body: "正文",
+      status: "open", authorAgentId: "bm", title: "决策", ...bodyAt("artifacts/a-dec.md", "正文"),
       metadataJson: null, createdAt: clock, updatedAt: clock,
     });
 
@@ -347,7 +361,7 @@ describe("③ `ArtifactView.workId`:把工件挂回产出它的环节", () => {
     work("w1", { status: "in_progress", assignee: "wk" });
     insertArtifact(db, {
       id: "a-ev", projectId: P, conversationId: null, kind: "evidence",
-      status: "open", authorAgentId: "wk", title: "证据", body: "",
+      status: "open", authorAgentId: "wk", title: "证据", ...bodyAt("artifacts/a-ev2.md", ""),
       metadataJson: null, createdAt: clock, updatedAt: clock, workId: "w1",
     });
 

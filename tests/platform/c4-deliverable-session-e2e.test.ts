@@ -28,6 +28,7 @@
  *      回合仍然解析到同一条会话;交付之前不存在第二条对话)。
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { createHash } from "node:crypto";
 import { createServer, type Server } from "node:http";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -44,6 +45,19 @@ import { insertWork, markWorkReviewed } from "../../src/platform/storage/repo/wo
 import { insertArtifact } from "../../src/platform/storage/repo/artifacts.js";
 import type { CreateSessionFn } from "../../src/platform/runtime/session.js";
 import type { SessionMessageView } from "@shared/types/platform.js";
+
+/**
+ * 027 起正文住文件:测试里仍从「想写的正文」造出**落点三列** ——
+ * sha256 与字节数都是真的(`node:crypto` 现算),不是占位串;正文本身不再进库。
+ * 夹具仍然说得出「这件工件的正文是这一句」,只是表达成 (落点, 哈希, 字节数)。
+ */
+function bodyAt(path: string, content: string) {
+  return {
+    bodyPath: path,
+    bodySha256: createHash("sha256").update(content, "utf8").digest("hex"),
+    bodyBytes: Buffer.byteLength(content, "utf8"),
+  };
+}
 
 let dataDir: string;
 let host: PlatformHost | undefined;
@@ -214,7 +228,7 @@ function seed(db: Database.Database): void {
   // 整合的产物(策略 ③ 的终止判据)+ 已验收 ⇒ 唯一的待办是 `handover:bm`
   insertArtifact(db, {
     id: "d1", projectId: "p1", conversationId: null, kind: "deliverable", status: "accepted",
-    authorAgentId: "pm", title: "选型建议交付物", body: "三条路线:…", metadataJson: null,
+    authorAgentId: "pm", title: "选型建议交付物", ...bodyAt("artifacts/d1.md", "三条路线:…"), metadataJson: null,
     createdAt: 4, updatedAt: 4, workId: "R",
   });
 }

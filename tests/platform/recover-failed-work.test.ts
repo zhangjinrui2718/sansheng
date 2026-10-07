@@ -17,6 +17,7 @@
  * 预算到界不静默。
  */
 import { beforeEach, afterEach, describe, expect, it } from "vitest";
+import { createHash } from "node:crypto";
 import Database from "better-sqlite3";
 import { openPlatformMemoryDb } from "../../src/platform/storage/index.js";
 import { runMigrations } from "../../src/platform/infra/migrations.js";
@@ -29,6 +30,19 @@ import { resolveClientQuestion } from "../../src/platform/tools/client.js";
 import { ensureOrg } from "../../src/platform/runtime/org.js";
 
 const T0 = 1_700_000_000_000;
+/**
+ * 027 起正文住文件:测试里仍从「想写的正文」造出**落点三列** ——
+ * sha256 与字节数都是真的(`node:crypto` 现算),不是占位串;正文本身不再进库。
+ * 夹具仍然说得出「这件工件的正文是这一句」,只是表达成 (落点, 哈希, 字节数)。
+ */
+function bodyAt(path: string, content: string) {
+  return {
+    bodyPath: path,
+    bodySha256: createHash("sha256").update(content, "utf8").digest("hex"),
+    bodyBytes: Buffer.byteLength(content, "utf8"),
+  };
+}
+
 let db: Database.Database;
 let pmId: string;
 
@@ -187,7 +201,7 @@ describe("⑥ 球在甲方那边时,不再追加新的交代回合", () => {
     insertArtifact(db, {
       id: "q_t1", projectId: "p1", kind: "client_question", status: "open",
       authorAgentId: "bm", title: "整合报告这件事,现在算交付了吗?",
-      body: "候选 A/B/C", createdAt: T0 + 10_000, updatedAt: T0 + 10_000,
+      ...bodyAt("artifacts/q_t1.md", "候选 A/B/C"), createdAt: T0 + 10_000, updatedAt: T0 + 10_000,
     });
     db.prepare(
       `INSERT INTO client_questions (question_artifact_id, project_id, asked_by, asked_at)

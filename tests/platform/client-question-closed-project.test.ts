@@ -30,6 +30,7 @@
  * 而一个**什么都排除**的检查会让负样本绿、正样本红,方向相反的错法同理。
  */
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import type Database from "better-sqlite3";
@@ -41,6 +42,19 @@ import {
   listArtifacts,
 } from "../../src/platform/storage/repo/artifacts.js";
 import { listAllClientQuestions } from "../../src/platform/transport/views.js";
+
+/**
+ * 027 起正文住文件:测试里仍从「想写的正文」造出**落点三列** ——
+ * sha256 与字节数都是真的(`node:crypto` 现算),不是占位串;正文本身不再进库。
+ * 夹具仍然说得出「这件工件的正文是这一句」,只是表达成 (落点, 哈希, 字节数)。
+ */
+function bodyAt(path: string, content: string) {
+  return {
+    bodyPath: path,
+    bodySha256: createHash("sha256").update(content, "utf8").digest("hex"),
+    bodyBytes: Buffer.byteLength(content, "utf8"),
+  };
+}
 
 let db: Database.Database;
 let seq = 0;
@@ -61,7 +75,7 @@ function ask(pid: string, q: string): string {
   const id = `art${++seq}`;
   insertArtifact(db, {
     id, projectId: pid, conversationId: null, kind: "client_question", status: "open",
-    authorAgentId: bm, title: q, body: q, metadataJson: null,
+    authorAgentId: bm, title: q, ...bodyAt(`artifacts/${id}.md`, q), metadataJson: null,
     createdAt: T0 + seq * 10, updatedAt: T0 + seq * 10,
   });
   return id;

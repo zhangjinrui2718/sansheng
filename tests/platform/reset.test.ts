@@ -30,6 +30,7 @@
  * 本项目三类静默失败之一就是「检查本身返回一个看起来正常的错误答案」。
  */
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { createHash } from "node:crypto";
 import type Database from "better-sqlite3";
 import { openPlatformMemoryDb } from "../../src/platform/storage/index.js";
 import {
@@ -53,6 +54,19 @@ import { affectWork } from "../../src/platform/storage/repo/changes.js";
 import { addDep } from "../../src/platform/storage/repo/works.js";
 import { addArtifactLink } from "../../src/platform/storage/repo/artifacts.js";
 import { SqliteMemory } from "../../src/platform/memory/sqliteMemory.js";
+
+/**
+ * 027 起正文住文件:测试里仍从「想写的正文」造出**落点三列** ——
+ * sha256 与字节数都是真的(`node:crypto` 现算),不是占位串;正文本身不再进库。
+ * 夹具仍然说得出「这件工件的正文是这一句」,只是表达成 (落点, 哈希, 字节数)。
+ */
+function bodyAt(path: string, content: string) {
+  return {
+    bodyPath: path,
+    bodySha256: createHash("sha256").update(content, "utf8").digest("hex"),
+    bodyBytes: Buffer.byteLength(content, "utf8"),
+  };
+}
 
 let db: Database.Database;
 const NOW = 1_700_000_000_000;
@@ -144,12 +158,12 @@ async function seedEverything(): Promise<{ project: string; work: string; agent:
 
   insertArtifact(db, {
     id: "art_test", projectId: project, conversationId: null, kind: "evidence",
-    status: "open", authorAgentId: agent, title: "A", body: "B",
+    status: "open", authorAgentId: agent, title: "A", ...bodyAt("artifacts/art_test.md", "B"),
     metadataJson: null, createdAt: NOW, updatedAt: NOW, workId: root,
   });
   insertArtifact(db, {
     id: "art_test2", projectId: project, conversationId: null, kind: "note",
-    status: "open", authorAgentId: agent, title: "A2", body: "B2",
+    status: "open", authorAgentId: agent, title: "A2", ...bodyAt("artifacts/art_test2.md", "B2"),
     metadataJson: null, createdAt: NOW, updatedAt: NOW, workId: null,
   });
   const link = addArtifactLink(db, "art_test", "depends_on", "art_test2");
@@ -160,7 +174,7 @@ async function seedEverything(): Promise<{ project: string; work: string; agent:
   // 「外键安全顺序」问题,自己先犯一次很愚蠢)。
   insertArtifact(db, {
     id: "q_test", projectId: project, conversationId: null, kind: "client_question",
-    status: "open", authorAgentId: agent, title: "问甲方", body: "问什么",
+    status: "open", authorAgentId: agent, title: "问甲方", ...bodyAt("artifacts/q_test.md", "问什么"),
     metadataJson: null, createdAt: NOW, updatedAt: NOW, workId: null,
   });
   // ⚠️ 只登记提问、**不**写答复:答复行带 `answer_artifact_id`(外键指 `artifacts`),

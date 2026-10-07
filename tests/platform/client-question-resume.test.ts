@@ -29,6 +29,7 @@
  *   ④ **at-least-once**:回合失败/被中断**不消费**,下次排空重来。
  */
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { createHash } from "node:crypto";
 import type Database from "better-sqlite3";
 import { openPlatformMemoryDb } from "../../src/platform/storage/index.js";
 import { insertProject } from "../../src/platform/storage/repo/projects.js";
@@ -42,6 +43,19 @@ import {
 } from "../../src/platform/storage/repo/clientQuestions.js";
 import { collectTodos, drainProject, renderTask } from "../../src/platform/runtime/dispatcher.js";
 import type { DrainTurnReport } from "../../src/platform/runtime/dispatcher.js";
+
+/**
+ * 027 起正文住文件:测试里仍从「想写的正文」造出**落点三列** ——
+ * sha256 与字节数都是真的(`node:crypto` 现算),不是占位串;正文本身不再进库。
+ * 夹具仍然说得出「这件工件的正文是这一句」,只是表达成 (落点, 哈希, 字节数)。
+ */
+function bodyAt(path: string, content: string) {
+  return {
+    bodyPath: path,
+    bodySha256: createHash("sha256").update(content, "utf8").digest("hex"),
+    bodyBytes: Buffer.byteLength(content, "utf8"),
+  };
+}
 
 let db: Database.Database;
 let seq = 0;
@@ -67,7 +81,7 @@ beforeEach(() => {
   markWorkReviewed(db, "wk_seed", T0);
   insertArtifact(db, {
     id: "art_delivered", projectId: "p1", conversationId: null, kind: "deliverable",
-    status: "accepted", authorAgentId: "pm", title: "已交付的交付物", body: "正文",
+    status: "accepted", authorAgentId: "pm", title: "已交付的交付物", ...bodyAt("artifacts/art_delivered.md", "正文"),
     metadataJson: null, createdAt: T0 + 10, updatedAt: T0 + 10, workId: "wk_seed",
   });
   // 交付会话那条边 = `handover` 的终止判据(017)。不建它,handover 会一直成立。
@@ -91,7 +105,7 @@ function askClient(question: string): string {
   const id = `q_${++seq}`;
   insertArtifact(db, {
     id, projectId: "p1", conversationId: null, kind: "client_question",
-    status: "open", authorAgentId: "bm", title: question, body: question,
+    status: "open", authorAgentId: "bm", title: question, ...bodyAt(`artifacts/${id}.md`, question),
     metadataJson: null, createdAt: T0 + seq, updatedAt: T0 + seq, workId: null,
   });
   recordClientQuestion(db, {
@@ -106,7 +120,7 @@ function answerClient(questionId: string, answer: string): string {
   insertArtifact(db, {
     id: decId, projectId: "p1", conversationId: null, kind: "decision",
     status: "accepted", authorAgentId: "bm", title: `甲方答复:${questionId}`,
-    body: answer, metadataJson: JSON.stringify({ answersQuestionId: questionId, source: "client" }),
+    ...bodyAt(`artifacts/${decId}.md`, answer), metadataJson: JSON.stringify({ answersQuestionId: questionId, source: "client" }),
     createdAt: T0 + 100 + seq, updatedAt: T0 + 100 + seq, workId: null,
   });
   db.prepare(`UPDATE artifacts SET status = 'accepted' WHERE id = ?`).run(questionId);
