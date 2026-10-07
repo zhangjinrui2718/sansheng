@@ -13,6 +13,8 @@
  * 并且这里带上那条最容易写反的分支:**先看 kind,再看类型**。
  */
 import { describe, expect, it } from "vitest";
+import { readFileSync, readdirSync, statSync } from "node:fs";
+import { join, relative } from "node:path";
 import type { ArtifactKind, CodeServiceView, DeliverableType } from "@shared/types/platform";
 import { DELIVERABLE_TYPES } from "../../src/platform/storage/repo/artifacts.js";
 import {
@@ -22,6 +24,30 @@ import {
   deliverableTypeTone,
 } from "@/lib/vocab";
 import { bodyMode, dockerCommands, htmlReportFileName, shortSha } from "@/lib/deliverable";
+import { commitsRuntimeLabel } from "@/components/deliverable/CodeService";
+
+const WEB_SRC = join(process.cwd(), "web/src");
+
+function readWebSrc(rel: string): string {
+  return readFileSync(join(WEB_SRC, rel), "utf8");
+}
+
+/** 去掉注释 —— 断言针对**代码**:注释里讨论「不许写成的形态」不该被判为违规。 */
+function stripComments(src: string): string {
+  return src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+}
+
+function walk(dir: string, out: string[] = []): string[] {
+  for (const name of readdirSync(dir)) {
+    const p = join(dir, name);
+    if (statSync(p).isDirectory()) walk(p, out);
+    else if (/\.(ts|tsx)$/.test(name)) out.push(relative(process.cwd(), p));
+  }
+  return out;
+}
+
+/** 全部 web/src 源码(仓库相对路径)—— iframe 扫描的范围。 */
+const WALKED_WEB_FILES = walk(WEB_SRC);
 
 const ALL_KINDS: ArtifactKind[] = [
   "decision", "note", "evidence", "hypothesis", "project_brief", "work_brief",
@@ -70,11 +96,18 @@ describe("交付物 · 正文呈现方式(bodyMode)", () => {
 });
 
 describe("代码服务 · 展示辅助(短 sha / 部署命令)", () => {
+  // ⚠️ 2026-10-08 起坐标是**六项**(设计 §3.2a),`CodeServiceView` 多了
+  // `servicePath` / `deliverableCommit` / `deliverableSubject` / `ignoredFiles`。
+  // 这个夹具跟着换成新形状 —— 少一项就会让下面那条命令断言变成
+  // 「docker build -t billing undefined」(可见地胡说,而不是静静地写对)。
   const META = (over: Partial<CodeServiceView> = {}): CodeServiceView => ({
-    repoPath: "/w/billing", repoName: "billing", branch: "main",
+    repoPath: "/w/proj", repoName: "billing", servicePath: "services/billing",
+    branch: "main",
     headCommit: "0123456789abcdef0123456789abcdef01234567", headSubject: "交付计费服务",
-    commitCount: 3, dockerfile: "Dockerfile", service: "billing", port: 8080,
-    files: ["Dockerfile", "index.js", "package.json"], ...over,
+    deliverableCommit: "89abcdef0123456789abcdef0123456789abcdef",
+    deliverableSubject: "给计费服务加退款接口",
+    commitCount: 3, dockerfile: "services/billing/Dockerfile", service: "billing", port: 8080,
+    files: ["Dockerfile", "index.js", "package.json"], ignoredFiles: [], ...over,
   });
 
   it("短 sha 取 7 位;读不到就返回 null(界面上不许出现 undefined)", () => {
@@ -82,19 +115,132 @@ describe("代码服务 · 展示辅助(短 sha / 部署命令)", () => {
     expect(shortSha(null)).toBeNull();
   });
 
-  it("两条命令由**核实过的坐标**生成 —— 端口来自交付物,不是模型手写的", () => {
-    const c = dockerCommands(META());
-    expect(c).not.toBeNull();
-    expect(c!.build).toBe("docker build -t billing .");
-    expect(c!.run).toBe("docker run --rm -p 8080:8080 billing");
-    // 负样本:坐标换了,命令必须跟着换(否则「生成」是假的)
-    expect(dockerCommands(META({ service: "api", port: 3000 }))!.run)
-      .toBe("docker run --rm -p 3000:3000 api");
+  it("**交付版本与 HEAD 是两个 sha** —— 短 sha 对两者都成立,不许拿一个冒充另一个", () => {
+    expect(shortSha(META().deliverableCommit)).toBe("89abcde");
+    expect(shortSha(META().deliverableCommit)).not.toBe(shortSha(META().headCommit));
   });
 
-  it("**缺服务名或端口就不生成命令** —— 编一个默认端口会让人照着错的命令去部署", () => {
+  it("两条命令由**核实过的坐标**生成 —— 构建上下文是交付物边界,端口来自交付物", () => {
+    const c = dockerCommands(META());
+    expect(c).not.toBeNull();
+    // ⚠️ 构建上下文是 `servicePath`,**不是** `.`:仓库根还含 artifacts/ 与
+    // work/,`docker build .` 会把内部工作区装进镜像(设计 §3.2a / §7)。
+    expect(c!.build).toBe("docker build -t billing services/billing");
+    expect(c!.run).toBe("docker run --rm -p 8080:8080 billing");
+    // 负样本:坐标换了,命令必须跟着换(否则「生成」是假的)
+    expect(dockerCommands(META({ service: "api", port: 3000, servicePath: "services/api" }))!.run)
+      .toBe("docker run --rm -p 3000:3000 api");
+    expect(dockerCommands(META({ servicePath: "services/api" }))!.build)
+      .toBe("docker build -t billing services/api");
+  });
+
+  it("**缺服务名 / 端口 / 服务目录就不生成命令** —— 编一个默认值会让人照着错的命令去部署", () => {
     expect(dockerCommands(META({ service: null }))).toBeNull();
     expect(dockerCommands(META({ port: null }))).toBeNull();
+    // 缺边界时不生成:`docker build -t billing .` 是一条会跑、但装错东西的命令。
+    expect(dockerCommands(META({ servicePath: null }))).toBeNull();
+  });
+});
+
+describe("代码服务 · 提交列表的三态(读不到 / 提交不可达都不是空列表)", () => {
+  it("`ok` / `unavailable` / `unreachable` 三种 runtime 各有各的读法", () => {
+    expect(commitsRuntimeLabel("unavailable")).toBe("读不到");
+    // §3.2c:`reset --hard` 之后交付提交只剩 reflog ⇒ 读面报 unreachable,
+    // 与「读不到盘」区分开(处置不同:一个是去看盘,一个是这版提交没了)。
+    expect(commitsRuntimeLabel("unreachable")).toBe("提交已不可达");
+    expect(commitsRuntimeLabel("unreachable")).not.toBe(commitsRuntimeLabel("unavailable"));
+  });
+
+  it("未知取值原样透出(不猜、也不悄悄折成「读不到」)", () => {
+    expect(commitsRuntimeLabel("something_new")).toBe("something_new");
+  });
+
+  it("负样本自检:两个已知取值都不等于 `ok` —— 页面据此走「不渲染成空列表」的那一支", () => {
+    expect(commitsRuntimeLabel("unavailable")).not.toBe("ok");
+    expect(commitsRuntimeLabel("unreachable")).not.toBe("ok");
+  });
+});
+
+/**
+ * 渲染面的**源码级**判据(web 侧没有 jsdom,见 `c10-dead-code.test.ts` 文件头)。
+ *
+ * ── 这条判据为什么必须存在 ──────────────────────────────────────
+ *
+ * 正文改成**现读** `GET /api/artifacts/:id/content` 之后,最顺手的一条写法是
+ * `<iframe src="/api/artifacts/:id/content">` —— **那条端点与页面同源**,于是
+ * 模型写的 HTML 拿到本应用的来源,`sandbox=""` 连表达「不透明来源」的机会都没有。
+ * 这条错误**不会报任何错**,只会静静地把结构性保证换成一次同源加载。
+ *
+ * 所以这里钉两件事:① 仍然 `srcDoc` + 字面 `sandbox=""`;② 全 `web/src` 里
+ * **没有任何** `<iframe src=`(带 src 而不带 srcDoc 的开标签)。
+ */
+describe("HTML 报告 · 沙箱渲染判据(srcDoc + sandbox=\"\",且没有同源 src)", () => {
+  /** 抽出源码里所有 `<iframe …>` 开标签(`[^>]` 跨行,JSX 属性可以分行写)。 */
+  function iframeTags(src: string): string[] {
+    return src.match(/<iframe\b[^>]*>/g) ?? [];
+  }
+
+  /**
+   * 这个开标签是不是「同源 src」形态:有 `src=`,却没有 `srcDoc=`
+   * (两者都在时以 `srcDoc` 为准,浏览器不会去请求 `src`)。
+   */
+  function isSameOriginSrc(tag: string): boolean {
+    return /\ssrc=/.test(tag) && !/\ssrcDoc=/.test(tag);
+  }
+
+  /** 字面空值 sandbox —— 这一段的全部安全依据(不是 `sandbox={sandbox}`)。 */
+  function hasEmptySandbox(src: string): boolean {
+    return /sandbox=""/.test(src);
+  }
+
+  it("正负样本自检:扫描器对已知答案给出正确答案(坏掉的检查不等于检查失败)", () => {
+    // 正样本:同源 src 的 frame **必须**被判出来
+    const bad = `export const X = () => <iframe src="/api/artifacts/a1/content" title="t" />;`;
+    expect(iframeTags(bad).filter(isSameOriginSrc)).toHaveLength(1);
+    // 负样本:`srcDoc` + 空 sandbox 的 frame **必须**不被判出来
+    const good = `export const X = () => <iframe sandbox="" srcDoc={html} title="t" />;`;
+    expect(iframeTags(good).filter(isSameOriginSrc)).toHaveLength(0);
+    // 判据的两种形态各自也要自检
+    expect(hasEmptySandbox(good)).toBe(true);
+    expect(hasEmptySandbox(`<iframe sandbox="allow-scripts" srcDoc={html} />`)).toBe(false);
+    expect(hasEmptySandbox(`<iframe srcDoc={html} />`)).toBe(false);
+
+    // ⚠️ 对**真文件**做内存变异:同一个判据必须由绿转红。
+    // 「跑完没报错」不是判据,「把它改坏这条断言会红」才是。
+    const real = stripComments(readWebSrc("components/deliverable/HtmlReport.tsx"));
+    const noSandbox = real.replace('sandbox=""', 'sandbox="allow-scripts"');
+    expect(noSandbox, "前提:变异真的改到了源码(改不动的话下面那条断言毫无意义)").not.toBe(real);
+    expect(hasEmptySandbox(noSandbox)).toBe(false);
+
+    const sameOrigin = real.replace("srcDoc={html}", `src="/api/artifacts/a1/content"`);
+    expect(sameOrigin, "前提:变异真的改到了源码").not.toBe(real);
+    expect(iframeTags(sameOrigin).filter(isSameOriginSrc)).toHaveLength(1);
+  });
+
+  it("HtmlReport.tsx 仍然:字面 `sandbox=\"\"` + `srcDoc`", () => {
+    const src = stripComments(readWebSrc("components/deliverable/HtmlReport.tsx"));
+    expect(hasEmptySandbox(src), "空值 sandbox 是结构性的安全保证 —— 改成属性变量或加 allow-scripts 都等于拆掉它").toBe(true);
+    expect(src, "正文必须经 srcDoc 喂进 frame").toContain("srcDoc={html}");
+    expect(iframeTags(src), "这个文件里应当只有一个 iframe(报告预览)").toHaveLength(1);
+  });
+
+  it("web/src 里没有任何 `<iframe src=`(同源加载模型写的 HTML)", () => {
+    const offenders: string[] = [];
+    for (const rel of WALKED_WEB_FILES) {
+      const src = stripComments(readFileSync(join(process.cwd(), rel), "utf8"));
+      for (const tag of iframeTags(src).filter(isSameOriginSrc)) offenders.push(`${rel}: ${tag}`);
+    }
+    expect(offenders).toEqual([]);
+  });
+
+  it("正文走现读:**没有一处代码再读 `artifact.body` / `a.body`**", () => {
+    const works = stripComments(readWebSrc("routes/Works.tsx"));
+    expect(works, "正文是文件,`ArtifactView` 上已经没有 `body` 这个字段了").not.toMatch(/\bartifact\.body\b/);
+    expect(works).not.toMatch(/\ba\.body\b/);
+    // 正样本自检:这条正则对一个**必然含它**的串要给 true(防止断言恒真)
+    expect(/\bartifact\.body\b/.test("const x = artifact.body.length;")).toBe(true);
+    // 现读的入口必须真的被接上(HtmlReport / 普通正文两处)
+    expect(stripComments(readWebSrc("components/deliverable/HtmlReport.tsx"))).toContain("useArtifactContent(");
   });
 });
 

@@ -28,6 +28,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { todoKindReachesClient } from "@shared/types/platform";
 import type {
+  ArtifactContentView,
   ArtifactView,
   AskView,
   BlockerView,
@@ -115,6 +116,32 @@ export function useArtifacts(options?: {
     options?.pollMs ?? 0,
   );
   return { data: r.data?.artifacts ?? [], loading: r.loading, error: r.error };
+}
+
+/**
+ * 一件工件的**正文**(现读,`GET /api/artifacts/:id/content`,设计 §4.2)。
+ *
+ * ⚠️ 正文不在列表里了 —— 它是项目仓里的一份文件(`ArtifactView.bodyPath` 只是
+ * 落点)。所以这条 hook 是正文**唯一**的入口;列表拿落点与字节数,正文按 id 现读。
+ *
+ * ⚠️ **「读不到」不是 `null`。** `data === null` 是「还没拿到过」;而文件被删 /
+ * 被回滚读不出来时,拿到的是一份真视图:`runtime: "unavailable"` + `problem`。
+ * 渲染方**必须**把那一行印出来 —— 空 `<pre>` / 空 iframe 看起来像「这份工件本来
+ * 就没有正文」,而那是假的(同 `useProjectWorkspace` 那条纪律)。
+ */
+export function useArtifactContent(
+  artifactId: string | null,
+  at?: string | null,
+): Loaded<ArtifactContentView | null> {
+  const revision = useChatStore((s) => s.projectRevision);
+  const r = useLoad<ArtifactContentView | null>(
+    () =>
+      artifactId === null
+        ? Promise.resolve(null)
+        : api.fetchArtifactContent(artifactId, at ?? undefined),
+    [artifactId, at ?? null, revision],
+  );
+  return { data: r.data, loading: r.loading, error: r.error };
 }
 
 export function useWorks(projectId?: string | null): Loaded<WorkView[]> {
@@ -330,9 +357,10 @@ export function useProjectAsks(projectId: string | null): Loaded<AskView[]> {
  * 项目工作区 · 只读观测面(设计 `docs/DESIGN-WORKSPACE.md` §4.4,P0)。
  *
  * ⚠️ `data === null` 是「**还没拿到过**」,不是「工作区是空的」—— 与
- * `useProjectLive` 同一条理由:`WorkspaceView` 自己带 `runtime` / `index.runtime`
- * 两个状态字段,调用方**只有在拿到 data 之后**才有资格判断「有没有文件」。
+ * `useProjectLive` 同一条理由:`WorkspaceView` 自己带 `runtime` 状态字段,
+ * 调用方**只有在拿到 data 之后**才有资格判断「有没有文件」。
  * 把 `null` 渲染成空目录,就是把「还没查」说成「查过了,是空的」。
+ * (`index` 现在只剩 `{ paths: number }` —— 分期的 `not_migrated` 兜底已作废。)
  */
 export function useProjectWorkspace(projectId: string | null): Loaded<WorkspaceView | null> {
   const revision = useChatStore((s) => s.projectRevision);

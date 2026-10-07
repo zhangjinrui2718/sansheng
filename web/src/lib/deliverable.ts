@@ -55,16 +55,21 @@ export function shortSha(sha: string | null): string | null {
 /**
  * 两条可直接复制的命令。
  *
- * **为什么由前端拼**:这两条命令的判据是「甲方能照着跑起来」,而 `service` 与
- * `port` 是交付物自己的事实 —— 让模型在正文里手写一遍,就会有第三种写法
- * (它可能写错端口)。命令从**核实过的坐标**生成,正文只负责讲为什么。
+ * **为什么由前端拼**:这两条命令的判据是「甲方能照着跑起来」,而 `service` /
+ * `port` / `servicePath` 是交付物自己的事实 —— 让模型在正文里手写一遍,就会有
+ * 第三种写法(它可能写错端口)。
  *
- * `service` 或 `port` 缺一项时返回 null(渲染成「读不到」),**不编一个默认值**。
+ * ⚠️ **构建上下文是 `servicePath`(交付物的边界),不是 `.`。**
+ * 2026-10-08 起代码服务复用**项目仓**,`repoPath` 因此是项目根 —— 从那儿
+ * `docker build .` 会把 `artifacts/`(内部报告)与 `work/`(中间产物)一起装进
+ * 镜像,交付物的边界当场消失(设计 §3.2a / §7:`docker build services/<name>`)。
+ * 所以 `service` / `port` / `servicePath` **缺一项就返回 null**(渲染成「读不到」),
+ * **不编一个默认值** —— 编出来的 `docker build -t x .` 是一条会跑、但装错东西的命令。
  */
 export function dockerCommands(meta: CodeServiceView): { build: string; run: string } | null {
-  if (meta.service === null || meta.port === null) return null;
+  if (meta.service === null || meta.port === null || meta.servicePath === null) return null;
   return {
-    build: `docker build -t ${meta.service} .`,
+    build: `docker build -t ${meta.service} ${meta.servicePath}`,
     run: `docker run --rm -p ${meta.port}:${meta.port} ${meta.service}`,
   };
 }

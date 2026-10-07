@@ -360,8 +360,9 @@ export function ProjectDetailPage() {
 
             两条反造假纪律在这里的落法(与 ProjectLiveView.runtime 同源):
               · `runtime === "unavailable"` ⇒ 显示 problem 那一行,**绝不**渲染成空目录;
-              · `index.runtime === "not_migrated"` ⇒ 如实写「索引化尚未落地」,
-                而不是让 `indexed` 全 false 看起来像「这些文件全是孤儿」。
+              · `truncated === true` ⇒ 明说「列表不全」,不许让「少列」看起来像「没有」。
+                (`index` 现在只剩 `{ paths }` —— 分期的 `not_migrated` 兜底已作废:
+                 `body_path` 列由 migration 027 保证存在。)
           */}
           <Section
             title="文件系统"
@@ -380,15 +381,6 @@ export function ProjectDetailPage() {
                 {/* root 的绝对路径(可复制)—— 「读不到」时它更要显示:用户要拿着它去盘上核对 */}
                 <CopyPath text={workspace.root} />
 
-                {workspace.index.runtime === "not_migrated" && (
-                  <div
-                    className="ss-note"
-                    title="artifacts.body_path 这一列由 P2 的 migration 027 加上。在那之前索引里一条正文路径都没有 —— 这不是「盘上的文件都是孤儿」,是「索引这件事还没落地」。"
-                  >
-                    索引化尚未落地,盘上文件暂未与工件建立边(artifacts.body_path 列还不存在)。
-                  </div>
-                )}
-
                 {workspace.runtime === "unavailable" ? (
                   // 「读不到」**不是**「空目录」—— 这一行是两者的分界线,不许被空态替代。
                   <Flag tone="cinnabar">
@@ -401,6 +393,10 @@ export function ProjectDetailPage() {
                       <span>已索引 {workspace.counts.indexed}</span>
                       <span>孤儿文件 {workspace.counts.orphanFile}</span>
                       <span>库里有盘上无 {workspace.missing.length}</span>
+                      {/* 对账的分母:索引里正文路径的总条数(它不会被遍历上限影响) */}
+                      <span title="artifacts.body_path 里的总条数 —— 对账的另一个分母">
+                        索引正文路径 {workspace.index.paths}
+                      </span>
                       {workspace.truncated && (
                         <Pill tone="amber" title="到深度 / 条目上限,或有内容读不出来 —— 下面这份列表不全">
                           已截断 · 列表不全

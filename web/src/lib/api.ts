@@ -33,6 +33,7 @@
  */
 import type {
   AppConfigResponse,
+  ArtifactContentView,
   ArtifactStatus,
   ArtifactView,
   AskView,
@@ -368,9 +369,35 @@ function usageQuery(opts?: { days?: number; limit?: number }): string {
  *
  * 契约里**没有**跨项目的 `/api/artifacts` 列表,但有 `/:id` 详情 —— 从列表点进一条
  * 时不必把整个项目的工件再拉一遍。
+ *
+ * ⚠️ **详情不再带正文**(2026-10-08):它只给落点 `bodyPath` / `bodyBytes` /
+ * `commitSha`。正文走 `fetchArtifactContent()` 现读 —— 两者的分工见那个函数的注释。
  */
 export function getArtifact(id: string): Promise<{ artifact: ArtifactView }> {
   return request<{ artifact: ArtifactView }>(`/artifacts/${encodeURIComponent(id)}`);
+}
+
+/**
+ * **一件工件的正文**(`GET /api/artifacts/:id/content`,设计 §4.2)。
+ *
+ * ── 为什么正文要单独一条请求 ──────────────────────────────────────
+ *
+ * 2026-10-08 起正文不再住库:它是项目仓里的一份文件(`ArtifactView.bodyPath`)。
+ * 于是列表只给**落点**(`bodyPath` / `bodyBytes` / `commitSha`),正文现读 ——
+ * 这正是列表变便宜的全部理由,所以**不要在列表里顺手把每条正文都拉一遍**。
+ *
+ * ── 两条不许弄错的语义 ───────────────────────────────────────────
+ *
+ *   · `at` **省略 = 读 HEAD**;给了提交 sha 就读那一版历史(`git show <sha>:<path>`)。
+ *     索引记了 `commitSha` ⇒ 正文按 sha 可寻址,`git revert` 回滚之后照样读得出来。
+ *   · 文件被删 / 被回滚 / `at` 不可达 ⇒ 后端返回
+ *     `runtime: "unavailable"` + `problem`,**不是 404、不是空正文**。
+ *     调用方必须把那一行印出来 —— 空 iframe / 空 `<pre>` 看起来像「这份工件本来
+ *     就没有正文」,而那是假的。**工件不存在**才是 404。
+ */
+export function fetchArtifactContent(id: string, at?: string): Promise<ArtifactContentView> {
+  const q = at !== undefined && at !== "" ? `?at=${encodeURIComponent(at)}` : "";
+  return request<ArtifactContentView>(`/artifacts/${encodeURIComponent(id)}/content${q}`);
 }
 
 /**
@@ -378,7 +405,9 @@ export function getArtifact(id: string): Promise<{ artifact: ArtifactView }> {
  *
  * 与 `getArtifact` 分开的**另一条边**:详情回答「交付了什么」(那一刻的事实),
  * 这一条回答「这个仓库现在长什么样」—— 后者只有盘上有,所以它可能
- * `runtime: "unavailable"`,而**那不是**「没有提交」。界面上必须分开渲染。
+ * `runtime: "unavailable"`(读不到盘)或交付提交已不可达,而**两者都不是**
+ * 「没有提交」。界面上必须分开渲染:把非 `ok` 渲染成空列表 = 把一次读失败
+ * 说成「这个仓库是空的」。
  */
 export function getRepoCommits(id: string, limit = 20): Promise<RepoCommitsView> {
   return request<RepoCommitsView>(
@@ -394,11 +423,17 @@ export function listMembers(projectId: string): Promise<{ members: MemberView[] 
 /**
  * **项目工作区 · 只读观测面**(设计 `docs/DESIGN-WORKSPACE.md` §4.4,P0)。
  *
- * 「盘上有什么 + 索引引用了什么 + 两边对不对得上」。两个字段是**状态**,不是
+ * 「盘上有什么 + 索引引用了什么 + 两边对不对得上」。三个字段是**状态**,不是
  * 空态,页面必须分开渲染:
- *   - `workspace.runtime === "unavailable"` ⇒ **读不到根目录**(不是「空目录」);
- *   - `workspace.index.runtime === "not_migrated"` ⇒ 索引化还没落地(P2 才加
- *     `body_path` 列),**不是**「索引里一条都没有」。
+ *   - `workspace.runtime === "unavailable"` ⇒ **读不到根目录**(不是「空目录」),
+ *     `problem` 里带绝对路径与原因,必须印出来;
+ *   - `workspace.truncated === true` ⇒ 列表被深度 / 条数上限截断,**必须说「列表不全」**;
+ *   - `workspace.missing` ⇒ 索引里有、盘上没有(逐条 stat 算出来的,不受遍历上限影响),
+ *     逐条列出。
+ *
+ * ⚠️ `index` 现在只剩 `{ paths: number }`(索引里正文路径的总条数,对账的分母)——
+ * 分期方案里那个 `index.runtime: "not_migrated"` 兜底**已随「不做迁移」作废**,
+ * 别再把它接回来:`body_path` 列由 migration 027 保证存在。
  */
 export function getProjectWorkspace(projectId: string): Promise<{ workspace: WorkspaceView }> {
   return request<{ workspace: WorkspaceView }>(

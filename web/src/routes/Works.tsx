@@ -127,7 +127,7 @@ import {
   StatStrip,
   toneColor,
 } from "@/components/ui/primitives";
-import { useArtifacts, useProjectLive, useWorks } from "@/lib/data";
+import { useArtifactContent, useArtifacts, useProjectLive, useWorks } from "@/lib/data";
 import { useChatStore } from "@/stores/chat";
 import { errorMessage, getArtifact } from "@/lib/api";
 import {
@@ -1198,14 +1198,6 @@ export function ArtifactRow({
   open: boolean;
   onToggle: () => void;
 }) {
-  const long = a.body.length > 120;
-  // HTML 报告的正文是**源文本** —— 把它当预览印在卡片上就是一片标签噪音,
-  // 而且会让 `long` 判断失真(一份 30KB 的 HTML 恒为 long)。卡片只标出类型,
-  // 正文留给详情里的沙箱渲染。
-  //
-  // 代码服务同理,而且更强:它的**主体是仓库坐标**(在 `metadata_json` 里),
-  // 正文只是一份 markdown 说明 —— 卡片上印一句「代码服务 · 分支 · 短 sha」
-  // 比印正文有用得多。
   const mode = bodyMode(a);
   const isHtmlReport = mode === "html_report";
   const isCodeService = mode === "code_service";
@@ -1259,24 +1251,21 @@ export function ArtifactRow({
           代码服务
           {csMeta?.service !== null && csMeta?.service !== undefined ? `「${csMeta.service}」` : ""}
           {csMeta?.branch != null ? ` · 分支 ${csMeta.branch}` : ""}
-          {csMeta?.headCommit != null ? ` · ${shortSha(csMeta.headCommit)}` : ""}
+          {csMeta?.servicePath != null ? ` · 服务目录 ${csMeta.servicePath}` : ""}
+          {csMeta?.deliverableCommit != null ? ` · 交付版本 ${shortSha(csMeta.deliverableCommit)}` : ""}
           {csMeta?.port != null ? ` · 端口 ${csMeta.port}` : ""}
           {" —— 点「详情」看仓库坐标与部署命令。"}
         </div>
       ) : (
-        a.body.length > 0 &&
-        a.body !== a.title && (
-          <>
-            <Clamp lines={2} style={{ marginTop: 4 }}>
-              {a.body}
-            </Clamp>
-            {long && (
-              <Disclosure summary="全文">
-                <div style={{ whiteSpace: "pre-wrap" }}>{a.body}</div>
-              </Disclosure>
-            )}
-          </>
-        )
+        // ⚠️ 卡片上**不再印正文**(2026-10-08,设计 §4.2):正文住项目仓里的
+        // 一份文件,列表只给落点与字节数。给每张卡片各拉一次正文 = 把列表变回
+        // 「每次都把全部正文拉一遍」,那正是这次改动要去掉的东西。
+        // 全文在「详情」里**现读**;读不到时由那一段印出 problem(不是空白)。
+        <div className="ss-meta mt-1">
+          {a.bodyBytes > 0
+            ? `正文 ${a.bodyBytes} 字节 —— 点「详情」现读全文。`
+            : "这条工件没有正文。"}
+        </div>
       )}
       <div className="ss-meta mt-1">
         {fmtTime(a.createdAt)}
@@ -1939,45 +1928,22 @@ function ArtifactDetail({ id, known }: { id: string; known: readonly ArtifactVie
               <div className="ss-section" style={{ fontSize: 12 }}>
                 报告
               </div>
+              {/*
+                正文由 HtmlReport **自己现读**(`GET /api/artifacts/:id/content`)
+                —— 渲染仍走 `sandbox="" + srcDoc`(见那个文件的文件头:
+                改成 `<iframe src=...>` 会让模型写的 HTML 与应用同源)。
+              */}
               <HtmlReport
-                html={artifact.body}
+                artifactId={artifact.id}
                 fileName={htmlReportFileName(artifact.title, artifact.id)}
               />
             </>
           ) : bodyMode(artifact) === "code_service" ? (
-            // 正文(说明)由 CodeService 自己渲染 —— 它要把坐标摆在正文之前,
-            // 所以不能复用下面那个只印 `<pre>` 的分支。
-            <CodeService
-              artifactId={artifact.id}
-              body={artifact.body}
-              service={artifact.codeService}
-            />
-          ) : artifact.body.length > 0 ? (
-            <>
-              <div className="ss-section" style={{ fontSize: 12 }}>
-                正文
-              </div>
-              <pre
-                style={{
-                  whiteSpace: "pre-wrap",
-                  wordBreak: "break-word",
-                  fontSize: 12,
-                  lineHeight: 1.7,
-                  margin: 0,
-                  padding: "6px 8px",
-                  background: "var(--ink-1)",
-                  border: "1px solid var(--ink-3)",
-                  borderRadius: 6,
-                  color: "var(--bone-dim)",
-                  maxHeight: 420,
-                  overflow: "auto",
-                }}
-              >
-                {artifact.body}
-              </pre>
-            </>
+            // 坐标(主体)与 markdown 说明都由 CodeService 渲染 —— 它要把坐标
+            // 摆在正文之前,所以不能复用下面那个只印 `<pre>` 的分支。
+            <CodeService artifactId={artifact.id} service={artifact.codeService} />
           ) : (
-            <div className="ss-note">这条工件没有正文(body 为空)。</div>
+            <TextArtifactBody artifactId={artifact.id} />
           )}
 
           <div>
@@ -2012,6 +1978,10 @@ function ArtifactDetail({ id, known }: { id: string; known: readonly ArtifactVie
               <span>作者 id:{artifact.authorAgentId}</span>
               <span>作者名(authorName):{artifact.authorName}</span>
               <span>产出它的环节(workId):{artifact.workId ?? "null(不由工作项产出)"}</span>
+              {/* 正文的**落点**,不是内容(2026-10-08):内容由上面的正文区现读。 */}
+              <span>正文落点(bodyPath):{artifact.bodyPath}</span>
+              <span>正文字节数(bodyBytes,写入时的快照):{artifact.bodyBytes}</span>
+              <span>引入正文的提交(commitSha):{artifact.commitSha ?? "null(还没提交)"}</span>
               <span>
                 交付物类型(deliverableType):
                 {artifact.deliverableType ?? "null(非交付物,或存量未声明类型的交付物)"}
@@ -2023,5 +1993,75 @@ function ArtifactDetail({ id, known }: { id: string; known: readonly ArtifactVie
         </div>
       )}
     </div>
+  );
+}
+
+// ── 普通工件的正文(现读)────────────────────────────────────────
+
+/**
+ * 普通工件的正文(`<pre>`)—— **现读** `GET /api/artifacts/:id/content`。
+ *
+ * ── 为什么不再从 `artifact.body` 读 ─────────────────────────────
+ *
+ * 2026-10-08 起正文住**项目仓里的一份文件**(设计 §4.2):工件视图只给落点
+ * (`bodyPath` / `bodyBytes` / `commitSha`),正文要现读。所以 `body` 这个字段
+ * 已经从 `ArtifactView` 上消失 —— 不是「改了个名字」。
+ *
+ * ── 三态必须分开 ────────────────────────────────────────────────
+ *
+ * `runtime: "unavailable"` 是**读不到**(文件被删 / 被回滚 / `at` 不可达),
+ * 把它显示成「这条工件没有正文」就是把一次读失败说成「本来就没有」。
+ * 读不到时印 `problem` 那一行,**不许**留空。
+ */
+function TextArtifactBody({ artifactId }: { artifactId: string }) {
+  const { data, loading, error } = useArtifactContent(artifactId);
+
+  if (error !== null) {
+    return (
+      <div className="ss-note" style={{ color: "var(--cinnabar)" }}>
+        读不到正文:{error}
+      </div>
+    );
+  }
+  if (loading || data === null) return <div className="ss-meta">读取正文…</div>;
+  if (data.runtime !== "ok") {
+    return (
+      <div
+        className="ss-note"
+        style={{ color: "var(--cinnabar)" }}
+        data-content-runtime="unavailable"
+      >
+        **读不到**这份正文 —— {data.problem ?? "原因未说明"}。
+        (这不是「这条工件没有正文」,是这一次读不到。落点:{data.path})
+      </div>
+    );
+  }
+  if (data.content.length === 0) {
+    return <div className="ss-note">这条工件的正文是空的。</div>;
+  }
+  return (
+    <>
+      <div className="ss-section" style={{ fontSize: 12 }}>
+        正文
+      </div>
+      <pre
+        style={{
+          whiteSpace: "pre-wrap",
+          wordBreak: "break-word",
+          fontSize: 12,
+          lineHeight: 1.7,
+          margin: 0,
+          padding: "6px 8px",
+          background: "var(--ink-1)",
+          border: "1px solid var(--ink-3)",
+          borderRadius: 6,
+          color: "var(--bone-dim)",
+          maxHeight: 420,
+          overflow: "auto",
+        }}
+      >
+        {data.content}
+      </pre>
+    </>
   );
 }
