@@ -24,7 +24,7 @@
 import { Hono } from "hono";
 import type Database from "better-sqlite3";
 import { join } from "node:path";
-import { readFileSync } from "node:fs";
+import { readFileSync, existsSync } from "node:fs";
 import {
   listProjects, getProjectRow, insertProject,
 } from "../storage/repo/projects.js";
@@ -135,6 +135,23 @@ export interface HttpDeps {
    * 「读不到盘」与「这份工件本来就没有正文」在屏幕上长得一样,而处置相反。
    */
   readonly workspace?: WorkspacePort;
+  /**
+   * **立项之后把工作区(目录 + 仓库)建起来**(设计 §2 / §6 第 3 步)。
+   *
+   * ⚠️ **为什么这条依赖存在**:建仓此前只挂在 `project_open` **工具**那条路上,
+   * 于是经 `POST /api/projects` 建出来的项目**没有目录、没有仓** ⇒ 它的
+   * `sessionCwd` 指向一个不存在的目录 ⇒ 会话建不出来 ⇒ **它永远跑不起来**,
+   * 而唯一的迹象是一条 `session_failed`(T7 真机冒烟现场)。
+   * **两个入口造出两种项目**,正是本项目要消灭的分叉。
+   *
+   * ⚠️ **可选,但缺了不许静默**:`undefined` 时 `POST /api/projects` 的响应里会带
+   * `workspaceBootstrapped: false` + `workspaceProblem`(说明了哪个目录没建出来、
+   * 后果是什么)—— 「没接上」与「建好了」在屏幕上不能长得一样。
+   *
+   * 实现那半在宿主(`host/serve.ts` 的 `ensureProjectWorkspace`),由它负责把
+   * 建立失败落成一条**可见**通知(`reportWorkspaceProblem`)。
+   */
+  readonly ensureWorkspace?: (projectId: string) => void;
   /** 设置读写(复用旧 store —— 它是基础设施,不是旧系统的领域逻辑) */
   readonly settings: {
     read: () => unknown;
@@ -298,9 +315,53 @@ export function createPlatformApp(deps: HttpDeps): Hono {
     // 整个组织一起进来 —— 单一落点,与 project_open 走同一个 helper
     ensureProjectOrg(db, id, at);
 
+    // ── 立项之后**立刻把工作区建起来**(目录 + git 仓,设计 §2 / §6 第 3 步)──
+    //
+    // ⚠️ 建仓此前只挂在 `project_open` **工具**那条路上,于是经这条 API 建出来的
+    // 项目没有目录、没有仓 ⇒ `sessionCwd` 指向不存在的目录 ⇒ 会话建不出来 ⇒
+    // **它永远跑不起来**,而唯一迹象是一条 `session_failed`(T7 真机冒烟现场)。
+    // 两个入口造出两种项目,正是本项目要消灭的分叉。
+    //
+    // ⚠️ **「没接上」不许静默**,也**不许把「调了个 void 函数」当成「建好了」**:
+    // 先调,再核对目录到底在不在,两个事实都进响应(见 `workspaceBootstrapped` /
+    // `workspaceProblem`)。宿主那半负责把建立失败落成可见通知。
+    const ensureWorkspace = deps.ensureWorkspace;
+    let bootstrapError: string | null = null;
+    if (ensureWorkspace !== undefined) {
+      try {
+        ensureWorkspace(id);
+      } catch (e) {
+        // 抛出来就当「建不起来」处理:项目行**已经进了库**,收不回来 ——
+        // 能做的只有把现场说出来;不让它变成一个没有上下文的 500。
+        bootstrapError = e instanceof Error ? e.message : String(e);
+      }
+    }
+    const workspaceRoot = projectWorkspaceRoot(deps.cwd, id);
+    const workspaceBootstrapped = existsSync(workspaceRoot);
+    const workspaceProblem = workspaceBootstrapped
+      ? null
+      : ensureWorkspace === undefined
+        ? `本次装配没有接上 ensureWorkspace,所以项目 ${id} 没有工作区(${workspaceRoot} 不存在)—— ` +
+          `它的会话 cwd 会指向一个不存在的目录,这个项目**永远跑不起来**。` +
+          `请走 project_open 立项(那条路会建仓),或把工作区接进 HTTP 装配。`
+        : bootstrapError !== null
+          ? `建工作区时抛出异常,工作区根目录 ${workspaceRoot} 仍不存在:${bootstrapError}`
+          : `ensureWorkspace 跑完了,但工作区根目录 ${workspaceRoot} 仍然不存在 —— 目录没建出来。`;
+
     const row = getProjectRow(db, id);
     if (row === null) return c.json(err("internal", "项目刚建好却读不到", 500).body, 500);
-    return c.json({ project: toProjectSummary(db, row), createdOrg }, 201);
+    return c.json(
+      {
+        project: toProjectSummary(db, row),
+        createdOrg,
+        // ⚠️ `true` = 工作区根目录**真的在盘上**(不是「调用过了」)。
+        // `false` 的项目**永远跑不起来**,所以它必须能从响应里看出来,而不是等到
+        // 某次 `session_failed` 才发现 —— 同时 `workspaceProblem` 说明为什么。
+        workspaceBootstrapped,
+        ...(workspaceProblem !== null ? { workspaceProblem } : {}),
+      },
+      201,
+    );
   });
 
   app.get("/api/projects/:id", (c) => {
@@ -326,10 +387,13 @@ export function createPlatformApp(deps: HttpDeps): Hono {
    * (`artifactBodyPaths` 直接查 `body_path` —— 027 起这一列一定在),以及
    * 两边的不一致(`missing` 逐条 stat 算出 / `orphanFile`)。
    *
-   * ⚠️ **`root` 与 `sessionCwd()` 无关。** `sessionCwd` 只在 `--isolate-project-cwd`
-   * 打开时才把会话放到项目目录里,而这条读面问的是「这个项目的目录里有什么」——
-   * 两件事今天可以指向同一个路径,但**判据不同**,所以这里走 `projectWorkspaceRoot`
-   * 而不是去复用会话那一个。
+   * ⚠️ **`root` 与 `sessionCwd()` 无关。** `sessionCwd` 现在**无条件**按项目
+   * (`<工作根>/projects/<projectId>`,`--isolate-project-cwd` 那个开关已整个删掉),
+   * 而这条读面问的是「这个项目的目录里有什么」—— 两者今天指向同一个路径,但
+   * **判据不同**(一个是「会话在哪建」、一个是「观测面看哪里」),所以这里走
+   * `projectWorkspaceRoot` 而不是去复用会话那一个。
+   * (目录该由**立项**建:`POST /api/projects` 与 `project_open` 都调
+   *  `deps.ensureWorkspace` —— 两个入口造出两种项目是要消灭的分叉。)
    *
    * ⚠️ **它不建目录**(`sessionCwd` 会 `mkdirSync`)。一个 GET 不该在盘上留东西
    * —— 目录不存在是**读不到**,由 `runtime: "unavailable"` 如实承载,而不是回一个
