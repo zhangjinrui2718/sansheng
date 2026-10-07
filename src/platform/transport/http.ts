@@ -44,6 +44,7 @@ import {
   listProjectArtifacts, listProjectAsks, listProjectBlockers,
   listProjectChanges, toProjectDetail, listProjectMembers,
   listProjectMessages, listProjectSummaries, toArtifactView, toProjectLiveView,
+  toIntakeLiveView,
   toProjectSummary,
   toMessageView, toProjectUsageView,
   toWorkView,
@@ -476,6 +477,28 @@ export function createPlatformApp(deps: HttpDeps): Hono {
           };
     const collect: LiveCollectOptions = deps.live?.collect ?? {};
     return c.json({ live: toProjectLiveView(db, row, deps.now(), runtime, collect) });
+  });
+
+  /**
+   * **接待会话**的运行态 —— 与上面那条同源、同一份内存快照,只是上下文是 `null`。
+   *
+   * ⚠️ **没有它是 404**(2026-10-07 真机):对话页顶部那盏灯只由 WS 实时事件推出来,
+   * 而 WS 没有回放 ⇒ 刷新或切走再切回来之后,一个**还在跑**的回合在接待里显示成
+   * 「就绪」。项目那条有 `/live` 可查,接待连端点都没有。
+   *
+   * 与 `/api/intake/messages` 同一条理由:**没有接待会话时返回「读得到但没人跑」,
+   * 不是 404** —— 404 会让前端把首屏显示成一次错误。
+   */
+  app.get("/api/intake/live", (c) => {
+    const runtime: LiveRuntimeSnapshot | null =
+      deps.live === undefined
+        ? null
+        : {
+            turns: deps.live.turns(),
+            dispatch: deps.live.dispatch(),
+            drainingProjects: deps.live.drainingProjects(),
+          };
+    return c.json({ live: toIntakeLiveView(deps.now(), runtime) });
   });
 
   // ── 工件 ──────────────────────────────────────────────────────

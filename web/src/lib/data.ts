@@ -886,10 +886,29 @@ export type SurfaceStatus = "idle" | "streaming" | "internal" | "error" | "conne
  * 真机上 worker 每跑一轮,顶部就显示「推演中」、输入框永久禁用,而用户看不见
  * 任何一条内部角色的发言(`partitionTurns` 把它们滤掉了)。
  */
-export function surfaceStatusOf(raw: ChatStatus, activity: ChannelActivity): SurfaceStatus {
+export function surfaceStatusOf(
+  raw: ChatStatus,
+  activity: ChannelActivity,
+  /**
+   * **服务端说这个上下文有回合在跑**(`GET /live` / `GET /api/intake/live`)。
+   *
+   * ── 为什么它是必需的(2026-10-07 真机)────────────────────────
+   *
+   * 上面那两行只看得见**本地在飞的轮**,而 WS **没有回放**、`selectProject` 又会清
+   * `inFlight` ⇒ **刷新页面**或**切走再切回来**时,一个还在跑的回合在屏幕上变成
+   * 「就绪」。甲方以为它没动,其实它正在动 —— 与 `liveForDisplay` 防的那个方向
+   * 相反,但同样是「界面说的不是此刻」。
+   *
+   * `null` = **读不到 / 还没查**,不是「没在跑」:这一位只在本地确实没有在飞的轮时
+   * 才被读到,所以它**永远不会盖过**本地证据。
+   */
+  remote: { readonly client: boolean; readonly internal: boolean } | null = null,
+): SurfaceStatus {
   if (raw === "error") return "error";
   if (raw === "connecting") return "connecting";
   if (activity.client.length > 0) return "streaming";
   if (activity.internal.length > 0) return "internal";
+  if (remote !== null && remote.client) return "streaming";
+  if (remote !== null && remote.internal) return "internal";
   return "idle";
 }

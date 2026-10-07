@@ -44,6 +44,7 @@ import {
 } from "../runtime/dispatcher.js";
 import type {
   AskView, ArtifactView, BlockerView, ChangeView, ClientQuestionView, CodeServiceView,
+  IntakeLiveView,
   MemberActivityView, MemberView, MessageOrigin, ProjectDetail, ProjectLiveView,
   ProjectSummary, ProjectUsageView,
   SessionMessageView, TurnTrigger, TurnUsageView,
@@ -717,8 +718,40 @@ export interface LiveCollectOptions {
   readonly reportMaxDelayMs?: number;
 }
 
-/** 一条待办在人读层面的最小形状 —— 字段与 `DriverTodo` 一一对应(**不重算**)。 */
-function todoView(t: DriverTodo, max: number): MemberActivityView["todos"][number] {
+/**
+ * 接待会话的运行态 —— 与 `toProjectLiveView` 读**同一份** `runtime` 快照,
+ * 只是按上下文过滤(`projectId === null`)。
+ *
+ * ── 为什么接待需要它(2026-10-07 真机)──────────────────────────
+ *
+ * 对话页顶部那盏灯此前**只**由 WS 实时事件推出来,而 WS **没有回放** ⇒
+ * 刷新、或切走再切回来(`selectProject` 清 `inFlight`)之后,一个**还在跑**的
+ * 回合在屏幕上变成「就绪」。项目那条有 `GET /live` 可查,接待此前连端点都没有
+ * (404)⇒ 这条洞在接待里没有任何补救机会。
+ *
+ * **这里不读库**:接待没有项目行,而这条要回答的只有「此刻有没有人在跑」。
+ * `runtime === null` ⇒ 如实报 `unavailable`,**不是** `runningTurns: 0` 而不加区分
+ * ——「读不到」与「没在跑」不许长得一样(与 `ProjectLiveView.runtime` 同源)。
+ */
+export function toIntakeLiveView(
+  now: number,
+  runtime: LiveRuntimeSnapshot | null,
+): IntakeLiveView {
+  if (runtime === null) {
+    return { at: now, runtime: "unavailable", runningTurns: 0, turns: [] };
+  }
+  const turns = runtime.turns
+    .filter((t) => t.projectId === null)
+    .map((t) => ({
+      agentId: t.agentId,
+      // 负数不该出现;真出现也只报 0,不把「时钟倒退」显示成「已经跑了负几秒」。
+      elapsedMs: Math.max(0, now - t.startedAt),
+      trigger: t.trigger,
+    }));
+  return { at: now, runtime: "host", runningTurns: turns.length, turns };
+}
+
+/** 一条待办在人读层面的最小形状 —— 字段与 `DriverTodo` 一一对应(**不重算**)。 */function todoView(t: DriverTodo, max: number): MemberActivityView["todos"][number] {
   return {
     kind: t.kind,
     label: t.label,

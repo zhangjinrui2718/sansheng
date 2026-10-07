@@ -49,6 +49,7 @@ import type {
   MessagesResponse,
   ProjectDetail,
   ProjectSessionsResponse,
+  IntakeLiveView,
   ProjectLiveView,
   ProjectStatus,
   ProjectSummary,
@@ -401,6 +402,17 @@ export function listMembers(projectId: string): Promise<{ members: MemberView[] 
  */
 export function getProjectLive(projectId: string): Promise<{ live: ProjectLiveView }> {
   return request<{ live: ProjectLiveView }>(`/projects/${encodeURIComponent(projectId)}/live`);
+}
+
+/**
+ * **接待会话**的运行态(与 `getProjectLive` 同源,只是上下文是 `null`)。
+ *
+ * ⚠️ 2026-10-07 之前**没有这个端点**(404):对话页那盏灯只由 WS 实时事件推出来,
+ * 而 WS 没有回放 ⇒ 刷新或切走再切回来之后,一个**还在跑**的回合在接待里显示成
+ * 「就绪」。项目那条一直可查,接待连补救入口都没有。
+ */
+export function getIntakeLive(): Promise<{ live: IntakeLiveView }> {
+  return request<{ live: IntakeLiveView }>("/intake/live");
 }
 
 // ── 待甲方答的问题 ──────────────────────────────────────────────

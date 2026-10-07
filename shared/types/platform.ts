@@ -553,6 +553,32 @@ export interface ProjectLiveView {
   agents: MemberActivityView[];
 }
 
+/**
+ * **接待会话**的运行态。
+ *
+ * ── 为什么它必须存在(2026-10-07 真机)────────────────────────────
+ *
+ * 对话页顶部那盏灯(`surfaceStatusOf`)此前**只**由 WS 实时事件推出来:
+ * `message_start` 建轮 ⇒ `delta` 追加 ⇒ `agent_end` 收口。而 WS 是**没有回放**的,
+ * 于是「刷新页面」或「切走再切回来」(`selectProject` 会清 `inFlight`)之后,
+ * 一个**还在跑**的回合在屏幕上变成「就绪」—— 甲方以为它没在动,其实它正在动。
+ *
+ * 「此刻」的唯一读面是 `GET /live`(项目那条)。接待会话此前**没有对应端点**
+ * (404)⇒ 这条洞在接待里连补的机会都没有。
+ *
+ * `runtime: "unavailable"` 照旧是**读不到**,不是「没在跑」—— 前端不许把它渲染成
+ * 「就绪」而不加区分(与 `ProjectLiveView.runtime` 同一条纪律)。
+ */
+export interface IntakeLiveView {
+  /** 这份快照算出来的时刻(服务端时钟)。`elapsedMs` 相对它算 */
+  at: number;
+  runtime: "host" | "unavailable";
+  /** 此刻在**接待会话**里跑着的回合数 */
+  runningTurns: number;
+  /** 逐条现场 —— `trigger` 决定该显示「推演中」还是「内部推进中」 */
+  turns: Array<{ agentId: string; elapsedMs: number; trigger: TurnTrigger }>;
+}
+
 /** 项目内的提问(角色之间,或对角色的)。**甲方看不到横向沟通**,只看发给自己那部分。 */
 export interface AskView {
   id: string;

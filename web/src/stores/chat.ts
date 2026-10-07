@@ -23,6 +23,7 @@
 import { create } from "zustand";
 import {
   eventProjectId,
+  todoKindReachesClient,
   type MessageOrigin,
   type ProjectSummary,
   type ServerEvent,
@@ -345,6 +346,29 @@ export interface ChatState {
    */
   lastUserSend: { readonly text: string; readonly optimistic: boolean } | null;
 
+  /**
+   * **服务端说「此刻这个上下文有回合在跑」** —— 刷新 / 切换之后补那盏灯。
+   *
+   * ── 为什么必须有它(2026-10-07 真机)────────────────────────────
+   *
+   * 顶部那盏灯(`surfaceStatusOf`)此前**只**由 WS 实时事件推出来
+   * (`message_start` 建轮 → `delta` 追加 → `agent_end` 收口),而 **WS 没有回放**;
+   * 加上 `selectProject` 会清 `inFlight` —— 于是「刷新页面」或「切走再切回来」时,
+   * 一个**还在跑**的回合在屏幕上变成「就绪」。甲方以为它没动,其实它正在动。
+   *
+   * 「此刻」的真相在 `GET /live`(项目)+ `GET /api/intake/live`(接待),
+   * 由 {@link ChatState.refreshRunning} 取回。
+   *
+   * ⚠️ **它是兜底,不是第二处真相**:本地一旦收到这个上下文的任何
+   * `message_start` / `agent_end`,就把它清成 `null` —— 那时 `inFlight` 已经是
+   * 更准的一份,继续留着它只会让一盏灯在回合结束后仍亮着(那正是「系统挂了而界面
+   * 还在显示正在跑」的镜像,`lib/data.ts` 的 `liveForDisplay` 记着这条纪律)。
+   *
+   * `null` = **没有服务端信息**(还没查 / 查失败 / 已被本地事件取代)——
+   * 它不代表「没在跑」,所以判据里必须与「查过了、没在跑」分开。
+   */
+  remoteRunning: { readonly client: boolean; readonly internal: boolean } | null;
+
   // ── 运行态 ──
   modelId: string | null;
   provider: string | null;
@@ -395,6 +419,14 @@ export interface ChatState {
   startIntake(): Promise<void>;
   /** 拉接待会话的历史(首屏没有项目时、以及刷新之后)。 */
   loadIntakeMessages(): Promise<void>;
+  /**
+   * 问一次服务端「**此刻**这个上下文有没有回合在跑」,写进 {@link remoteRunning}。
+   *
+   * 调用点都是**本地状态归零或可能过期**的时刻:进入上下文(`selectProject` /
+   * `selectSession` / `startIntake`)与 WS 重连(`ready`)。失败时清成 `null`
+   * (读不到 ≠ 没在跑),不抛。
+   */
+  refreshRunning(): Promise<void>;
   sendMessage(text: string): void;
   sendInterrupt(): void;
   /** 回答问题(HTTP POST;WS 也有等价命令,前端统一走 HTTP 有回执)。 */
@@ -643,6 +675,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   currentTurn: null,
   lastUserEchoId: null,
   lastUserSend: null,
+  remoteRunning: null,
 
   modelId: null,
   provider: null,
@@ -677,6 +710,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
       inFlight: {},
       inFlightOrder: [],
       currentTurn: null,
+      // 上一个上下文的运行态在这一刻作废 —— 留着它会让新项目的灯按旧项目亮。
+      remoteRunning: null,
       error: null,
       status: "idle",
     });
@@ -700,6 +735,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
         sessionId: null, turns: [], inFlight: {}, inFlightOrder: [],
         currentTurn: null, status: "idle",
       });
+      // 一条线都没有时也要问运行态:排空器可能正在这个项目里跑内部角色。
+      void get().refreshRunning();
       return;
     }
     await get().selectSession(main.id);
@@ -722,6 +759,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
         turns: (res.messages ?? []).map((m) => messageToTurn(m, id)),
         inFlight: {}, inFlightOrder: [], currentTurn: null, status: "idle",
       });
+      // 同上:`inFlight` 被清空了,而在飞的那一轮不在 REST 历史里 —— 补问运行态。
+      void get().refreshRunning();
     } catch (e) {
       if (get().sessionId !== sid) return;
       set({ error: { code: "messages_load_failed", message: errorMessage(e) }, status: "error" });
@@ -776,6 +815,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
       inFlight: {},
       inFlightOrder: [],
       currentTurn: null,
+      // 上一个上下文的运行态作废(同上);`loadIntakeMessages` 会补问新的那一份。
+      remoteRunning: null,
       error: null,
       status: "idle",
     });
@@ -800,9 +841,51 @@ export const useChatStore = create<ChatState>((set, get) => ({
         currentTurn: null,
         status: "idle",
       });
+      // 历史是 REST 拿回来的,而**在飞的那一轮不在里面** —— 补问一次运行态,
+      // 否则「刷新时正好有个回合在跑」会显示成「就绪」(见 `remoteRunning`)。
+      void get().refreshRunning();
     } catch (e) {
       if (!get().intakeActive) return;
       set({ error: { code: "messages_load_failed", message: errorMessage(e) }, status: "error" });
+    }
+  },
+
+  async refreshRunning() {
+    const { projectId, intakeActive } = get();
+    // 既不在项目、也不在接待 —— 没有「这个上下文」可言
+    if (!intakeActive && projectId === null) {
+      set({ remoteRunning: null });
+      return;
+    }
+    try {
+      const running = intakeActive
+        ? (await api.getIntakeLive()).live.turns
+        : (await api.getProjectLive(projectId as string)).live.agents.flatMap((a) =>
+            a.turn === null
+              ? []
+              : [{ agentId: a.agentId, trigger: a.turn.trigger }],
+          );
+      // 判据与 `channelOf` 的第 4 步同源(**不另立一份**):
+      //   甲方亲口发起 ⇒ 甲方通道;三类客户端待办 ⇒ 甲方通道;其余 ⇒ 内部。
+      // ⚠️ 这里**不做角色两跳** —— `live` 只给 `agentId`,而
+      // `handover` / `report_downstream` / `resume_client` 是**只有业务经理**
+      // 会持有的待办,所以「按待办类别判」在这一处已经等价。
+      let client = false;
+      let internal = false;
+      for (const t of running) {
+        const tr = t.trigger;
+        const reachesClient =
+          tr.kind === "user" || (tr.kind === "todo" && todoKindReachesClient(tr.todoKind));
+        if (reachesClient) client = true;
+        else internal = true;
+      }
+      // 迟到的响应不许覆盖已经换过的上下文(与 `loadIntakeMessages` 同一条纪律)
+      const now = get();
+      if (now.projectId !== projectId || now.intakeActive !== intakeActive) return;
+      set({ remoteRunning: { client, internal } });
+    } catch {
+      // 读不到 ≠ 没在跑 —— 如实清成「没有服务端信息」,让本地 `inFlight` 说话。
+      set({ remoteRunning: null });
     }
   },
 
@@ -890,6 +973,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
           status: "idle",
           error: null,
         });
+        // ⚠️ **`ready` 是「刚连上/刚重连上」那一刻** —— WS **没有回放**,所以
+        // 断线期间开始、到现在还在跑的那一轮,本地一条事件都没收到过。
+        // 不在这里补问一次,灯就会停在「就绪」而它其实在跑(真机:刷新 / 切页)。
+        void get().refreshRunning();
         return;
       }
       case "pong":
@@ -1104,6 +1191,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
               e.projectId === s.projectId ? s.activityRevision + 1 : s.activityRevision,
           };
         });
+        // ⚠️ **一轮收口之后补问一次运行态**(2026-10-07):`remoteRunning` 是
+        // 一份**快照**,而排空器可能立刻接上下一个角色 —— 只在上下文入口问一次,
+        // 会让「上一轮开始时问的那份」一直挂着:灯该灭的时候不灭(就是
+        // `liveForDisplay` 警告的那个方向的镜像)。
+        // **重问而不是清空**:同一上下文里可能还有**别的**回合在跑(它的
+        // `message_start` 发生在这次快照之前,本地根本没收到过)。
+        if (e.projectId === get().projectId) void get().refreshRunning();
         return;
       }
 

@@ -98,12 +98,15 @@ export function ChatSurface() {
   // `sessionId` 是「这个项目里的哪条线」。只给前一个 ⇒ 一个项目下面所有线的
   // 消息混进同一个面板。
   const sessionId = useChatStore((s) => s.sessionId);
+  // 服务端那份「此刻有回合在跑」—— 本地 WS 状态在刷新/切换之后会归零,
+  // 那一份是**唯一**还能说出「它还在跑」的东西(见 `surfaceStatusOf` 的第三个参数)。
+  const remoteRunning = useChatStore((s) => s.remoteRunning);
   const contextNotice = useChatStore((s) => s.contextNotice);
   const activity = useMemo(
     () => channelActivityOf(live, ctx, contextKey, sessionId),
     [live, ctx, contextKey, sessionId],
   );
-  const surface = surfaceStatusOf(status, activity);
+  const surface = surfaceStatusOf(status, activity, remoteRunning);
   /**
    * **输入框唯一由「有人在跑」推出的禁用理由**:甲方通道在跑 —— 甲方自己那句
    * (乐观上屏那条不在 `inFlight` 里)、`tell_client` 的播报、或**用户触发**的
