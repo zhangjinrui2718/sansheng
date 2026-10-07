@@ -78,6 +78,18 @@ export type ArtifactKind =
 
 export type ArtifactStatus = "open" | "accepted" | "rejected" | "superseded";
 
+/**
+ * 交付物类型(migration 025)。**只有真正有写入口的类型才在这里。**
+ *
+ * 与 `src/platform/storage/repo/artifacts.ts` 的 `DELIVERABLE_TYPES` 逐项相同 ——
+ * 由 `tests/platform/deliverable-types.test.ts` 的跨边界对照钉住。
+ *
+ * `git_repo` / 仓库上的提交**刻意不在这里**:预留靠的是
+ * `artifacts.deliverable_type` 这一列的结构(加一种类型 = 纯加法),
+ * 不是提前往闭集里塞一个平台造不出来的值(7-E:`enabledTools` 那四个名字)。
+ */
+export type DeliverableType = "html_report";
+
 export type AskStatus =
   | "open"
   | "answered"
@@ -180,6 +192,18 @@ export interface ArtifactView {
    * 判据与取舍见 `docs/DESIGN-PLATFORM.md` 与 `runtime/execution.ts`。
    */
   workId: string | null;
+  /**
+   * **这条交付物是哪种类型**(migration 025 的 `artifacts.deliverable_type`)。
+   *
+   * ⚠️ **`null` 覆盖两种不同的情形,读面必须分开处理**:
+   *   · `kind !== 'deliverable'` → 非交付物没有类型,这是**唯一合法取值**;
+   *   · `kind === 'deliverable'` 且为 `null` → **存量交付物**(真机 23 条,
+   *     全部是 016 之后写的 markdown 正文),正文按**普通正文**呈现。
+   *
+   * ⚠️ 把它当 `html_report` 渲染那 23 条会得到 23 片空白 —— 页面必须先看
+   * `kind` 再看类型,不能只按类型分支。
+   */
+  deliverableType: DeliverableType | null;
 }
 
 /**

@@ -2,7 +2,60 @@
 
 ---
 
-# ⚡ 最新一轮 · W14(2026-10-06 夜)· 失败的工作项不再让项目永久停住
+# ⚡ 最新一轮 · W15(2026-10-07)· 交付物**类型**:先落地 HTML 报告,给 git 仓库留好位
+
+> 用户原话:「定义一下交付物都有哪些类型,先实现一个最简单的,html 的报告(技术方案、
+> 架构图、汇报材料等等,但凡是只有信息交付的,都可以用 html 产出),同时预留其他类型的
+> 交付物,比如说 git 仓库以及 git 仓库上的一些提交」。
+
+```
+migration 025 · DeliverableType = ["html_report"]
+1579 passed / 77 files · 两条 typecheck 0 · npm run build 绿 · check:design E1–E14 绿
+真机库副本上跑过 025:156 条工件不变 / 23 条存量交付物保持 NULL / 7 条索引 / fk_check=0
+```
+
+## ① 预留靠的是**结构**,不是往闭集里塞名字
+
+`artifacts.deliverable_type` 是一列(`kind='deliverable'` 的 1:N 属性),所以加一种类型
+**不改表、不改迁移、不动 `integrate` / `handover` 两条规则**(它们按 `kind` 查)。
+届时要改的只有三处:闭集 / 025 那条 CHECK / `validateDeliverableBody` 加一条分支。
+
+⚠️ **`git_repo` 刻意不在 `DELIVERABLE_TYPES` 里。** 7-E 的病是「代码里声明了一个平台
+造不出来的东西」(`enabledTools` 那四个名字)—— 提前把 `git_repo` 写进闭集,模型就会照着
+这个声明去 `board_write(deliverableType="git_repo")`。**闭集里每个值都必须有真的写入口。**
+`tests/platform/deliverable-types.test.ts` 有一条**故意现在就该红**的负样本盯着这件事。
+
+## ② 存量 23 条交付物**不许回填**
+
+真机库 23 条 `deliverable` 全是 markdown(最大 3,282 字节)。回填 `html_report` = 把 23 条
+没有 HTML 的东西说成 HTML 报告,读面渲染出来就是 23 片空白。所以 `NULL` 是合法状态,
+读面**必须先看 `kind` 再看类型**(`web/src/lib/deliverable.ts` 的 `bodyMode`,有单测)。
+
+⇒ 顺带解释了为什么 schema **不**加「`kind='deliverable'` ⟺ 类型非 NULL」那条 CHECK:
+`ALTER TABLE … ADD COLUMN … CHECK` 只对新增行求值,加上它会让那 23 行变成**已经违反约束**
+的数据,之后任何 `UPDATE` 都会突然报 `CHECK constraint failed`,而迁移本身一声不响。
+那条等价式落在工具层(必填 + 不许多传,两个方向都拒)。
+
+## ③ 渲染面是 `<iframe sandbox="" srcDoc>`,不是 `dangerouslySetInnerHTML`
+
+内容是**模型写的 HTML**,而模型会照抄它读过的东西(worker 抓来的网页片段)——「自己人写的」
+不能当安全依据。空值 sandbox = 脚本/表单/`allow-same-origin` 全关 + 不透明来源 ⇒
+**结构性保证,不是过滤器**(与 `lib/markdown.ts` 选 micromark 而非 marked 同源)。
+
+⚠️ 「新窗口打开」是**下载 `.html`**,不是 `window.open` —— blob URL 继承本应用来源。
+写入层因此在 `validateHtmlReport` 里**拒绝** `<script>`/`<iframe>`/`<object>`/`<embed>`
+与 >512 KiB 的正文:好让模型当场拿到可执行的处置(「改用内联 SVG」),而不是甲方收到一页空白。
+
+## ④ 提示词两条通道都改了
+
+`harness/system_prompts/project_manager.core.md` 的「整合」那一节 + `runtime/dispatcher.ts`
+的 `integrate` 待办正文(§9.4:user message 那条通道 recency 比 system prompt 强)。
+⚠️ 改了仓库提示词**不等于**模型收到了 —— 已有数据目录要做一次
+`POST /api/harness/units/:unitId/reset` **并重启进程**。
+
+---
+
+# W14(2026-10-06 夜)· 失败的工作项不再让项目永久停住
 
 > 用户现场:「美股自动化交易平台方案设计·单报告合并版」**有工作项失败了,现在就停下来**。
 

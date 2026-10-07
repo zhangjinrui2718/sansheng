@@ -1510,7 +1510,84 @@ Meeting:   convened → in_progress → concluded
 Project:   draft → active → paused → done | abandoned
 ```
 
-### 6.4 与 7-D/7-M/7-N 的关系
+### 6.4 交付物类型(`deliverable_type`,migration 025)
+
+> 「交付物」有四个所指(§2.11.5):①worker 的产出工件 ②根工作项 ③`projects.status` 终态
+> ④一条 `deliverable` 工件。**本节只讲第 ④ 种。**
+
+016 之后 `deliverable` 只有两件事:**存在性**(`integrate` / `handover` 两条规则的终止判据)
+与 `body`(一段 markdown)。于是「交付」这件事在库里**没有类型**:甲方的技术方案与一份代码仓库
+在结构上完全一样,读面拿到 `body` 无从判断该渲染成网页还是该去克隆仓库 —— 而这不是读面能猜的。
+
+**用户的要求(2026-10-07)**:「定义一下交付物都有哪些类型,先实现一个最简单的,html 的报告
+(技术方案、架构图、汇报材料等等,但凡是只有信息交付的,都可以用 html 产出),同时预留其他类型的
+交付物,比如说 git 仓库以及 git 仓库上的一些提交」。
+
+```ts
+export type DeliverableType =
+  | "html_report"        // 只有信息交付:技术方案 / 架构图 / 汇报材料 / 评审结论 / 说明书
+```
+
+#### ① 为什么是**一列**,而不是给 kind 加取值
+
+| 方案 | 问题 |
+|---|---|
+| `kind` 加 `deliverable_html_report` | ① `kind` 的值是**角色写面白名单**的成员(E8/E9 逐条校验),而「类型」是交付物自己的属性;② `integrate` / `handover` / 版本链都按 `kind='deliverable'` 查,每加一种类型就改一处规则;③ 「交付」这一件事在 11 个 kind 里裂成 N 个 |
+| **`artifacts.deliverable_type` 一列** | `kind='deliverable'` 的 1:N 属性。加一种类型 = **纯加法**:不改表、不改迁移、不动那两条规则 |
+
+#### ② 预留:**结构**预留,不是**名字**预留
+
+`git_repo`(以及仓库上的提交)**刻意不在上面这个闭集里**。预留靠的是结构:
+
+| 预留的机制 | 位置 |
+|---|---|
+| 类型是一**列**,不是 kind 的取值 | `migrations/025` 的 `artifacts.deliverable_type` |
+| 类型专属坐标落 `metadata_json`,按类型分派读法 | 与 `kind` 无关的那部分保持不变 |
+| 读面按 `deliverable_type` 分支渲染 | `web/src/lib/deliverable.ts` 的 `bodyMode` |
+| 届时要改的只有三处 | 闭集 + 025 的 CHECK + `validateDeliverableBody` 加一条分支 |
+
+⚠️ **为什么不提前把 `git_repo` 写进闭集**:7-E 的病是「代码里声明了一个平台造不出来的东西」
+(`enabledTools: ["fs_read","fs_write","shell","http"]` —— 四个名字在 SDK 闭集里根本不存在,
+却摆在 `/api/harness` 里像个配置项)。一个**没有写入口**的类型值进闭集,就是对外声明平台
+造得出这个东西 —— 而模型会照着声明去 `board_write(deliverableType="git_repo")`。
+⇒ **闭集里每一个值都必须有一条真的写入口。**
+(`tests/platform/deliverable-types.test.ts` 里有一条**故意现在就该红**的负样本断言盯着这件事。)
+
+#### ③ 存量 `NULL` 是**有意义的取值**
+
+真机库 2026-10-07:`deliverable` 23 条,最大正文 3,282 字节 —— **全是 markdown**。
+回填 `html_report` 会把 23 条没有 HTML 的东西说成 HTML 报告。
+
+⇒ `kind='deliverable'` + `deliverable_type IS NULL` = **存量 / 未声明类型的交付物**,
+读面按普通正文呈现。新写入的交付物**必须**给类型(工具层强制)—— 所以 NULL 只会减少不会增加,
+但**不许为了「整齐」去改写历史行**(改了就是把事实改成好看的样子)。
+
+⚠️ 因此 schema **只**约束取值域,**不**约束「`kind='deliverable'` ⟺ 类型非 NULL」:
+`ALTER TABLE … ADD COLUMN … CHECK` **只对新增/更新的行求值**,加上那条等价式会让现存 23 行
+变成**已经违反约束**的数据,之后任何 `UPDATE` 都会突然报 `CHECK constraint failed`,而迁移本身
+一声不响。那条等价式落在工具层。
+
+#### ④ `html_report` 的正文 = 一份 **HTML 文档**
+
+| | |
+|---|---|
+| 写入 | `board_write({ kind:"deliverable", deliverableType:"html_report", body: "<!doctype html>…" })` |
+| 校验 | `validateHtmlReport`:至少一个标签 / **禁 `<script>` `<iframe>` `<object>` `<embed>`** / ≤ 512 KiB |
+| 渲染 | `<iframe sandbox="" srcDoc>`(`web/src/components/deliverable/HtmlReport.tsx`) |
+| 下载 | `.html` 文件(`<a download>` + blob URL)。**不做** `window.open` —— blob URL 继承本应用来源 |
+
+**为什么是空值 `sandbox` 而不是 `dangerouslySetInnerHTML`**:这一页的内容是模型写的 HTML,
+而模型会照抄它读过的东西(worker 抓来的网页片段)。「这是自己人写的」不能当安全依据。
+空值 sandbox 的语义是:脚本 / 表单 / 弹窗 / `allow-same-origin` 全部关闭,且 frame 拿到
+**不透明来源** —— 它碰到的只有一个空文档。**这是结构性保证,不是过滤器**(与 `lib/markdown.ts`
+选 micromark 而不是 marked 是同一条纪律:安全性来自结构,不是事后过滤)。
+
+⚠️ **脚本不执行是设计的一部分**,所以校验层在**写入时**就拒绝带 `<script>` 的正文 ——
+让模型当场拿到一条可执行的处置,而不是甲方收到一页空白(7-N:见不到现场等于没有现场)。
+
+---
+
+### 6.5 与 7-D/7-M/7-N 的关系
 
 「信封偏差」三次事故的根因是:模型的输出被**一个硬编码的解析点**消费,包装错了就被当失败丢掉。
 

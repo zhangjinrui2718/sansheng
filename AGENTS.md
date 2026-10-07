@@ -40,7 +40,7 @@
   判据的一部分:同一对节点上两类边**方向一致**时不是环(真机那份数据就是这样),方向相反
   才是环(`mutualPairs` 会点名是哪两条边)。写反会让「交付」跑到最左、并且把一个不存在的
   环报出来(`web/src/lib/workGraph.ts` 的 `collectEdges`)。
-- 基线:**1547 passed / 75 test files** · 两条 typecheck 0 error · `check:design` E1–E14 全绿。
+- 基线:**1579 passed / 77 test files** · 两条 typecheck 0 error · `check:design` E1–E14 全绿。
 - **角色中文名只有一处**:`src/platform/runtime/org.ts` 的 `ORG`(播种 + `RoleHarnessView.displayName`
   共用);前端兜底表 `web/src/lib/vocab.ts` 的 `ROLE_LABEL` 必须逐项相同,由
   `tests/web/role-names.test.ts` 跨边界对照。**不许在某个页面里再写一张名字表**
@@ -247,12 +247,46 @@ shared/types/            跨端协议类型(platform.ts / settings.ts)
 
 ## 数据与存储
 
-- 迁移在 `migrations/`:**007–010 建平台表**,**011 把旧系统的 7 张表 DROP**(`blackboards` / `conversations` / `messages` / `fragments` / `user_profile` / `agent_states` / `fragments_vec`),**012 接待会话**(重建 `project_sessions` 放宽 `project_id` 可空,已登记进 `INTENTIONAL_REBUILDS`),**013 排空器状态**(`works.review_state` + `dispatch_events` + `dispatch_attempts`,纯加法),**014 产出边**(`artifacts.work_id` + 一条部分索引,纯加法),**015 放宽 `dispatch_events.kind`**(加 `work_cancelled`;闭集**只能靠重建表**放宽,已登记进 `INTENTIONAL_REBUILDS`),**016 交付物 kind**(重建 `artifacts`),**017 交付会话**(`project_sessions.deliverable_artifact_id` + `channel`,纯加法),**018 `turn_usage` 表**(纯加法),**019 会话消息的封套**(`session_messages.origin_source` + `trigger_kind`,纯加法;两列各有自己的 CHECK),**020 `client_questions` 台账**,**021 `review_verdicts`**,**022 `session_messages.todo_kind`**(纯加法、**不建 CHECK** —— 取值域随 `TODO_KINDS` 变,闭集在读写两侧的 TS 里),**023 项目版本链**(`projects.version` + `parent_project_id`,`ON DELETE SET NULL`),**024 对话一等实体**(`project_sessions.kind` + `title`;`kind` **有** CHECK —— 两值闭集,与 022 相反)。
+- 迁移在 `migrations/`:**007–010 建平台表**,**011 把旧系统的 7 张表 DROP**(`blackboards` / `conversations` / `messages` / `fragments` / `user_profile` / `agent_states` / `fragments_vec`),**012 接待会话**(重建 `project_sessions` 放宽 `project_id` 可空,已登记进 `INTENTIONAL_REBUILDS`),**013 排空器状态**(`works.review_state` + `dispatch_events` + `dispatch_attempts`,纯加法),**014 产出边**(`artifacts.work_id` + 一条部分索引,纯加法),**015 放宽 `dispatch_events.kind`**(加 `work_cancelled`;闭集**只能靠重建表**放宽,已登记进 `INTENTIONAL_REBUILDS`),**016 交付物 kind**(重建 `artifacts`),**017 交付会话**(`project_sessions.deliverable_artifact_id` + `channel`,纯加法),**018 `turn_usage` 表**(纯加法),**019 会话消息的封套**(`session_messages.origin_source` + `trigger_kind`,纯加法;两列各有自己的 CHECK),**020 `client_questions` 台账**,**021 `review_verdicts`**,**022 `session_messages.todo_kind`**(纯加法、**不建 CHECK** —— 取值域随 `TODO_KINDS` 变,闭集在读写两侧的 TS 里),**023 项目版本链**(`projects.version` + `parent_project_id`,`ON DELETE SET NULL`),**024 对话一等实体**(`project_sessions.kind` + `title`;`kind` **有** CHECK —— 两值闭集,与 022 相反),**025 交付物类型**(`artifacts.deliverable_type` + 一条部分索引,纯加法)。
 - ⚠️ **`artifacts.work_id` 一条边承载两个语义**(「产出」∪「关于」,migration 014):worker 写 `evidence` 是产出,质检把 `review_finding` 挂到**被审的那条**上是「关于」。取「这条工作项交付了什么」必须自己区分(`runtime/execution.ts` 用 `work_id` + 作者 + `kind ∉ ABOUT_ONLY_ARTIFACT_KINDS` 三条判据);**不要删那些边** —— 它是 `review_finding` 唯一能表达「审的是哪一条」的地方。
 - `artifacts` 直接挂项目 —— **没有 blackboard 容器层**。记忆在 `memory_fragments` / `memory_profile`,不是 `fragments`:`fragments` 是旧名字,001 已占用。
 - 平台表**不得复用旧表名**:`CREATE TABLE IF NOT EXISTS` 撞名时静默无操作,新表根本建不出来(见下 §三类静默失败)。加表前先 `ls migrations/` 查名。
 - 外键一律指向 `agent_id`,不存 `role` 字符串 —— 角色属性只有一处真相。
 - 存储形态可替换:上层只依赖 `src/platform/memory/port.ts` 的 `MemoryPort`;甲方通道同理走 `src/platform/client/port.ts` 的 `ClientChannel`。
+
+### 交付物**类型**(2026-10-07,migration 025)
+
+用户原话:「定义一下交付物都有哪些类型,先实现一个最简单的,html 的报告(技术方案、架构图、
+汇报材料等等,但凡是只有信息交付的,都可以用 html 产出),同时预留其他类型的交付物,比如说
+git 仓库以及 git 仓库上的一些提交」。
+
+**闭集 `DeliverableType` = `["html_report"]`**,在 `src/platform/storage/repo/artifacts.ts`
+(与 `ARTIFACT_STATUSES` / `ARTIFACT_LINK_RELS` 同一个位置);契约侧同名联合在
+`shared/types/platform.ts`。`board_write` 加了 `deliverableType` 参数。
+
+⚠️ **三条纪律,三个不同的方向**:
+
+- **`git_repo` 与仓库上的提交刻意不在闭集里。** 预留靠的是**结构**:`artifacts.deliverable_type`
+  是一列(`kind='deliverable'` 的 1:N 属性),类型专属坐标落 `metadata_json`,按类型分派读法。
+  加一种类型是**纯加法**:闭集 + 025 的 CHECK + `validateDeliverableBody` 加一条分支,
+  **不改表、不改迁移、不动 `integrate` / `handover` 两条规则**(它们按 `kind` 查)。
+  7-E 的病是「代码里声明了一个平台造不出来的东西」—— 提前把 `git_repo` 写进闭集,模型就会
+  照着这个声明去 `board_write(deliverableType="git_repo")`。**闭集里每个值都必须有真的写入口。**
+  `tests/platform/deliverable-types.test.ts` 有一条**故意现在就该红**的负样本盯着这件事。
+- **`kind='deliverable'` 必须给类型,非交付物不许给类型。** 缺了就拒收并回灌闭集;
+  多给了也拒收 —— 静默丢掉参数 = 替模型把它没做的事抹平了(7-D)。
+- **交付物上的 `deliverable_type IS NULL` 是合法状态**(真机 23 条,全是 016 之后的 markdown)。
+  读面**必须先看 `kind` 再看类型**(`web/src/lib/deliverable.ts` 的 `bodyMode`,有单测):
+  把那 23 条当 `html_report` 渲染 = 23 片空白,而空白看起来像「平台坏了」。
+  新写入被强制带类型,所以 NULL 只会减少;**不许为了「整齐」去改写历史行**。
+
+**渲染面 = `<iframe sandbox="" srcDoc>`**(`web/src/components/deliverable/HtmlReport.tsx`),
+不是 `dangerouslySetInnerHTML`:内容是模型写的 HTML,而模型会照抄它读过的东西(worker 抓来的
+网页片段),「自己人写的」不能当安全依据。空值 sandbox = 脚本/表单/`allow-same-origin` 全关 +
+不透明来源 ⇒ **结构性保证,不是过滤器**(与 `lib/markdown.ts` 选 micromark 而非 marked 同源)。
+**「新窗口打开」是下载 `.html`,不是 `window.open`** —— blob URL 继承本应用来源。
+写入层因此**拒绝**带 `<script>`/`<iframe>`/`<object>`/`<embed>` 的正文(≤512 KiB),
+好让模型当场拿到可执行的处置,而不是甲方收到一页空白。
 
 ## 提示词(harness)
 
@@ -293,7 +327,7 @@ help
 ```
 npx tsc -p tsconfig.server.json --noEmit
 npx tsc -p tsconfig.web.json --noEmit
-npm test                  # 1547 passed / 75 files
+npm test                  # 1579 passed / 77 files
 npm run build
 npm run check:design      # 设计一致性 E1–E14
 ```

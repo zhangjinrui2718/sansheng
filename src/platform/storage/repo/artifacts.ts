@@ -18,6 +18,109 @@ import {
   type ArtifactKind,
 } from "../../identity/role.js";
 
+// ── 交付物类型(migration 025)────────────────────────────────────
+
+/**
+ * 交付物类型闭合联合。**只有真正有写入口的类型才在这里**(设计 1 §6.4)。
+ *
+ * `html_report` = 「凡是只有信息交付的」:技术方案、架构图、汇报材料、
+ * 评审结论、说明书。正文是一份**自包含的 HTML 文档**,读面在**禁用脚本的
+ * 沙箱 iframe** 里渲染它(`web/src/components/deliverable/HtmlReport.tsx`)。
+ *
+ * ⚠️ **本闭集必须与 `migrations/025` 的 `deliverable_type` CHECK 恰好相等**,
+ * 理由与上面 `ArtifactKind` 那段完全相同:schema 先开、代码后跟的那段窗口里,
+ * 读面是**关**的 —— `rowToArtifact` 对未定义类型**硬抛**。
+ *
+ * ── 预留类型(刻意**不在**这个闭集里)─────────────────────────────
+ *
+ * 用户原话(2026-10-07):「同时预留其他类型的交付物,比如说 **git 仓库**以及
+ * **git 仓库上的一些提交**」。预留的方式是**结构**而不是**名字**:
+ *
+ *   ① `artifacts.deliverable_type` 是一列(`kind='deliverable'` 的 1:N 属性),
+ *      所以加一种类型**不需要改表**、不需要迁移、不需要动 integrate /
+ *      handover 两条规则(它们按 `kind` 查,不按类型查);
+ *   ② 类型专属的坐标(仓库地址、分支、提交区间)落 `metadata_json`,
+ *      按 `deliverable_type` 分派读法 —— 与 `kind` 无关的那部分保持不变;
+ *   ③ 届时只需:往本闭集加一个值 → 往 025 那条 CHECK 里同步 → 在
+ *      `board_write` 加一条类型专属校验 + 在读面加一个渲染分支。
+ *
+ * ⚠️ **为什么不把 `git_repo` 现在就写进闭集**:7-E 的教训是「代码里写了逻辑
+ * ≠ 它有读者」。一个**没有写入口**的类型值进闭集,就是对外声明平台造得出
+ * 这个东西 —— 而模型会照着这个声明去 `board_write(kind='deliverable',
+ * deliverableType='git_repo')`,然后拿到一条「这个类型还没实现」的错误,
+ * 或者更糟:进闭集后被静默接受、写出一条没有坐标的假仓库交付。
+ * **闭集里每一个值都必须有一条真的写入口。**
+ */
+export type DeliverableType = "html_report";
+
+export const DELIVERABLE_TYPES = [
+  "html_report",
+] as const satisfies readonly DeliverableType[];
+
+export function isDeliverableType(v: unknown): v is DeliverableType {
+  return typeof v === "string" && (DELIVERABLE_TYPES as readonly string[]).includes(v);
+}
+
+/**
+ * `html_report` 正文的**最小验收判据**。
+ *
+ * 为什么要有:「一份 HTML 报告」这个概念对模型来说太宽 —— 它会把 markdown
+ * 塞进来、把裸文本塞进来、或者写一篇依赖 CDN 脚本库的可视化。读面拿到之后
+ * 在沙箱 iframe 里渲染,后两种的表现是**一片空白**,而空白页看起来像「平台坏了」。
+ *
+ * ⇒ 判据定在**能渲染出东西**这一条线上,且每条拒绝都**带可执行的处置**:
+ *   · 不是 HTML  → 告诉它要写标签(它多半是写了 markdown)
+ *   · 带 `<script>` / `<iframe>` → 告诉它沙箱里脚本不执行,改用 CSS + 内联 SVG
+ *   · 超过上限   → 告诉它拆成几份,或把长附录放进子工作项的产出
+ *
+ * **不校验的东西**:标签闭合、CSS 语法、是否 `<!doctype>`。沙箱 iframe 对残缺
+ * 标签是宽容的,而一个「HTML 校验器」只会逼模型去修它看不见的东西。
+ */
+const HTML_TAG = /<[a-z][\s\S]*>/i;
+const HTML_SCRIPT = /<\s*(script|iframe|object|embed)\b/i;
+const MAX_HTML_REPORT_BYTES = 512 * 1024;
+
+/** 一条 `html_report` 的正文能不能当报告渲染。`null` = 通过。 */
+export function validateHtmlReport(body: string): string | null {
+  if (!HTML_TAG.test(body)) {
+    return (
+      "`html_report` 的正文必须是一份 **HTML 文档**,而不是 markdown 或纯文本。" +
+      "至少要有一个 HTML 标签(例如 `<!doctype html><html><body>…`)。" +
+      "现在这份正文里一个标签都没有 —— 若你手上有的是一份 markdown 正文," +
+      "请改写成一个自包含的 HTML 页面(结构用标签、样式用内联 `<style>`)。"
+    );
+  }
+  const bad = body.match(HTML_SCRIPT);
+  if (bad !== null) {
+    return (
+      `本平台的 HTML 交付报告渲染在**禁用脚本的沙箱 iframe** 里(sandbox 空值、` +
+      `srcDoc),所以 \`<${bad[1]}>\` 不会执行 —— 写了它这一页在甲方那里是**空白**。` +
+      "请改成纯 HTML + CSS + **内联 SVG**(架构图用 SVG 画,不要用脚本绘图库)," +
+      "并且不要外链样式表或字体。"
+    );
+  }
+  if (Buffer.byteLength(body, "utf8") > MAX_HTML_REPORT_BYTES) {
+    return (
+      `这份 HTML 报告有 ${Math.round(Buffer.byteLength(body, "utf8") / 1024)} KiB,` +
+      `超过上限 ${MAX_HTML_REPORT_BYTES / 1024} KiB。` +
+      "请拆成主报告 + 若干子工作项产出(正文写进那些产出,用 links 指回来)," +
+      "或者把长表格/长代码压缩成摘要 + 要点。"
+    );
+  }
+  return null;
+}
+
+/**
+ * 类型专属的正文校验。新增一种类型就在这里加一条分支 ——
+ * **闭集里每个值都必须在这里有分支**,否则 `null` 意味着「不校验」而不是「合法」。
+ */
+export function validateDeliverableBody(type: DeliverableType, body: string): string | null {
+  switch (type) {
+    case "html_report":
+      return validateHtmlReport(body);
+  }
+}
+
 /** 工件状态机(设计 1 §6.3)。 */
 export type ArtifactStatus = "open" | "accepted" | "rejected" | "superseded";
 
@@ -67,15 +170,29 @@ export interface ArtifactRow {
    * 而 `ToolRunContext` 是建会话时构造一次的 —— 放在那里会过期。
    */
   workId: string | null;
+  /**
+   * **这条交付物是哪种类型**(migration 025)。
+   *
+   * ⚠️ `null` 对非交付物工件是**唯一合法取值**,对 `kind='deliverable'` 是
+   * **存量状态**(真机 23 条,全是 016 之后写的 markdown 正文,见 025 的注释)。
+   * 它**不是缺参数**:新写入的交付物必须带类型(工具层强制),
+   * 而读面**必须**把 NULL 交付物按普通正文呈现 —— 按「html_report」渲染
+   * 那 23 条会得到 23 片空白。
+   */
+  deliverableType: DeliverableType | null;
 }
 
 /**
- * 插入用的一行。`workId` 可省:多数工件的产出者不是「某条工作项」。
+ * 插入用的一行。`workId` / `deliverableType` 可省:
+ * 多数工件不是「某条工作项的产出」,而**所有非交付物工件都没有类型**。
  *
  * 与 `repo/works.ts` 的 `NewWorkRow` 同一个形状理由 —— 读出来的一行必须
- * 答得出「谁产出了它」,写入方却不必知道这条边。
+ * 答得出「谁产出了它」「它是哪种交付物」,写入方却不必知道这两条边。
  */
-export type NewArtifactRow = Omit<ArtifactRow, "workId"> & { readonly workId?: string | null };
+export type NewArtifactRow = Omit<ArtifactRow, "workId" | "deliverableType"> & {
+  readonly workId?: string | null;
+  readonly deliverableType?: DeliverableType | null;
+};
 
 interface RawArtifact {
   id: string;
@@ -90,15 +207,24 @@ interface RawArtifact {
   created_at: number;
   updated_at: number;
   work_id: string | null;
+  deliverable_type: string | null;
 }
 
-/** 行 → 领域对象。边界处校验闭合集,不让未定义的 kind/status 冒充类型。 */
+/** 行 → 领域对象。边界处校验闭合集,不让未定义的 kind/status/类型冒充类型。 */
 function rowToArtifact(raw: RawArtifact): ArtifactRow {
   if (!isArtifactKind(raw.kind)) {
     throw new Error(`artifacts 表里出现未定义 kind「${raw.kind}」(id=${raw.id})`);
   }
   if (!isArtifactStatus(raw.status)) {
     throw new Error(`artifacts 表里出现未定义 status「${raw.status}」(id=${raw.id})`);
+  }
+  // 025 之前建的库(还没跑迁移)读出来是 undefined —— 如实当成「未声明类型」,
+  // 不让字段名缺失变成类型层的一句谎话(与下面 `work_id ?? null` 同理)。
+  const deliverableType = raw.deliverable_type ?? null;
+  if (deliverableType !== null && !isDeliverableType(deliverableType)) {
+    throw new Error(
+      `artifacts 表里出现未定义 deliverable_type「${deliverableType}」(id=${raw.id})`,
+    );
   }
   return {
     id: raw.id,
@@ -115,6 +241,7 @@ function rowToArtifact(raw: RawArtifact): ArtifactRow {
     // `?? null`:014 之前建的库(还没跑迁移)读出来是 undefined —— 如实当成
     // 「没有产出工作项」,不让字段名缺失变成类型层的一句谎话。
     workId: raw.work_id ?? null,
+    deliverableType,
   };
 }
 
@@ -123,12 +250,14 @@ function rowToArtifact(raw: RawArtifact): ArtifactRow {
 export function insertArtifact(db: Database.Database, row: NewArtifactRow): void {
   db.prepare(
     `INSERT INTO artifacts (id, project_id, conversation_id, kind, status, author_agent_id,
-                            title, body, metadata_json, created_at, updated_at, work_id)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                            title, body, metadata_json, created_at, updated_at, work_id,
+                            deliverable_type)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     row.id, row.projectId, row.conversationId, row.kind, row.status, row.authorAgentId,
     row.title, row.body, row.metadataJson, row.createdAt, row.updatedAt,
     row.workId ?? null,
+    row.deliverableType ?? null,
   );
 }
 
@@ -153,6 +282,8 @@ export interface ListArtifactsFilter {
    * 那个判据连 `author_agent_id` 都不读,同项目两回合交叠时会互相认领。
    */
   workId?: string;
+  /** 只要某种**交付物类型**(migration 025 的部分索引 idx_artifacts_deliverable)。 */
+  deliverableType?: DeliverableType;
   limit?: number;
 }
 
@@ -177,6 +308,11 @@ export function listArtifacts(
     // 走 014 的部分索引 idx_artifacts_work(WHERE work_id IS NOT NULL)
     where.push("a.work_id = ?");
     vals.push(filter.workId);
+  }
+  if (filter.deliverableType !== undefined) {
+    // 走 025 的部分索引(WHERE deliverable_type IS NOT NULL)
+    where.push("a.deliverable_type = ?");
+    vals.push(filter.deliverableType);
   }
   if (filter.parentOf !== undefined) {
     where.push(

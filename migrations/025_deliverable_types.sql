@@ -1,0 +1,88 @@
+-- 025 · 交付物**类型**:一条 `deliverable` 工件不再只是「一个标记」
+--
+-- ── 它补的是什么 ────────────────────────────────────────────────
+--
+-- 用户原话(2026-10-07):
+--
+--   「定义一下交付物都有哪些类型,先实现一个最简单的,html 的报告
+--     (技术方案、架构图、汇报材料等等,但凡是只有信息交付的,都可以用 html 产出),
+--     同时预留其他类型的交付物,比如说 git 仓库以及 git 仓库上的一些提交」
+--
+-- 而 016 之后 `deliverable` 这个 kind 只有两件事:**存在性**(integrate 规则的
+-- 终止判据)与 `body`(一段 markdown)。于是「交付」这件事在库里**没有类型**:
+-- 甲方的技术方案与一份代码仓库在结构上**完全一样**,读面拿到 `body` 无从判断
+-- 该渲染成网页还是该去克隆仓库 —— 而这不是读面能猜的事。
+--
+-- ⇒ 本迁移给 `artifacts` 加一列 `deliverable_type`,把「交付物有哪些类型」
+--   变成**结构化的事实**,而不是从 `kind` / `body` / `title` 里猜。
+--
+-- ── 为什么是**一列**,而不是给 kind 加取值 ────────────────────────
+--
+-- ① `kind` 的值是**角色写面白名单**的成员(`ROLE_SPECS[].writeKinds`,E8/E9
+--    逐条校验),而「类型」是**交付物自己的属性** —— 加 `deliverable_html_report`
+--    这样的 kind 会让「交付」这一件事在 11 个 kind 里裂成 N 个,而 integrate /
+--    handover 两条规则、以及 023 的版本链都在按 `kind='deliverable'` 查。
+-- ② `kind` 与类型是**正交**的:将来 `git_repo` 之外还会长出别的,它们与
+--    `deliverable` 是 1:N。加 kind 等于每加一种类型就改一处规则。
+--
+-- ── 为什么**可空**,而不是给存量 23 条 `deliverable` 回填一个类型 ─────
+--
+-- 真机库(2026-10-07):`SELECT kind, COUNT(*) … GROUP BY kind` 里
+-- `deliverable` = 23 条,最大正文 3,282 字节 —— **全是 markdown**。
+-- 回填 `html_report` 会**把 23 条没有 HTML 的东西说成 HTML 报告**,
+-- 读面按 `deliverable_type='html_report'` 去渲染就得到一片空白。
+--
+-- 所以 `NULL` 是一个**有意义的取值**,不是「缺参数」:
+--
+--   kind='deliverable' + deliverable_type IS NULL → **存量 / 未声明类型的交付物**,
+--     读面按普通正文(markdown)呈现。⚠️ 它**不允许被新写入**(工具层强制
+--     `kind='deliverable'` 必须带类型)—— 所以 NULL 只会随时间减少,
+--     不会增加;但**不许为了「整齐」去改写历史行**(改了就是把事实改成好看的样子)。
+--
+-- ── ⚠️ 约束的边界:本列**只**约束自己的取值域,**不**约束
+-- 「`kind='deliverable'` ⟺ `deliverable_type IS NOT NULL」 ──────────
+--
+-- 那个等价式**写不出来而不撒谎**:SQLite 的 `ALTER TABLE … ADD COLUMN … CHECK`
+-- **只对新增/更新的行求值,不对存量行回溯校验**。加上它,现存 23 条
+-- `deliverable` 行(NULL)会变成一行**已经违反约束**的数据 —— 之后任何
+-- `UPDATE artifacts SET status=… WHERE id=…` 都会突然报
+-- `CHECK constraint failed`,而这次迁移本身一声不响。
+--
+-- ⇒ 那条等价式落在**工具层**(`tools/blackboard.ts` 的 `board_write`:
+--   交付物必须给类型 / 非交付物不许给类型),并由 `tests/platform/deliverable-types.test.ts`
+--   钉住。**schema 只管它管得住的那件事**(取值域是闭集,与 `kind`/`status`/`channel`
+--   同一个形状 —— 017 的 `channel` 就是这么加的)。
+--
+-- ── 本迁移只做加法 ──────────────────────────────────────────────
+--
+-- 一条 `ADD COLUMN` + 一条 `CREATE INDEX`,**零 DROP、零重建表**。
+-- 所以它**不是** `INTENTIONAL_REBUILDS` 的成员(016 那次重建才需要逐表备份
+-- `artifact_links` / `asks` / `project_sessions` 三个子表)。
+--
+-- 顺带记一笔:将来若有第二次重建 `artifacts`,引用它的子表是 **4 张**
+-- (`artifact_links` ×2、`asks.resolution_artifact_id`、`project_sessions.deliverable_artifact_id`),
+-- `project_sessions` 那条是 NO ACTION —— 处置方式与 016:第 3/8 步同形;
+-- 而 `artifacts` 上的索引是 **7 条**(008 五条 + 014 一条 + 本文件 ①② 一条),
+-- `DROP TABLE` 会把它们一起带走,重建时**一条不少**地抄回来
+-- (真库实测 `PRAGMA index_list(artifacts)` = 7 条,`tests/platform/storage.test.ts`
+--  逐条钉住这个名单)。
+
+-- ① 类型列。闭集**目前只有一个值** `html_report`:
+--    「凡是只有信息交付的都可以用 html 产出」(用户原话)—— 技术方案 / 架构图 /
+--    汇报材料都属于它。`git_repo` 与仓库上的提交**刻意不在这里**:
+--    本项目的 7-E 教训是「代码里写了逻辑 ≠ 它有读者」,一个**没有写入口**
+--    的类型值进闭集,就是对外声明了一个平台造不出来的东西(与 7-E 那个
+--    `enabledTools` 名单同一种病)。它们留在 `repo/artifacts.ts` 的
+--    `RESERVED_DELIVERABLE_TYPES` 注释里,等真有写入口时再加进来 ——
+--    届时**纯加法**:这一列、这个闭集、读面全都不用改。
+--
+--    ⚠️ `IS NULL OR IN (...)` 这个形态是为了让**存量 23 行合法**(它们是 NULL)。
+ALTER TABLE artifacts ADD COLUMN deliverable_type TEXT
+  CHECK (deliverable_type IS NULL OR deliverable_type IN ('html_report'));
+
+-- ② 按类型查(读面「这个项目有几份 HTML 报告」与未来的「仓库类交付物」走这里)。
+--    **部分索引**:交付物是 156 条工件里的少数(真机 2026-10-07),而 NULL 行
+--    占绝大多数 —— 全索引会把绝大多数行收进来,查询却永远用不上。
+--    **故意不写 `IF NOT EXISTS`**(照 015/016 的纪律):名字被占着要响亮报错。
+CREATE INDEX idx_artifacts_deliverable
+  ON artifacts(project_id, deliverable_type) WHERE deliverable_type IS NOT NULL;

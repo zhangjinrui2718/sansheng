@@ -163,10 +163,14 @@ import {
   artifactKindTone,
   artifactStatusLabel,
   artifactStatusTone,
+  deliverableTypeLabel,
+  deliverableTypeTone,
   fmtTime,
   workStatusLabel,
   workStatusTone,
 } from "@/lib/vocab";
+import { HtmlReport } from "@/components/deliverable/HtmlReport";
+import { bodyMode, htmlReportFileName } from "@/lib/deliverable";
 
 /** 展示顺序:结论类优先,过程类靠后。表里没有的 kind 落在末尾(不丢)。 */
 const KIND_ORDER: ArtifactKind[] = [
@@ -1194,6 +1198,10 @@ export function ArtifactRow({
   onToggle: () => void;
 }) {
   const long = a.body.length > 120;
+  // HTML 报告的正文是**源文本** —— 把它当预览印在卡片上就是一片标签噪音,
+  // 而且会让 `long` 判断失真(一份 30KB 的 HTML 恒为 long)。卡片只标出类型,
+  // 正文留给详情里的沙箱渲染。
+  const isHtmlReport = bodyMode(a) === "html_report";
   return (
     <article className="sansheng-card p-2.5" title={a.id}>
       <div className="flex items-center gap-2 flex-wrap">
@@ -1209,6 +1217,11 @@ export function ArtifactRow({
         <Pill tone={artifactStatusTone(a.status)} title={a.status}>
           {artifactStatusLabel(a.status)}
         </Pill>
+        {isHtmlReport && (
+          <Pill tone={deliverableTypeTone("html_report")} title="deliverable_type">
+            {deliverableTypeLabel("html_report")}
+          </Pill>
+        )}
         <span className="ss-body" style={{ color: "var(--bone)" }}>
           {a.title || "(无标题)"}
         </span>
@@ -1223,17 +1236,24 @@ export function ArtifactRow({
           {open ? "收起" : "详情"}
         </button>
       </div>
-      {a.body.length > 0 && a.body !== a.title && (
-        <>
-          <Clamp lines={2} style={{ marginTop: 4 }}>
-            {a.body}
-          </Clamp>
-          {long && (
-            <Disclosure summary="全文">
-              <div style={{ whiteSpace: "pre-wrap" }}>{a.body}</div>
-            </Disclosure>
-          )}
-        </>
+      {isHtmlReport ? (
+        <div className="ss-meta mt-1">
+          一份 HTML 报告 —— 点「详情」在沙箱里渲染。
+        </div>
+      ) : (
+        a.body.length > 0 &&
+        a.body !== a.title && (
+          <>
+            <Clamp lines={2} style={{ marginTop: 4 }}>
+              {a.body}
+            </Clamp>
+            {long && (
+              <Disclosure summary="全文">
+                <div style={{ whiteSpace: "pre-wrap" }}>{a.body}</div>
+              </Disclosure>
+            )}
+          </>
+        )
       )}
       <div className="ss-meta mt-1">
         {fmtTime(a.createdAt)}
@@ -1891,7 +1911,17 @@ function ArtifactDetail({ id, known }: { id: string; known: readonly ArtifactVie
             </span>
           </div>
 
-          {artifact.body.length > 0 ? (
+          {bodyMode(artifact) === "html_report" ? (
+            <>
+              <div className="ss-section" style={{ fontSize: 12 }}>
+                报告
+              </div>
+              <HtmlReport
+                html={artifact.body}
+                fileName={htmlReportFileName(artifact.title, artifact.id)}
+              />
+            </>
+          ) : artifact.body.length > 0 ? (
             <>
               <div className="ss-section" style={{ fontSize: 12 }}>
                 正文
@@ -1951,6 +1981,10 @@ function ArtifactDetail({ id, known }: { id: string; known: readonly ArtifactVie
               <span>作者 id:{artifact.authorAgentId}</span>
               <span>作者名(authorName):{artifact.authorName}</span>
               <span>产出它的环节(workId):{artifact.workId ?? "null(不由工作项产出)"}</span>
+              <span>
+                交付物类型(deliverableType):
+                {artifact.deliverableType ?? "null(非交付物,或存量未声明类型的交付物)"}
+              </span>
               <span>创建:{fmtTime(artifact.createdAt)}</span>
               <span>更新:{fmtTime(artifact.updatedAt)}</span>
             </div>

@@ -1826,6 +1826,19 @@ export function renderTask(db: Database.Database, todo: DriverTodo): string {
         "整合是收敛,不是复述:甲方的诉求、结论、依据、还剩什么没解决,收成一份能独立读懂的东西\n" +
         "2. **每一份交付各写一条**交付物,用 `board_write`:\n" +
         "   - `kind` 用 **`deliverable`**\n" +
+        // ⚠️ **2026-10-07 加的一条**(migration 025)。`deliverableType` 是**必填**的,
+        // 缺了平台直接拒收 —— 所以这一句不是「建议」,它是「不写就写不进去」。
+        // 为什么放在**这条 user message** 里而不是只写进
+        // `harness/system_prompts/project_manager.core.md`:同 §9.4 的教训 ——
+        // 那条通道 recency 比 system prompt 强,而它**只**在真被叫醒整合的
+        // 这一次出现,不占别处的 context。
+        "   - `deliverableType` 用 **`html_report`**(**必填,不传平台会拒收**):" +
+        "交付物必须声明自己是哪种类型,而当前只有这一种 —— " +
+        "凡是**只有信息交付**的东西(技术方案 / 架构图 / 汇报材料 / 评审结论 / 说明书)都归它\n" +
+        "   - `body` 因此是**一份 HTML 文档**,不是 markdown:甲方在界面上点开它" +
+        "看到的是一个渲染好的网页。用**内联 `<style>`**,**架构图 / 流程图用内联 SVG**," +
+        "**不要写 `<script>` / `<iframe>`**(平台在禁用脚本的沙箱里渲染,写了就是一片空白)," +
+        "不要外链样式表或字体,控制在 512 KiB 以内\n" +
         "   - `workId` **必须显式传那条根工作项的 id**:" +
         "平台判「这条交付整合完了没有」看的**就是**「这条根工作项上有没有 `deliverable` 工件」——" +
         "不传 `workId` 的话这条待办会**一直重新出现**,直到把尝试预算烧完\n" +

@@ -16,9 +16,10 @@ import { Type } from "@sinclair/typebox";
 import {
   insertArtifact, getArtifact, listArtifacts, setArtifactStatus,
   addArtifactLink, listLinks, listBackLinks, countArtifactsByKind,
-  ARTIFACT_STATUSES, ARTIFACT_LINK_RELS,
-  isArtifactStatus, isArtifactLinkRel,
-  type ArtifactStatus, type ArtifactLinkRel,
+  ARTIFACT_STATUSES, ARTIFACT_LINK_RELS, DELIVERABLE_TYPES,
+  isArtifactStatus, isArtifactLinkRel, isDeliverableType,
+  validateDeliverableBody,
+  type ArtifactStatus, type ArtifactLinkRel, type DeliverableType,
 } from "../storage/repo/artifacts.js";
 import { isArtifactKind, ARTIFACT_KINDS, type ArtifactKind } from "../identity/role.js";
 import { getWork } from "../storage/repo/works.js";
@@ -87,7 +88,12 @@ const boardList: PlatformTool = {
 
     const counts = countArtifactsByKind(ctx.db, pid);
     const summary = Object.entries(counts).map(([k, n]) => `${k}:${n}`).join(" · ");
-    const lines = rows.map((a) => `[${a.status}] ${a.kind} ${a.id} · ${a.title}(作者 ${a.authorAgentId})`);
+    // 交付物那条行**额外标出类型** —— 甲方的技术方案与一份代码仓库在 kind 上
+// 完全一样,`board_read` 之前拿不到区分(读 `body` 开头是不是 `<html` 是猜测)。
+const lines = rows.map((a) =>
+      `[${a.status}] ${a.kind} ${a.id} · ${a.title}(作者 ${a.authorAgentId}` +
+      `${a.deliverableType !== null ? ` · 类型:${a.deliverableType}` : ""})`,
+    );
     return ok(
       `项目 ${pid} 工件共 ${Object.values(counts).reduce((x, y) => x + y, 0)} 条(${summary})\n` +
         `显示 ${rows.length} 条:\n${lines.join("\n")}\n\n要读正文用 board_read 传 id。`,
@@ -115,6 +121,9 @@ const boardRead: PlatformTool = {
         `# ${a.title}`,
         `- id:${a.id}`,
         `- kind:${a.kind} · status:${a.status}`,
+        ...(a.kind === "deliverable"
+          ? [`- 交付物类型:${a.deliverableType ?? "(存量 · 未声明类型,正文按 markdown 读)"}`]
+          : []),
         `- 项目:${a.projectId}`,
         `- 作者:${a.authorAgentId}`,
         `- 创建:${new Date(a.createdAt).toISOString()}`,
@@ -137,8 +146,22 @@ const boardWrite: PlatformTool = {
   parameters: Type.Object({
     projectId: Type.Optional(Type.String({ description: "缺省 = 当前项目" })),
     kind: Type.String({ description: ARTIFACT_KINDS.join(" | ") }),
+    deliverableType: Type.Optional(
+      Type.String({
+        description:
+          `**kind='deliverable' 时必填**,其余 kind 不许传。` +
+          `合法值:${DELIVERABLE_TYPES.join(" | ")}。` +
+          "`html_report` = 只有信息交付的东西(技术方案 / 架构图 / 汇报材料 / " +
+          "评审结论 / 说明书):正文写**一份自包含的 HTML 文档**(内联 <style>," +
+          "架构图用内联 SVG),平台在禁用脚本的沙箱里把它渲染成给甲方看的网页。",
+      }),
+    ),
     title: Type.String(),
-    body: Type.String({ description: "正文。要能被事后独立读懂 —— 见不到现场等于没有现场。" }),
+    body: Type.String({
+      description:
+        "正文。要能被事后独立读懂 —— 见不到现场等于没有现场。" +
+        "`kind='deliverable' + `deliverableType='html_report'` 时,它是**一份 HTML 文档**。",
+    }),
     status: Type.Optional(Type.String({ description: `${ARTIFACT_STATUSES.join(" | ")}(默认 open)` })),
     metadata: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
     workId: Type.Optional(
@@ -187,6 +210,46 @@ const boardWrite: PlatformTool = {
     if (!title.ok) return title.result;
     const body = requireString(args, "body");
     if (!body.ok) return body.result;
+
+    // ── 交付物类型(migration 025)───────────────────────────────────
+    //
+    // 两条纪律,方向相反:
+    //
+    //   ① `kind='deliverable'` **必须**给类型 —— 交付物没有类型,读面就只能靠
+    //      `body` 开头是不是 `<html` 去猜(本项目反复拒绝的启发式代理)。存量
+    //      那 23 条 NULL 是历史事实,不该让**新**写入继续欠账。
+    //   ② 非交付物工件**不许**给类型 —— 静默丢掉一个参数就是「不携带错误信息
+    //      的偏差」被平台替模型抹平(7-D):模型会以为类型落库了,而库里没有。
+    const deliverableTypeRaw = readString(args, "deliverableType");
+    let deliverableType: DeliverableType | null = null;
+    if (kind === "deliverable") {
+      if (deliverableTypeRaw === undefined) {
+        return fail(
+          "invalid_args",
+          `写交付物必须给 deliverableType(合法值:${DELIVERABLE_TYPES.join(" | ")})。` +
+            "现在只有 html_report —— 凡是只有信息交付的东西(技术方案 / 架构图 / " +
+            "汇报材料 / 评审结论 / 说明书)都写成一份自包含的 HTML 文档," +
+            "平台会把它渲染成给甲方看的网页。",
+          DELIVERABLE_TYPES,
+        );
+      }
+      if (!isDeliverableType(deliverableTypeRaw)) {
+        return fail(
+          "invalid_args",
+          `未知交付物类型「${deliverableTypeRaw}」。合法值:${DELIVERABLE_TYPES.join(" | ")}。`,
+          DELIVERABLE_TYPES,
+        );
+      }
+      deliverableType = deliverableTypeRaw;
+      const bad = validateDeliverableBody(deliverableType, body.value);
+      if (bad !== null) return fail("invalid_args", bad, DELIVERABLE_TYPES);
+    } else if (deliverableTypeRaw !== undefined) {
+      return fail(
+        "invalid_args",
+        `只有 kind='deliverable' 的工件能带 deliverableType,你写的是 kind='${kind}'。` +
+          "不要传 —— 平台不会静默丢掉它(那样你会以为类型落库了)。",
+      );
+    }
 
     const statusRaw = readString(args, "status") ?? "open";
     if (!isArtifactStatus(statusRaw)) {
@@ -240,6 +303,7 @@ const boardWrite: PlatformTool = {
         createdAt: at,
         updatedAt: at,
         workId,
+        deliverableType,
       });
     } catch (err) {
       // 外键失败必须**指名道姓** —— 裸的 "FOREIGN KEY constraint failed" 不说是哪条,
@@ -273,6 +337,7 @@ const boardWrite: PlatformTool = {
 
     return ok(
       `已写工件 ${id}(${kind} · ${statusRaw})「${title.value}」` +
+        (deliverableType !== null ? ` · 交付物类型:${deliverableType}` : "") +
         (warnings.length > 0 ? `\n⚠️ 部分关联未建立:${warnings.join(";")}` : "") +
         // 把产出边如实回灌给模型 —— 否则它无法从工具输出里确认自己填对了,
         // 而下一次「这条工作项产出了什么」正是靠这行字。

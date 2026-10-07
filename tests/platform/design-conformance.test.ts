@@ -29,6 +29,7 @@ import {
   parseMatrix,
   parseFactorySets,
   parseArtifactKinds,
+  parseDeliverableTypes,
   parseProtocolKinds,
   parseInlineWriteKinds,
   parseCeilings,
@@ -52,6 +53,7 @@ import {
   factoryToolset,
   type ProjectRole,
 } from "../../src/platform/identity/role.js";
+import { DELIVERABLE_TYPES } from "../../src/platform/storage/repo/artifacts.js";
 
 const DOCS = join(import.meta.dirname, "../../docs");
 const p1 = readFileSync(join(DOCS, "DESIGN-PLATFORM.md"), "utf8");
@@ -62,6 +64,7 @@ const docTools = parseToolTable(p1);
 const docMatrix = parseMatrix(p2);
 const docFactory = parseFactorySets(p2);
 const docKinds = parseArtifactKinds(p1);
+const docDeliverableTypes = parseDeliverableTypes(p1);
 const docProtocolKinds = parseProtocolKinds(p1);
 const docInlineWK = parseInlineWriteKinds(p2);
 const docCeilings = parseCeilings(p2);
@@ -219,6 +222,18 @@ describe("E7 · 工件 kind ↔ ARTIFACT_KINDS", () => {
 
   it("PROTOCOL_CREATED_KINDS 与设计 1 §6.2 一致", () => {
     expect(diff(PROTOCOL_CREATED_KINDS, [...(docProtocolKinds as Set<string>)])).toBe("(无差异)");
+  });
+
+  /**
+   * 交付物类型(migration 025)—— 与 kind 是**两个闭集**,同一个病(转录漂移)。
+   *
+   * 这一条的价值在于它同时挡住两个方向的漂移:文档里多写一个「以后要做的
+   * git_repo」而代码没做(文档开始承诺平台造不出来的东西),以及代码里加了
+   * 一个而文档没记(设计文档不再是意图的真相)。**两个方向都红。**
+   */
+  it("交付物类型闭集与设计 1 §6.4 一致(加类型是纯加法,两处必须同步)", () => {
+    expect(docDeliverableTypes, "设计 1 §6.4 找不到 DeliverableType 联合").not.toBeNull();
+    expect(diff(DELIVERABLE_TYPES, [...(docDeliverableTypes as Set<string>)])).toBe("(无差异)");
   });
 
   it("WRITEKIND_EXEMPT_KINDS 是 PROTOCOL_CREATED_KINDS 的子集", () => {

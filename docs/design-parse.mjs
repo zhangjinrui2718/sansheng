@@ -95,6 +95,13 @@ export function parseArtifactKinds(md) {
   return new Set([...m[1].matchAll(/"([a-z_]+)"/g)].map((x) => x[1]));
 }
 
+/** 设计 1 §6.4:DeliverableType 闭合联合(交付物类型,migration 025) */
+export function parseDeliverableTypes(md) {
+  const m = md.match(/export type DeliverableType =([\s\S]*?)\n```/);
+  if (!m) return null;
+  return new Set([...m[1].matchAll(/"([a-z_]+)"/g)].map((x) => x[1]));
+}
+
 /** 设计 1 §6.2:由协议工具自动创建、模型不能手写的 kind */
 export function parseProtocolKinds(md) {
   const m = md.match(/\*\*协议工具自动创建\*\* \|([^|]*)\|/);

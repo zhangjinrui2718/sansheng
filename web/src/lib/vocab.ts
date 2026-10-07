@@ -22,6 +22,7 @@ import type {
   BlockerSeverity,
   BlockerStatus,
   ChangeStatus,
+  DeliverableType,
   ProjectRole,
   ProjectStatus,
   WorkStatus,
@@ -110,6 +111,20 @@ export const ARTIFACT_STATUS_LABEL: Record<ArtifactStatus, string> = {
   accepted: "已采纳",
   rejected: "已否决",
   superseded: "被取代",
+};
+
+// ── 交付物类型(migration 025)───────────────────────────────────
+//
+// key 必须与契约的 `DeliverableType` 逐个对齐(纪律 1)。**不加契约里没有的
+// 取值** —— 与其在这里写「代码仓库」让人以为平台能产出,不如让它落进
+// `?? t` 的兜底(原样显示英文),那是诚实的。
+
+export const DELIVERABLE_TYPE_LABEL: Record<DeliverableType, string> = {
+  html_report: "HTML 报告",
+};
+
+export const DELIVERABLE_TYPE_TONE: Record<DeliverableType, Tone> = {
+  html_report: "jade",
 };
 
 export const ARTIFACT_STATUS_TONE: Record<ArtifactStatus, Tone> = {
@@ -227,6 +242,11 @@ export const artifactStatusLabel = (s: string): string =>
   (ARTIFACT_STATUS_LABEL as Record<string, string>)[s] ?? s;
 export const artifactStatusTone = (s: string): Tone =>
   (ARTIFACT_STATUS_TONE as Record<string, Tone>)[s] ?? "mute";
+/** 未知类型原样透出英文 —— 纪律 2:不猜含义。 */
+export const deliverableTypeLabel = (t: string): string =>
+  (DELIVERABLE_TYPE_LABEL as Record<string, string>)[t] ?? t;
+export const deliverableTypeTone = (t: string): Tone =>
+  (DELIVERABLE_TYPE_TONE as Record<string, Tone>)[t] ?? "bone";
 export const askStatusLabel = (s: string): string =>
   (ASK_STATUS_LABEL as Record<string, string>)[s] ?? s;
 export const askStatusTone = (s: string): Tone =>

@@ -133,6 +133,9 @@ export function toArtifactView(
     // 合法状态(决策 / 会议 / 变更 / 甲方问答),前端据此把它列在「无环节」区,
     // 这里不许拿 authorAgentId 之类去猜一个环节出来(那是编造 provenance)。
     workId: row.workId,
+    // migration 025。**`null` 原样透出** —— 非交付物工件没有类型,
+    // 交付物也可能是存量 NULL(016 之后写的 markdown 正文)。
+    deliverableType: row.deliverableType,
   };
 }
 

@@ -844,24 +844,30 @@ describe("016 · deliverable 工件(真启动路径 + 仓储层)", () => {
     ).toBe(KIND_016.length);
   });
 
-  it("016 重建之后 6 条索引仍在真库上(启动路径上的 DROP TABLE 没把它们带走)", () => {
+  it("016 重建之后 7 条索引仍在真库上(启动路径上的 DROP TABLE 没把它们带走)", () => {
     const names = (db.pragma("index_list(artifacts)") as Array<{ name: string }>)
       .map((r) => r.name)
       .filter((n) => !n.startsWith("sqlite_autoindex"))
       .sort();
     expect(
       names,
-      "DROP TABLE 会连索引一起丢掉 —— 016 必须把 6 条全部原样重建" +
-        "(设计稿 §2.11.5 写的是五条,那是 014 之前的数字)",
+      "DROP TABLE 会连索引一起丢掉 —— 016 必须把索引全部原样重建" +
+        "(设计稿 §2.11.5 写的是五条,那是 014 之前的数字;025 又加了第七条," +
+        "**下一次重建 `artifacts` 时这个名单必须逐字抄新的**)",
     ).toEqual([
-      "idx_artifacts_author", "idx_artifacts_kind", "idx_artifacts_project",
-      "idx_artifacts_recent", "idx_artifacts_status", "idx_artifacts_work",
+      "idx_artifacts_author", "idx_artifacts_deliverable", "idx_artifacts_kind",
+      "idx_artifacts_project", "idx_artifacts_recent", "idx_artifacts_status",
+      "idx_artifacts_work",
     ]);
     // 部分索引的谓词不能丢(丢了不报错,只是悄悄退化成全表扫)
     const sql = db.prepare(
       `SELECT sql FROM sqlite_master WHERE type='index' AND name='idx_artifacts_work'`,
     ).get() as { sql: string };
     expect(sql.sql).toMatch(/WHERE\s+work_id\s+IS\s+NOT\s+NULL/i);
+    const dsql = db.prepare(
+      `SELECT sql FROM sqlite_master WHERE type='index' AND name='idx_artifacts_deliverable'`,
+    ).get() as { sql: string };
+    expect(dsql.sql).toMatch(/WHERE\s+deliverable_type\s+IS\s+NOT\s+NULL/i);
   });
 });
 
