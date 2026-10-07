@@ -96,6 +96,14 @@ function stringifyValue(v: unknown): string {
   }
 }
 
+/**
+ * 明细区一次取多少块。
+ *
+ * 一处定义两处用(请求 + 屏幕上那句「最近索引的 N 块」直接读响应长度)——
+ * 分开写会得到「请求 10 条、标签说 20 条」这种只有对着看才发现的不一致。
+ */
+const CHUNK_PAGE_SIZE = 10;
+
 /** 明细区的输入 / 按钮样式 —— 沿用 Works.tsx 那处 select 的 token(不新增配色体系)。 */
 const FILTER_INPUT_STYLE = {
   background: "var(--ink-1)",
@@ -177,7 +185,7 @@ export function MemoryPage() {
       setChunksLoading(true);
       try {
         // 不传 q = **按时间浏览**最近索引的块(合法用法,不是"空检索")
-        const res = await api.listKnowledgeChunks({ limit: 20 });
+        const res = await api.listKnowledgeChunks({ limit: CHUNK_PAGE_SIZE });
         if (!cancelled) { setChunks(res.chunks); setChunksError(null); }
       } catch (e) {
         if (!cancelled) setChunksError(errorMessage(e));
@@ -201,7 +209,7 @@ export function MemoryPage() {
       const res = await api.listKnowledgeChunks({
         ...(query.trim() !== "" ? { q: query } : {}),
         ...(projectId !== null ? { projectId } : {}),
-        limit: 20,
+        limit: CHUNK_PAGE_SIZE,
       });
       setChunks(res.chunks);
       setChunksError(null);
