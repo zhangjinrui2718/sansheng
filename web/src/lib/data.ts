@@ -621,13 +621,25 @@ export function channelOf(turn: Turn, ctx: ChannelContext): TurnChannel {
   if (origin.source === "broadcast") return "client";
   if (origin.source === "turn") {
     if (origin.trigger.kind === "user") return "client";
-    // ⚠️ 这三类待办按定义就是冲着甲方去的(交付 / 交代下游 / 处置甲方的答复)。
-    // 真机现场:业务经理 24 次 todo 回合、`tell_client` 调用 0 次,而 14:52 那条
-    // 「档位与 <$25k Cash account 不匹配」正文被这一步整条滤掉 —— 甲方从头到尾
-    // 不知道自己的两个拍板互相打架。
-    // **两半都要成立**:todoKind 在那个闭合集里(库内事实)、说话人 clientFacing。
-    // 少任何一半都回到 `internal`(fail-closed:宁可晚一拍,不可通道分离失效)。
     if (origin.trigger.kind !== "todo") return "internal";
+    // ── ⚠️ 行首 `[未播报]` = 这一回合**自己声明了没对甲方说** ⇒ 留在内部 ────
+    //
+    // 2026-10-07 真机事故:下面那三类待办的正文**默认进甲方通道**(2026-10-06 修的,
+    // 为了别再出现「关键张力没到甲方」),但业务经理的提示词同时要求
+    // 「平台叫醒的回合、没调 tell_client ⇒ 正文第一行必须是 `[未播报]`」。
+    // **两条规矩在这三类上直接打架**,而模型照着提示词走:
+    //
+    //   真机现场 `resume_client` 那条 1988 字,`[未播报] 评估 1 条 —— …` 开头,
+    //   后面跟着 1744 字的内部工作日志(工件 id、阻塞处置、要通知谁重做)。
+    //   它被判成 client ⇒ **甲方在对话页上读到了这段内部记录**。
+    //
+    // 判据就是那个标记的**字面意思**:`[未播报]` = 本回合没播。写在第 0 个正文块
+    // 的行首时,它就是一句机器可判的声明 —— 与 `serve.ts` 的
+    // `detectUnannouncedTurn`(④ 认同一个标记)是同一份语义的两端。
+    //
+    // **fail-closed**:拿不准时留内部(上面那段已经写明了这条方向)。
+    // 历史数据一并被这一条救回来 —— 不需要迁移。
+    if (turnIsWorkLog(turn)) return "internal";
     // ⚠️ 这三类待办按定义就是冲着甲方去的(交付 / 交代下游 / 处置甲方的答复)。
     // 真机现场:业务经理 24 次 todo 回合、`tell_client` 调用 0 次,而 14:52 那条
     // 「档位与 <$25k Cash account 不匹配」正文被这一步整条滤掉 —— 甲方从头到尾
@@ -641,6 +653,31 @@ export function channelOf(turn: Turn, ctx: ChannelContext): TurnChannel {
     return "internal";
   }
   return fallbackChannelOf(turn, ctx);
+}
+
+/**
+ * 工作记录标记的行首判据 —— **行首**,不是包含(设计 1 §2.10.2c 的 ④)。
+ *
+ * ⚠️ **`web/src/components/chat/MessageList.tsx` 的 `splitWorkLog` 与本函数共用它**
+ * (那条路径按段渲染,这条按通道分流)。`src/platform/host/serve.ts` 里还有一份
+ * 逐字相同的 —— 那份**不能**从这里取:server 侧禁 `@shared` 的 value import,
+ * 而这条是值不是类型。三处的语义必须一致,改这里就去看那两处。
+ */
+export const WORK_LOG_LINE = /^[ \t]*\[未播报\]/;
+
+/**
+ * 这一回合的正文**是不是一条工作记录** —— 判据是「**第一个正文块**的第一行」。
+ *
+ * ⚠️ **只认第一个正文块,不认「正文里任意一行」**:`[未播报]` 写在文末或夹在
+ * 段落中间时,那一轮可能真有一段话是给甲方的(提示词明确说那样写**不算**)。
+ * 认「第一行」与提示词的要求、与 `serve.ts` 的 `detectUnannouncedTurn`
+ * (`input.text.split("\n").some(...)`,那份宽松些)**方向一致**:都是在问
+ * 「这一轮有没有声明自己没播」。
+ */
+export function turnIsWorkLog(turn: Turn): boolean {
+  const first = turn.blocks.find((b) => b.kind === "text");
+  if (first === undefined || first.kind !== "text") return false;
+  return WORK_LOG_LINE.test(first.text);
 }
 
 /**

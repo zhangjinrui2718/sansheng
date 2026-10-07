@@ -335,6 +335,26 @@ export function splitWorkLog(text: string): TextSegment[] {
     if (joined.trim() === "") return; // 纯空白段不成块
     segments.push({ kind, text: joined });
   };
+  // ── ⚠️ 正文**以标记开头** ⇒ 整条都是工作记录,不再「空行之后回到播报」──
+  //
+  // 提示词的要求是「这一回合没调 `tell_client`,**正文的第一行**就必须是
+  // `[未播报]`」—— 也就是说,**标记在第一行时,它声明的是整个回合**:这一轮
+  // 没有任何一句是对甲方说的。下面那条「空行 = 工作记录结束」是按**段**分流的
+  // 规矩(给「说一句 → 记一条 → 再说一句」那种正文用的),它**不该**作用在
+  // 整个回合都是工作记录的情况下。
+  //
+  // 2026-10-07 真机事故:业务经理那条 1988 字的正文以 `[未播报]` 开头,第一段
+  // 242 字被正确折成工作记录,**而后面的空行让余下 1744 字(工件 id、阻塞处置、
+  // 要通知谁重做)回到了 `speech`** —— 于是它们渲染成一个个甲方气泡。
+  // 通道判据那一侧已经让这一整轮留在内部(见 `lib/data.ts` 的 `turnIsWorkLog`),
+  // 这里是**同一份语义的渲染侧**;两处都改,是因为它们是两条独立的泄漏路径。
+  const firstLine = text.split("\n").find((l) => l.trim() !== "");
+  if (firstLine !== undefined && WORK_LOG_LINE.test(firstLine)) {
+    flush();
+    const whole = text.replace(/^\n+/, "").replace(/\n+$/, "");
+    if (whole.trim() !== "") return [{ kind: "work_log", text: whole }];
+    return segments;
+  }
   for (const line of text.split("\n")) {
     if (kind === "speech" && WORK_LOG_LINE.test(line)) {
       flush();
