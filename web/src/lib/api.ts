@@ -38,6 +38,7 @@ import type {
   AskView,
   BlockerView,
   ChangeView,
+  ClientQuestionList,
   ClientQuestionView,
   HarnessView,
   HealthResponse,
@@ -391,8 +392,8 @@ export function getProjectLive(projectId: string): Promise<{ live: ProjectLiveVi
 // ── 待甲方答的问题 ──────────────────────────────────────────────
 
 /** 所有项目里**等甲方答**的问题(待办 / 评审队列的数据源)。 */
-export function listClientQuestions(): Promise<{ questions: ClientQuestionView[] }> {
-  return request<{ questions: ClientQuestionView[] }>("/client-questions");
+export function listClientQuestions(): Promise<ClientQuestionList> {
+  return request<ClientQuestionList>("/client-questions");
 }
 
 /** 回答一个问题 —— 后端走 resolveClientQuestion,落 decision 工件。 */

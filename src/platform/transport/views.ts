@@ -530,16 +530,62 @@ export function toProjectDetail(db: Database.Database, row: ProjectRow): Project
 }
 
 /** 全项目等甲方答的问题(左栏徽标 + 待办列表)。 */
-export function listAllClientQuestions(db: Database.Database): ClientQuestionView[] {
+/**
+ * 全局「待答」队列 —— **跨项目是有意的**,但**收口项目的提问不算待答**。
+ *
+ * ── 为什么跨项目 ──────────────────────────────────────────────────
+ *
+ * 甲方可能在任何一条对话线里被业务经理问到「W3 那个结论还成立吗」。若这一块
+ * 只显示当前项目的,别处的提问就又变成没人知道 —— 那正是这个面板存在的理由。
+ * 所以:**当前项目的不标项目名**(它在「本项目」底下,归属不言自明),别的项目
+ * 的带一行暗色项目名(`ClientQuestionDock` 的 `DockCard`)。跨项目的事实如实显示。
+ *
+ * ── 为什么排除收口的项目(2026-10-07 真机事故)──────────────────────
+ *
+ * 真机现场:项目「美股自动化交易平台方案设计·单报告合并版」于 2026-10-07 00:27
+ * 收口(`done`),业务经理在**收口之后 8.5 小时**(09:03 / 09:13)又提了 3 个问题。
+ * 三件事凑成一个**兑现不了的承诺**:
+ *
+ *   ① 提得到 —— `authorize.ts` 的 `PROJECT_SCOPED_PREFIXES` **不含 `client.`**,
+ *      所以收口后 `ask_client` 仍然可用。这是**有意**的(「豁免的是说话,不是改」)。
+ *   ② 没人会处理 —— `host/serve.ts` 的 `drainAll` 排的是
+ *      `listProjects(db, "active")`,**终态项目永远不进排空器**。
+ *   ③ 所以那 3 条 `status='open'` + `consumed_at=NULL` **永远不会有人被叫醒去处置**,
+ *      却一直挂在「待答」里 —— 用户点「回答」会落一条 `decision` 工件,然后**没有任何
+ *      人被叫醒**,而这一条仍然挂着。
+ *
+ * 「待答」这个词承诺的是「你答了会有人处理」。兑现不了的队列不是队列,是噪音,
+ * 而且是**看起来很正常**的噪音(它是「零待办」与「有人欠你三个回答」长得一模一样
+ * 的那种)。⇒ 收口项目的提问**不再是待答**,它属于历史。
+ *
+ * ⚠️ **事实一条都不删**:工件与 `client_questions` 行原样留在库里,项目页
+ * (`ProjectDetail` 的「待答问题」,那个读面本来就是项目内的)照常显示,答复接口
+ * 也仍然可用(它落一条 `decision` 工件,那是审计事实)。这里只决定**「待答」这个词
+ * 覆盖哪一批**。
+ *
+ * ⚠️ **不静默丢弃**:被排除的条数由 `fromClosedProjects` 一并返回,前端必须显示出来。
+ * 悄悄少三条会让用户以为「问题自己消失了」—— 那正是 7-N(见不到现场等于没有现场)。
+ */
+export function listAllClientQuestions(db: Database.Database): {
+  questions: ClientQuestionView[];
+  /** 因项目已收口而**没有**进入待答队列的条数。⚠️ 必须被显示,不许静默丢弃。 */
+  fromClosedProjects: number;
+} {
   const name = agentNameCache(db);
   const out: ClientQuestionView[] = [];
+  let fromClosedProjects = 0;
   for (const p of listProjects(db)) {
+    const closed = p.status === "done" || p.status === "abandoned";
     for (const a of listArtifacts(db, p.id, { kind: "client_question", status: "open" })) {
+      if (closed) {
+        fromClosedProjects += 1;
+        continue;
+      }
       out.push(toClientQuestionView(db, a, name));
     }
   }
   out.sort((a, b) => a.createdAt - b.createdAt);
-  return out;
+  return { questions: out, fromClosedProjects };
 }
 
 export function listProjectAsks(db: Database.Database, projectId: string): AskView[] {

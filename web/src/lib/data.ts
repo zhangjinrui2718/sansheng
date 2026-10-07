@@ -295,10 +295,18 @@ export function useProjectDetail(
 }
 
 /** 所有项目里等甲方答的问题(待办 / 评审队列)。 */
-export function useClientQuestions(): Loaded<ClientQuestionView[]> {
+export function useClientQuestions(): Loaded<ClientQuestionView[]> & {
+  /** 因项目已收口而不在待答队列里的条数。⚠️ 必须被显示,不许静默丢弃(见契约注释)。 */
+  fromClosedProjects: number;
+} {
   const revision = useChatStore((s) => s.projectsRevision);
   const r = useLoad(() => api.listClientQuestions(), [revision]);
-  return { data: r.data?.questions ?? [], loading: r.loading, error: r.error };
+  return {
+    data: r.data?.questions ?? [],
+    loading: r.loading,
+    error: r.error,
+    fromClosedProjects: r.data?.fromClosedProjects ?? 0,
+  };
 }
 
 /**

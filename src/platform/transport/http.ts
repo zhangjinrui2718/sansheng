@@ -483,7 +483,9 @@ export function createPlatformApp(deps: HttpDeps): Hono {
 
   // ── 等甲方答的问题(全项目)────────────────────────────────────
 
-  app.get("/api/client-questions", (c) => c.json({ questions: listAllClientQuestions(db) }));
+  // 载荷形状就是 `listAllClientQuestions` 的返回值(含 `fromClosedProjects`)——
+// 那条计数必须**一起**出去,前端才可能显示「为什么不在这队列里」,而不是静默少几条。
+app.get("/api/client-questions", (c) => c.json(listAllClientQuestions(db)));
 
   app.post("/api/client-questions/:id/answer", async (c) => {
     const body = (await c.req.json().catch(() => null)) as { answer?: unknown } | null;

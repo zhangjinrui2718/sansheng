@@ -42,6 +42,18 @@
  * 页签当初存在的理由。所以:**当前项目的不标项目名**(它在「本项目」底下,归属
  * 不言自明),别的项目的那条上面带一行暗色项目名。跨项目的事实如实显示,不藏。
  *
+ * ── ⚠️ **已收口项目的提问不在这个队列里,而且必须说出来**(2026-10-07)─
+ *
+ * 「待答」承诺的是「你答了会有人处理」。**已收口项目的提问兑现不了**:排空器排的是
+ * `listProjects(db, "active")`,终态项目永远不进排空 ⇒ 那些提问永远没人被叫醒。
+ * 真机现场:项目 00:27 收口,业务经理在 09:03/09:13 又提了 3 个问题(收口后
+ * `client.*` 仍可用 —— 「豁免的是说话,不是改」),三条就一直挂在「待答」里,
+ * 而用户点「回答」只会多落一条 `decision`,**没有任何人会被叫醒**。
+ *
+ * 所以后端把它们排除,并**把条数一起返回**(`fromClosedProjects`)。这里**必须显示**:
+ * 悄悄少三条会让用户以为「问题自己消失了」—— 见不到现场等于没有现场(7-N)。
+ * 事实一条都没删:项目页(那个读面本来就是项目内的)照常显示,答复接口仍然可用。
+ *
  * ── 数据来源与刷新 ────────────────────────────────────────────────
  *
  * `GET /api/client-questions`(经 `useClientQuestions`),按 `projectsRevision` 重拉 ——
@@ -56,7 +68,7 @@ import { useChatStore } from "@/stores/chat";
 import type { ClientQuestionView } from "@shared/types/platform";
 
 export function ClientQuestionDock() {
-  const { data: questions, loading, error } = useClientQuestions();
+  const { data: questions, loading, error, fromClosedProjects } = useClientQuestions();
   /** 当前上下文 —— 只用来决定「要不要给这条标项目名」(见 `DockCard`)。 */
   const projectId = useChatStore((s) => s.projectId);
 
@@ -105,18 +117,27 @@ export function ClientQuestionDock() {
       </div>
 
       {count > 0 && (
-        <div
-          className="px-3 py-1.5 flex-none"
-          style={{ borderTop: "1px solid var(--ink-3)" }}
-        >
-          <span
-            className="ss-meta"
-            title="数据来源:GET /api/client-questions。回答走 POST /api/client-questions/:id/answer,落成 decision 工件。"
-          >
+          <div className="ss-meta px-3 py-1 flex-none" title="GET /api/client-questions">
             答案会落成 decision 工件,项目上留得下
-          </span>
-        </div>
-      )}
+          </div>
+        )}
+
+        {/*
+          ⚠️ **不许静默丢弃**(见文件头那一节)。`fromClosedProjects` 大于 0 时
+          必须有一行说明,否则用户会以为「那几件自己消失了」—— 而事实是它们
+          属于已收口的项目,那里的业务经理永远不会被叫醒。
+          `to` 是纯文案占位:点击不导航(这一块本身不持有项目 id 的导航态)。
+        */}
+        {fromClosedProjects > 0 && (
+          <div
+            className="ss-meta px-3 py-1 flex-none"
+            style={{ borderTop: "1px solid var(--ink-3)", color: "var(--ochre)" }}
+            data-from-closed-projects={fromClosedProjects}
+            title="这些提问属于已收口的项目。排空器只跑 active 的项目,所以那里没有人会被叫醒来处理它们 —— 它们不再是「待答」。事实仍在项目页里。"
+          >
+            另有 {fromClosedProjects} 件来自已收口项目,不再等回复(项目页里还看得见)
+          </div>
+        )}
     </section>
   );
 }

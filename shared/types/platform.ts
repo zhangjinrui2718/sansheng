@@ -524,6 +524,26 @@ export interface ClientQuestionView {
   status: ArtifactStatus;
 }
 
+/**
+ * `GET /api/client-questions` 的载荷。
+ *
+ * ⚠️ `fromClosedProjects` **必须被显示,不许静默丢弃**(2026-10-07 真机事故)。
+ *
+ * 「待答」承诺的是「你答了会有人处理」。而**已收口项目的提问兑现不了**:
+ * `host/serve.ts` 的 `drainAll` 排的是 `listProjects(db, "active")`,终态项目
+ * 永远不进排空器 ⇒ 那些提问永远没人被叫醒去处置。真机上有 3 条这样的提问
+ * (项目 00:27 收口,提问发生在 09:03/09:13)常驻在队列里。
+ *
+ * 所以它们不进 `questions`;但**事实一条都不删**(工件与 `client_questions` 行
+ * 原样在库里,项目页照常显示,答复接口仍然可用)。前端**必须**把这条计数说出来 ——
+ * 悄悄少三条会让用户以为「问题自己消失了」,那正是 7-N。
+ */
+export interface ClientQuestionList {
+  questions: ClientQuestionView[];
+  /** 因项目已收口(`done`/`abandoned`)而没有进入待答队列的条数。 */
+  fromClosedProjects: number;
+}
+
 export interface BlockerView {
   id: string;
   projectId: string;

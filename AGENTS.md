@@ -40,7 +40,7 @@
   判据的一部分:同一对节点上两类边**方向一致**时不是环(真机那份数据就是这样),方向相反
   才是环(`mutualPairs` 会点名是哪两条边)。写反会让「交付」跑到最左、并且把一个不存在的
   环报出来(`web/src/lib/workGraph.ts` 的 `collectEdges`)。
-- 基线:**1579 passed / 77 test files** · 两条 typecheck 0 error · `check:design` E1–E14 全绿。
+- 基线:**1587 passed / 78 test files** · 两条 typecheck 0 error · `check:design` E1–E14 全绿。
 - **角色中文名只有一处**:`src/platform/runtime/org.ts` 的 `ORG`(播种 + `RoleHarnessView.displayName`
   共用);前端兜底表 `web/src/lib/vocab.ts` 的 `ROLE_LABEL` 必须逐项相同,由
   `tests/web/role-names.test.ts` 跨边界对照。**不许在某个页面里再写一张名字表**
@@ -254,6 +254,37 @@ shared/types/            跨端协议类型(platform.ts / settings.ts)
 - 外键一律指向 `agent_id`,不存 `role` 字符串 —— 角色属性只有一处真相。
 - 存储形态可替换:上层只依赖 `src/platform/memory/port.ts` 的 `MemoryPort`;甲方通道同理走 `src/platform/client/port.ts` 的 `ClientChannel`。
 
+### 「待答」队列:**收口项目的提问不是待答**(2026-10-07 真机事故)
+
+用户报的现象是「待答没有区分项目,A 项目的待答在 B 项目的对话里也看得见」。查下来
+**跨项目是有意的**(`ClientQuestionDock` 的 `DockCard` 给别的项目那条带一行暗色项目名,
+真机实测 `projectName` 有值),**但那 3 条之所以能常驻,是因为它们兑现不了** —— 这是缺陷。
+
+真机现场:项目「美股自动化交易平台方案设计·单报告合并版」**00:27 收口**(`done`),
+业务经理在**收口之后 8.5 小时**(09:03 / 09:13)又提了 3 个问题。三件事凑成一个
+**兑现不了的承诺**:
+
+| | 事实 | 位置 |
+|---|---|---|
+| ① 提得到 | `PROJECT_SCOPED_PREFIXES` **不含 `client.`** ⇒ 收口后 `ask_client` 仍可用 | `harness/authorize.ts:129`(**有意**:「豁免的是说话,不是改」) |
+| ② 没人处理 | 排空器排的是 `listProjects(db,"active")` ⇒ **终态项目永远不进排空器** | `host/serve.ts:1408` |
+| ③ ⇒ | 用户点「回答」只会多落一条 `decision`,**没有任何人会被叫醒**,而这一条仍然挂着 | `POST /api/client-questions/:id/answer` |
+
+⇒ 「待答」承诺的是「你答了会有人处理」。**兑现不了的队列不是队列,是看起来很正常的噪音** ——
+它与「有人欠你三个回答」在屏幕上长得一模一样。
+
+**处置**(`listAllClientQuestions`,2026-10-07):收口项目(`done`/`abandoned`)的提问**不进队列**,
+但**条数由 `fromClosedProjects` 一并返回,前端必须显示**(「另有 N 件来自已收口项目,不再等回复」)。
+⚠️ **事实一条都不删**:工件与 `client_questions` 行原样在库里,**项目页那个读面照常显示**
+(真机复核:全局队列 `0 条 / fromClosedProjects 3`,项目页 `pendingQuestions 3`)。
+`paused` **不算**收口 —— 排空器还会叫它。
+
+> ⚠️ **别把这条改回「只显示当前项目」。** 那会让别处的提问重新变成没人知道 ——
+> 这个面板当初就是因为「没有待答页签的计数、提问发生了用户完全不知道」才存在的(2026-10-06)。
+> 跨项目 + 标项目名是**刻意**的;要治的只是「兑现不了还在排队」这一件。
+> 回归:`tests/platform/client-question-closed-project.test.ts`(含一条源码 grep 钉住
+> 「排空器只跑 active」—— 那条 grep 带正负样本自检)。
+
 ### 交付物**类型**(2026-10-07,migration 025)
 
 用户原话:「定义一下交付物都有哪些类型,先实现一个最简单的,html 的报告(技术方案、架构图、
@@ -327,7 +358,7 @@ help
 ```
 npx tsc -p tsconfig.server.json --noEmit
 npx tsc -p tsconfig.web.json --noEmit
-npm test                  # 1579 passed / 77 files
+npm test                  # 1587 passed / 78 files
 npm run build
 npm run check:design      # 设计一致性 E1–E14
 ```
