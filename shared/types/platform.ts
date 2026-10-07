@@ -300,12 +300,17 @@ export interface CodeServiceView {
  * 那一刻**的事实,而「这个仓库后来改了什么」只能现在去盘上读 —— 存进库就会过期,
  * 而过期的快照看起来与新鲜的一模一样。
  *
- * ⚠️ `runtime: "unavailable"` 是**读不到**,不是「没有提交」。界面上**必须**
- * 分开渲染:读不到渲染成空列表 = 把一次读失败说成「这个仓库是空的」。
+ * ⚠️ **两种「不是 ok」必须分开**,它们处置相反:
+ *   · `"unavailable"` = **读不到盘**(目录被移走 / git 不可用 / 没接上核对面);
+ *   · `"unreachable"` = **提交没了** —— `deliverableCommit` 在仓库里已不可达
+ *     (一次 `git reset --hard` 就能造成:交付物与工作区同仓)。仓库好好的,
+ *     但那条交付记录的版本被抹掉了 ⇒ 用户该做的是翻 reflog / 别再 reset,
+ *     而不是去查磁盘。
+ * 两者都**必须**如实渲染,渲染成空列表 = 把一次读失败说成「这个仓库没有提交」。
  * (与 `ProjectLiveView.runtime` 同一条纪律。)
  */
 export interface RepoCommitsView {
-  readonly runtime: "ok" | "unavailable";
+  readonly runtime: "ok" | "unavailable" | "unreachable";
   readonly commits: readonly {
     readonly sha: string;
     readonly shortSha: string;
@@ -316,7 +321,7 @@ export interface RepoCommitsView {
   /** 交付物记下的 HEAD(不是当前 HEAD —— 那是**交付那一刻**的事实) */
   readonly head: string | null;
   readonly branch: string | null;
-  /** `runtime === "unavailable"` 时说明为什么读不到 */
+  /** 不是 `ok` 时说明为什么(可执行:用户能据此决定下一步) */
   readonly problem?: string;
 }
 
@@ -650,8 +655,26 @@ export interface ArtifactContentView {
   readonly problem: string | null;
   readonly content: string;
   readonly bytes: number;
-  /** 与索引里记的 `bodySha256` 是否一致 —— 人工改过文件时不一致,读面要能说出来 */
+  /** **盘上这一份**的 sha256(真值,不是索引里的快照) */
   readonly sha256: string;
+  /**
+   * **索引里记的那一份**的 sha256(`artifacts.body_sha256`)。
+   *
+   * `at != null`(读历史版本)时为 `null` —— 那时「漂移」这个概念不适用:
+   * 比的本来就不是同一份东西。
+   */
+  readonly indexedSha256: string | null;
+  /**
+   * 盘上这份与索引记的**不是同一份**(人工改过文件 / 被 git 回滚过)。
+   *
+   * 这不是错误,是**要看得见的状态**:项目仓是给人用的,用户可以手改文件 ——
+   * 手改之后索引就旧了,而 §3.4 的 `commitWorkspace` 会在**下一次提交时重建索引**
+   * 把它收回一致。所以它是一句「还没收口」的提示,不是故障。
+   *
+   * ⚠️ 判据是 `sha256 !== indexedSha256`,**不是**「sha256 与某个常量不同」。
+   * `at != null` 时恒 `false`(见 `indexedSha256`)。
+   */
+  readonly drifted: boolean;
 }
 
 /**
