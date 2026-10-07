@@ -128,7 +128,18 @@ export function toArtifactView(
     kind: row.kind,
     status: row.status,
     title: row.title,
-    body: row.body,
+    // migration 027:正文**不住库**了,这里只给**落点与写入时的快照**
+    // (`bodyPath` / `bodyBytes` / `commitSha`),内容走
+    // `GET /api/artifacts/:id/content` 现读(设计 §4.2)。
+    //
+    // ⚠️ 这里**不 stat 文件**:列表端点的载荷最多 500 条,而「文件还在不在」
+    // 是读面的判断(要碰盘、要 git)。`bodyPath` 非空**不代表文件还在盘上** ——
+    // 把「读不到」在这里提前编出来(比如回一个 `exists: false`)等于让列表端点
+    // 替 content 端点下一个它下不了的结论。
+    bodyPath: row.bodyPath,
+    bodyBytes: row.bodyBytes,
+    // `null` = 还没提交过(行先落库、提交在回合边界,设计 §3.4)—— 合法状态,原样透出。
+    commitSha: row.commitSha,
     authorAgentId: row.authorAgentId,
     authorName: name(row.authorAgentId),
     createdAt: row.createdAt,
@@ -164,15 +175,26 @@ export function toArtifactView(
  *
  * ⚠️ **缺一项就是 `null`,不许填默认值、不许抛。** 一条读不出来坐标的交付物
  * 在界面上应当显示「读不到」—— 而编一个默认端口会让人照着一条错的命令去部署。
+ *
+ * ⚠️ **2026-10-08 起坐标是六项**(设计 §3.2):`servicePath` 是交付物的**边界**
+ * (构建上下文),`deliverableCommit` / `deliverableSubject` 是**这版交付物**
+ * (≠ `headCommit`:平台每回合写工件都会让 HEAD 动,而交付物可能没变),
+ * `ignoredFiles` 是「交付物会缺这些」(被 `.gitignore` 吃掉 ⇒ 甲方 clone 不到)。
+ * 四者都**按同一套规矩**解析:缺项给 `null`(数组给 `[]`),不猜、不编。
  */
 function parseCodeServiceView(metadataJson: string | null): CodeServiceView {
   const str = (v: unknown): string | null =>
     typeof v === "string" && v.trim() !== "" ? v : null;
   const num = (v: unknown): number | null =>
     typeof v === "number" && Number.isFinite(v) ? v : null;
+  const strs = (v: unknown): string[] =>
+    Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : [];
   const empty: CodeServiceView = {
-    repoPath: null, repoName: null, branch: null, headCommit: null, headSubject: null,
-    commitCount: null, dockerfile: null, service: null, port: null, files: [],
+    repoPath: null, repoName: null, servicePath: null, branch: null,
+    headCommit: null, headSubject: null,
+    deliverableCommit: null, deliverableSubject: null,
+    commitCount: null, dockerfile: null, service: null, port: null,
+    files: [], ignoredFiles: [],
   };
   if (metadataJson === null || metadataJson.trim() === "") return empty;
   let raw: unknown;
@@ -186,14 +208,21 @@ function parseCodeServiceView(metadataJson: string | null): CodeServiceView {
   return {
     repoPath: str(m["repoPath"]),
     repoName: str(m["repoName"]),
+    servicePath: str(m["servicePath"]),
     branch: str(m["branch"]),
     headCommit: str(m["headCommit"]),
     headSubject: str(m["headSubject"]),
+    deliverableCommit: str(m["deliverableCommit"]),
+    deliverableSubject: str(m["deliverableSubject"]),
     commitCount: num(m["commitCount"]),
     dockerfile: str(m["dockerfile"]),
     service: str(m["service"]),
     port: num(m["port"]),
-    files: Array.isArray(m["files"]) ? m["files"].filter((x): x is string => typeof x === "string") : [],
+    files: strs(m["files"]),
+    // 空数组 = **没有**被忽略的文件(不是「读不到」);整条坐标读不到由
+    // `service === null` / `codeService === null` 表达。两者是不同的信息:
+    // 「交付物是完整的」与「这件事我没读到」。
+    ignoredFiles: strs(m["ignoredFiles"]),
   };
 }
 

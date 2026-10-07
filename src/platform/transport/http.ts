@@ -31,11 +31,12 @@ import {
 import { getWork } from "../storage/repo/works.js";
 import {
   getArtifact,
-  listIndexedBodyPaths,
-  type IndexedBodyPathList,
+  artifactBodyPaths,
+  type IndexedBodyPath,
 } from "../storage/repo/artifacts.js";
 import { projectWorkspaceRoot } from "../workspace/root.js";
 import { scanWorkspace, type WorkspaceScan } from "../workspace/scan.js";
+import type { WorkspacePort } from "../workspace/port.js";
 import type { CodeServicePort } from "../codeservice/port.js";
 import { resolveClientQuestion } from "../tools/client.js";
 import { ensureOrg, ensureProjectOrg, orgReady, roleDisplayName } from "../runtime/org.js";
@@ -66,8 +67,9 @@ import {
 } from "../storage/repo/sessions.js";
 import type { SessionMessageKind, SessionMessageRow } from "../storage/repo/sessions.js";
 import type {
+  ArtifactContentView,
   HarnessView, MemberConversationView, MemberConversationsResponse,
-  PromptUnitView, RoleHarnessView, SessionMessageView, WorkspaceView,
+  PromptUnitView, RepoCommitsView, RoleHarnessView, SessionMessageView, WorkspaceView,
 } from "@shared/types/platform.js";
 import type { ResetReport } from "../host/reset.js";
 import {
@@ -122,6 +124,17 @@ export interface HttpDeps {
    * 与 `live` 那条同源:读不到不是空。
    */
   readonly codeService?: CodeServicePort;
+  /**
+   * **工作区端口**(设计 `docs/DESIGN-WORKSPACE.md` §4.3)。用来读工件正文 ——
+   * 2026-10-08 起正文是项目仓里的一份文件,只有这个端口能把它读出来
+   * (`read` 读 HEAD / `show` 读某一版历史)。
+   *
+   * ⚠️ **可选**,与 `codeService` 同一条理由:只挂 HTTP 的装配(测试、诊断)
+   * 拿不到它,那时 `GET /api/artifacts/:id/content` 返回
+   * `runtime: "unavailable"` + 一句说明,**不是**空正文 ——
+   * 「读不到盘」与「这份工件本来就没有正文」在屏幕上长得一样,而处置相反。
+   */
+  readonly workspace?: WorkspacePort;
   /** 设置读写(复用旧 store —— 它是基础设施,不是旧系统的领域逻辑) */
   readonly settings: {
     read: () => unknown;
@@ -144,19 +157,25 @@ const err = (code: string, message: string, status: 400 | 404 | 409 | 500 = 400)
  *   ② `counts` 与三个数组必须同源(各算一遍迟早会出现「计数说 3、列表两条」);
  *   ③ `missing` 要带回工件身份(只给路径的话,用户还得自己去库里找是哪件工件)。
  *
- * ⚠️ `index.runtime === "not_migrated"` 时 `missing` **必然是空** —— 不是
- * 「没有不一致」,是「没有索引可以比」。所以 `runtime` 是那个必须被渲染出来的
- * 字段,而空数组不能替它说话。
+ * ⚠️ **`missing` 的判据在 `scanWorkspace` 里,是逐条 `stat`**(设计 §4.4 那条纪律):
+ * 遍历有深度 3 层 / 500 条上限,拿「本次有没有列到它」当判据会把一个真实存在的
+ * 文件报成「库里有、盘上无」—— 一句**自信的假话**。所以这里只负责把索引路径
+ * 喂进去、把回来的路径贴回工件身份,不自己重算一遍。
+ *
+ * ⚠️ `index` 现在只剩 `{ paths: number }`(索引里正文路径的总条数)。分期方案里
+ * 那个 `runtime: "not_migrated"` 兜底**已随「不做迁移」作废**(027 一次到终态,
+ * `body_path` 列一定在);库真跑到一半时,该让 SQL 响亮报错,而不是回一个
+ * 「索引还没落地」把「机制缺一半」与「项目还没产出」说成同一件事。
  */
 function toWorkspaceView(opts: {
   projectId: string;
   root: string;
   scan: WorkspaceScan;
-  index: IndexedBodyPathList;
+  index: readonly IndexedBodyPath[];
 }): WorkspaceView {
   const { projectId, root, scan, index } = opts;
   const indexedPaths = new Set(scan.indexed.map((e) => e.path));
-  const byPath = new Map(index.paths.map((p) => [p.path, p]));
+  const byPath = new Map(index.map((p) => [p.path, p]));
   return {
     projectId,
     root,
@@ -181,7 +200,7 @@ function toWorkspaceView(opts: {
       // 对账用的是两份输入 —— 那时**照实报空 title**,不编一个(7-D)。
       return { path, artifactId: hit?.artifactId ?? "", title: hit?.title ?? "" };
     }),
-    index: { runtime: index.runtime, paths: index.paths.length },
+    index: { paths: index.length },
   };
 }
 
@@ -301,19 +320,20 @@ export function createPlatformApp(deps: HttpDeps): Hono {
   });
 
   /**
-   * **项目工作区 · 只读观测面**(设计 `docs/DESIGN-WORKSPACE.md` §4.4,**P0**)。
+   * **项目工作区 · 只读观测面**(设计 `docs/DESIGN-WORKSPACE.md` §4.4)。
    *
    * 三块事实一次端出来:盘上有什么(`scanWorkspace` 的 entries)、索引引用了什么
-   * (此刻 `body_path` 列还不存在 ⇒ `index.runtime: "not_migrated"`),以及两边
-   * 的不一致(`missing` / `orphanFile`)。
+   * (`artifactBodyPaths` 直接查 `body_path` —— 027 起这一列一定在),以及
+   * 两边的不一致(`missing` 逐条 stat 算出 / `orphanFile`)。
    *
-   * ⚠️ **`root` 现在与 `sessionCwd()` 无关。** `sessionCwd` 只在
-   * `--isolate-project-cwd` 打开时才把会话放到项目目录里(P1 才动它),而这条
-   * 读面问的是「这个项目的目录里有什么」—— 两件事今天可以指向同一个路径,
-   * 但**判据不同**,所以这里走 `projectWorkspaceRoot` 而不是去复用会话那一个。
+   * ⚠️ **`root` 与 `sessionCwd()` 无关。** `sessionCwd` 只在 `--isolate-project-cwd`
+   * 打开时才把会话放到项目目录里,而这条读面问的是「这个项目的目录里有什么」——
+   * 两件事今天可以指向同一个路径,但**判据不同**,所以这里走 `projectWorkspaceRoot`
+   * 而不是去复用会话那一个。
    *
    * ⚠️ **它不建目录**(`sessionCwd` 会 `mkdirSync`)。一个 GET 不该在盘上留东西
-   * —— 目录不存在是**读不到**,由 `runtime: "unavailable"` 如实承载。
+   * —— 目录不存在是**读不到**,由 `runtime: "unavailable"` 如实承载,而不是回一个
+   * 空目录列表。
    */
   app.get("/api/projects/:id/workspace", (c) => {
     const id = c.req.param("id");
@@ -321,8 +341,10 @@ export function createPlatformApp(deps: HttpDeps): Hono {
       return c.json(err("not_found", "项目不存在", 404).body, 404);
     }
     const root = projectWorkspaceRoot(deps.cwd, id);
-    const index = listIndexedBodyPaths(db, id);
-    const scan = scanWorkspace({ root, indexedPaths: index.paths.map((p) => p.path) });
+    // 索引侧**直接查** `body_path`(migration 027 之后恒可用)。这里**不 stat**:
+    // 「盘上有没有」由扫描逐条问盘,两件事各有一个判据。
+    const index = artifactBodyPaths(db, id);
+    const scan = scanWorkspace({ root, indexedPaths: index.map((p) => p.path) });
     return c.json({ workspace: toWorkspaceView({ projectId: id, root, scan, index }) });
   });
 
@@ -597,7 +619,96 @@ export function createPlatformApp(deps: HttpDeps): Hono {
   });
 
   /**
-   * 代码服务交付物的**最近提交**(migration 026)。
+   * **一件工件的正文**(设计 `docs/DESIGN-WORKSPACE.md` §4.2)。
+   *
+   * ── 为什么正文要单独一条端点 ──────────────────────────────────────
+   *
+   * 2026-10-08 起正文不住库:它是项目仓里的一份文件(`ArtifactRow.bodyPath` 只是
+   * **落点**)。于是「列表」与「正文」天然分开 —— 列表不再顺手把每份正文都拉一遍,
+   * 而正文**每次现读**,读出来的就是盘上此刻的内容。
+   *
+   * ── 三态(与 `ProjectLiveView.runtime` 同源:读不到不是空)──────────
+   *
+   *   · 工件不存在 → **404**(那才是「没有这件东西」);
+   *   · 读到 → `runtime: "ok"` + 正文 + 真实字节数 + 真实 sha256;
+   *   · 读不到(文件不在 HEAD / `?at=` 不可达 / 没接工作区端口)→
+   *     `runtime: "unavailable"` + `problem`,**不是空正文、不是 404**。
+   *
+   * 回一个空字符串等于把一次读失败说成「这份工件本来就没有正文」,而两者的处置
+   * 完全相反:前者要去看盘 / 换 `at=` 重试,后者什么都不用做。
+   *
+   * ── `sha256` 为什么必须是**盘上那份内容**的哈希 ────────────────────
+   *
+   * 索引里的 `body_sha256` 是**写入那一刻的快照**。人工改过文件之后两者不同 ——
+   * 那正是要被看出来的东西(§3.4:下一次提交会用盘上的内容重建索引)。回快照 =
+   * 把「索引说的」当成「盘上是的」,一次人工修改就此隐形。
+   */
+  app.get("/api/artifacts/:id/content", (c) => {
+    const row = getArtifact(db, c.req.param("id"));
+    if (row === null) return c.json(err("not_found", "工件不存在", 404).body, 404);
+
+    const atRaw = c.req.query("at");
+    const at = atRaw !== undefined && atRaw.trim() !== "" ? atRaw.trim() : null;
+    const root = projectWorkspaceRoot(deps.cwd, row.projectId);
+
+    const unavailable = (problem: string) => {
+      const body: ArtifactContentView = {
+        artifactId: row.id,
+        path: row.bodyPath,
+        at,
+        runtime: "unavailable",
+        problem,
+        // 读不到就是确定的空 —— 而 `runtime` 才是判据:调用方拿到的内容只有在
+        // `runtime === "ok"` 时才是事实(见契约里那句话)。
+        content: "",
+        bytes: 0,
+        sha256: "",
+      };
+      return c.json(body);
+    };
+
+    const ws = deps.workspace;
+    if (ws === undefined) {
+      return unavailable(
+        "本次装配没有接上工作区端口(HTTP 侧拿不到磁盘),所以读不到正文 —— " +
+          "这不是「这份工件没有正文」。",
+      );
+    }
+
+    const read =
+      at === null
+        ? ws.read({ root, path: row.bodyPath })
+        : ws.show({ root, sha: at, path: row.bodyPath });
+    if (!read.ok) {
+      return unavailable(
+        at === null
+          ? `${read.problem}。正文落点是 ${row.bodyPath}(项目根相对)` +
+            (row.commitSha !== null
+              ? `;可以试 \`?at=${row.commitSha}\` 读引入它的那一版(索引记了 sha ⇒ 历史版本按 sha 可寻址)。`
+              : ";索引里还没记下引入它的提交(commitSha 为 null),所以历史版本现在读不出来。")
+          : `${read.problem}。这一版(at=${at})读不出来 —— 提交可能已不可达` +
+            `(git reset --hard 之后只剩 reflog),或那个提交里没有 ${row.bodyPath}。`,
+      );
+    }
+
+    const content = read.value;
+    const body: ArtifactContentView = {
+      artifactId: row.id,
+      path: row.bodyPath,
+      at,
+      runtime: "ok",
+      problem: null,
+      content,
+      // 真实字节数,不是索引里的快照。
+      bytes: Buffer.byteLength(content, "utf8"),
+      // 盘上这份内容的 sha256(见上面那段:不许回索引快照)。
+      sha256: ws.sha256(content),
+    };
+    return c.json(body);
+  });
+
+  /**
+   * 代码服务交付物的**最近提交**(migration 026 / 设计 §3.2b · §3.2c)。
    *
    * ── 为什么它不是「交付物的一部分」,而是一条**现读**的边 ────────────
    *
@@ -605,11 +716,23 @@ export function createPlatformApp(deps: HttpDeps): Hono {
    * 而「这个仓库后来越改了什么」是**另一个问题**,它的答案是**现在**去盘上读 ——
    * 存进库就会过期,而过期的快照看起来与新鲜的一模一样。
    *
-   * 三条如实(都对应一种「屏幕上看不出」的错):
-   *   · 工件不存在 → 404;
-   *   · 工件不是 `code_service` → 400 并说明(不是回一个空列表);
-   *   · 没接核对面 / 坐标里没有 `repoPath` / git 读不出来 → `runtime: "unavailable"`
-   *     且带 `problem`,**不是** `commits: []`。
+   * 读面按 `servicePath`(交付物边界)**过滤**:项目仓里还有平台写工件的提交,
+   * 不过滤的话「这个服务改了什么」会混进一堆与它无关的提交。
+   *
+   * ── 四种如实,分界是**「盘读得到吗」**(都对应一种「屏幕上看不出」的错)──
+   *
+   *   · 工件不存在 → 404;工件不是 `code_service` → 400 并说明(不是回空列表);
+   *   · 没接核对面 / 坐标缺 `repoPath` / 缺 `servicePath` / git 读不出来 →
+   *     `runtime: "unavailable"` + `problem`(**读不到盘**),不是 `commits: []`;
+   *   · 盘读得到,但**这版交付物的提交已不可达**(`git reset --hard` 之后只剩
+   *     reflog)→ `runtime: "unreachable"` + `problem`(设计 §3.2c)。
+   *     **不许回空列表,也不许假装正常** —— 「仓库里没有这个提交」与「这个提交被
+   *     抹掉了」是两句不同的话,后者还要求一次 `git revert` 才能恢复现场;
+   *   · 其余 → `runtime: "ok"` + 提交列表。
+   *
+   * ⚠️ **顺序是判据的一部分**:先读提交(证明盘读得到),再做可达性判断。
+   * 反过来的话,仓库整个被移走时 `isReachable` 也会回 false,于是一次
+   * 「读不到盘」会被报成「提交被抹掉了」—— 两句错话里更误导的那一句。
    */
   app.get("/api/artifacts/:id/commits", (c) => {
     const row = getArtifact(db, c.req.param("id"));
@@ -628,34 +751,57 @@ export function createPlatformApp(deps: HttpDeps): Hono {
     const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? Math.min(limitRaw, 100) : 20;
     const cs = deps.codeService;
     const view = toArtifactView(db, row, (id) => getAgent(db, id)?.displayName ?? id);
-    if (cs === undefined || view.codeService?.repoPath == null) {
-      return c.json({
-        runtime: "unavailable" as const,
-        commits: null,
-        head: view.codeService?.headCommit ?? null,
-        branch: view.codeService?.branch ?? null,
-        problem:
-          cs === undefined
-            ? "本次装配没有接上代码服务核对面(HTTP 侧拿不到磁盘)"
-            : "这条交付物的坐标里没有 repoPath,读不到仓库",
-      });
-    }
-    const commits = cs.recentCommits(view.codeService.repoPath, limit);
-    if (commits === null) {
-      return c.json({
-        runtime: "unavailable" as const,
-        commits: null,
-        head: view.codeService.headCommit,
-        branch: view.codeService.branch,
-        problem: `读不到仓库 ${view.codeService.repoPath} 的提交(目录被移走 / 删掉,或 git 不可用)`,
-      });
-    }
-    return c.json({
-      runtime: "ok" as const,
-      commits,
-      head: view.codeService.headCommit,
-      branch: view.codeService.branch,
+    const meta = view.codeService;
+    /** 非 `ok` 的形状:`commits` 一律 `null`,由 `runtime` + `problem` 说话。 */
+    const notOk = (runtime: "unavailable" | "unreachable", problem: string): RepoCommitsView => ({
+      runtime,
+      commits: null,
+      head: meta?.headCommit ?? null,
+      branch: meta?.branch ?? null,
+      problem,
     });
+    if (cs === undefined) {
+      return c.json(notOk("unavailable", "本次装配没有接上代码服务核对面(HTTP 侧拿不到磁盘)"));
+    }
+    if (meta?.repoPath == null) {
+      return c.json(notOk("unavailable", "这条交付物的坐标里没有 repoPath,读不到仓库"));
+    }
+    if (meta.servicePath == null) {
+      return c.json(
+        notOk(
+          "unavailable",
+          "这条交付物的坐标里没有 servicePath(交付物边界),所以读不出「这个服务改了什么」—— " +
+            "按整个仓库读会把平台写工件的提交一起算进来。",
+        ),
+      );
+    }
+    const commits = cs.recentCommits({ repoPath: meta.repoPath, servicePath: meta.servicePath, limit });
+    if (commits === null) {
+      return c.json(
+        notOk(
+          "unavailable",
+          `读不到仓库 ${meta.repoPath} 的提交(目录被移走 / 删掉,或 git 不可用)`,
+        ),
+      );
+    }
+    // 盘读得到 ⇒ 现在才轮到「这版交付物还在不在」。不可达 ≠ 读不到。
+    if (meta.deliverableCommit !== null && !cs.isReachable({ repoPath: meta.repoPath, sha: meta.deliverableCommit })) {
+      return c.json(
+        notOk(
+          "unreachable",
+          `这版交付物的提交 ${meta.deliverableCommit} 在仓库里已经不可达(git reset --hard 之后只剩 reflog)` +
+            ` —— 仓库本身读得到(${commits.length} 条提交),但「这版交付物是什么」已经不是能回答的问题。` +
+            `回滚请用 git revert(设计 §3.2c),用 reset --hard 会把索引指着的那个提交抹掉。`,
+        ),
+      );
+    }
+    const ok: RepoCommitsView = {
+      runtime: "ok",
+      commits,
+      head: meta.headCommit,
+      branch: meta.branch,
+    };
+    return c.json(ok);
   });
 
   // ── 等甲方答的问题(全项目)────────────────────────────────────
