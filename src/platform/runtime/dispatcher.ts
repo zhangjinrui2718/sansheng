@@ -1022,6 +1022,17 @@ export const RULES: readonly Rule[] = [
     if: (q) => {
       const bm = q.members.find((m) => m.role === "business_manager");
       if (bm === undefined || q.events.length === 0) return [];
+      // ⚠️ **球在甲方那边时不追加**(与 `handover_deliverable` 同一条纪律)。
+      //
+      // 真机现场(2026-10-07 09:03–09:13):一个**已经 `done` 且已经交付**的项目上,
+      // 业务经理被 `report_downstream` + `handover` 叫醒三轮,连问甲方三件事 ——
+      // 而 `ask_client` **没有任何合并窗口**(`report_downstream` 自己有
+      // 「攒够 N 条或等 T」,提问那条没有)。三件里两件问的是同一件事,
+      // 第三件要甲方去核对业务经理自己读得到的内容。
+      //
+      // 抑制**不是**丢弃:这些行留在 outbox 里(`consumed_at` 仍为 NULL),
+      // 甲方一答复,`resume_client` 那一轮连同它们一起交代。
+      if (q.awaitingClient) return [];
       // ── 合并唤醒:攒够 N 条、或最老的那条等到 T,才叫醒一次 ──────────
       //
       // 加这两个条件的**唯一**理由是用户的原话:「业务经理干的事情太多了……
@@ -1145,6 +1156,18 @@ export const RULES: readonly Rule[] = [
     if: (q) => {
       const bm = q.members.find((m) => m.role === "business_manager");
       if (bm === undefined) return [];
+      // ⚠️ **球在甲方那边时不追加第二次交代**(2026-10-06 真机现场补)。
+      //
+      // 真机:`09:03:42` 与 `09:03:59` —— 相隔 **17 秒** —— 业务经理连着问了两件,
+      // 而第一件还没有答复。它等的是甲方,这时候再叫醒它,只会让它**再问一件**。
+      //
+      // 而它真的会:第二件是「你确认这份子文件覆盖是否完整」—— **那份工件
+      // 业务经理自己读得到**(`blackboard.read` 在它的 ceiling 里,实测 09:04
+      // 它就读了),却把「你自己核对」变成了一条要甲方动手的待办。
+      //
+      // 抑制**不是**丢弃:未消费的 outbox 事件留在库里,甲方一答复,
+      // `resume_client` 那一轮会把它们一起交代出去(合并唤醒本来就是这个形状)。
+      if (q.awaitingClient) return [];
       const out: TodoDraft[] = [];
       for (const a of q.acceptedDeliverables) {
         // ── 终止判据:这条交付物已经有交付会话了(§2.11.6 的那条边)──

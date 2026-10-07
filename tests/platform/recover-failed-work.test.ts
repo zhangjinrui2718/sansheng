@@ -23,6 +23,9 @@ import { runMigrations } from "../../src/platform/infra/migrations.js";
 import { addMember, insertProject } from "../../src/platform/storage/repo/projects.js";
 import { insertWork, updateWorkStatus } from "../../src/platform/storage/repo/works.js";
 import { collectTodos } from "../../src/platform/runtime/dispatcher.js";
+import { insertDispatchEvent } from "../../src/platform/storage/repo/dispatch.js";
+import { insertArtifact } from "../../src/platform/storage/repo/artifacts.js";
+import { resolveClientQuestion } from "../../src/platform/tools/client.js";
 import { ensureOrg } from "../../src/platform/runtime/org.js";
 
 const T0 = 1_700_000_000_000;
@@ -157,5 +160,108 @@ describe("④ 预算到界:不静默停", () => {
       expect(t.label.length, "公告文案要能读懂,不能是空串或一个 key")
         .toBeGreaterThan(4);
     }
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════
+// ⑤ 等甲方时不再追加新的交代回合(2026-10-07 真机:三连问)
+// ══════════════════════════════════════════════════════════════════
+
+/**
+ * 真机现场:一个**已经 `done`、交付物也验收过**的项目,业务经理在 20 分钟里连问
+ * 甲方三件 —— `09:03:42` / `09:03:59`(相隔 **17 秒**)/ `09:13:38`。
+ * 而 `ask_client` **没有任何合并窗口**(`report_downstream` 自己有「攒够 N 条或等 T」,
+ * 提问那条没有)。
+ *
+ * ⇒ 机制这一层拦的是「球在甲方那边时又被叫醒」;**一轮里问两件**要靠提示词。
+ */
+describe("⑥ 球在甲方那边时,不再追加新的交代回合", () => {
+  /**
+   * 建一条未答复的提问 = 球在甲方那边。
+   *
+   * ⚠️ **`question_artifact_id` 有外键指向 `artifacts`**(migration 020),所以
+   * 不能随手塞一个 id —— 那样测试会挂在 FOREIGN KEY 上,而不是挂在判据上。
+   * 走真实工件 ⇒ 外键满足,而且这条提问在界面上**真的会出现**。
+   */
+  const askClient = (): void => {
+    insertArtifact(db, {
+      id: "q_t1", projectId: "p1", kind: "client_question", status: "open",
+      authorAgentId: "bm", title: "整合报告这件事,现在算交付了吗?",
+      body: "候选 A/B/C", createdAt: T0 + 10_000, updatedAt: T0 + 10_000,
+    });
+    db.prepare(
+      `INSERT INTO client_questions (question_artifact_id, project_id, asked_by, asked_at)
+       VALUES ('q_t1', 'p1', 'bm', ?)`,
+    ).run(T0 + 10_000);
+  };
+
+  it("有未答复提问时,`report_downstream` **不产出**待办", () => {
+    addWork("w1", "done");
+    // ⚠️ **要攒够 3 条**(`--report-batch-size` 默认 3):`report_downstream` 有
+    // 合并窗口,1 条 + 不到 5 分钟 ⇒ 判据不成立 ⇒ 下面那条正样本会**因为
+    // 别的原因**一直空(夹具不够),而测试照样绿。
+    for (let i = 0; i < 3; i++) {
+      insertDispatchEvent(db, {
+        projectId: "p1", kind: "work_done", subjectId: "w1",
+        summary: `一条完成了 ${i}`, createdAt: T0 + 20_000,
+      });
+    }
+    // ⚠️ **先断言「没有提问时确实会产出」** —— 否则下面那条可能因为别的原因
+    // 一直空(夹具建错、事件类型不对),而测试照样绿。
+    expect(board().runnable.some((t) => t.kind === "report_downstream")).toBe(true);
+
+    askClient();
+    expect(
+      board().runnable.some((t) => t.kind === "report_downstream"),
+      "球在甲方那边时不该再追加交代",
+    ).toBe(false);
+  });
+
+  it("⚠️ **抑制不是丢弃**:那行 outbox 仍未被消费,答复后会一起交代", () => {
+    addWork("w1", "done");
+    // ⚠️ **要攒够 3 条**(`--report-batch-size` 默认 3):`report_downstream` 有
+    // 合并窗口,1 条 + 不到 5 分钟 ⇒ 判据不成立 ⇒ 下面那条正样本会**因为
+    // 别的原因**一直空(夹具不够),而测试照样绿。
+    for (let i = 0; i < 3; i++) {
+      insertDispatchEvent(db, {
+        projectId: "p1", kind: "work_done", subjectId: "w1",
+        summary: `一条完成了 ${i}`, createdAt: T0 + 20_000,
+      });
+    }
+    askClient();
+    board(); // 跑一次,模拟排空器查过
+    const row = db.prepare(
+      `SELECT consumed_at FROM dispatch_events WHERE project_id = 'p1' AND kind = 'work_done'`,
+    ).get() as { consumed_at: number | null };
+    // `pruneAttempts` 只动预算账本;`consumed_at` 是**消费**侧,归 `markConsumed`。
+    // 这条钉的是「抑制期间它没有被消费掉」—— 丢了就再也交代不出去了。
+    expect(row.consumed_at, "被抑制的那行必须留在库里,否则甲方答复后就消失了").toBeNull();
+  });
+
+  it("甲方答复之后(球回来),交代待办重新成立", () => {
+    addWork("w1", "done");
+    // ⚠️ **要攒够 3 条**(`--report-batch-size` 默认 3):`report_downstream` 有
+    // 合并窗口,1 条 + 不到 5 分钟 ⇒ 判据不成立 ⇒ 下面那条正样本会**因为
+    // 别的原因**一直空(夹具不够),而测试照样绿。
+    for (let i = 0; i < 3; i++) {
+      insertDispatchEvent(db, {
+        projectId: "p1", kind: "work_done", subjectId: "w1",
+        summary: `一条完成了 ${i}`, createdAt: T0 + 20_000,
+      });
+    }
+    askClient();
+    expect(board().runnable.some((t) => t.kind === "report_downstream")).toBe(false);
+    // 球回到业务经理这边。
+    // ⚠️ **走真实答复路径**(`resolveClientQuestion`),不手改 `client_questions.answered_at`。
+    // 因为 `awaitingClient` 读的是**工件 `status`**(`client_question` + `open`),
+    // 只改 `answered_at` 的话判据仍然成立 —— 那个测试会**因为夹具走偏**而红,
+    // 而它要钉的其实是「球回来之后能不能继续交代」。
+    resolveClientQuestion(db, "q_t1", "A —— 已经看过了", T0 + 60_000, {
+      newId: (p: string) => `${p}_ans`, answeredByAgentId: "bm",
+    });
+    expect(
+      board().runnable.some((t) => t.kind === "report_downstream"),
+      "球回来之后必须能继续交代 —— 否则被抑制的行永远出不来",
+    ).toBe(true);
   });
 });
