@@ -31,9 +31,12 @@
   读不到 ⇒ 判据在 `web/src/lib/orgState.ts`,事实来自 `GET /live` 与 `GET /messages`);
   **「合规记录」**= 不派生状态 —— 那一个回合确实没留工作记录,平台也不替模型补,
   **任何「已解决」都是编造现场**,它只能说「记录 · 不需要你动作」+ 计数。
-  `session_messages` 里 `kind='system'` 的行**只有两个生产者**,都在
-  `src/platform/host/serve.ts`:`announceDrain`(停止推进,项目级)与
-  `reportUnannouncedTurn`(合规告警,回合级),都落项目的**内部会话**,`agent_id` 为 NULL;
+  `session_messages` 里 `kind='system'` 的行**有三个生产者**,都在
+  `src/platform/host/serve.ts`:`announceDrain`(停止推进,项目级)、
+  `reportUnannouncedTurn`(合规告警,回合级)与
+  `reportWorkspaceProblem`(**工作区告警**,项目级;首行前缀 `⚠️ 工作区`,
+  只在「提交失败 / 有文件没进版本库」时发声,**同一条只播一次** —— 每回合重来一次
+  会把「组织运行态」淹掉),都落项目的**内部会话**,`agent_id` 为 NULL;
   分类只认**正文首行前缀**(`web/src/lib/platformNotices.ts`)。
   **对话页一个字都不留**(既不是气泡,也不再是一条「系统带」):`partitionTurns` 把它们摘成
   `notices` 计数,屏幕上只剩 `channelNoteText` 那一行「另有 N 条平台通知 —— 到「项目」页
@@ -43,7 +46,7 @@
   判据的一部分:同一对节点上两类边**方向一致**时不是环(真机那份数据就是这样),方向相反
   才是环(`mutualPairs` 会点名是哪两条边)。写反会让「交付」跑到最左、并且把一个不存在的
   环报出来(`web/src/lib/workGraph.ts` 的 `collectEdges`)。
-- 基线:**1672 passed / 82 test files** · 两条 typecheck 0 error · `check:design` E1–E14 全绿(5 角色)。
+- 基线:**1805 passed / 88 test files** · 两条 typecheck 0 error · `check:design` E1–E14 全绿(5 角色)。
 - **角色中文名只有一处**:`src/platform/runtime/org.ts` 的 `ORG`(播种 + `RoleHarnessView.displayName`
   共用);前端兜底表 `web/src/lib/vocab.ts` 的 `ROLE_LABEL` 必须逐项相同,由
   `tests/web/role-names.test.ts` 跨边界对照。**不许在某个页面里再写一张名字表**
@@ -321,12 +324,55 @@ dev/prod + CI/CD」,09:54 业务经理只回了一句「我先看下你之前留
 
 ## 数据与存储
 
-- 迁移在 `migrations/`:**007–010 建平台表**,**011 把旧系统的 7 张表 DROP**(`blackboards` / `conversations` / `messages` / `fragments` / `user_profile` / `agent_states` / `fragments_vec`),**012 接待会话**(重建 `project_sessions` 放宽 `project_id` 可空,已登记进 `INTENTIONAL_REBUILDS`),**013 排空器状态**(`works.review_state` + `dispatch_events` + `dispatch_attempts`,纯加法),**014 产出边**(`artifacts.work_id` + 一条部分索引,纯加法),**015 放宽 `dispatch_events.kind`**(加 `work_cancelled`;闭集**只能靠重建表**放宽,已登记进 `INTENTIONAL_REBUILDS`),**016 交付物 kind**(重建 `artifacts`),**017 交付会话**(`project_sessions.deliverable_artifact_id` + `channel`,纯加法),**018 `turn_usage` 表**(纯加法),**019 会话消息的封套**(`session_messages.origin_source` + `trigger_kind`,纯加法;两列各有自己的 CHECK),**020 `client_questions` 台账**,**021 `review_verdicts`**,**022 `session_messages.todo_kind`**(纯加法、**不建 CHECK** —— 取值域随 `TODO_KINDS` 变,闭集在读写两侧的 TS 里),**023 项目版本链**(`projects.version` + `parent_project_id`,`ON DELETE SET NULL`),**024 对话一等实体**(`project_sessions.kind` + `title`;`kind` **有** CHECK —— 两值闭集,与 022 相反),**025 交付物类型**(`artifacts.deliverable_type` + 一条部分索引,纯加法),**026 执行角色一分为二 + 交付物类型加 `code_service`**(⚠️ **重建两张表**:`agents` 的 role 闭集 4→5 值并改名 + `artifacts` 的 `deliverable_type` 闭集 1→2 值;两张都登记进 `INTENTIONAL_REBUILDS`)。
+- 迁移在 `migrations/`:**007–010 建平台表**,**011 把旧系统的 7 张表 DROP**(`blackboards` / `conversations` / `messages` / `fragments` / `user_profile` / `agent_states` / `fragments_vec`),**012 接待会话**(重建 `project_sessions` 放宽 `project_id` 可空,已登记进 `INTENTIONAL_REBUILDS`),**013 排空器状态**(`works.review_state` + `dispatch_events` + `dispatch_attempts`,纯加法),**014 产出边**(`artifacts.work_id` + 一条部分索引,纯加法),**015 放宽 `dispatch_events.kind`**(加 `work_cancelled`;闭集**只能靠重建表**放宽,已登记进 `INTENTIONAL_REBUILDS`),**016 交付物 kind**(重建 `artifacts`),**017 交付会话**(`project_sessions.deliverable_artifact_id` + `channel`,纯加法),**018 `turn_usage` 表**(纯加法),**019 会话消息的封套**(`session_messages.origin_source` + `trigger_kind`,纯加法;两列各有自己的 CHECK),**020 `client_questions` 台账**,**021 `review_verdicts`**,**022 `session_messages.todo_kind`**(纯加法、**不建 CHECK** —— 取值域随 `TODO_KINDS` 变,闭集在读写两侧的 TS 里),**023 项目版本链**(`projects.version` + `parent_project_id`,`ON DELETE SET NULL`),**024 对话一等实体**(`project_sessions.kind` + `title`;`kind` **有** CHECK —— 两值闭集,与 022 相反),**025 交付物类型**(`artifacts.deliverable_type` + 一条部分索引,纯加法),**026 执行角色一分为二 + 交付物类型加 `code_service`**(⚠️ **重建两张表**:`agents` 的 role 闭集 4→5 值并改名 + `artifacts` 的 `deliverable_type` 闭集 1→2 值;两张都登记进 `INTENTIONAL_REBUILDS`),**027 工件正文落文件**(⚠️ **重建 `artifacts`**:`body TEXT` → `body_path` / `body_sha256` / `body_bytes` 三列 NOT NULL + `commit_sha` 可空;登记进 `INTENTIONAL_REBUILDS`。**它故意不走「建 _new → 拷 → 改名」**:没有数据要拷(用户明确「老数据全不要」),而改名法会让「`artifacts` 被多个迁移创建」这条登记**当场过期**;数据安全改由一条会响的前置检查承担 —— `CHECK (n = 0)`,非空库上**响亮失败并整体回滚**,而不是静默清空)。
 - ⚠️ **`artifacts.work_id` 一条边承载两个语义**(「产出」∪「关于」,migration 014):执行角色写 `evidence` 是产出,质检把 `review_finding` 挂到**被审的那条**上是「关于」。取「这条工作项交付了什么」必须自己区分(`runtime/execution.ts` 用 `work_id` + 作者 + `kind ∉ ABOUT_ONLY_ARTIFACT_KINDS` 三条判据);**不要删那些边** —— 它是 `review_finding` 唯一能表达「审的是哪一条」的地方。
 - `artifacts` 直接挂项目 —— **没有 blackboard 容器层**。记忆在 `memory_fragments` / `memory_profile`,不是 `fragments`:`fragments` 是旧名字,001 已占用。
 - 平台表**不得复用旧表名**:`CREATE TABLE IF NOT EXISTS` 撞名时静默无操作,新表根本建不出来(见下 §三类静默失败)。加表前先 `ls migrations/` 查名。
 - 外键一律指向 `agent_id`,不存 `role` 字符串 —— 角色属性只有一处真相。
 - 存储形态可替换:上层只依赖 `src/platform/memory/port.ts` 的 `MemoryPort`;甲方通道同理走 `src/platform/client/port.ts` 的 `ClientChannel`。
+
+### 工作区:每项目一个仓,库里只存索引(2026-10-08 大批次)
+
+**用户五条裁决**:① 按**项目**分文件系统(不按角色);② **不做归档动作**,用 git 管这个目录;
+③ **数据库不存真实内容,只存索引**;④ `code_service` 直接**复用项目仓**(不再有独立仓库);
+⑤ 交付口径 = 交付物是 `services/<name>/` 这个**构建上下文**,整仓对甲方可见(**透明交付**)。
+配套约束:老数据一条不要 ⇒ **没有迁移、没有回填、一步到位**。
+
+```
+<workRoot>/projects/<projectId>/     ← 一个项目 = 一个 git 仓库
+├── .gitignore / README.md           ← 平台在 project_open 时写并首次提交
+├── artifacts/<id>-<slug>.<ext>      ← 工件正文(索引 body_path 指向这里,平台写)
+├── work/<workId>/                   ← 派发工作项时建;绝对路径写进任务提示词
+└── services/<name>/                 ← 代码服务(Dockerfile 在这里)= code_service 交付物
+```
+
+- **`sessionCwd(projectId)` 无条件**返回项目根;`isolateProjectCwd` 参数**已整个删掉**
+  (接待会话 `projectId === null` 仍留工作根、不建仓)。全仓 grep 该名字只剩注释。
+- **归属由 git 承载**:平台在**回合边界**做 housekeeping 提交(成功/失败/超时/被中断**四条路都做**),
+  author = 角色中文名(`ORG`);次序 = 索引向盘收敛(重算 sha/bytes)→ 提交 → 按「HEAD 里有这条
+  路径且哈希一致」回填 `commit_sha`。agent 自己提交代码(编码工要先提交服务目录,
+  否则 `code_service` 的第 ⑦ 条会拒 —— 见上)。
+- **提交失败 / 有文件没进版本库 ⇒ 可见**(`reportWorkspaceProblem` → 一条 `system` 平台通知,
+  首行前缀 `⚠️ 工作区`,**同一条只播一次**)。闸门挡下的东西**不许静默**:秘密
+  (`.env` / `*.key` / `*.pem` / `secrets/`)与超大文件(> 10 MB)**不提交**并逐条报出 ——
+  交付口径是整仓可见,所以「没进去的」与「进去了的」必须长得不一样。
+- **读面 `GET /api/projects/:id/workspace`**(`WorkspaceView`)= 盘上有什么 + 索引引用了什么 +
+  两边对不对得上。**`runtime: "unavailable"` 是读不到根目录,不是空目录**;
+  `missing`(**库里有、盘上无**)必须**逐条 `statSync`** 算出来 —— **不许**拿「本次遍历有没有列到它」
+  当判据:遍历有深度 3 层 / 500 条上限,到界时一个真实存在的文件会被报成 missing,
+  那是一句**自信的假话**(`tests/platform/workspace-scan.test.ts` 有两条负样本 + 变异自检钉住它)。
+- **工件正文不再随列表返回**:列表给 `bodyPath` / `bodyBytes` / `commitSha`,
+  正文走 `GET /api/artifacts/:id/content?at=<sha>` 现读。三态 **不是 ok 就都不是空正文**:
+  `unavailable`(文件不在 HEAD / `at` 不可达)、`drifted`(盘上这份与索引记的不是同一份 ——
+  人工改过,下一次提交重建索引收回一致)、提交不可达(`RepoCommitsView.runtime === "unreachable"`,
+  与 `unavailable` **处置相反**:前者是「提交被 `reset --hard` 抹掉」,后者是「读不到盘」)。
+  ⚠️ **回滚只许 `revert`,不许 `reset --hard`** —— 后者会让 `deliverableCommit` 变成不可达对象。
+- **渲染面不变**:`HtmlReport` 仍走 `<iframe sandbox="" srcDoc>`,正文**先 fetch 成文本**再喂进去。
+  ⚠️ **不许**改成 `<iframe src="/api/artifacts/:id/content">` —— 那让模型写的 HTML 与应用**同源**,
+  `sandbox=""` 是结构性保证、不是过滤器。判据在 `tests/web/deliverable-render.test.ts`
+  (**剥注释后**扫全 `web/src`,带正负样本与对真源码的内存变异自检)。
+  ⚠️ 用裸 `grep '<iframe[^>]*src='` 复核会得到**假阳性**(它命中注释里的反面教材)——
+  本文自己就踩过一次:原始 grep 报 3 处,剥掉注释后是 **0**。**错的是仪器,不是代码。**
 
 ### 「待答」队列:**收口项目的提问不是待答**(2026-10-07 真机事故)
 
@@ -392,17 +438,29 @@ dev/prod + CI/CD」,09:54 业务经理只回了一句「我先看下你之前留
 
 #### `code_service` 的写入口 = 平台**当场去盘上核对**
 
-`metadata` 必带五项:`repoPath` / `branch` / `headCommit` / `service` / `port`。
+⚠️ **2026-10-08 起代码服务复用项目仓**(不再有独立仓库),交付物的**边界**因此改由
+`servicePath`(仓内相对路径,如 `services/billing-api`,Dockerfile 在它里面)表达。
+`metadata` 必带**六项**:`repoPath`(**= 项目根**)/ `servicePath` / `branch` /
+`headCommit` / `service` / `port`。
 写入那一刻 `tools/blackboard.ts` 的 `verifyCodeService` 调 `codeservice` 端口
-(`src/platform/codeservice/git.ts`)去读一遍,**六件事一件不过就拒收**(每条拒绝都带可执行的处置):
+(`src/platform/codeservice/git.ts`)去读一遍,**七件事一件不过就拒收**(每条拒绝都带可执行的处置):
 
 ① 路径存在且**在工作根之内**(realpath 之后比,符号链接也拦得住);② 它**就是仓库根**
 (`git rev-parse --show-toplevel` 必须等于它,不是子目录);③ 真的是 git 工作区;
 ④ 有提交(HEAD 解析得出来);⑤ `headCommit` 与真实 HEAD 一致、`branch` 的顶端就是它;
-⑥ **仓库根有 `Dockerfile`**。
+⑥ **`servicePath` 在仓库内、存在、是目录,且里面有 `Dockerfile`**;
+⑦ **服务目录里至少有一条被提交的文件** —— 否则 `git log -1 -- <servicePath>` 给不出 sha,
+而**回退到 HEAD 就是把「交付物根本没进版本库」说成「这版就是 HEAD」**(自信的假话)。
+⇒ 编码工提示词因此把顺序写死:**先 `git add services/<名> && git commit`,再 `board_write`**。
 
-核对通过之后,写进库的坐标是**平台读到的值**(短 sha 归一成全 sha,另补
-`headSubject` / `commitCount` / `files` / `verifiedAt`),并**原样回灌给模型**。
+核对通过之后,写进库的坐标是**平台读到的值**,并**原样回灌给模型**:
+`headCommit`/`headSubject`(交付那一刻的仓库现场)、
+**`deliverableCommit`/`deliverableSubject`**(= `git log -1 -- <servicePath>`,
+**这个交付物的版本**)、`commitCount`/`files`(**按 `servicePath` 算**)、
+`ignoredFiles`(被 `.gitignore` 吃掉、**甲方 clone 不到**的那些)。
+⚠️ **`deliverableCommit` 与 `headCommit` 不是一回事**:平台每回合都写工件并提交,
+HEAD 一直在动,而交付物可能根本没变 —— 读面说「这版交付物是什么」必须用前者。
+
 ⚠️ **没接上核对面时拒绝,不放行** —— 缺省放行等于「在这台机器上写一条假交付物是合法的」。
 ⚠️ `GIT_DIR` 这类环境变量必须 **`delete` 而不是设成 `""`**:空串会被 git 当成一个路径
 (`fatal: not a git repository: ''`),于是每次核对都失败,而错误读起来像「这不是 git 仓库」。
@@ -465,7 +523,7 @@ help
 ```
 npx tsc -p tsconfig.server.json --noEmit
 npx tsc -p tsconfig.web.json --noEmit
-npm test                  # 1672 passed / 82 files
+npm test                  # 1805 passed / 88 files
 npm run build
 npm run check:design      # 设计一致性 E1–E14
 ```
