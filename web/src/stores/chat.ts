@@ -325,6 +325,26 @@ export interface ChatState {
    */
   lastUserEchoId: string | null;
 
+  /**
+   * 上一次 `sendMessage` 的**原文**,以及那一轮**有没有乐观上屏**。
+   *
+   * ── 为什么需要它(2026-10-07 真机:接待里甲方的话根本不显示)────────
+   *
+   * 接待会话里 `sendMessage` 的 `line` **恒为 `null`**(见那个函数:`intakeActive`
+   * 时根本不发 `sessionId`,而乐观上屏以 `line !== null` 为条件)⇒ **接待里不做
+   * 乐观上屏**。可是 `message_start` 的 user 分支**假设已经上屏了**:
+   * 它只记 `lastUserEchoId` 就 `return`,**不建轮**;随后 `delta` / `thinking_delta`
+   * 又都按 `lastUserEchoId` 跳过。
+   *
+   * ⇒ 两边各让一步的结果是**没有一条路给接待里那句甲方的话建轮**:
+   * 屏幕上只剩业务经理的回复,甲方自己说的话**只有刷新(或重进接待,REST 重取)
+   * 才看得到**。真机现象正是「我发的信息怎么看不到了」+「刷新页面也能看到」。
+   *
+   * 判据放在这里而不是 `intakeActive` 上:发送与回显之间上下文可能已经变了,
+   * 而「这一句我到底上没上屏」是**发送那一刻的事实**,不该事后推断。
+   */
+  lastUserSend: { readonly text: string; readonly optimistic: boolean } | null;
+
   // ── 运行态 ──
   modelId: string | null;
   provider: string | null;
@@ -622,6 +642,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   inFlightOrder: [],
   currentTurn: null,
   lastUserEchoId: null,
+  lastUserSend: null,
 
   modelId: null,
   provider: null,
@@ -816,6 +837,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
       );
       set((s) => ({ turns: [...s.turns, { ...t, blocks: [{ kind: "text", text }] }] }));
     }
+    // **把「这一句发出去时上没上屏」记下来** —— 接待会话不上屏(`line` 恒为 null),
+    // 而 server 的 `message_start(user)` 回显又假设已经上屏了、不建轮。
+    // 没有这个记录,接待里甲方说的话就**没有任何一条路**能进 `turns`(见字段注释)。
+    set({ lastUserSend: { text, optimistic: line !== null } });
     // 接待会话发送 `projectId: null` —— 契约里这就是「第一个项目之前」那条会话
     socket.sendToProject(intakeActive ? null : projectId, text, line ?? undefined);
   },
@@ -879,6 +904,31 @@ export const useChatStore = create<ChatState>((set, get) => ({
         // 它不该出现在 `inFlight` 里(那会让渲染层多一个「推演中」的甲方气泡)。
         if (e.role === "user") {
           set({ lastUserEchoId: e.messageId });
+          // ⚠️ **没乐观上屏的那一轮,靠这条回显补出轮来**(2026-10-07 真机)。
+          //
+          // 上面那句注释假设「用户那条消息在 sendMessage 里已乐观上屏」—— 那个假设
+          // **在接待会话里不成立**(`sendMessage` 的 `line` 恒为 null ⇒ 不上屏),
+          // 于是接待里甲方的话既没有乐观轮、回显这里又 `return` 掉,`delta` 还被
+          // `lastUserEchoId` 跳过 ⇒ **屏幕上永远没有它**,只有刷新才看得到。
+          //
+          // 正文用**发送时记下的原文**(回显不带正文,而 `delta` 按 id 被跳过),
+          // `sessionId` 用**回显带来的那个** —— 不编一个(那条纪律见 `sendMessage`)。
+          const sent = get().lastUserSend;
+          // `e.projectId === get().projectId` 是**上下文守卫**:`turns` 只装当前
+          // 上下文,发送与回显之间用户可能已经切走 —— 那时这条轮不属于眼前这一屏。
+          if (sent !== null && !sent.optimistic && e.projectId === get().projectId) {
+            const t = newTurn(
+              e.messageId,
+              "user",
+              null,
+              e.projectId,
+              originOfMessageStart(e),
+              e.sessionId,
+            );
+            set((s) => ({
+              turns: [...s.turns, { ...t, blocks: [{ kind: "text", text: sent.text }] }],
+            }));
+          }
           return;
         }
         // 建轮的唯一入口之一(另一个是 tool_start)。`agentId` 在这里落进轮里,
