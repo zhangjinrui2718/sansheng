@@ -6,6 +6,10 @@
  *   - 工具实现的业务语义(负责人解析、环回滚、终态必须给 resolution)
  */
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { createGitWorkspace } from "../../src/platform/workspace/git.js";
 import type Database from "better-sqlite3";
 import { openPlatformMemoryDb } from "../../src/platform/storage/index.js";
 import {
@@ -29,11 +33,14 @@ let db: Database.Database;
 let seq = 0;
 let clock = 1_700_000_000_000;
 let project: Project;
+/** 工作根 —— **只碰 `mkdtemp`**(027 起工件正文落成项目仓里的文件) */
+let workRoot: string;
 const agents = new Map<string, Agent>();
 
 const ids: Record<string, string> = {};
 
 beforeEach(() => {
+  workRoot = mkdtempSync(join(tmpdir(), "sansheng-tools-"));
   db = openPlatformMemoryDb();
   seq = 0;
   clock = 1_700_000_000_000;
@@ -62,7 +69,10 @@ beforeEach(() => {
   for (const id of Object.values(ids)) addMember(db, pid, id, clock);
   project = loadProjectForAuthz(db, pid)!;
 });
-afterEach(() => db.close());
+afterEach(() => {
+  db.close();
+  rmSync(workRoot, { recursive: true, force: true });
+});
 
 function ctxFor(agentId: string): ToolRunContext {
   const agent = agents.get(agentId);
@@ -73,6 +83,9 @@ function ctxFor(agentId: string): ToolRunContext {
     project,
     now: () => clock,
     newId: (prefix) => `${prefix}_new${++seq}`,
+    // 027 起 `board_write` 先写文件、后插行 ⇒ 工具层必须有工作区
+    workspace: createGitWorkspace(),
+    workspaceRoot: workRoot,
   };
 }
 
@@ -641,7 +654,7 @@ describe("端到端 · 立项 → 拆解 → 干活 → 阻塞 → 变更 → �
     // 立项人进项目;其余成员由 boot 逻辑加(这里手工补,BC1 还没有 member 管理工具)
     for (const id of [ids.pm, ids.wkAlgo, ids.qa]) addMember(db, pid, id, clock);
     const proj = loadProjectForAuthz(db, pid)!;
-    const ctx = (a: Agent): ToolRunContext => ({ db, agent: a, project: proj, now: () => clock, newId: (p) => `${p}_new${++seq}` });
+    const ctx = (a: Agent): ToolRunContext => ({ ...ctxFor(a.id), project: proj });
     const run = (a: Agent, tool: string, args: Record<string, unknown> = {}): ToolResult => {
       const r = dispatch(tool, args, ctx(a));
       if (r instanceof Promise) throw new Error("sync only");

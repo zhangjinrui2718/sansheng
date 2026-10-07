@@ -16,8 +16,10 @@
  *   ③ 不变式:solveToolset 给的每个工具都必须在注册表里
  */
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
+import { tmpdir } from "node:os";
+import { createGitWorkspace } from "../../src/platform/workspace/git.js";
 import type Database from "better-sqlite3";
 import { openPlatformMemoryDb } from "../../src/platform/storage/index.js";
 import { insertAgent } from "../../src/platform/storage/repo/agents.js";
@@ -41,11 +43,14 @@ let db: Database.Database;
 let seq = 0;
 const clock = 1_700_000_000_000;
 let deps: RuntimeDeps;
+/** 工作根 —— **只碰 `mkdtemp`**(027 起工件正文落成项目仓里的文件) */
+let workRoot: string;
 const ids: Record<string, string> = {};
 /** 角色 → 夹具 agent id。完整覆盖 `ProjectRole`(漏一个会在类型层报错,而不是静默 undefined)。 */
 let roleIds: Record<ProjectRole, string>;
 
 beforeEach(() => {
+  workRoot = mkdtempSync(join(tmpdir(), "sansheng-sdk-"));
   db = openPlatformMemoryDb();
   seq = 0;
   function mk(role: ProjectRole, spec?: Specialization): string {
@@ -74,9 +79,16 @@ beforeEach(() => {
     memory: new SqliteMemory(db, { newId: (p) => `${p}_${++seq}`, now: () => clock }),
     now: () => clock,
     newId: (p) => `${p}_${++seq}`,
+    // 工具层写工件正文要工作区(端口 + 根),装配路径与生产同一条
+    // (`buildToolContext` 把它们搬进 `ToolRunContext`)
+    workspace: createGitWorkspace(),
+    workspaceRoot: workRoot,
   };
 });
-afterEach(() => db.close());
+afterEach(() => {
+  db.close();
+  rmSync(workRoot, { recursive: true, force: true });
+});
 
 // ── assembly ────────────────────────────────────────────────────
 

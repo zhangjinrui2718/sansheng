@@ -23,6 +23,7 @@ import type { Capability, ToolName } from "../harness/capability.js";
 import type { MemoryPort } from "../memory/port.js";
 import type { ClientChannel } from "../client/port.js";
 import type { CodeServicePort } from "../codeservice/port.js";
+import type { WorkspacePort } from "../workspace/port.js";
 import type { ToolRunContext } from "../tools/types.js";
 
 /** 进程级依赖。会话工厂持有一份,每次工具调用按 agent + project 组装。 */
@@ -36,6 +37,25 @@ export interface RuntimeDeps {
    * 生产由 `bootPlatform` 注入真实现(`codeservice/git.ts`)。
    */
   readonly codeService?: CodeServicePort;
+  /**
+   * **工作区**(设计 `docs/DESIGN-WORKSPACE.md` §4.3)。
+   *
+   * 与 `codeService` 同一条理由:工件正文 2026-10-08 起落成项目仓里的文件,
+   * 工具层必须有写盘能力。缺省 = 没有接线,那时 `board_write` / `ask_client` /
+   * `answer` / `meeting_conclude` 会**拒绝并如实报装配错误**,而不是静默不落盘。
+   * 生产由 `bootPlatform` 注入真实现(`workspace/git.ts`)。
+   *
+   * ⚠️ 它与 {@link workspaceRoot} **成对**:端口提供能力,根提供「相对哪个根」。
+   */
+  readonly workspace?: WorkspacePort;
+  /**
+   * **工作根**(绝对路径)。项目根 = `<workspaceRoot>/projects/<projectId>`
+   * (`workspace/root.ts` 的 `projectWorkspaceRoot`)。
+   *
+   * ⚠️ **必须与会话 `cwd` 用同一个根** —— 否则会话在项目目录里跑,
+   * 而平台把工件写到了工作根下面另一个地方,两边都"看起来正常"。
+   */
+  readonly workspaceRoot?: string;
   /** 时钟注入(测试可控) */
   readonly now?: () => number;
   /** id 生成注入(测试可复现) */
@@ -149,6 +169,8 @@ export function buildToolContext(
     ...(deps.memory !== undefined ? { memory: deps.memory } : {}),
     ...(deps.client !== undefined ? { client: deps.client } : {}),
     ...(deps.codeService !== undefined ? { codeService: deps.codeService } : {}),
+    ...(deps.workspace !== undefined ? { workspace: deps.workspace } : {}),
+    ...(deps.workspaceRoot !== undefined ? { workspaceRoot: deps.workspaceRoot } : {}),
     ...(deps.onStateChange !== undefined ? { nudge: deps.onStateChange } : {}),
   } satisfies Omit<ToolRunContext, "project">;
 

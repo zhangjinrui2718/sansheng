@@ -25,6 +25,10 @@ import {
 } from "../storage/repo/artifacts.js";
 import { recordClientQuestion, markClientQuestionAnswered } from "../storage/repo/clientQuestions.js";
 import type { ClientChannel } from "../client/port.js";
+import type { WorkspacePort } from "../workspace/port.js";
+import {
+  WORKSPACE_ASSEMBLY_PROBLEM, accessFromDeps, workspaceAccess, writeArtifactBody,
+} from "./artifactBody.js";
 import { fail, ok, requireProject, requireString, readString, readStringArray,
   type PlatformTool, type ToolResult, type ToolRunContext } from "./types.js";
 
@@ -61,10 +65,33 @@ const askClient: PlatformTool = {
     const lean = readString(args, "lean");
 
     const id = ctx.newId("q");
-    const at = ctx.now();
+    // 台账用的标题 —— 提问的正文标题就是问题本身(它要被读面显示成一条 open 的提问)
+    const questionTitle = question.value;
+    const questionBody =
+      question.value +
+      (options.length > 0 ? `\n\n候选:\n${options.map((o) => `- ${o}`).join("\n")}` : "") +
+      (lean !== undefined ? `\n\n倾向:${lean}` : "");
+
+    // ── 先写文件、后插行(设计 §4.3)─────────────────────────────────
+    // 与 board_write 同一条纪律、同一个实现(顺序反了会得到「有索引无内容」)。
+    const qAccess = workspaceAccess(ctx);
+    if (qAccess === null) return fail("internal", WORKSPACE_ASSEMBLY_PROBLEM);
+    const qWritten = writeArtifactBody(qAccess, {
+      id,
+      title: questionTitle,
+      deliverableType: null,
+      content: questionBody,
+    });
+    if (!qWritten.ok) {
+      return fail(
+        "internal",
+        `提问正文写盘失败,这次 ask_client **没有落库、也没有投递**:${qWritten.problem}`,
+      );
+    }
 
     // 先落工件再投递 —— 顺序反了会出现「问题已经发给用户但库里没有记录」,
     // 用户答完之后无处回填。
+    const at = ctx.now();
     try {
       insertArtifact(ctx.db, {
         id,
@@ -73,11 +100,10 @@ const askClient: PlatformTool = {
         kind: "client_question",
         status: OPEN,
         authorAgentId: ctx.agent.id,
-        title: question.value,
-        body:
-          question.value +
-          (options.length > 0 ? `\n\n候选:\n${options.map((o) => `- ${o}`).join("\n")}` : "") +
-          (lean !== undefined ? `\n\n倾向:${lean}` : ""),
+        title: questionTitle,
+        bodyPath: qWritten.value.bodyPath,
+        bodySha256: qWritten.value.bodySha256,
+        bodyBytes: qWritten.value.bodyBytes,
         metadataJson: JSON.stringify({
           options,
           ...(lean !== undefined ? { lean } : {}),
@@ -162,7 +188,14 @@ function optionalChannel(ctx: ToolRunContext): ClientChannel | null {
 
 export interface ResolveClientQuestionResult {
   ok: boolean;
-  reason?: "not_found" | "not_a_question" | "already_resolved";
+  /**
+   * ⚠️ `content_write_failed` 是**装配/磁盘**的问题,不是数据问题:
+   * 正文没写成就**没有** decision 行(先文件后行)。调用方要把它渲染成
+   * 「答复没能落库」而不是「找不到这个问题」。
+   */
+  reason?: "not_found" | "not_a_question" | "already_resolved" | "content_write_failed";
+  /** `content_write_failed` 时的现场(路径 / 为什么写不成) */
+  problem?: string;
   decisionArtifactId?: string;
 }
 
@@ -180,7 +213,21 @@ export function resolveClientQuestion(
   questionId: string,
   answer: string,
   at: number,
-  opts: { newId: (p: string) => string; answeredByAgentId: string },
+  opts: {
+    newId: (p: string) => string;
+    answeredByAgentId: string;
+    /**
+     * **工作区**(+ 工作根)—— 落 `decision` 工件的正文用。
+     *
+     * 为什么它是必填而不是可选:`decision` 的正文与其它工件一样**住文件**
+     * (migration 027 的三列 NOT NULL)。没有工作区就没有落点 —— 那只能让这次
+     * 答复失败,而**不能**插一行指向不存在文件的记录(「有索引无内容」)。
+     * 必填让「忘了装配」变成一次编译错误,而不是一次运行时静默降级。
+     */
+    workspace: WorkspacePort;
+    /** 工作根(`<workRoot>/projects/<projectId>` 的 `workRoot`) */
+    workspaceRoot: string;
+  },
 ): ResolveClientQuestionResult {
   const q = getArtifact(db, questionId);
   if (q === null) return { ok: false, reason: "not_found" };
@@ -188,6 +235,21 @@ export function resolveClientQuestion(
   if (q.status !== "open") return { ok: false, reason: "already_resolved" };
 
   const decisionId = opts.newId("art");
+  const decisionTitle = `甲方答复:${q.title.slice(0, 60)}`;
+  const decisionBody = `${answer}\n\n---\n原问题:${q.title}`;
+  // 先写文件、后插行(与 board_write 同一个实现、同一条纪律)。
+  const access = accessFromDeps(
+    { workspace: opts.workspace, workspaceRoot: opts.workspaceRoot },
+    q.projectId,
+  );
+  if (access === null) {
+    return { ok: false, reason: "content_write_failed", problem: WORKSPACE_ASSEMBLY_PROBLEM };
+  }
+  const written = writeArtifactBody(access, {
+    id: decisionId, title: decisionTitle, deliverableType: null, content: decisionBody,
+  });
+  if (!written.ok) return { ok: false, reason: "content_write_failed", problem: written.problem };
+
   insertArtifact(db, {
     id: decisionId,
     projectId: q.projectId,
@@ -195,8 +257,10 @@ export function resolveClientQuestion(
     kind: "decision",
     status: ACCEPTED,
     authorAgentId: opts.answeredByAgentId,
-    title: `甲方答复:${q.title.slice(0, 60)}`,
-    body: `${answer}\n\n---\n原问题:${q.title}`,
+    title: decisionTitle,
+    bodyPath: written.value.bodyPath,
+    bodySha256: written.value.bodySha256,
+    bodyBytes: written.value.bodyBytes,
     metadataJson: JSON.stringify({ answersQuestionId: q.id, source: "client" }),
     createdAt: at,
     updatedAt: at,

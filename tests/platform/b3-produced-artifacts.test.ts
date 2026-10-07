@@ -32,6 +32,11 @@
  *   ④ 产出工件不改变看板 —— 所以宿主侧的布尔是空转。
  */
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { createHash } from "node:crypto";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { createGitWorkspace } from "../../src/platform/workspace/git.js";
 import type Database from "better-sqlite3";
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
 import { openPlatformMemoryDb } from "../../src/platform/storage/index.js";
@@ -51,9 +56,11 @@ import type { Agent } from "../../src/platform/harness/authorize.js";
 
 let db: Database.Database;
 let seq = 0;
+let workRoot: string;
 const T0 = 1_700_000_000_000;
 
 beforeEach(() => {
+  workRoot = mkdtempSync(join(tmpdir(), "sansheng-b3-"));
   db = openPlatformMemoryDb();
   seq = 0;
   insertAgent(db, {
@@ -70,7 +77,10 @@ beforeEach(() => {
   });
   for (const id of ["pm", "wk"]) addMember(db, "p1", id, T0);
 });
-afterEach(() => db.close());
+afterEach(() => {
+  db.close();
+  rmSync(workRoot, { recursive: true, force: true });
+});
 
 function mkWork(): WorkRow {
   const w: WorkRow = {
@@ -106,7 +116,12 @@ function ctxFor(agentId: string, nudge: () => void): ToolRunContext {
     id: row.id, role: row.role, displayName: row.displayName,
     ...(row.specialization !== null ? { specialization: row.specialization } : {}),
   };
-  return { db, agent, project, now: () => T0, newId: (p) => `${p}_b3`, nudge };
+  return {
+    db, agent, project, now: () => T0, newId: (p) => `${p}_b3`, nudge,
+    // 027:`board_write` 先写文件、后插行 —— 走真工具路径就必须有真工作区
+    workspace: createGitWorkspace(),
+    workspaceRoot: workRoot,
+  };
 }
 
 /**
@@ -160,8 +175,13 @@ describe("B3 · `producedArtifacts` 的读者是 CLI 报告(`platform-run`)", ()
       producedArtifacts: [{
         id: "art_b3", projectId: "p1", conversationId: null,
         kind: "evidence", status: "open", authorAgentId: "wk",
-        title: "路线 A 的实测数据", body: "延迟 120ms", metadataJson: null,
-        createdAt: T0, updatedAt: T0, workId: "w1",
+        title: "路线 A 的实测数据",
+        // 027:行的内容是**落点 + 写入快照**,不是正文本身
+        bodyPath: "artifacts/art_b3-route-a.md",
+        bodySha256: createHash("sha256").update("延迟 120ms", "utf8").digest("hex"),
+        bodyBytes: Buffer.byteLength("延迟 120ms", "utf8"),
+        commitSha: null, metadataJson: null,
+        createdAt: T0, updatedAt: T0, workId: "w1", deliverableType: null,
       }],
       raisedBlockers: [],
     };

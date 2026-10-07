@@ -20,6 +20,7 @@
  *      这一条才证明它不是交付时存下的快照(快照看起来与新鲜的一模一样)。
  */
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -48,20 +49,27 @@ function git(cwd: string, ...args: string[]): string {
   ).trim();
 }
 
-/** 在临时工作根里建一个真仓库,提交 `n` 次。 */
-function makeRepo(name: string, n: number): { path: string; head: string } {
+/**
+ * 在临时工作根里建一个真仓库,并把 `n` 次提交全部落在**服务目录**
+ * `services/<name>/` 里(migration 027 之后交付物的边界是 `servicePath`)。
+ */
+function makeRepo(name: string, n: number): {
+  path: string; head: string; servicePath: string;
+} {
   const dir = join(root, name);
-  mkdirSync(dir, { recursive: true });
-  writeFileSync(join(dir, "Dockerfile"), "FROM scratch\n");
+  const servicePath = `services/${name}`;
+  const svc = join(dir, servicePath);
+  mkdirSync(svc, { recursive: true });
+  writeFileSync(join(svc, "Dockerfile"), "FROM scratch\n");
   git(dir, "init", "-b", "main");
   let head = "";
   for (let i = 1; i <= n; i += 1) {
-    writeFileSync(join(dir, `f${i}.txt`), `${i}\n`);
+    writeFileSync(join(svc, `f${i}.txt`), `${i}\n`);
     git(dir, "add", "-A");
     git(dir, "commit", "-m", `第 ${i} 次提交`);
     head = git(dir, "rev-parse", "HEAD");
   }
-  return { path: dir, head };
+  return { path: dir, head, servicePath };
 }
 
 beforeEach(() => {
@@ -79,8 +87,10 @@ afterEach(() => {
 
 function writeDeliverable(opts: {
   repoPath: string | null;
+  servicePath?: string | null;
   head?: string | null;
   branch?: string | null;
+  deliverableCommit?: string | null;
   type?: string | null;
 }): string {
   seq += 1;
@@ -90,11 +100,15 @@ function writeDeliverable(opts: {
       ? null
       : JSON.stringify({
           repoPath: opts.repoPath,
+          servicePath: opts.servicePath === undefined ? "services/svc" : opts.servicePath,
           branch: opts.branch ?? "main",
           headCommit: opts.head ?? null,
+          // 交付物的**版本**(与 HEAD 是两件事):默认与 head 相同
+          deliverableCommit: opts.deliverableCommit ?? opts.head ?? null,
           service: "svc",
           port: 8080,
         });
+  const content = "## 怎么跑";
   insertArtifact(db, {
     id,
     projectId: P1,
@@ -103,7 +117,9 @@ function writeDeliverable(opts: {
     status: "open",
     authorAgentId: "cw",
     title: "代码服务",
-    body: "## 怎么跑",
+    bodyPath: `artifacts/${id}.md`,
+    bodySha256: createHash("sha256").update(content, "utf8").digest("hex"),
+    bodyBytes: Buffer.byteLength(content, "utf8"),
     metadataJson: md,
     createdAt: NOW,
     updatedAt: NOW,
@@ -148,7 +164,9 @@ async function get(path: string, withPort = true): Promise<{ status: number; bod
 describe("代码服务 · 提交读面(现读,不是快照)", () => {
   it("正样本:列出最近提交,最新的在前", async () => {
     const repo = makeRepo("billing", 3);
-    const id = writeDeliverable({ repoPath: repo.path, head: repo.head });
+    const id = writeDeliverable({
+      repoPath: repo.path, servicePath: repo.servicePath, head: repo.head,
+    });
     const r = await get(`/api/artifacts/${id}/commits`);
     expect(r.status).toBe(200);
     const v = r.body as RepoCommitsView;
@@ -166,11 +184,13 @@ describe("代码服务 · 提交读面(现读,不是快照)", () => {
 
   it("**现读**:仓库里再提交一次,下一次请求就看得到(所以它不是快照)", async () => {
     const repo = makeRepo("billing", 1);
-    const id = writeDeliverable({ repoPath: repo.path, head: repo.head });
+    const id = writeDeliverable({
+      repoPath: repo.path, servicePath: repo.servicePath, head: repo.head,
+    });
     const first = (await get(`/api/artifacts/${id}/commits`)).body as RepoCommitsView;
     expect(first.commits).toHaveLength(1);
 
-    writeFileSync(join(repo.path, "f2.txt"), "2\n");
+    writeFileSync(join(repo.path, repo.servicePath, "f2.txt"), "2\n");
     git(repo.path, "add", "-A");
     git(repo.path, "commit", "-m", "交付之后又改了一次");
 
@@ -183,7 +203,9 @@ describe("代码服务 · 提交读面(现读,不是快照)", () => {
 
   it("`limit` 有上界(100),坏值取默认 20", async () => {
     const repo = makeRepo("many", 25);
-    const id = writeDeliverable({ repoPath: repo.path, head: repo.head });
+    const id = writeDeliverable({
+      repoPath: repo.path, servicePath: repo.servicePath, head: repo.head,
+    });
     const dflt = (await get(`/api/artifacts/${id}/commits`)).body as RepoCommitsView;
     expect(dflt.commits).toHaveLength(20);
     const small = (await get(`/api/artifacts/${id}/commits?limit=3`)).body as RepoCommitsView;
@@ -198,7 +220,9 @@ describe("代码服务 · 提交读面(现读,不是快照)", () => {
   it("**读不到**与「没有提交」必须分开:`runtime: unavailable` + problem", async () => {
     // ① 仓库被移走
     const repo = makeRepo("gone", 2);
-    const id = writeDeliverable({ repoPath: repo.path, head: repo.head });
+    const id = writeDeliverable({
+      repoPath: repo.path, servicePath: repo.servicePath, head: repo.head,
+    });
     rmSync(repo.path, { recursive: true, force: true });
     const gone = (await get(`/api/artifacts/${id}/commits`)).body as RepoCommitsView;
     expect(gone.runtime).toBe("unavailable");
@@ -207,7 +231,9 @@ describe("代码服务 · 提交读面(现读,不是快照)", () => {
 
     // ② 没接核对面(HTTP 侧拿不到磁盘)
     const repo2 = makeRepo("noport", 1);
-    const id2 = writeDeliverable({ repoPath: repo2.path, head: repo2.head });
+    const id2 = writeDeliverable({
+      repoPath: repo2.path, servicePath: repo2.servicePath, head: repo2.head,
+    });
     const noPort = (await get(`/api/artifacts/${id2}/commits`, false)).body as RepoCommitsView;
     expect(noPort.runtime).toBe("unavailable");
     expect(noPort.commits).toBeNull();
@@ -218,6 +244,53 @@ describe("代码服务 · 提交读面(现读,不是快照)", () => {
     const noPath = (await get(`/api/artifacts/${id3}/commits`)).body as RepoCommitsView;
     expect(noPath.runtime).toBe("unavailable");
     expect(noPath.problem).toMatch(/repoPath/);
+
+    // ④ 坐标里没有 servicePath(交付物边界)—— 按整仓读会把平台写工件的提交
+    //    混进来,所以这也是「读不到」,不是「没有提交」
+    const id4 = writeDeliverable({ repoPath: makeRepo("nosvc", 1).path, servicePath: null });
+    const noSvc = (await get(`/api/artifacts/${id4}/commits`)).body as RepoCommitsView;
+    expect(noSvc.runtime).toBe("unavailable");
+    expect(noSvc.problem).toMatch(/servicePath/);
+  });
+
+  it("提交**按 servicePath 过滤**:平台写工件的提交不出现在这个服务的列表里", async () => {
+    const repo = makeRepo("billing", 2);
+    const id = writeDeliverable({
+      repoPath: repo.path, servicePath: repo.servicePath, head: repo.head,
+    });
+    // 平台每回合写工件正文 → 在**仓库里**提交一个与交付物无关的文件
+    mkdirSync(join(repo.path, "artifacts"), { recursive: true });
+    writeFileSync(join(repo.path, "artifacts", "art_1-report.html"), "<html></html>\n");
+    git(repo.path, "add", "-A");
+    git(repo.path, "commit", "-m", "平台:写工件正文 art_1");
+
+    const v = (await get(`/api/artifacts/${id}/commits`)).body as RepoCommitsView;
+    expect(v.runtime).toBe("ok");
+    expect(v.commits, "仍只有服务目录的两条 —— 不过滤会把平台的提交算进来").toHaveLength(2);
+    expect(v.commits!.map((c) => c.subject)).not.toContain("平台:写工件正文 art_1");
+  });
+
+  it("`deliverableCommit` 不可达 ⇒ `runtime: \"unreachable\"`(**不是** unavailable、不是空列表)", async () => {
+    const repo = makeRepo("billing", 2);
+    const id = writeDeliverable({
+      repoPath: repo.path, servicePath: repo.servicePath,
+      head: repo.head, deliverableCommit: repo.head,
+    });
+    // 正样本:此刻可达 ⇒ ok
+    expect(((await get(`/api/artifacts/${id}/commits`)).body as RepoCommitsView).runtime).toBe("ok");
+
+    // 负样本:`reset --hard` 把交付物那版提交变成**不可达对象**
+    // (⚠️ 它仍在 `.git` 里,所以只判 `cat-file -e` 是看不出来的 —— 见 isReachable)
+    git(repo.path, "reset", "--hard", "HEAD~1");
+    const v = (await get(`/api/artifacts/${id}/commits`)).body as RepoCommitsView;
+    // 「提交没了」与「读不到盘」是**两件事**,处置相反:前者去翻 reflog、别再 reset,
+    // 后者去查磁盘 / 装配。混成一种就等于把一次交付记录的丢失说成一次读盘失败。
+    expect(v.runtime).toBe("unreachable");
+    // ★ 「读不到 ≠ 空」:非 ok 时 `commits` 是 **null**,不是 `[]` ——
+    //   `[]` 会被读成「这个仓库没有提交」。
+    expect(v.commits).toBeNull();
+    expect(v.problem).toBeTruthy();
+    expect(v.problem).toMatch(/revert|不可达/);
   });
 
   it("负样本:工件不存在 → 404;不是代码服务 → 400 并说明", async () => {

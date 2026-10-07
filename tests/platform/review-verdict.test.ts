@@ -32,6 +32,7 @@
  *      跨项目必须拒。
  */
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { createHash } from "node:crypto";
 import type Database from "better-sqlite3";
 import { openPlatformMemoryDb } from "../../src/platform/storage/index.js";
 import { insertProject, loadProjectForAuthz } from "../../src/platform/storage/repo/projects.js";
@@ -68,6 +69,17 @@ beforeEach(() => {
   });
 });
 afterEach(() => db.close());
+
+/** 027:工件行交的是**落点与哈希**,不是正文内容。 */
+function placement(content: string): {
+  bodyPath: string; bodySha256: string; bodyBytes: number;
+} {
+  return {
+    bodyPath: `artifacts/rf-${createHash("sha256").update(content).digest("hex").slice(0, 8)}.md`,
+    bodySha256: createHash("sha256").update(content, "utf8").digest("hex"),
+    bodyBytes: Buffer.byteLength(content, "utf8"),
+  };
+}
 
 function qaCtx(over: Partial<ToolRunContext> = {}): ToolRunContext {
   const qa = db.prepare(`SELECT * FROM agents WHERE role = 'quality_reviewer'`).get() as {
@@ -117,7 +129,8 @@ describe("① fail:平台退回重做(走 status 唯一写口)", () => {
   it("不通过也要能指着那份审查意见(现场可追)", () => {
     insertArtifact(db, {
       id: "rf1", projectId: "p1", conversationId: null, kind: "review_finding",
-      status: "open", authorAgentId: "qa", title: "W0 审查不通过", body: "6 条判据 0 条达成",
+      status: "open", authorAgentId: "qa", title: "W0 审查不通过",
+      ...placement("6 条判据 0 条达成"),
       metadataJson: null, createdAt: T0 + 50, updatedAt: T0 + 50, workId: "W0",
     });
     okText(call({ workId: "W0", verdict: "fail", severity: "medium", findingArtifactId: "rf1" }));
@@ -205,7 +218,8 @@ describe("④ 错误必须响亮(8-F:回灌允许集合)", () => {
   it("findingArtifactId 指向的不是 review_finding ⇒ 拒(否则「现场」是假的)", () => {
     insertArtifact(db, {
       id: "n1", projectId: "p1", conversationId: null, kind: "note",
-      status: "open", authorAgentId: "qa", title: "随便一条", body: "x",
+      status: "open", authorAgentId: "qa", title: "随便一条",
+      ...placement("x"),
       metadataJson: null, createdAt: T0, updatedAt: T0, workId: null,
     });
     const r = errOf(call({ workId: "W0", verdict: "fail", severity: "low", findingArtifactId: "n1" }));

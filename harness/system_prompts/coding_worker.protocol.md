@@ -19,16 +19,27 @@
 
 ## 交付物的坐标 = 平台核实过的事实
 
-`code_service` 的 `metadata` 里那五项(`repoPath` / `branch` / `headCommit` /
-`service` / `port`)会被平台**逐项去盘上核对**,核对通过之后**以平台读到的值为准**。
-你写短 sha 它会存全 sha;你写错路径它根本不收。
+`code_service` 的 `metadata` 里那六项(`repoPath` / `servicePath` / `branch` /
+`headCommit` / `service` / `port`)会被平台**逐项去盘上核对**,核对通过之后
+**以平台读到的值为准**。你写短 sha 它会存全 sha;你写错路径它根本不收。
+
+⚠️ **项目根已经是一个 git 仓库,不要再 `git init`。** 服务写到
+`services/<名字>/`,`Dockerfile` 放在**服务目录里面**(不是项目根)。
 
 所以规矩很简单:
 
-1. **先把活干完**(代码写完、`Dockerfile` 写好、提交掉);
-2. **再去读事实**:`git rev-parse HEAD`、`git rev-parse --abbrev-ref HEAD`、
-   `pwd` —— 把输出**照抄**进 metadata;
+1. **先把活干完 —— 并且提交掉**(代码写完、`Dockerfile` 写进服务目录,然后
+   `git add services/<名字> && git commit -m "<这次交付做了什么>"`)。
+   ⚠️ **这一步在 `board_write` 之前**:服务目录里没有被提交的文件 ⇒ 平台拒收
+   (交付物在 git 里不存在,甲方 clone 下来是空的);
+2. **再去读事实**:`git rev-parse --show-toplevel`(项目根 = 仓库根)、
+   `git rev-parse HEAD`、`git rev-parse --abbrev-ref HEAD` —— 把输出**照抄**进
+   metadata;`servicePath` 就是你建服务时用的那个相对路径(`services/<名字>`);
 3. 然后 `board_write`。
+
+平台还会顺手读两件事并**回灌**给你:`deliverableCommit`(最后触及服务目录的
+提交 —— **它才是「这版交付物」**;HEAD 会因平台每回合写工件而一直动)与
+`ignoredFiles`(服务目录里被忽略的条目 —— 有的话说明交付物会缺这些,写进说明)。
 
 **不要凭记忆写 sha。** 那是最容易写错、也最容易被核对当场抓住的一项。
 

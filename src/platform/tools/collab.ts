@@ -31,6 +31,9 @@ import {
   type MeetingRow, type Stance,
 } from "../storage/repo/meetings.js";
 import { insertArtifact, getArtifact, type ArtifactStatus } from "../storage/repo/artifacts.js";
+import {
+  WORKSPACE_ASSEMBLY_PROBLEM, readArtifactBody, workspaceAccess, writeArtifactBody,
+} from "./artifactBody.js";
 
 /** 决策工件的固定状态 —— 它就是「已裁定」的记录。 */
 const ARTIFACT_ACCEPTED: ArtifactStatus = "accepted";
@@ -172,6 +175,23 @@ const answer: PlatformTool = {
     // 的审计空洞,而那正是 7-L 明文要求避免的形态。
     if (asDecision) {
       artifactId = ctx.newId("art");
+      // ── 先写文件、后插行(设计 §4.3)───────────────────────────────
+      // 写文件失败 ⇒ 这次答复失败:**不插 decision 行、也不回填 ask**
+      // (否则 ask 会显示「已答复」而结论正文永远读不回来)。
+      const access = workspaceAccess(ctx);
+      if (access === null) return fail("internal", WORKSPACE_ASSEMBLY_PROBLEM);
+      const written = writeArtifactBody(access, {
+        id: artifactId,
+        title: `对 ${ask.id} 的答复`,
+        deliverableType: null,
+        content: `${body.value}\n\n---\n原问题:${ask.question}\n提问者假设:${ask.hypothesis}`,
+      });
+      if (!written.ok) {
+        return fail(
+          "internal",
+          `答复正文写盘失败,这次 answer **没有落库**(ask 仍是 open):${written.problem}`,
+        );
+      }
       try {
         insertArtifact(ctx.db, {
           id: artifactId,
@@ -181,7 +201,9 @@ const answer: PlatformTool = {
           status: ARTIFACT_ACCEPTED,
           authorAgentId: ctx.agent.id,
           title: `对 ${ask.id} 的答复`,
-          body: `${body.value}\n\n---\n原问题:${ask.question}\n提问者假设:${ask.hypothesis}`,
+          bodyPath: written.value.bodyPath,
+          bodySha256: written.value.bodySha256,
+          bodyBytes: written.value.bodyBytes,
           metadataJson: JSON.stringify({ answersAskId: ask.id, askerAgentId: ask.fromAgentId }),
           createdAt: at,
           updatedAt: at,
@@ -292,7 +314,21 @@ const askRead: PlatformTool = {
         ...(chain.length > 1
           ? ["", `## 升级链(${chain.length} 跳)`, ...chain.map((x) => `- [${x.status}] ${x.id} → ${x.toAgentId}`)]
           : []),
-        ...(resolution !== null ? ["", `## 结论工件(${resolution.id})`, resolution.body] : []),
+        ...(resolution !== null
+          ? [
+              "",
+              `## 结论工件(${resolution.id})`,
+              (() => {
+                // 正文现读(设计 §4.3):读不到就说读不到,不回空正文。
+                const access = workspaceAccess(ctx);
+                if (access === null) return `⚠️ 读不到正文:${WORKSPACE_ASSEMBLY_PROBLEM}`;
+                const r = readArtifactBody(access, resolution.bodyPath);
+                return r.ok
+                  ? r.value
+                  : `⚠️ 读不到正文(落点 ${resolution.bodyPath}):${r.problem}`;
+              })(),
+            ]
+          : []),
       ].join("\n"),
     );
   },
@@ -558,25 +594,47 @@ const meetingConclude: PlatformTool = {
     let artifactNote = "";
     try {
       const artifactId = ctx.newId("art");
-      insertArtifact(ctx.db, {
-        id: artifactId,
-        projectId: m.projectId,
-        conversationId: null,
-        kind: "meeting_note",
-        status: "accepted",
-        authorAgentId: ctx.agent.id,
-        title: `会议纪要:${m.topic}`,
-        body:
-          `${summary.value}\n\n---\n参会方立场:\n` +
-          listParticipants(ctx.db, m.id)
-            .map((p) => `- ${p.agentId}:${p.stance ?? "未表态"}${p.comment !== null ? ` — ${p.comment}` : ""}`)
-            .join("\n") +
-          (r.pending.length > 0 ? `\n\n未表态:${r.pending.join(", ")}` : ""),
-        metadataJson: JSON.stringify({ meetingId: m.id, pendingAgents: r.pending }),
-        createdAt: at,
-        updatedAt: at,
-      });
-      artifactNote = `\n纪要工件:${artifactId}`;
+      const noteTitle = `会议纪要:${m.topic}`;
+      const noteBody =
+        `${summary.value}\n\n---\n参会方立场:\n` +
+        listParticipants(ctx.db, m.id)
+          .map((p) => `- ${p.agentId}:${p.stance ?? "未表态"}${p.comment !== null ? ` — ${p.comment}` : ""}`)
+          .join("\n") +
+        (r.pending.length > 0 ? `\n\n未表态:${r.pending.join(", ")}` : "");
+      // ── 先写文件、后插行(设计 §4.3)───────────────────────────────
+      // 会议**已经**收尾了(上面那句不可回滚),所以这里写不成只降级成告警 ——
+      // 但**绝不插一行指向不存在正文的记录**:那会得到「有索引无内容」。
+      const access = workspaceAccess(ctx);
+      if (access === null) {
+        artifactNote = `\n⚠️ 纪要工件未写入(工作区未装配,这是装配错误):${WORKSPACE_ASSEMBLY_PROBLEM}`;
+      } else {
+        const written = writeArtifactBody(access, {
+          id: artifactId,
+          title: noteTitle,
+          deliverableType: null,
+          content: noteBody,
+        });
+        if (!written.ok) {
+          artifactNote = `\n⚠️ 纪要工件未写入(正文写盘失败,会议已收尾):${written.problem}`;
+        } else {
+          insertArtifact(ctx.db, {
+            id: artifactId,
+            projectId: m.projectId,
+            conversationId: null,
+            kind: "meeting_note",
+            status: "accepted",
+            authorAgentId: ctx.agent.id,
+            title: noteTitle,
+            bodyPath: written.value.bodyPath,
+            bodySha256: written.value.bodySha256,
+            bodyBytes: written.value.bodyBytes,
+            metadataJson: JSON.stringify({ meetingId: m.id, pendingAgents: r.pending }),
+            createdAt: at,
+            updatedAt: at,
+          });
+          artifactNote = `\n纪要工件:${artifactId}`;
+        }
+      }
     } catch (err) {
       artifactNote = `\n⚠️ 纪要工件写入失败(会议已收尾):${err instanceof Error ? err.message : String(err)}`;
     }

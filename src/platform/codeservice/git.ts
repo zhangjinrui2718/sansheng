@@ -73,11 +73,11 @@ function headSha(repoPath: string): string | null {
  * 抽出来是因为它会出现在好几条拒绝里,而它们必须**逐字一致** ——
  * 模型对同一件事拿到两种说法时,下一步就变成猜。
  */
-const HOW_TO_MAKE_A_REPO = [
-  "建一个代码服务的最小步骤(在工作目录里执行):",
-  "  mkdir -p <仓库目录> && cd <仓库目录>",
-  "  git init -b main",
-  "  # 写你的代码与 Dockerfile(仓库**根目录**必须有 Dockerfile)",
+const HOW_TO_DELIVER_A_SERVICE = [
+  "交付一个代码服务的最小步骤(**项目根已经是一个 git 仓库,不要再 `git init`**):",
+  "  cd <项目根>",
+  "  mkdir -p services/<服务名>          # ← 这个目录就是 servicePath / docker build 的上下文",
+  "  # 写你的代码,并把 Dockerfile 放进**服务目录里面**(不是项目根)",
   "  git add -A && git commit -m \"<这次交付做了什么>\"",
   "  git rev-parse HEAD   # ← 这个 sha 就是 metadata 的 headCommit",
 ].join("\n");
@@ -112,7 +112,7 @@ export function createGitCodeService(opts: { workspaceRoot: string }): CodeServi
         ok: false,
         reason:
           `找不到路径「${raw}」(解析为 ${abs})。代码服务的仓库必须**真的存在于磁盘上**,` +
-          `平台会去核对它 —— 先把它建出来再写这条交付物。\n\n${HOW_TO_MAKE_A_REPO}`,
+          `平台会去核对它 —— 先把它建出来再写这条交付物。\n\n${HOW_TO_DELIVER_A_SERVICE}`,
       };
     }
     if (real !== rootReal && !real.startsWith(rootReal + sep)) {
@@ -139,6 +139,94 @@ export function createGitCodeService(opts: { workspaceRoot: string }): CodeServi
     return { ok: true, abs: real };
   }
 
+  /**
+   * 把模型给的 `servicePath` 解析成**仓库之内**的一个真实目录(设计 §3.2a)。
+   *
+   * 三条判据:必须是**相对路径**、解析后**在仓库之内**(realpath 之后比,
+   * 符号链接也拦得住)、且**是一个目录**。交付物的边界由它定义 —— 判松了,
+   * 交付物会把项目根里的 `artifacts/` / `work/`(内部工作记录)一起算进去,
+   * 而一个项目交两个服务时两条交付物在 `repoPath` 上完全相同,读面分不出谁是谁。
+   */
+  function resolveService(
+    repoPath: string,
+    raw: string,
+  ): { ok: true; gitPath: string; abs: string } | { ok: false; reason: string } {
+    const p = raw.trim();
+    if (p === "") {
+      return {
+        ok: false,
+        reason:
+          "`servicePath` 是空串。它必须是仓库内的**服务目录**相对路径(例如 `services/billing`)—— " +
+          "交付物的边界与 `docker build` 的构建上下文都由它定义。",
+      };
+    }
+    if (isAbsolute(p)) {
+      return {
+        ok: false,
+        reason:
+          `\`servicePath\` 必须是**仓库内相对路径**(例如 \`services/billing\`),收到绝对路径「${p}」。` +
+          `绝对路径只出现在 \`repoPath\` 里 —— 交付物的边界要能跟着仓库一起被 clone 到甲方那台机器上。`,
+      };
+    }
+    const abs = resolve(repoPath, p);
+    const prefix = repoPath.endsWith(sep) ? repoPath : repoPath + sep;
+    if (abs === repoPath) {
+      return {
+        ok: false,
+        reason:
+          `\`servicePath\` 不能是仓库根(收到「${p}」)。项目根里还有 \`artifacts/\`(内部工件正文)` +
+          `与 \`work/\`(中间产物)—— 拿它当交付物,边界就消失了,而且一个项目交两个服务时` +
+          `两条交付物在 \`repoPath\` 上完全相同。请把服务放进一个子目录(如 \`services/<名字>\`)。`,
+      };
+    }
+    if (!abs.startsWith(prefix)) {
+      return {
+        ok: false,
+        reason:
+          `服务目录「${p}」解析为 ${abs},**不在仓库 ${repoPath} 之内**。` +
+          `交付物的内容必须真的在项目仓里 —— 在仓外意味着甲方 clone 下来拿不到它。`,
+      };
+    }
+    let real: string;
+    try {
+      real = realpathSync(abs);
+    } catch {
+      return {
+        ok: false,
+        reason:
+          `找不到服务目录「${p}」(解析为 ${abs})。\`servicePath\` 是交付物的**构建上下文** —— ` +
+          `它必须真的存在于项目仓里,先把它建出来再写这条交付物。\n\n${HOW_TO_DELIVER_A_SERVICE}`,
+      };
+    }
+    if (real !== repoPath && !real.startsWith(prefix)) {
+      return {
+        ok: false,
+        reason:
+          `服务目录「${p}」经符号链接解析到 **${real}**,不在仓库 ${repoPath} 之内` +
+          `(它要么在仓外,要么兜回了仓库根)。工作区里的符号链接可以指向仓库内部,` +
+          `但不许让一次交付引用仓外的内容。`,
+      };
+    }
+    let st;
+    try {
+      st = statSync(real);
+    } catch {
+      return { ok: false, reason: `读不到服务目录「${p}」的状态。` };
+    }
+    if (!st.isDirectory()) {
+      return {
+        ok: false,
+        reason:
+          `「${p}」是一个文件,不是目录。\`servicePath\` 要指向**服务目录**(构建上下文),` +
+          `甲方在它下面执行 \`docker build\` —— 指向一个文件时那条命令无从开始。`,
+      };
+    }
+    // git 的 pathspec 用**仓库相对、斜杠分隔**的路径;`abs` 可能带符号链接形式,
+    // 而 `real` 用来判包含性(上面)。两者都保留,各司其职。
+    const gitPath = relative(repoPath, abs).split(sep).join("/");
+    return { ok: true, gitPath, abs };
+  }
+
   function inspect(claim: CodeServiceClaim): CodeServiceInspection {
     const located = resolveInsideRoot(claim.repoPath);
     if (!located.ok) return { ok: false, reason: located.reason };
@@ -152,7 +240,7 @@ export function createGitCodeService(opts: { workspaceRoot: string }): CodeServi
         reason:
           `「${repoPath}」不是一个 git 工作区(\`git rev-parse --is-inside-work-tree\` 没有回 true)。` +
           `一个**代码服务**交付物必须是一个真的 git 仓库 —— 它是甲方拿去部署、` +
-          `拿去继续开发的东西,不是一堆躺着的文件。\n\n${HOW_TO_MAKE_A_REPO}`,
+          `拿去继续开发的东西,不是一堆躺着的文件。\n\n${HOW_TO_DELIVER_A_SERVICE}`,
       };
     }
 
@@ -190,7 +278,7 @@ export function createGitCodeService(opts: { workspaceRoot: string }): CodeServi
         reason:
           `仓库「${repoPath}」还没有任何提交(HEAD 解析不出来)。` +
           `一份没有提交的代码服务交付物是**无法被部署**的 —— 甲方 clone 下来会得到一个空目录。` +
-          `先 \`git add -A && git commit\`。\n\n${HOW_TO_MAKE_A_REPO}`,
+          `先 \`git add -A && git commit\`。\n\n${HOW_TO_DELIVER_A_SERVICE}`,
       };
     }
 
@@ -245,32 +333,70 @@ export function createGitCodeService(opts: { workspaceRoot: string }): CodeServi
       };
     }
 
-    // ── ⑤ Dockerfile(「可以独立部署到 docker 上面」的那一半)──
-    const dockerfileAbs = join(repoPath, "Dockerfile");
+    // ── ④b 服务目录 = 交付物的边界(设计 §3.2a)──
+    //
+    // 它必须**在仓库之内**,而且**不是仓库根**:项目根里还有 `artifacts/` 与
+    // `work/`,拿根当交付物等于把内部工作记录也算进交付物。`repoPath` 与
+    // `servicePath` 是同一个仓库的两个层次 —— 前者是仓库,后者是这一份交付物。
+    const service = resolveService(repoPath, claim.servicePath);
+    if (!service.ok) return { ok: false, reason: service.reason };
+
+    // ── ⑤ Dockerfile(**服务目录之内**,不是仓库根)──
+    const dockerfileAbs = join(service.abs, "Dockerfile");
     if (!existsSync(dockerfileAbs) || !statSync(dockerfileAbs).isFile()) {
       return {
         ok: false,
         reason:
-          `仓库 ${repoPath} 的根目录里没有 \`Dockerfile\`。` +
-          `「可以独立部署到 Docker 上」这句话的**机械判据就是它** —— ` +
-          `没有 Dockerfile 的话,这份交付物在甲方那里是一句承诺,不是一件东西。` +
-          `在仓库根目录写一个 \`Dockerfile\`(构建 + 启动你的服务),提交之后再来写这条交付物。`,
+          `服务目录 ${service.gitPath} 里没有 \`Dockerfile\`(仓库根有没有都不算)。` +
+          `「可以独立部署到 Docker 上」这句话的**机械判据**就是构建上下文里有它 —— ` +
+          `没有的话,这份交付物在甲方那里是一句承诺,不是一件东西。` +
+          `把 \`Dockerfile\` 写进 ${service.gitPath}/(构建 + 启动这个服务),提交之后再来写这条交付物。`,
       };
     }
+    const dockerfile = `${service.gitPath}/Dockerfile`;
 
-    // ── ⑥ 读事实(全部来自 git / fs,没有一个是模型说的)──
+    // ── ⑥ 这个交付物的**版本**:最后触及服务目录的那个提交 ──
+    //
+    // 为什么不能拿 HEAD 当版本:平台每回合都会写工件正文并提交 ⇒ HEAD 一直在动,
+    // 而交付物根本没变。判据很硬:平台写一堆工件提交之后这个值不动;
+    // 动了服务目录它必须动。
+    //
+    // 它必须存在(类型是 `string`,没有「空版本」这种状态):服务目录里一个
+    // **被提交的文件**都没有时,交付物在 git 里根本不存在 —— 甲方 clone 下来是空的。
+    const deliverableCommit = (
+      git(repoPath, ["log", "-1", "--format=%H", "--", service.gitPath]) ?? ""
+    ).trim();
+    if (!/^[0-9a-f]{40}$/.test(deliverableCommit)) {
+      return {
+        ok: false,
+        reason:
+          `服务目录 ${service.gitPath} 里还没有任何**被提交的**文件 —— 它在 git 历史里不存在。` +
+          `交付物的内容 = 被 git 跟踪的文件,所以一份没提交的服务 clone 下来是空的。` +
+          `先 \`git add ${service.gitPath} && git commit\` 再写这条交付物。\n\n${HOW_TO_DELIVER_A_SERVICE}`,
+      };
+    }
+    const deliverableSubject = (
+      git(repoPath, ["log", "-1", "--format=%s", "--", service.gitPath]) ?? ""
+    ).trim();
+
+    // ── ⑦ 读事实(全部来自 git / fs,没有一个是模型说的)──
     const headSubject = (git(repoPath, ["log", "-1", "--pretty=%s"]) ?? "").trim();
-    const countRaw = (git(repoPath, ["rev-list", "--count", "HEAD"]) ?? "").trim();
+    // `commitCount` 也**按服务目录算** —— 数整个仓库的话,平台每回合写工件的
+    // 提交都会让「这个服务改了多少次」虚增。
+    const countRaw = (
+      git(repoPath, ["rev-list", "--count", "HEAD", "--", service.gitPath]) ?? ""
+    ).trim();
     const commitCount = /^\d+$/.test(countRaw) ? Number(countRaw) : 0;
+    // 服务目录的**一级条目**读面用来一眼看结构。
     const files = (() => {
       try {
-        return readdirSync(repoPath)
+        return readdirSync(service.abs)
           .filter((n) => n !== ".git")
           .filter((n) => {
             // 断链的符号链接会让 statSync 抛 —— 一个坏链接不该让整次核对失败,
             // 它只是**不进列表**。
             try {
-              const l = lstatSync(join(repoPath, n));
+              const l = lstatSync(join(service.abs, n));
               return l.isSymbolicLink() || l.isDirectory() || l.isFile();
             } catch {
               return false;
@@ -282,30 +408,63 @@ export function createGitCodeService(opts: { workspaceRoot: string }): CodeServi
         return [];
       }
     })();
+    // 交付物的内容 = **被 git 跟踪的文件** ⇒ 被 `.gitignore` 吃掉的东西甲方
+    // clone 不到,交付物**静默残缺**。而 `node_modules` / 构建产物本来就该被忽略,
+    // 所以这是**告警不是拒绝**(设计 §3.2d):列出来,让读面说清楚。
+    const ignoredFiles = (
+      git(repoPath, ["status", "--ignored", "--porcelain", "--", service.gitPath]) ?? ""
+    )
+      .split("\n")
+      .map((l) => l.trim())
+      .filter((l) => l.startsWith("!! "))
+      .map((l) => l.slice(3).trim().replace(/\/+$/, ""))
+      .filter((l) => l !== "")
+      .slice(0, 60);
 
     const facts: CodeServiceFacts = {
       repoPath,
       repoName: repoPath.split(sep).filter((s) => s !== "").pop() ?? repoPath,
+      servicePath: service.gitPath,
       branch,
       headCommit: head,
       headSubject,
+      deliverableCommit,
+      deliverableSubject,
       commitCount,
-      dockerfile: relative(repoPath, dockerfileAbs),
+      dockerfile,
       files,
+      ignoredFiles,
     };
     return { ok: true, facts };
   }
 
-  function recentCommits(repoPath: string, limit: number): readonly RepoCommit[] | null {
+  function recentCommits(input: {
+    readonly repoPath: string;
+    readonly servicePath: string;
+    readonly limit: number;
+  }): readonly RepoCommit[] | null {
     // ⚠️ **读面**的路径校验比写入侧宽:这里只回答「这一版改了什么」,
     // 而一条**已经成立**的交付物不该因为仓库后来被删/被移走而在界面上变成
     // 「不存在」。读不到就如实返回 null,由读面渲染成「读不到」—— 与
     // `runtime: "unavailable"` 那条纪律同源:读不到不是空。
-    const raw = git(repoPath, [
+    const repoPath = input.repoPath;
+    const spec = input.servicePath.trim();
+    const args = [
       "log",
-      `-${Math.max(1, Math.min(100, limit))}`,
+      `-${Math.max(1, Math.min(100, input.limit))}`,
       "--pretty=%H%x1f%h%x1f%an%x1f%at%x1f%s",
-    ]);
+    ];
+    if (spec !== "") {
+      // ⚠️ **必须按 `servicePath` 过滤**:项目仓里还有平台每回合写工件的提交,
+      // 不过滤的话「这个服务改了什么」会混进一堆与它无关的提交(设计 §3.2b)。
+      // 逃出仓库的路径 ⇒ 读不到(`null`),**不是**空列表。
+      if (isAbsolute(spec)) return null;
+      const abs = resolve(repoPath, spec);
+      const prefix = repoPath.endsWith(sep) ? repoPath : repoPath + sep;
+      if (!abs.startsWith(prefix)) return null;
+      args.push("--", spec);
+    }
+    const raw = git(repoPath, args);
     if (raw === null) return null;
     const out: RepoCommit[] = [];
     for (const line of raw.split("\n")) {
@@ -324,7 +483,27 @@ export function createGitCodeService(opts: { workspaceRoot: string }): CodeServi
     return out;
   }
 
-  return { inspect, recentCommits };
+  /**
+   * 这个提交在仓库里**还可达**吗。
+   *
+   * 交付物与工作区**同仓**(设计 §3.2c)⇒ 一次 `git reset --hard` 就能让
+   * 库里的 `deliverableCommit` 变成不可达对象,而索引仍指着它。读面必须能
+   * 如实报 `unreachable` —— **不许**回一个空提交列表假装正常。
+   *
+   * 两条判据,缺一不可:
+   *   ① 对象还在(`git cat-file -e <sha>^{commit}`);
+   *   ② 还能从 HEAD 走到(`merge-base --is-ancestor`)。⚠️ 只判 ① 是不够的:
+   *      `reset --hard` 之后旧提交在 `.git` 里**仍然存在**(直到 gc),
+   *      于是「不可达」会被读成「可达」—— 那正是这条判据要防的形态。
+   */
+  function isReachable(input: { readonly repoPath: string; readonly sha: string }): boolean {
+    const sha = input.sha.trim();
+    if (!/^[0-9a-f]{7,40}$/.test(sha)) return false;
+    if (git(input.repoPath, ["cat-file", "-e", `${sha}^{commit}`]) === null) return false;
+    return git(input.repoPath, ["merge-base", "--is-ancestor", sha, "HEAD"]) !== null;
+  }
+
+  return { inspect, recentCommits, isReachable };
 }
 
 /**
@@ -338,5 +517,9 @@ export function unavailableCodeService(reason: string): CodeServicePort {
   return {
     inspect: () => ({ ok: false, reason }),
     recentCommits: () => null,
+    // 「没接上核对面」⇒ 可达性**也不知道**。回 `false`(读面渲染成
+    // `unreachable` 之外的那条 unavailable 分支由端口缺席表达)——
+    // 唯一不许的是回 `true` 假装核对过。
+    isReachable: () => false,
   };
 }

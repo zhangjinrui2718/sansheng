@@ -37,11 +37,14 @@ import {
 import { toArtifactView } from "../../src/platform/transport/views.js";
 import { dispatch } from "../../src/platform/tools/registry.js";
 import type { ToolRunContext, ToolResult } from "../../src/platform/tools/types.js";
+import { createHash } from "node:crypto";
 import { readFileSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createGitCodeService } from "../../src/platform/codeservice/git.js";
+import { createGitWorkspace } from "../../src/platform/workspace/git.js";
+import { projectWorkspaceRoot } from "../../src/platform/workspace/root.js";
 import type { DeliverableType as SharedDeliverableType } from "../../shared/types/platform.js";
 import type { ArtifactView } from "../../shared/types/platform.js";
 
@@ -67,32 +70,59 @@ function workspace(): string {
   return root;
 }
 
-/** 在临时工作根里建一个真 git 仓库,返回 {path, head}。 */
-function makeRepo(name: string, opts: { dockerfile?: boolean; commit?: boolean } = {}): {
-  path: string; head: string;
-} {
-  const dir = join(workspace(), name);
-  mkdirSync(dir, { recursive: true });
+/** 真跑 git(与生产用同一套 `-c` 身份参数:提交结果必须是仓库自身的事实)。 */
+function git(cwd: string, ...args: string[]): string {
+  return execFileSync(
+    "git",
+    ["-c", "user.email=t@example.com", "-c", "user.name=t", "-c", "commit.gpgsign=false", ...args],
+    { cwd, encoding: "utf8", env: { ...process.env, GIT_CONFIG_NOSYSTEM: "1" } },
+  ).trim();
+}
+
+/** 项目根(题目里的「每项目一仓」:仓库根 = 项目根,工件与 work/ 都在里面)。 */
+function projectRoot(pid = projectId): string {
+  return projectWorkspaceRoot(workspace(), pid);
+}
+
+/**
+ * 在**项目根**建一个真 git 仓库,并在它下面建**服务目录** `services/<service>`。
+ *
+ * ⚠️ 2026-10-08 起 `code_service` **复用项目仓**(设计 §3.2):`repoPath` 是项目根,
+ * 交付物的边界由 `servicePath` 表达 —— `Dockerfile` 必须在**服务目录里**。
+ */
+function makeRepo(
+  name: string,
+  opts: {
+    dockerfile?: boolean;
+    commit?: boolean;
+    service?: string;
+    /** 仓库**根**也放一个 Dockerfile(它**不算数** —— 判据是服务目录里的那一个) */
+    repoRootDockerfile?: boolean;
+  } = {},
+): { path: string; head: string; servicePath: string } {
+  const service = opts.service ?? "billing";
+  const servicePath = `services/${service}`;
+  const dir = projectRoot();
+  const svcDir = join(dir, servicePath);
+  mkdirSync(svcDir, { recursive: true });
   writeFileSync(join(dir, "README.md"), `# ${name}\n`);
+  writeFileSync(join(svcDir, "index.js"), "console.log('ok');\n");
   if (opts.dockerfile !== false) {
     writeFileSync(
-      join(dir, "Dockerfile"),
+      join(svcDir, "Dockerfile"),
       "FROM node:22-alpine\nWORKDIR /app\nCOPY . .\nCMD [\"node\",\"index.js\"]\n",
     );
   }
-  const git = (...a: string[]) =>
-    execFileSync(
-      "git",
-      ["-c", "user.email=t@example.com", "-c", "user.name=t", "-c", "commit.gpgsign=false", ...a],
-      { cwd: dir, encoding: "utf8", env: { ...process.env, GIT_CONFIG_NOSYSTEM: "1" } },
-    ).trim();
-  git("init", "-b", "main");
-  if (opts.commit !== false) {
-    git("add", "-A");
-    git("commit", "-m", `交付 ${name}`);
+  if (opts.repoRootDockerfile === true) {
+    writeFileSync(join(dir, "Dockerfile"), "FROM scratch\n");
   }
-  const head = opts.commit === false ? "" : git("rev-parse", "HEAD");
-  return { path: dir, head };
+  git(dir, "init", "-b", "main");
+  if (opts.commit !== false) {
+    git(dir, "add", "-A");
+    git(dir, "commit", "-m", `交付 ${name}`);
+  }
+  const head = opts.commit === false ? "" : git(dir, "rev-parse", "HEAD");
+  return { path: dir, head, servicePath };
 }
 
 beforeEach(() => {
@@ -124,6 +154,9 @@ function ctxFor(agentId: string, withCodeService = true): ToolRunContext {
     project: loadProjectForAuthz(db, projectId)!,
     now: () => clock,
     newId: (p: string) => `${p}${++seq}`,
+    // 工作区:**真实现 + 一个临时工作根**(正文真的落到 `<root>/projects/<pid>/artifacts/`)
+    workspace: createGitWorkspace(),
+    workspaceRoot: workspace(),
     // 核对面:**真实现 + 一个临时工作根**。`code_service` 的判据全在磁盘上,
     // 用假实现测等于把被测对象换成测试自己写的桩。
     ...(withCodeService
@@ -138,11 +171,21 @@ function call(agentId: string, args: Record<string, unknown>): ToolResult {
   return r;
 }
 
+const sha256 = (x: string): string => createHash("sha256").update(x, "utf8").digest("hex");
+const bytesOf = (x: string): number => Buffer.byteLength(x, "utf8");
+
+/** 造一条交付物行(migration 027:**落点 + 哈希**,不是正文内容)。 */
 function writeArtifact(over: Record<string, unknown> = {}): string {
   const id = `ar${++seq}`;
+  // 哈希 / 字节数默认按一份真 HTML 报告算(要别的快照就在 over 里显式覆盖)
+  const content = HTML_OK;
   insertArtifact(db, {
     id, projectId, conversationId: null, kind: "deliverable", status: "accepted",
-    authorAgentId: pm, title: `交付${seq}`, body: HTML_OK, metadataJson: null,
+    authorAgentId: pm, title: `交付${seq}`,
+    bodyPath: `artifacts/${id}-report.html`,
+    bodySha256: sha256(content),
+    bodyBytes: bytesOf(content),
+    metadataJson: null,
     createdAt: T0 + seq, updatedAt: T0 + seq, deliverableType: "html_report",
     ...over,
   });
@@ -210,9 +253,11 @@ describe("交付物类型 · 闭集与 schema 恰好相等", () => {
     // 负样本:真往库里写一个 CHECK 不认的值,必须**响亮失败**
     expect(() =>
       db.prepare(
-        `INSERT INTO artifacts (id, project_id, kind, status, author_agent_id, title, body,
+        `INSERT INTO artifacts (id, project_id, kind, status, author_agent_id, title,
+                                body_path, body_sha256, body_bytes,
                                 created_at, updated_at, deliverable_type)
-         VALUES ('ar_neg','${projectId}','deliverable','open','${pm}','t','b',1,1,'git_repo')`,
+         VALUES ('ar_neg','${projectId}','deliverable','open','${pm}','t',
+                 'artifacts/ar_neg.html','h',1,1,1,'git_repo')`,
       ).run(),
     ).toThrow(/CHECK/i);
   });
@@ -221,9 +266,9 @@ describe("交付物类型 · 闭集与 schema 恰好相等", () => {
     const cols = db.pragma("table_info(artifacts)") as Array<{ name: string }>;
     expect(cols.map((c) => c.name)).toContain("deliverable_type");
     // 存量交付物必须仍然合法(025 的 NULL 语义)
-    const legacy = writeArtifact({ deliverableType: null, body: "## markdown 交付物" });
+    const legacy = writeArtifact({ deliverableType: null, bodyPath: "artifacts/legacy.md" });
     expect(getArtifact(db, legacy)?.deliverableType).toBeNull();
-    expect(getArtifact(db, legacy)?.body).toBe("## markdown 交付物");
+    expect(getArtifact(db, legacy)?.bodyPath).toBe("artifacts/legacy.md");
   });
 });
 
@@ -329,27 +374,31 @@ describe("交付物类型 · board_write 的三条纪律", () => {
 describe("交付物类型 · 仓储与读面", () => {
   it("按类型过滤走的是**结构化的列**,不是从 body 猜", () => {
     writeArtifact();
-    writeArtifact({ deliverableType: null, body: "## 存量 markdown 交付物" });
+    writeArtifact({ deliverableType: null, bodyPath: "artifacts/legacy-md.md" });
     expect(listArtifacts(db, projectId, { deliverableType: "html_report" })).toHaveLength(1);
     expect(listArtifacts(db, projectId)).toHaveLength(2);
     // 负样本:一个不存在的类型返回空,而不是抛错
     expect(listArtifacts(db, projectId, { deliverableType: "git_repo" as DeliverableType })).toHaveLength(0);
   });
 
-  it("读面原样透出类型;**存量 NULL 不会被当成 html_report**", () => {
-    const id = writeArtifact({ deliverableType: null, body: "## markdown" });
+  it("读面原样透出类型与**落点**;**存量 NULL 不会被当成 html_report**", () => {
+    const id = writeArtifact({ deliverableType: null, bodyPath: "artifacts/legacy.md" });
     const view: ArtifactView = toArtifactView(db, getArtifact(db, id)!, () => "PM");
     expect(view.kind).toBe("deliverable");
     expect(view.deliverableType).toBeNull();
-    expect(view.body).toBe("## markdown");
+    // 027 起读面给的是**落点与快照**,正文走 content 端点现读
+    expect(view.bodyPath).toBe("artifacts/legacy.md");
+    expect(view.commitSha).toBeNull(); // 还没提交 ⇒ null(合法状态)
+    expect(view.bodyBytes).toBe(bytesOf(HTML_OK));
   });
 
   it("非交付物工件的 deliverableType 恒为 null(不传 = 不写)", () => {
     const id = `ar${++seq}`;
     insertArtifact(db, {
       id, projectId, conversationId: null, kind: "evidence", status: "open",
-      authorAgentId: worker, title: "证据", body: "x", metadataJson: null,
-      createdAt: T0, updatedAt: T0,
+      authorAgentId: worker, title: "证据",
+      bodyPath: `artifacts/${id}.md`, bodySha256: sha256("x"), bodyBytes: bytesOf("x"),
+      metadataJson: null, createdAt: T0, updatedAt: T0,
     });
     expect(getArtifact(db, id)!.deliverableType).toBeNull();
     expect(toArtifactView(db, getArtifact(db, id)!, () => "W").deliverableType).toBeNull();
@@ -378,14 +427,20 @@ describe("交付物类型 · 仓储与读面", () => {
 
 describe("代码服务 · 写入口带现场核对", () => {
   /** 一个默认合法的交付参数(测试里逐项替换成坏值看它拒不拒)。 */
-  function claim(repo: { path: string; head: string }, over: Record<string, unknown> = {}) {
+  function claim(
+    repo: { path: string; head: string; servicePath: string },
+    over: Record<string, unknown> = {},
+  ) {
     return {
       kind: "deliverable",
       deliverableType: "code_service",
       title: "计费服务",
-      body: "## 计费服务\n\n`docker build -t billing .` → `docker run -p 8080:8080 billing`",
+      body:
+        "## 计费服务\n\n`docker build services/billing` → " +
+        "`docker run -p 8080:8080 billing`",
       metadata: {
-        repoPath: repo.path, branch: "main", headCommit: repo.head,
+        repoPath: repo.path, servicePath: repo.servicePath,
+        branch: "main", headCommit: repo.head,
         service: "billing", port: 8080, ...over,
       },
     };
@@ -404,12 +459,76 @@ describe("代码服务 · 写入口带现场核对", () => {
     expect(md["branch"]).toBe("main");
     expect(md["service"]).toBe("billing");
     expect(md["port"]).toBe(8080);
-    expect(md["dockerfile"]).toBe("Dockerfile");
-    expect(md["commitCount"]).toBe(1);
+    // 交付物的**边界**是服务目录(不是仓库根)
+    expect(md["servicePath"]).toBe("services/billing");
+    expect(md["dockerfile"]).toBe("services/billing/Dockerfile");
+    expect(md["commitCount"]).toBe(1); // 按服务目录算
     expect(typeof md["verifiedAt"]).toBe("number");
     expect(md["files"]).toContain("Dockerfile");
-    // 模型自己给的额外键**原样保留**(平台只覆盖它能核实的那几个)
-    expect(md["repoName"]).toBe("billing");
+    // 这版交付物 = 最后触及服务目录的提交(此刻就是唯一那次提交)
+    expect(md["deliverableCommit"]).toBe(repo.head);
+    expect(md["deliverableSubject"]).toBe("交付 billing");
+    // 负样本对照:干净的服务目录 ⇒ **空数组**(不是「读不到」)
+    expect(md["ignoredFiles"]).toEqual([]);
+  });
+
+  it("`deliverableCommit` 按**路径**算:平台写工件的提交不动它,动了服务目录它必须动", () => {
+    const repo = makeRepo("billing");
+    const r1 = call(pm, claim(repo));
+    expect(r1.ok, !r1.ok ? r1.message : "").toBe(true);
+
+    const id1 = /已写工件 (\S+?)\(/.exec(r1.ok ? r1.text : "")![1]!;
+    expect(getArtifact(db, id1)!.deliverableType).toBe("code_service");
+
+    // ① 在仓库里提交一个**与服务无关**的文件(平台每回合写工件正文就是这种提交)
+    mkdirSync(join(repo.path, "artifacts"), { recursive: true });
+    writeFileSync(join(repo.path, "artifacts", "art_x-report.html"), "<html></html>\n");
+    git(repo.path, "add", "-A");
+    git(repo.path, "commit", "-m", "平台:写工件正文 art_x");
+    const newHead = git(repo.path, "rev-parse", "HEAD");
+    const r2 = call(pm, claim(repo, { headCommit: newHead }));
+    expect(r2.ok, !r2.ok ? r2.message : "").toBe(true);
+    const id2 = /已写工件 (\S+?)\(/.exec(r2.ok ? r2.text : "")![1]!;
+    const md2 = JSON.parse(getArtifact(db, id2)!.metadataJson ?? "{}") as Record<string, unknown>;
+    // ★ 判据:平台写工件的提交**不动**交付物的版本,而 HEAD 确实动了
+    expect(md2["headCommit"], "HEAD 随平台提交而动").toBe(newHead);
+    expect(md2["deliverableCommit"], "交付物没变 ⇒ 版本不动").toBe(repo.head);
+    expect(md2["commitCount"], "提交数也按服务目录算").toBe(1);
+
+    // ② 现在动**服务目录**
+    writeFileSync(join(repo.path, "services", "billing", "index.js"), "console.log('v2');\n");
+    git(repo.path, "add", "-A");
+    git(repo.path, "commit", "-m", "服务:改成 v2");
+    const head3 = git(repo.path, "rev-parse", "HEAD");
+    const r3 = call(pm, claim(repo, { headCommit: head3 }));
+    expect(r3.ok, !r3.ok ? r3.message : "").toBe(true);
+    const id3 = /已写工件 (\S+?)\(/.exec(r3.ok ? r3.text : "")![1]!;
+    const md3 = JSON.parse(getArtifact(db, id3)!.metadataJson ?? "{}") as Record<string, unknown>;
+    expect(md3["deliverableCommit"], "动了服务目录 ⇒ 版本必须动").toBe(head3);
+    expect(md3["deliverableSubject"]).toBe("服务:改成 v2");
+    expect(md3["commitCount"]).toBe(2);
+  });
+
+  it("**忽略文件是告警不是拒绝**:服务目录里被 `.gitignore` 吃掉的条目进 `ignoredFiles`", () => {
+    const repo = makeRepo("billing");
+    writeFileSync(join(repo.path, ".gitignore"), ".env\nservices/billing/node_modules/\n");
+    mkdirSync(join(repo.path, "services", "billing", "node_modules"), { recursive: true });
+    writeFileSync(join(repo.path, "services", "billing", "node_modules", "x.js"), "x\n");
+    writeFileSync(join(repo.path, "services", "billing", ".env"), "SECRET=1\n");
+    git(repo.path, "add", "-A");
+    git(repo.path, "commit", "-m", "加 .gitignore 与本地文件");
+
+    const r = call(pm, claim(repo, { headCommit: git(repo.path, "rev-parse", "HEAD") }));
+    expect(r.ok, !r.ok ? r.message : "").toBe(true);
+    const md = JSON.parse(
+      getArtifact(db, listArtifacts(db, projectId)[0]!.id)!.metadataJson ?? "{}",
+    ) as Record<string, unknown>;
+    const ignored = md["ignoredFiles"] as string[];
+    // 正样本:两条都被列出来(甲方 clone 不到它们 —— 交付物会缺这些)
+    expect(ignored.some((x) => x.includes("node_modules"))).toBe(true);
+    expect(ignored.some((x) => x.endsWith(".env"))).toBe(true);
+    // 交付物本身照收(告警不是拒绝)
+    expect(ignored.length).toBeGreaterThan(0);
   });
 
   it("负样本:headCommit 与真实 HEAD 不一致 → 拒收,并**告诉它真实 sha**", () => {
@@ -424,7 +543,9 @@ describe("代码服务 · 写入口带现场核对", () => {
   });
 
   it("负样本:仓库目录不存在 → 拒收(声明不能代替磁盘上的东西)", () => {
-    const r = call(pm, claim({ path: join(workspace(), "并不存在"), head: "a".repeat(40) }));
+    const r = call(pm, claim({
+      path: join(workspace(), "并不存在"), head: "a".repeat(40), servicePath: "services/billing",
+    }));
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.message).toMatch(/找不到路径/);
     expect(listArtifacts(db, projectId)).toHaveLength(0);
@@ -432,24 +553,78 @@ describe("代码服务 · 写入口带现场核对", () => {
 
   it("负样本:不是一个 git 仓库 → 拒收", () => {
     const dir = join(workspace(), "plain");
-    mkdirSync(dir, { recursive: true });
-    writeFileSync(join(dir, "Dockerfile"), "FROM scratch\n");
-    const r = call(pm, claim({ path: dir, head: "a".repeat(40) }));
+    mkdirSync(join(dir, "services", "billing"), { recursive: true });
+    writeFileSync(join(dir, "services", "billing", "Dockerfile"), "FROM scratch\n");
+    const r = call(pm, claim({ path: dir, head: "a".repeat(40), servicePath: "services/billing" }));
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.message).toMatch(/git/);
   });
 
-  it("负样本:没有 Dockerfile → 拒收(「可以独立部署到 docker」的机械判据)", () => {
+  it("负样本:服务目录里没有 Dockerfile → 拒收(「可以独立部署到 docker」的机械判据)", () => {
     const repo = makeRepo("nodocker", { dockerfile: false });
+    const r = call(pm, claim(repo));
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.message).toMatch(/Dockerfile/);
+      expect(r.message).toContain("services/billing"); // 点名是**哪个**目录
+    }
+    expect(listArtifacts(db, projectId)).toHaveLength(0);
+  });
+
+  it("负样本:**仓库根**有 Dockerfile 不算 —— 判据是服务目录里的那一个", () => {
+    const repo = makeRepo("rootdocker", { dockerfile: false, repoRootDockerfile: true });
     const r = call(pm, claim(repo));
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.message).toMatch(/Dockerfile/);
     expect(listArtifacts(db, projectId)).toHaveLength(0);
   });
 
+  it("负样本:`servicePath` 指到仓库**外** → 拒收(包含性校验)", () => {
+    const repo = makeRepo("billing");
+    const r = call(pm, claim(repo, { servicePath: "../escaped-service" }));
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.message).toMatch(/不在仓库|仓外/);
+      expect(r.message).toContain("../escaped-service");
+    }
+    expect(listArtifacts(db, projectId)).toHaveLength(0);
+  });
+
+  it("负样本:`servicePath` 是**文件**不是目录 → 拒收", () => {
+    const repo = makeRepo("billing");
+    writeFileSync(join(repo.path, "services", "not-a-dir"), "x\n");
+    const r = call(pm, claim(repo, { servicePath: "services/not-a-dir" }));
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.message).toMatch(/不是目录/);
+    expect(listArtifacts(db, projectId)).toHaveLength(0);
+  });
+
+  it("负样本:`servicePath = 仓库根` → 拒收(交付物的边界会消失)", () => {
+    const repo = makeRepo("billing");
+    for (const bad of [".", "", "./"]) {
+      const r = call(pm, claim(repo, { servicePath: bad }));
+      expect(r.ok, `servicePath=「${bad}」竟然通过了`).toBe(false);
+    }
+    expect(listArtifacts(db, projectId)).toHaveLength(0);
+  });
+
+  it("负样本:服务目录里**没有一条被提交的文件** → 拒收(交付物在 git 里不存在)", () => {
+    const repo = makeRepo("billing");
+    // 服务目录建出来、Dockerfile 也写了,但**没有提交**它
+    mkdirSync(join(repo.path, "services", "late"), { recursive: true });
+    writeFileSync(join(repo.path, "services", "late", "Dockerfile"), "FROM scratch\n");
+    const r = call(pm, claim(repo, { servicePath: "services/late" }));
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.message).toMatch(/被 git 跟踪|git add/);
+      expect(r.message).toContain("services/late");
+    }
+    expect(listArtifacts(db, projectId)).toHaveLength(0);
+  });
+
   it("负样本:仓库还没有提交 → 拒收(clone 下来是空目录,无法部署)", () => {
     const repo = makeRepo("empty", { commit: false });
-    const r = call(pm, claim({ path: repo.path, head: "a".repeat(40) }));
+    const r = call(pm, claim({ path: repo.path, head: "a".repeat(40), servicePath: repo.servicePath }));
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.message).toMatch(/提交/);
   });
@@ -467,7 +642,9 @@ describe("代码服务 · 写入口带现场核对", () => {
   it("负样本:路径在工作根**之外** → 拒收(realpath 之后比,符号链接也拦得住)", () => {
     const outside = mkdtempSync(join(tmpdir(), "sansheng-outside-"));
     try {
-      const r = call(pm, claim({ path: outside, head: "a".repeat(40) }));
+      const r = call(pm, claim({
+        path: outside, head: "a".repeat(40), servicePath: "services/billing",
+      }));
       expect(r.ok).toBe(false);
       if (!r.ok) expect(r.message).toMatch(/工作根/);
     } finally {
@@ -475,16 +652,18 @@ describe("代码服务 · 写入口带现场核对", () => {
     }
   });
 
-  it("负样本:metadata 缺坐标 → 拒收,**点名**缺哪几项", () => {
+  it("负样本:metadata 缺坐标 → 拒收,**点名**缺哪几项(含新加的 servicePath)", () => {
     const repo = makeRepo("billing");
     const args = claim(repo);
     const md = { ...(args.metadata as Record<string, unknown>) };
     delete md["port"];
+    delete md["servicePath"];
     const r = call(pm, { ...args, metadata: md });
     expect(r.ok).toBe(false);
     if (!r.ok) {
       expect(r.message).toContain("port");
-      expect(r.alternatives).toContain("repoPath");
+      expect(r.message).toContain("servicePath");
+      expect(r.alternatives).toContain("servicePath");
     }
     expect(listArtifacts(db, projectId)).toHaveLength(0);
   });
@@ -525,6 +704,8 @@ describe("代码服务 · 写入口带现场核对", () => {
       expect(r.text).toContain(repo.head); // 全 sha,不是它给的短 sha
       expect(r.text).toContain("分支 main");
       expect(r.text).toContain("核实过");
+      // 边界与服务目录也要回灌 —— 模型看不到就无法确认自己填对了
+      expect(r.text).toContain("services/billing");
     }
   });
 
@@ -538,6 +719,11 @@ describe("代码服务 · 写入口带现场核对", () => {
     expect(view.codeService!.service).toBe("billing");
     expect(view.codeService!.port).toBe(8080);
     expect(view.codeService!.files).toContain("Dockerfile");
+    // 2026-10-08 起读面还有边界与「这版交付物」三件
+    expect(view.codeService!.servicePath).toBe("services/billing");
+    expect(view.codeService!.deliverableCommit).toBe(repo.head);
+    expect(view.codeService!.deliverableSubject).toBe("交付 billing");
+    expect(view.codeService!.ignoredFiles).toEqual([]);
     // 负样本:一份 HTML 报告**没有**坐标(不是空对象 —— 那是另一种信息)
     const htmlId = writeArtifact();
     expect(toArtifactView(db, getArtifact(db, htmlId)!, () => "PM").codeService).toBeNull();
@@ -551,6 +737,10 @@ describe("代码服务 · 写入口带现场核对", () => {
     expect(v.codeService!.service).toBe("x");
     expect(v.codeService!.port).toBeNull();
     expect(v.codeService!.branch).toBeNull();
+    // 缺项一律 `null` —— 不猜、不编默认值(编一个默认端口会让人照着错命令部署)
+    expect(v.codeService!.servicePath).toBeNull();
+    expect(v.codeService!.deliverableCommit).toBeNull();
+    expect(v.codeService!.ignoredFiles).toEqual([]);
     const bad = writeArtifact({ deliverableType: "code_service", metadataJson: "{不是 JSON" });
     expect(toArtifactView(db, getArtifact(db, bad)!, () => "PM").codeService!.service).toBeNull();
   });

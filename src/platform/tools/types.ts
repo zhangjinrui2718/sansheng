@@ -24,6 +24,7 @@ import type { Agent, Project } from "../harness/authorize.js";
 import type { MemoryPort } from "../memory/port.js";
 import type { ClientChannel } from "../client/port.js";
 import type { CodeServicePort } from "../codeservice/port.js";
+import type { WorkspacePort } from "../workspace/port.js";
 import type { Capability, ToolName } from "../harness/capability.js";
 import type { TSchema } from "@sinclair/typebox";
 
@@ -70,6 +71,30 @@ export interface ToolRunContext {
    * 一次响亮的拒绝,而不是一次静默的通过(7-E:声明必须有读者)。
    */
   readonly codeService?: CodeServicePort;
+  /**
+   * **工作区**(`WorkspacePort`,设计 `docs/DESIGN-WORKSPACE.md` §4.3)。
+   *
+   * 2026-10-08 起工件正文**不住库**:`board_write` 先把正文原子写到盘上,
+   * 再把落点与哈希交给 `insertArtifact`(顺序不能反 —— 反了会得到「有索引无内容」)。
+   * 所以工具层必须有写盘能力,与 `memory` / `client` / `codeService` 同一条注入理由。
+   *
+   * ⚠️ **它与 {@link workspaceRoot} 成对出现,缺一个就等于没有。** 端口里每个
+   * 方法的路径都是**项目根相对路径**,而项目根由 `workspaceRoot` 与当前项目算出来
+   * (`workspace/root.ts` 的 `projectWorkspaceRoot`)—— 少了 `workspaceRoot`,
+   * 工具不知道该相对哪个根,只能失败。
+   *
+   * 缺省(其一未注入,或接待会话没有项目)⇒ 写正文的工具**拒绝并如实报装配错误**
+   * (`tools/artifactBody.ts` 的 `workspaceAccess`),不静默跳过落盘。
+   */
+  readonly workspace?: WorkspacePort;
+  /**
+   * **工作根**(绝对路径,`<workRoot>/projects/<projectId>` 的那个 `workRoot`)。
+   *
+   * 与 {@link workspace} 成对:`ctx.workspace` 提供能力,它提供根。装配由
+   * `runtime/boot.ts` → `RuntimeDeps` → `assembly.ts` 的 `buildToolContext` 落地,
+   * 值必须与会话 `cwd` 用**同一个根**(`BootOptions.workspaceRoot` 那条注释)。
+   */
+  readonly workspaceRoot?: string;
   /**
    * **状态迁移的门铃**(排空器的触发点之一)。
    *

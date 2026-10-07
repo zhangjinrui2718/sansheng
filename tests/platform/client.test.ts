@@ -8,6 +8,9 @@
  *   - 用户答复走**与问答同一条落库路径**(7-L 纪律)
  */
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type Database from "better-sqlite3";
 import { openPlatformMemoryDb } from "../../src/platform/storage/index.js";
 import { insertAgent } from "../../src/platform/storage/repo/agents.js";
@@ -26,11 +29,16 @@ import type { WebSocket } from "ws";
 import { dispatch, notYetBuiltToolNames, capabilitiesWithoutTools, registrySnapshot } from "../../src/platform/tools/registry.js";
 import type { ToolRunContext, ToolResult } from "../../src/platform/tools/types.js";
 import type { Agent, Project } from "../../src/platform/harness/authorize.js";
+import { createGitWorkspace } from "../../src/platform/workspace/git.js";
+import type { WorkspacePort } from "../../src/platform/workspace/port.js";
+import { projectWorkspaceRoot } from "../../src/platform/workspace/root.js";
 
 let db: Database.Database;
 let seq = 0;
 let clock = 1_700_000_000_000;
 let project: Project;
+/** 工作根 —— **只碰 `mkdtemp`**(027 起工件正文落成项目仓里的文件) */
+let workRoot: string;
 const agents = new Map<string, Agent>();
 const ids: Record<string, string> = {};
 
@@ -67,6 +75,7 @@ function recordingChannel(): RecordingChannel {
 let channel: RecordingChannel;
 
 beforeEach(() => {
+  workRoot = mkdtempSync(join(tmpdir(), "sansheng-client-"));
   db = openPlatformMemoryDb();
   seq = 0;
   clock = 1_700_000_000_000;
@@ -89,13 +98,24 @@ beforeEach(() => {
   for (const id of Object.values(ids)) addMember(db, "p1", id, clock);
   project = loadProjectForAuthz(db, "p1")!;
 });
-afterEach(() => db.close());
+afterEach(() => {
+  db.close();
+  rmSync(workRoot, { recursive: true, force: true });
+});
+
+/** 项目根(p1)下的绝对落点 */
+function absBody(path: string): string {
+  return join(projectWorkspaceRoot(workRoot, "p1"), path);
+}
 
 function ctxFor(agentId: string, over: Partial<ToolRunContext> = {}): ToolRunContext {
   return {
     db, agent: agents.get(agentId)!, project,
     now: () => clock, newId: (p) => `${p}_${++seq}`,
     client: channel,
+    // 真工作区(写在 mkdtemp 的项目根下)—— 正文真的要落盘
+    workspace: createGitWorkspace(),
+    workspaceRoot: workRoot,
     ...over,
   };
 }
@@ -188,6 +208,13 @@ describe("ask_client · 先落工件再投递", () => {
     expect(channel.asked[0]!.questionId).toBe(qid);
     expect(channel.asked[0]!.options).toHaveLength(2);
     expect(channel.asked[0]!.lean).toContain("倾向加");
+
+    // 正文落盘(027):行里是落点与哈希,盘上真有那份文件
+    expect(art.bodyPath.startsWith("artifacts/")).toBe(true);
+    const onDisk = readFileSync(absBody(art.bodyPath), "utf8");
+    expect(onDisk).toContain("要不要加这个功能?");
+    expect(onDisk).toContain("倾向加,但想听你的排期判断");
+    expect(art.bodyBytes).toBe(Buffer.byteLength(onDisk, "utf8"));
   });
 
   it("缺 question 参数 → invalid_args,且不落工件不投递", async () => {
@@ -231,6 +258,7 @@ describe("resolveClientQuestion · 答复与提问走同一条落库路径", () 
     const qid = await askOne();
     const r = resolveClientQuestion(db, qid, "做,但先做最小版", clock + 100, {
       newId: (p) => `${p}_ans`, answeredByAgentId: ids.bm,
+      workspace: createGitWorkspace(), workspaceRoot: workRoot,
     });
     expect(r.ok).toBe(true);
     expect(r.decisionArtifactId).toBe("art_ans");
@@ -238,8 +266,10 @@ describe("resolveClientQuestion · 答复与提问走同一条落库路径", () 
     const d = getArtifact(db, "art_ans")!;
     expect(d.kind).toBe("decision");
     expect(d.status).toBe("accepted");
-    expect(d.body).toContain("先做最小版");
-    expect(d.body).toContain("要不要做 X?"); // 原问题留痕
+    // 正文**住文件**(027):经落点读回来,不是从行里读
+    const decisionBody = readFileSync(absBody(d.bodyPath), "utf8");
+    expect(decisionBody).toContain("先做最小版");
+    expect(decisionBody).toContain("要不要做 X?"); // 原问题留痕
 
     // 链连得起来:decision --answers--> question
     expect(listBackLinks(db, qid, "answers")).toEqual(["art_ans"]);
@@ -247,8 +277,10 @@ describe("resolveClientQuestion · 答复与提问走同一条落库路径", () 
   });
 
   it("找不到提问 → not_found", () => {
-    expect(resolveClientQuestion(db, "nope", "x", clock, { newId: (p) => p, answeredByAgentId: ids.bm }))
-      .toEqual({ ok: false, reason: "not_found" });
+    expect(resolveClientQuestion(db, "nope", "x", clock, {
+      newId: (p) => p, answeredByAgentId: ids.bm,
+      workspace: createGitWorkspace(), workspaceRoot: workRoot,
+    })).toEqual({ ok: false, reason: "not_found" });
   });
 
   it("不是 client_question → not_a_question(不许拿别的工件冒充提问)", async () => {
@@ -257,16 +289,44 @@ describe("resolveClientQuestion · 答复与提问走同一条落库路径", () 
     db.pragma("ignore_check_constraints = ON");
     db.prepare(`UPDATE artifacts SET kind = 'note' WHERE id = ?`).run(qid);
     db.pragma("ignore_check_constraints = OFF");
-    expect(resolveClientQuestion(db, qid, "x", clock, { newId: (p) => p, answeredByAgentId: ids.bm }))
-      .toEqual({ ok: false, reason: "not_a_question" });
+    expect(resolveClientQuestion(db, qid, "x", clock, {
+      newId: (p) => p, answeredByAgentId: ids.bm,
+      workspace: createGitWorkspace(), workspaceRoot: workRoot,
+    })).toEqual({ ok: false, reason: "not_a_question" });
   });
 
   it("重复答复被拒(不能给同一个问题两个结论)", async () => {
     const qid = await askOne();
-    resolveClientQuestion(db, qid, "答复一", clock, { newId: () => "art_a1", answeredByAgentId: ids.bm });
-    expect(resolveClientQuestion(db, qid, "答复二", clock + 1, { newId: () => "art_a2", answeredByAgentId: ids.bm }))
-      .toEqual({ ok: false, reason: "already_resolved" });
+    const ws = createGitWorkspace();
+    resolveClientQuestion(db, qid, "答复一", clock, {
+      newId: () => "art_a1", answeredByAgentId: ids.bm, workspace: ws, workspaceRoot: workRoot,
+    });
+    expect(resolveClientQuestion(db, qid, "答复二", clock + 1, {
+      newId: () => "art_a2", answeredByAgentId: ids.bm, workspace: ws, workspaceRoot: workRoot,
+    })).toEqual({ ok: false, reason: "already_resolved" });
     expect(listArtifacts(db, "p1", { kind: "decision" })).toHaveLength(1);
+  });
+
+  it("**先文件后行**:写盘失败 ⇒ 没有 decision 行,提问也**不**转 accepted", async () => {
+    const qid = await askOne();
+    // 包住真实现,只让 writeAtomic 失败
+    const base = createGitWorkspace();
+    const failing: WorkspacePort = {
+      ...base,
+      writeAtomic: () => ({ ok: false as const, problem: "磁盘满了(测试注入的失败)" }),
+    };
+    const r = resolveClientQuestion(db, qid, "做", clock + 5, {
+      newId: () => "art_fail", answeredByAgentId: ids.bm,
+      workspace: failing, workspaceRoot: workRoot,
+    });
+    expect(r).toEqual({
+      ok: false, reason: "content_write_failed", problem: "磁盘满了(测试注入的失败)",
+    });
+    // ★ 判据:没有行 —— 反过来会留下「有索引无内容」的结论工件
+    expect(listArtifacts(db, "p1", { kind: "decision" })).toEqual([]);
+    // 而提问**仍然 open**(回填与落库是同一条路径,先文件后行把它一起挡住了)
+    expect(getArtifact(db, qid)!.status).toBe("open");
+    expect(pendingClientQuestions(db, "p1").map((x) => x.id)).toEqual([qid]);
   });
 
   it("pendingClientQuestions 给出「谁在等甲方」", async () => {
@@ -275,7 +335,10 @@ describe("resolveClientQuestion · 答复与提问走同一条落库路径", () 
     expect(pendingClientQuestions(db, "p1").map((x) => x.id).sort()).toEqual([a, b].sort());
 
     // 答掉一条 → 只剩另一条
-    resolveClientQuestion(db, a, "答了", clock, { newId: () => "art_x", answeredByAgentId: ids.bm });
+    resolveClientQuestion(db, a, "答了", clock, {
+      newId: () => "art_x", answeredByAgentId: ids.bm,
+      workspace: createGitWorkspace(), workspaceRoot: workRoot,
+    });
     expect(pendingClientQuestions(db, "p1").map((x) => x.id)).toEqual([b]);
   });
 });

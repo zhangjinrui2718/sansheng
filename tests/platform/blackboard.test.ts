@@ -8,13 +8,23 @@
  *   - 两个多对多关系可查 —— 设计 1 §8.1 原本没给它们存储位置
  */
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { createHash } from "node:crypto";
+import { mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type Database from "better-sqlite3";
 import { openPlatformMemoryDb } from "../../src/platform/storage/index.js";
 import { insertAgent } from "../../src/platform/storage/repo/agents.js";
-import { insertProject } from "../../src/platform/storage/repo/projects.js";
+import { insertProject, loadProjectForAuthz } from "../../src/platform/storage/repo/projects.js";
 import { insertWork } from "../../src/platform/storage/repo/works.js";
+import { dispatch } from "../../src/platform/tools/registry.js";
+import type { ToolRunContext } from "../../src/platform/tools/types.js";
+import { createGitWorkspace } from "../../src/platform/workspace/git.js";
+import type { WorkspacePort } from "../../src/platform/workspace/port.js";
+import { projectWorkspaceRoot } from "../../src/platform/workspace/root.js";
 import {
   insertArtifact, getArtifact, listArtifacts, setArtifactStatus, updateArtifactBody,
+  artifactBodyPaths,
   countArtifactsByKind, addArtifactLink, removeArtifactLink, listLinks, listBackLinks,
   isArtifactStatus, isArtifactLinkRel,
   type ArtifactRow, type ArtifactKind,
@@ -35,9 +45,15 @@ let seq = 0;
 let projectId: string;
 let agentA: string;
 let agentB: string;
+/** 工作根 —— **只碰 `mkdtemp`**(工具层写正文要用它;见设计 §4.3) */
+let workRoot: string;
 const T0 = 1_700_000_000_000;
 
+const sha256 = (s: string): string => createHash("sha256").update(s, "utf8").digest("hex");
+const bytesOf = (s: string): number => Buffer.byteLength(s, "utf8");
+
 beforeEach(() => {
+  workRoot = mkdtempSync(join(tmpdir(), "sansheng-blackboard-"));
   db = openPlatformMemoryDb();
   seq = 0;
   projectId = `pj${++seq}`;
@@ -49,13 +65,60 @@ beforeEach(() => {
   insertAgent(db, { id: agentA, role: "research_worker", specialization: "algorithm", displayName: "算法", createdAt: T0 });
   insertAgent(db, { id: agentB, role: "quality_reviewer", specialization: null, displayName: "质检", createdAt: T0 });
 });
-afterEach(() => db.close());
+afterEach(() => {
+  db.close();
+  rmSync(workRoot, { recursive: true, force: true });
+});
 
+/**
+ * 工具层调用上下文。**注入真工作区**(`mkdtemp` 下的工作根)—— 工件正文现在
+ * 真的写到盘上,桩掉它等于把被测对象换成测试自己写的东西。
+ */
+function ctxFor(over: Partial<ToolRunContext> = {}): ToolRunContext {
+  return {
+    db,
+    agent: { id: agentA, role: "research_worker", displayName: "算法" },
+    project: loadProjectForAuthz(db, projectId)!,
+    now: () => T0 + 999,
+    newId: (p) => `${p}_t${++seq}`,
+    workspace: createGitWorkspace(),
+    workspaceRoot: workRoot,
+    ...over,
+  };
+}
+
+/** 项目根(工具写正文的落点就是它下面)。 */
+function projectRoot(pid = projectId): string {
+  return projectWorkspaceRoot(workRoot, pid);
+}
+
+/** 读盘:拿索引里那条落点去读**真实的文件**。 */
+function readBodyAt(path: string, pid = projectId): string {
+  return readFileSync(join(projectRoot(pid), path), "utf8");
+}
+
+/** 一个**写盘必失败**的工作区(包住真实现,只换掉 writeAtomic)—— 用来钉顺序。 */
+function failingWorkspace(base: WorkspacePort): WorkspacePort {
+  return {
+    ...base,
+    writeAtomic: () => ({ ok: false as const, problem: "磁盘满了(测试注入的失败)" }),
+  };
+}
+
+/**
+ * 造一条工件行。**交的是落点与哈希,不是正文内容**(migration 027)—— 仓储层
+ * 不碰磁盘,所以这里给的 `bodyPath` 只是一个路径字符串(盘上未必有那个文件)。
+ */
 function mkArtifact(kind: ArtifactKind, over: Partial<ArtifactRow> = {}): string {
   const id = `ar${++seq}`;
+  const content = "正文";
   insertArtifact(db, {
     id, projectId, conversationId: null, kind, status: "open", authorAgentId: agentA,
-    title: `工件${seq}`, body: "正文", metadataJson: null,
+    title: `工件${seq}`,
+    bodyPath: `artifacts/${id}-note.md`,
+    bodySha256: sha256(content),
+    bodyBytes: bytesOf(content),
+    metadataJson: null,
     createdAt: T0 + seq, updatedAt: T0 + seq,
     ...over,
   });
@@ -99,8 +162,9 @@ describe("BC3 · artifacts", () => {
   it("非法 kind 被 CHECK 拒绝", () => {
     expect(() =>
       db.prepare(
-        `INSERT INTO artifacts (id,project_id,conversation_id,kind,status,author_agent_id,title,body,metadata_json,created_at,updated_at)
-         VALUES ('x',?,NULL,'made_up','open',?,'t','b',NULL,1,1)`,
+        `INSERT INTO artifacts (id,project_id,conversation_id,kind,status,author_agent_id,title,
+                                body_path,body_sha256,body_bytes,metadata_json,created_at,updated_at)
+         VALUES ('x',?,NULL,'made_up','open',?,'t','artifacts/x.md','h',1,NULL,1,1)`,
       ).run(projectId, agentA),
     ).toThrow(/CHECK/i);
   });
@@ -108,8 +172,9 @@ describe("BC3 · artifacts", () => {
   it("非法 status 被 CHECK 拒绝", () => {
     expect(() =>
       db.prepare(
-        `INSERT INTO artifacts (id,project_id,conversation_id,kind,status,author_agent_id,title,body,metadata_json,created_at,updated_at)
-         VALUES ('x',?,NULL,'note','in_progress',?,'t','b',NULL,1,1)`,
+        `INSERT INTO artifacts (id,project_id,conversation_id,kind,status,author_agent_id,title,
+                                body_path,body_sha256,body_bytes,metadata_json,created_at,updated_at)
+         VALUES ('x',?,NULL,'note','in_progress',?,'t','artifacts/x.md','h',1,NULL,1,1)`,
       ).run(projectId, agentA),
     ).toThrow(/CHECK/i);
   });
@@ -137,13 +202,32 @@ describe("BC3 · artifacts", () => {
     expect(ids[1]).toBe(older);
   });
 
-  it("setArtifactStatus / updateArtifactBody", () => {
+  it("setArtifactStatus / updateArtifactBody(改的是**落点三列**,不是正文内容)", () => {
     const id = mkArtifact("hypothesis");
     setArtifactStatus(db, id, "accepted", T0 + 500);
-    updateArtifactBody(db, id, "改过的正文", T0 + 501);
+    // 027 之后正文不住库:对账收敛改的是落点 + 写入快照(设计 §3.4)
+    updateArtifactBody(
+      db, id,
+      { bodyPath: `artifacts/${id}-v2.md`, bodySha256: sha256("改过的正文"), bodyBytes: bytesOf("改过的正文") },
+      T0 + 501,
+    );
     expect(getArtifact(db, id)).toMatchObject({
-      status: "accepted", body: "改过的正文", updatedAt: T0 + 501,
+      status: "accepted",
+      bodyPath: `artifacts/${id}-v2.md`,
+      bodySha256: sha256("改过的正文"),
+      bodyBytes: bytesOf("改过的正文"),
+      updatedAt: T0 + 501,
     });
+  });
+
+  it("`artifactBodyPaths` 逐条给出落点(workspace 对账的输入)", () => {
+    const a = mkArtifact("note");
+    const rows = artifactBodyPaths(db, projectId);
+    expect(rows.map((r) => r.artifactId)).toEqual([a]);
+    expect(rows[0]!.path).toBe(`artifacts/${a}-note.md`);
+    expect(rows[0]!.title).toBe(getArtifact(db, a)!.title);
+    // 负样本:别的项目查不到(作用域是 projectId)
+    expect(artifactBodyPaths(db, "pj_不存在")).toEqual([]);
   });
 
   it("countArtifactsByKind 汇总", () => {
@@ -595,5 +679,245 @@ describe("跨 BC · 阻塞 + 变更 + 工件 一起回答「这个项目现在�
     expect(listAffectedWorks(db, "ch-1")).toEqual([w]);
     expect(changesForWork(db, w).map((c) => c.title)).toEqual(["加一个字段"]);
     expect(getArtifact(db, ev)!.title).toBe("实现证据");
+  });
+});
+
+// ── 工具层:`board_write` 的**先文件后行**(设计 `docs/DESIGN-WORKSPACE.md` §4.3)──
+//
+// 这一组是 027 之后**唯一**能证明顺序的判据。顺序反了会得到「**有索引无内容**」
+// —— 行在库里、`body_path` 指着一个不存在的文件;而它在读面上与「文件被人工删了」
+// 长得一模一样,正文永远读不回来。正着最坏只留一个**孤儿文件**(可检测、可回收)。
+//
+// 四条判据(每条都带正样本,否则「什么都拒」的检查会全绿):
+//   ① 写文件失败 ⇒ 工具失败 且 **一行都没有**;
+//   ② 正样本 ⇒ 文件真的在盘上,且 sha / bytes 与行里记的**逐位一致**;
+//   ③ 落点由平台生成(`artifacts/<id>-<slug>.<ext>`,html_report → `.html`);
+//   ④ `board_read` **现读**:文件被移走 ⇒ 如实说「读不到」,不是空正文。
+
+describe("board_write · 先写文件、后插行(027 的顺序纪律)", () => {
+  it("**写文件失败 ⇒ 工具失败、一行都不留** —— 反过来会留下「有索引无内容」", () => {
+    const r = dispatch(
+      "board_write",
+      { kind: "evidence", title: "证据", body: "正文" },
+      ctxFor({ workspace: failingWorkspace(createGitWorkspace()) }),
+    );
+    if (r instanceof Promise) throw new Error("board_write 必须是同步工具");
+    expect(r.ok, "写盘失败必须让这次调用失败").toBe(false);
+    if (!r.ok) {
+      expect(r.code).toBe("internal");
+      expect(r.message).toMatch(/没有落库|先文件后行/);
+      // 现场要留出来:路径与原因
+      expect(r.message).toContain("artifacts/");
+      expect(r.message).toContain("磁盘满了");
+    }
+    // ★ 核心判据:行一条都没有。反过来(先行后文件)这里会留下一行。
+    expect(listArtifacts(db, projectId)).toEqual([]);
+  });
+
+  it("另一半:插行失败 ⇒ 行没有、**孤儿文件留着**(可检测、可回收 —— 这是选定的取舍)", () => {
+    // 作者不存在 ⇒ `insertArtifact` 撞外键抛错。此时**文件已经写完了** ——
+    // 顺序纪律选的就是这一半:孤儿文件能被 workspace 对账列出来(orphanFile),
+    // 而反过来那一半(有索引无内容)**没有任何判据能发现**。
+    const ghost = ctxFor({
+      agent: { id: "ag_ghost", role: "research_worker", displayName: "幽灵" },
+    });
+    const r = dispatch("board_write", { kind: "evidence", title: "孤儿", body: "正文" }, ghost);
+    if (r instanceof Promise) throw new Error("board_write 必须是同步工具");
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.message).toMatch(/FOREIGN KEY/i);
+      expect(r.message).toContain("孤儿文件");
+      expect(r.message).toContain("artifacts/"); // 现场:落点被点名
+    }
+    // 行:一条都没有(作者外键把它挡住了)
+    expect(listArtifacts(db, projectId)).toEqual([]);
+    // 文件:在盘上。这是**有意的**最坏情况 —— 盘上多的东西看得见,
+    // 库里多的那条「有索引无内容」看不见。
+    const onDisk = readdirSync(join(projectRoot(), "artifacts"));
+    expect(onDisk.filter((f) => f.endsWith(".md"))).toHaveLength(1);
+  });
+
+  it("正样本:文件真的在盘上,sha / bytes 与行里记的逐位一致", () => {
+    const r = dispatch(
+      "board_write",
+      { kind: "evidence", title: "证据 A", body: "正文 A 的内容" },
+      ctxFor(),
+    );
+    if (r instanceof Promise) throw new Error("board_write 必须是同步工具");
+    expect(r.ok, !r.ok ? r.message : "").toBe(true);
+
+    const rows = listArtifacts(db, projectId);
+    expect(rows).toHaveLength(1);
+    const a = rows[0]!;
+    // 「证据 A」里的 ASCII 词 `a` 进 slug —— 落点是**平台生成**的,可预测
+    expect(a.bodyPath).toBe(`artifacts/${a.id}-a.md`);
+    expect(a.bodyPath.startsWith("artifacts/")).toBe(true);
+    expect(a.bodyPath.endsWith(".md"), "非 html_report → .md").toBe(true);
+    expect(a.commitSha, "还没提交 ⇒ null(合法状态,不是缺参数)").toBeNull();
+
+    // 索引记的必须是**盘上的事实**
+    const onDisk = readBodyAt(a.bodyPath);
+    expect(onDisk).toBe("正文 A 的内容");
+    expect(a.bodySha256).toBe(sha256(onDisk));
+    expect(a.bodyBytes).toBe(bytesOf(onDisk));
+
+    // 落点由**平台**生成,不是模型给的:参数里根本没有路径这一项
+    expect(Object.keys(a)).toContain("bodyPath");
+    // 工具输出如实回灌落点(模型要能知道正文去哪了)
+    if (r.ok) expect(r.text).toContain(a.bodyPath);
+  });
+
+  it("`html_report` → `.html`(扩展名按交付物类型分派)", () => {
+    const r = dispatch(
+      "board_write",
+      {
+        kind: "deliverable", deliverableType: "html_report", title: "技术方案",
+        body: "<!doctype html><html><body><h1>方案</h1></body></html>",
+      },
+      ctxFor(),
+    );
+    if (r instanceof Promise) throw new Error("board_write 必须是同步工具");
+    expect(r.ok, !r.ok ? r.message : "").toBe(true);
+    const a = listArtifacts(db, projectId)[0]!;
+    expect(a.bodyPath.endsWith(".html")).toBe(true);
+    expect(readBodyAt(a.bodyPath)).toContain("<h1>方案</h1>");
+  });
+
+  it("标题里的 ASCII 词进 slug;纯中文标题的 slug 为空(只留 id)—— 路径必须可预测", () => {
+    const r = dispatch(
+      "board_write",
+      { kind: "note", title: "Deploy Runbook v2", body: "x" },
+      ctxFor(),
+    );
+    if (r instanceof Promise) throw new Error("board_write 必须是同步工具");
+    expect(r.ok).toBe(true);
+    expect(listArtifacts(db, projectId)[0]!.bodyPath).toBe(
+      `artifacts/${listArtifacts(db, projectId)[0]!.id}-deploy-runbook-v2.md`,
+    );
+
+    // 负样本自检:纯中文标题 slug 为空是**正常**的(可读性排第二,
+    // 「同一个 id 恒定映射到同一个路径」排第一)
+    const r2 = dispatch("board_write", { kind: "note", title: "纯中文标题", body: "y" }, ctxFor());
+    if (r2 instanceof Promise) throw new Error("board_write 必须是同步工具");
+    expect(r2.ok).toBe(true);
+    const b = listArtifacts(db, projectId).find((x) => x.title === "纯中文标题")!;
+    expect(b.bodyPath).toBe(`artifacts/${b.id}.md`);
+  });
+
+  it("`board_read` **现读**正文;文件被移走 ⇒ 如实说「读不到」,**不是空正文**", () => {
+    const w = dispatch(
+      "board_write",
+      { kind: "evidence", title: "证据 B", body: "正文 B" },
+      ctxFor(),
+    );
+    if (w instanceof Promise) throw new Error("board_write 必须是同步工具");
+    expect(w.ok).toBe(true);
+    const a = listArtifacts(db, projectId)[0]!;
+
+    // 正样本:文件在 ⇒ 读得出正文
+    const read1 = dispatch("board_read", { artifactId: a.id }, ctxFor());
+    if (read1 instanceof Promise) throw new Error("board_read 必须是同步工具");
+    expect(read1.ok).toBe(true);
+    if (read1.ok) expect(read1.text).toContain("正文 B");
+
+    // 负样本:文件被移走(索引不动、盘上没了)⇒ 必须**说读不到**,且指出落点
+    rmSync(join(projectRoot(), a.bodyPath));
+    const read2 = dispatch("board_read", { artifactId: a.id }, ctxFor());
+    if (read2 instanceof Promise) throw new Error("board_read 必须是同步工具");
+    expect(read2.ok, "读不到不是「找不到工件」—— 索引还在").toBe(true);
+    if (read2.ok) {
+      expect(read2.text).toContain("读不到正文");
+      expect(read2.text).toContain(a.bodyPath);
+      // 空正文与「读不到」长得一样,所以这句反证必须有:
+      expect(read2.text).not.toMatch(/\n\n$/);
+    }
+  });
+
+  it("没接工作区 ⇒ **拒绝并报装配错误**(不是静默不落盘)", () => {
+    const ctx = ctxFor();
+    // 显式删掉这两个字段(spread 之前设的会被覆盖,所以用解构)
+    const { workspace: _w, workspaceRoot: _r, ...bare } = ctx;
+    const r = dispatch("board_write", { kind: "evidence", title: "t", body: "b" }, bare);
+    if (r instanceof Promise) throw new Error("board_write 必须是同步工具");
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.code).toBe("internal");
+      expect(r.message).toMatch(/装配错误/);
+    }
+    expect(listArtifacts(db, projectId)).toEqual([]);
+  });
+});
+
+// ── 工具层:产出边的**入参校验**(从 storage.test.ts 挪过来的两条判据)──
+//
+// ⚠️ 为什么这两条在这里:`work_id` 的外键只保证「这条工作项存在」,**跨项目引用
+// 在库里完全合法** —— 「必须同项目」只能在工具层拦。而 027 之后本文件的仓储
+// 夹具不再经 `board_write` 走一遍,这个洞一度**没有任何测试守着**(schema-core 报的洞 A)。
+
+describe("board_write · 产出边(工具层判据:存在 + 同项目)", () => {
+  it("workId **不存在** ⇒ not_found,且不落工件", () => {
+    const r = dispatch(
+      "board_write",
+      { kind: "evidence", title: "证据", body: "b", workId: "wk_不存在" },
+      ctxFor(),
+    );
+    if (r instanceof Promise) throw new Error("board_write 必须是同步工具");
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.code).toBe("not_found");
+      expect(r.message).toContain("wk_不存在");
+      expect(r.message).toMatch(/不传 workId/); // 可执行的处置
+    }
+    expect(listArtifacts(db, projectId)).toEqual([]);
+  });
+
+  it("workId **跨项目** ⇒ not_found,且不落工件 —— 库里的外键拦不住这一条", () => {
+    const other = `pj${++seq}`;
+    insertProject(db, {
+      id: other, name: "别的项目", client: "甲", goal: "g", status: "active", createdAt: T0,
+    });
+    const otherWork = `wk${++seq}`;
+    insertWork(db, {
+      id: otherWork, projectId: other, parentWorkId: null, title: "别处的活", goal: "g",
+      status: "open", assigneeAgentId: agentA, createdAt: T0, updatedAt: T0,
+    });
+    // 自检:这条工作项**真的**在库里(否则下面那条 not_found 可能只是「不存在」)
+    expect(listArtifacts(db, other)).toEqual([]);
+
+    const r = dispatch(
+      "board_write",
+      { kind: "evidence", title: "证据", body: "b", workId: otherWork },
+      ctxFor(),
+    );
+    if (r instanceof Promise) throw new Error("board_write 必须是同步工具");
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.code).toBe("not_found");
+      expect(r.message).toContain(other);
+      expect(r.message).toContain(projectId);
+    }
+    expect(listArtifacts(db, projectId)).toEqual([]);
+  });
+
+  it("正样本:同项目的 workId ⇒ 落库、回灌产出边,且能从 work 反查回来", () => {
+    const w = mkWork();
+    const r = dispatch(
+      "board_write",
+      { kind: "evidence", title: "证据", body: "b", workId: w },
+      ctxFor(),
+    );
+    if (r instanceof Promise) throw new Error("board_write 必须是同步工具");
+    expect(r.ok, !r.ok ? r.message : "").toBe(true);
+    if (r.ok) expect(r.text).toContain(w);
+    const arts = listArtifacts(db, projectId, { workId: w });
+    expect(arts).toHaveLength(1);
+    expect(arts[0]!.workId).toBe(w);
+  });
+
+  it("不传 workId = **合法状态**(不是填空缺)", () => {
+    const r = dispatch("board_write", { kind: "note", title: "随手记", body: "b" }, ctxFor());
+    if (r instanceof Promise) throw new Error("board_write 必须是同步工具");
+    expect(r.ok).toBe(true);
+    expect(listArtifacts(db, projectId)[0]!.workId).toBeNull();
   });
 });

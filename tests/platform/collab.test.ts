@@ -13,6 +13,11 @@
  * ③ 判断轮不再是独立 LLM 调用 → 卫生闸门随之消失(不是被删,是没有对应物)。
  */
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { createGitWorkspace } from "../../src/platform/workspace/git.js";
+import { projectWorkspaceRoot } from "../../src/platform/workspace/root.js";
 import type Database from "better-sqlite3";
 import { openPlatformMemoryDb } from "../../src/platform/storage/index.js";
 import { insertAgent, getAgent } from "../../src/platform/storage/repo/agents.js";
@@ -28,7 +33,7 @@ import {
 import {
   insertSession, listSessions, appendSessionMessage, listSessionMessages, isSessionMessageKind,
 } from "../../src/platform/storage/repo/sessions.js";
-import { listArtifacts } from "../../src/platform/storage/repo/artifacts.js";
+import { getArtifact, listArtifacts } from "../../src/platform/storage/repo/artifacts.js";
 import { dispatch, TOOL_INDEX, notYetBuiltToolNames } from "../../src/platform/tools/registry.js";
 import type { ToolRunContext, ToolResult } from "../../src/platform/tools/types.js";
 import type { Agent, Project } from "../../src/platform/harness/authorize.js";
@@ -38,10 +43,13 @@ let db: Database.Database;
 let seq = 0;
 let clock = 1_700_000_000_000;
 let project: Project;
+/** 工作根 —— **只碰 `mkdtemp`**(027 起正文落成项目仓里的文件) */
+let workRoot: string;
 const agents = new Map<string, Agent>();
 const ids: Record<string, string> = {};
 
 beforeEach(() => {
+  workRoot = mkdtempSync(join(tmpdir(), "sansheng-collab-"));
   db = openPlatformMemoryDb();
   seq = 0;
   clock = 1_700_000_000_000;
@@ -65,11 +73,19 @@ beforeEach(() => {
   for (const id of Object.values(ids)) addMember(db, pid, id, clock);
   project = loadProjectForAuthz(db, pid)!;
 });
-afterEach(() => db.close());
+afterEach(() => {
+  db.close();
+  rmSync(workRoot, { recursive: true, force: true });
+});
 
 function ctxFor(agentId: string): ToolRunContext {
   const agent = agents.get(agentId)!;
-  return { db, agent, project, now: () => clock, newId: (p) => `${p}_${++seq}` };
+  return {
+    db, agent, project, now: () => clock, newId: (p) => `${p}_${++seq}`,
+    // 027:`answer` / `meeting_conclude` 也要落正文 ⇒ 工具层必须有工作区
+    workspace: createGitWorkspace(),
+    workspaceRoot: workRoot,
+  };
 }
 function call(agentId: string, tool: string, args: Record<string, unknown> = {}): ToolResult {
   const r = dispatch(tool, args, ctxFor(agentId));
@@ -507,10 +523,20 @@ describe("BC2 工具 · 走派发器的完整链路", () => {
       targetRole: "project_manager", question: "q", hypothesis: "h",
     })).match(/\((\S+?)\)/)![1]!;
     const t = okText(call(ids.pm, "answer", { askId, body: "按方案 A 走,依据是 X" }));
+    // 027:答复的正文**先落盘、后插行** —— 盘上真有那份文件
+    const artId = t.match(/decision 工件 (\S+?)\)/)![1]!;
+    const row = getArtifact(db, artId)!;
+    expect(row.bodyPath.startsWith("artifacts/")).toBe(true);
+    expect(row.bodyBytes).toBeGreaterThan(0);
+    expect(
+      readFileSync(join(projectWorkspaceRoot(workRoot, "pj_1"), row.bodyPath), "utf8"),
+    ).toContain("按方案 A 走");
     expect(t).toContain("decision 工件");
     const arts = listArtifacts(db, "pj_1", { kind: "decision" });
     expect(arts).toHaveLength(1);
-    expect(arts[0]!.body).toContain("原问题");
+    // 正文**住文件**(027):经落点读回来
+    expect(readFileSync(join(projectWorkspaceRoot(workRoot, "pj_1"), arts[0]!.bodyPath), "utf8"))
+      .toContain("原问题");
     expect(getAsk(db, askId)?.status).toBe("answered");
   });
 

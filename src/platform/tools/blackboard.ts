@@ -25,9 +25,18 @@ import { isArtifactKind, ARTIFACT_KINDS, type ArtifactKind } from "../identity/r
 import { CODE_SERVICE_REQUIRED_META, type CodeServiceFacts } from "../codeservice/port.js";
 import { getWork } from "../storage/repo/works.js";
 import {
+  WORKSPACE_ASSEMBLY_PROBLEM, artifactBodyPath, readArtifactBody, workspaceAccess,
+  writeArtifactBody,
+} from "./artifactBody.js";
+import {
   fail, ok, requireString, requireProject, readString, readStringArray,
   type PlatformTool, type ToolRunContext, type ToolResult,
 } from "./types.js";
+
+/** 工具输出里回显的落点(与真正用的那个算式同源,不是第二份拼法)。 */
+function artifactPathForEcho(id: string, title: string, type: DeliverableType | null): string {
+  return artifactBodyPath({ id, title, deliverableType: type });
+}
 
 const boardList: PlatformTool = {
   name: "board_list",
@@ -117,6 +126,18 @@ const boardRead: PlatformTool = {
     }
     const out = listLinks(ctx.db, id.value);
     const inb = listBackLinks(ctx.db, id.value);
+    // ── 正文**现读**(设计 §4.3)─────────────────────────────────────
+    //
+    // 库里的 `body_path` 只是**落点**:文件被删、被移走、被回滚之后它照样在。
+    // 所以这里必须真去盘上读,而且**读不到要如实说读不到** ——
+    // 回一句空正文等于把「这一页丢了」说成「这条工件本来就是空的」,
+    // 而空白看起来像「平台坏了」(与 `runtime: "unavailable"` 同一条纪律)。
+    const access = workspaceAccess(ctx);
+    const body = (() => {
+      if (access === null) return { ok: false as const, problem: WORKSPACE_ASSEMBLY_PROBLEM };
+      const r = readArtifactBody(access, a.bodyPath);
+      return r.ok ? { ok: true as const, value: r.value } : { ok: false as const, problem: r.problem };
+    })();
     return ok(
       [
         `# ${a.title}`,
@@ -128,12 +149,19 @@ const boardRead: PlatformTool = {
         `- 项目:${a.projectId}`,
         `- 作者:${a.authorAgentId}`,
         `- 创建:${new Date(a.createdAt).toISOString()}`,
+        `- 正文落点:${a.bodyPath}(${a.bodyBytes} 字节 · sha256 ${a.bodySha256.slice(0, 12)}…)`,
+        ...(a.commitSha !== null ? [`- 引入提交:${a.commitSha}`] : ["- 引入提交:(还未提交)"]),
         ...(a.workId !== null ? [`- 产出工作项:${a.workId}`] : []),
         ...(out.length > 0 ? [`- 指向:${out.join(", ")}`] : []),
         ...(inb.length > 0 ? [`- 被指向:${inb.join(", ")}`] : []),
         ...(a.metadataJson !== null ? [`- metadata:${a.metadataJson}`] : []),
         "",
-        a.body,
+        body.ok
+          ? body.value
+          : `⚠️ **读不到正文**(落点 ${a.bodyPath}):${body.problem}\n` +
+            `这是「读不到」,不是「正文是空的」—— 索引在、内容不在。` +
+            `处置:到项目页的「文件系统」段对账(索引有、盘上无 = missing),` +
+            `或用 \`?at=<引入提交>\` 去读历史版本。`,
       ].join("\n"),
     );
   },
@@ -143,10 +171,12 @@ const boardRead: PlatformTool = {
  * 核对一份 `code_service` 交付物的坐标,并把它**翻译成平台读到的事实**。
  *
  * 返回的 `metadata` 是「模型给的键 ∪ 平台核实到的键」,而**重叠的键以平台为准**:
- *   · `repoPath`  → 解析 + 包含性校验之后的绝对路径(realpath)
- *   · `branch`    → 已确认存在于 `refs/heads/`
- *   · `headCommit`→ 40 位全 sha(模型给短 sha 也接受,存进去的是全的)
- *   · 另补 `repoName` / `headSubject` / `commitCount` / `files` / `verifiedAt`
+ *   · `repoPath`    → 解析 + 包含性校验之后的绝对路径(realpath)
+ *   · `servicePath` → 服务目录(仓库内相对路径)= **交付物的边界与构建上下文**
+ *   · `branch`      → 已确认存在于 `refs/heads/`
+ *   · `headCommit`  → 40 位全 sha(模型给短 sha 也接受,存进去的是全的)
+ *   · 另补 `repoName` / `headSubject` / `deliverableCommit` / `deliverableSubject` /
+ *     `commitCount` / `dockerfile` / `files` / `ignoredFiles` / `verifiedAt`
  *
  * 模型自己给的其它键(比如 `image` / `env` / 部署备注)**原样保留** ——
  * 平台只覆盖它能核实的那几个,不替模型删它说过的话。
@@ -173,12 +203,15 @@ function verifyCodeService(
         "invalid_args",
         `\`code_service\` 交付物的 metadata 缺这几项:${missing.join(" / ")}。` +
           `一份代码服务必须把坐标写清楚 —— 甲方靠它找到仓库、构建镜像、跑起来:\n` +
-          "  · `repoPath`   仓库在磁盘上的路径(工作根之下)\n" +
-          "  · `branch`     分支名(HEAD 必须是它的顶端)\n" +
-          "  · `headCommit` 这次交付的提交 sha(在仓库里跑 \`git rev-parse HEAD\`)\n" +
-          "  · `service`    服务名(镜像名 / 容器名,例如 `billing-api`)\n" +
-          "  · `port`       容器暴露的端口(数字)\n" +
-          "平台会**当场去盘上核对**这几项,核对不过这条交付物写不进去。",
+          "  · `repoPath`    **项目根**在磁盘上的绝对路径(项目根就是仓库根)\n" +
+          "  · `servicePath` 服务目录(仓库内相对路径,如 `services/billing`)—— " +
+          "交付物的**边界**与 `docker build` 的构建上下文\n" +
+          "  · `branch`      分支名(HEAD 必须是它的顶端)\n" +
+          "  · `headCommit`  这次交付的提交 sha(在仓库里跑 \`git rev-parse HEAD\`)\n" +
+          "  · `service`     服务名(镜像名 / 容器名,例如 `billing-api`)\n" +
+          "  · `port`        容器暴露的端口(数字)\n" +
+          "平台会**当场去盘上核对**这几项(服务目录在仓库内 / 是目录 / " +
+          "服务目录内有 Dockerfile / 服务目录里已有被提交的文件),核对不过这条交付物写不进去。",
         [...CODE_SERVICE_REQUIRED_META],
       ),
     };
@@ -211,9 +244,11 @@ function verifyCodeService(
     };
   }
 
-  // ③ 去盘上读事实。
+  // ③ 去盘上读事实。**`servicePath` 一起交过去** —— 交付物的边界由它定义,
+  //    少了它核对得再细也只是在核对「某个仓库」(设计 §3.2a)。
   const inspected = svc.inspect({
     repoPath: String(md["repoPath"]),
+    servicePath: String(md["servicePath"]),
     branch: String(md["branch"]),
     headCommit: String(md["headCommit"]),
   });
@@ -226,12 +261,20 @@ function verifyCodeService(
       ...md,
       repoPath: facts.repoPath,
       repoName: facts.repoName,
+      servicePath: facts.servicePath,
       branch: facts.branch,
       headCommit: facts.headCommit,
       headSubject: facts.headSubject,
+      // 交付物的**版本**与仓库 HEAD 是两件事:平台每回合都提交,HEAD 一直在动,
+      // 而交付物可能没变(`deliverableCommit` 只按 servicePath 算)。
+      deliverableCommit: facts.deliverableCommit,
+      deliverableSubject: facts.deliverableSubject,
       commitCount: facts.commitCount,
       dockerfile: facts.dockerfile,
       files: [...facts.files],
+      // 忽略文件是**告警不是拒绝**:交付物 = 被 git 跟踪的文件,忽略掉的东西
+      // 甲方 clone 不到(node_modules 这类本来就该忽略)—— 列出来让它可见。
+      ignoredFiles: [...facts.ignoredFiles],
       verifiedAt: ctx.now(),
     },
   };
@@ -255,10 +298,14 @@ const boardWrite: PlatformTool = {
           "架构图用内联 SVG),平台在禁用脚本的沙箱里把它渲染成给甲方看的网页。" +
           "`code_service` = **代码服务**:一个真的 git 仓库,能独立部署到 Docker。" +
           "正文写 markdown 说明(怎么构建/怎么跑/端口),并在 `metadata` 里给齐坐标 —— " +
-          "`repoPath` / `branch` / `headCommit` / `service` / `port`。" +
-          "⚠️ 平台会**当场去盘上核对**那个仓库(存在吗 / 是 git 吗 / HEAD 与记的一致吗 / " +
-          "分支顶端就是它吗 / 根目录有 Dockerfile 吗),核对不过写不进去 —— " +
-          "所以先把仓库建好、提交好、Dockerfile 写好,再来写这条交付物。",
+          "`repoPath`(项目根)/ `servicePath`(服务目录,如 `services/billing`)/ " +
+          "`branch` / `headCommit` / `service` / `port`。" +
+          "⚠️ 项目根**已经是**一个 git 仓库,**不要再 `git init`**;服务写到 " +
+          "`services/<名字>/`,`Dockerfile` 放在**服务目录里面**。" +
+          "平台会**当场去盘上核对**(服务目录在仓库内吗 / 是目录吗 / 服务目录内有 " +
+          "Dockerfile 吗 / HEAD 与记的一致吗 / 分支顶端就是它吗 / 服务目录里已经有被" +
+          "提交的文件吗),核对不过写不进去 —— " +
+          "所以先把服务写好、提交好,再来写这条交付物。",
       }),
     ),
     title: Type.String(),
@@ -414,7 +461,30 @@ const boardWrite: PlatformTool = {
       workId = workIdRaw;
     }
 
+    // ── 先写文件、后插行(设计 §4.3,**顺序不能反**)─────────────────
+    //
+    //   先文件后行:最坏留一个**孤儿文件**(盘上有、索引里没有)—— 可检测、可回收;
+    //   先行后文件:写失败就得到「**有索引无内容**」—— 行在库里、正文永远读不回来,
+    //   而且它与「文件被人工删了」在读面上长得一模一样。
+    //
+    // 所以写文件失败 ⇒ 这次调用**失败**,并且一行都不插。
+    const access = workspaceAccess(ctx);
+    if (access === null) return fail("internal", WORKSPACE_ASSEMBLY_PROBLEM);
     const id = ctx.newId("art");
+    const written = writeArtifactBody(access, {
+      id,
+      title: title.value,
+      deliverableType,
+      content: body.value,
+    });
+    if (!written.ok) {
+      return fail(
+        "internal",
+        `正文写盘失败,这次 board_write **没有落库**(先文件后行:写不成文件就不留行):` +
+          `${written.problem}\n路径:${artifactPathForEcho(id, title.value, deliverableType)}`,
+      );
+    }
+
     const at = ctx.now();
     try {
       insertArtifact(ctx.db, {
@@ -425,7 +495,10 @@ const boardWrite: PlatformTool = {
         status: statusRaw as ArtifactStatus,
         authorAgentId: ctx.agent.id,
         title: title.value,
-        body: body.value,
+        // **落点 + 写入快照**,不是正文内容 —— 正文已经在盘上了。
+        bodyPath: written.value.bodyPath,
+        bodySha256: written.value.bodySha256,
+        bodyBytes: written.value.bodyBytes,
         metadataJson: metadata !== undefined ? JSON.stringify(metadata) : null,
         createdAt: at,
         updatedAt: at,
@@ -435,10 +508,17 @@ const boardWrite: PlatformTool = {
     } catch (err) {
       // 外键失败必须**指名道姓** —— 裸的 "FOREIGN KEY constraint failed" 不说是哪条,
       // 事后无从判断是项目不存在还是作者不存在(首跑实测就撞上这条,只能靠猜)。
+      //
+      // ⚠️ 这一支**必然留下一个孤儿文件**(正文已经写进盘里、行没插进去)。
+      // 那是这条顺序纪律**选定的**最坏情况:可检测(`GET /api/projects/:id/workspace`
+      // 的 `orphanFile`)、可回收 —— 反过来(先行后文件)是「有索引无内容」,
+      // 谁都发现不了,正文永远读不回来。所以这里不瞒着,把落点写出来。
       return fail(
         "internal",
         `${err instanceof Error ? err.message : String(err)}` +
-          `(写入上下文:project_id=${pid} · author_agent_id=${ctx.agent.id} · kind=${kind})`,
+          `(写入上下文:project_id=${pid} · author_agent_id=${ctx.agent.id} · kind=${kind})` +
+          `\n⚠️ 正文已写到 ${written.value.bodyPath}(项目根相对)—— 这次查询失败留下了一个` +
+          `**孤儿文件**,workspace 对账会把它列为 orphanFile。`,
       );
     }
 
@@ -467,17 +547,30 @@ const boardWrite: PlatformTool = {
     const csEcho = (() => {
       if (deliverableType !== "code_service" || metadata === null || typeof metadata !== "object") return "";
       const m = metadata as Record<string, unknown>;
+      const ignored = Array.isArray(m["ignoredFiles"]) ? (m["ignoredFiles"] as unknown[]) : [];
       return (
         `\n· 仓库:${String(m["repoPath"] ?? "?")}(分支 ${String(m["branch"] ?? "?")})` +
+        `\n· 服务目录:${String(m["servicePath"] ?? "?")} · 构建上下文:\`docker build ` +
+        `${String(m["servicePath"] ?? "?")}\`` +
         `\n· HEAD:${String(m["headCommit"] ?? "?")} · ${String(m["headSubject"] ?? "")}` +
-        `\n· 提交数:${String(m["commitCount"] ?? "?")} · Dockerfile:${String(m["dockerfile"] ?? "?")}` +
+        `\n· 这版交付物:${String(m["deliverableCommit"] ?? "?")} · ` +
+        `${String(m["deliverableSubject"] ?? "")}` +
+        `\n· 提交数(按服务目录算):${String(m["commitCount"] ?? "?")} · ` +
+        `Dockerfile:${String(m["dockerfile"] ?? "?")}` +
         `\n· 服务名/端口:${String(m["service"] ?? "?")}:${String(m["port"] ?? "?")}` +
+        (ignored.length > 0
+          ? `\n⚠️ 服务目录里有 ${ignored.length} 个**被忽略**的条目(甲方 clone 不到它们):` +
+            `${ignored.map((x) => String(x)).join(", ")}`
+          : "") +
         `\n(以上是平台去盘上**核实过**的值,不是你写进来的原话)`
       );
     })();
     return ok(
       `已写工件 ${id}(${kind} · ${statusRaw})「${title.value}」` +
         (deliverableType !== null ? ` · 交付物类型:${deliverableType}` : "") +
+        // 正文落点如实回灌 —— 「正文去哪了」现在是模型必须知道的事实:
+        // 它不再住库里,而模型可能想用 `read` / `bash` 去看同一个文件。
+        `\n正文落点:${written.value.bodyPath}(${written.value.bodyBytes} 字节)` +
         csEcho +
         (warnings.length > 0 ? `\n⚠️ 部分关联未建立:${warnings.join(";")}` : "") +
         // 把产出边如实回灌给模型 —— 否则它无法从工具输出里确认自己填对了,
