@@ -13,8 +13,8 @@
  *   ④ **`hub.busy` 语义不变**:同一个项目并发两条用户消息,第二条被拒
  *      `code=busy`。
  *   ⑤ **中断仍按项目**:中断 B 不动 A。
- *   ⑥ **D4**:打开 `isolateProjectCwd` 后两个项目拿到不同的会话 cwd;默认
- *      (关)时它们拿到同一个 —— 那正是跨项目耦合的形状。
+ *   ⑥ **D4**:两个项目拿到**各自的**会话 cwd(`<工作根>/projects/<id>`,无条件 ——
+ *      `isolateProjectCwd` 开关已随「老数据不要」一起删),而接待会话仍在工作根本身。
  *
  * ── 为什么用假会话 ──────────────────────────────────────────────
  *
@@ -261,7 +261,6 @@ interface Started {
 
 async function startHost(o: {
   maxConcurrentProjects?: number;
-  isolateProjectCwd?: boolean;
 } = {}): Promise<Started> {
   host = createPlatformHost({
     dataDir,
@@ -276,7 +275,6 @@ async function startHost(o: {
     ...(o.maxConcurrentProjects !== undefined
       ? { maxConcurrentProjects: o.maxConcurrentProjects }
       : {}),
-    ...(o.isolateProjectCwd !== undefined ? { isolateProjectCwd: o.isolateProjectCwd } : {}),
     createSession: makeCreateSession(h),
   });
 
@@ -586,28 +584,11 @@ describe("⑤ 中断按项目:onInterrupt(B) 不动 A", () => {
   });
 });
 
-// ── ⑥ D4:每项目独立 cwd(机制与默认值)────────────────────────
+// ── ⑥ D4:每项目独立 cwd(**无条件**,开关已删)──────────────────
 
-describe("⑥ D4:每项目独立 cwd", () => {
-  it("默认(关):两个项目拿到**同一个**会话 cwd —— 这就是跨项目耦合的形状", async () => {
+describe("⑥ D4:每项目独立 cwd(无条件)", () => {
+  it("两个项目拿到各自的工作根子目录,同一个相对路径落在不同绝对路径", async () => {
     const s = await startHost();
-    const db = s.db();
-    seedProject(db, "pA", "wkA");
-    seedProject(db, "pB", "wkB");
-
-    await s.runTimerNow();
-
-    const a = workTurns("pA")[0]!;
-    const b = workTurns("pB")[0]!;
-    expect(a.cwd).toBe(resolve(root));
-    expect(b.cwd).toBe(resolve(root));
-    // 同一个相对路径 → 同一个绝对路径 ⇒ SDK 的按绝对路径文件变更队列会排队,
-    // 后写覆盖先写(这就是 D4 命名的语义冲突)。
-    expect(resolve(a.cwd, "src/x.ts")).toBe(resolve(b.cwd, "src/x.ts"));
-  });
-
-  it("打开后:两个项目拿到不同的 cwd(工作根的子目录),同一个相对路径落在不同绝对路径", async () => {
-    const s = await startHost({ isolateProjectCwd: true });
     const db = s.db();
     seedProject(db, "pA", "wkA");
     seedProject(db, "pB", "wkB");
@@ -622,17 +603,19 @@ describe("⑥ D4:每项目独立 cwd", () => {
     // 目录必须真的存在 —— SDK 的 `bash` 会 `fsAccess(cwd)` 并在缺失时报错
     expect(existsSync(a.cwd)).toBe(true);
     expect(existsSync(b.cwd)).toBe(true);
-    // 同一个相对路径 ⇒ **不同**绝对路径(耦合被拆掉)
+    // 同一个相对路径 ⇒ **不同**绝对路径(跨项目耦合被拆掉:这正是 D4 的语义)
     expect(resolve(a.cwd, "src/x.ts")).not.toBe(resolve(b.cwd, "src/x.ts"));
   });
 
-  it("打开后:**接待会话**仍然用工作根本身(它不属于任何项目)", async () => {
-    const s = await startHost({ isolateProjectCwd: true });
+  it("**接待会话**仍然用工作根本身(它不属于任何项目,也不建仓)", async () => {
+    const s = await startHost();
     s.send({ type: "send", projectId: null, content: "我想做个东西" });
     expect(await until(() => h.turns.length === 1)).toBe(true);
     const t = h.turns[0]!;
     expect(t.projectId).toBeNull();
     expect(t.cwd).toBe(resolve(root));
+    // ⚠️ 接待会话**不建仓**:立项之前没有项目,给它建一个仓等于凭空造一个仓库。
+    expect(existsSync(join(resolve(root), ".git"))).toBe(false);
   });
 });
 

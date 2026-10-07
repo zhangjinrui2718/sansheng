@@ -186,6 +186,11 @@ export interface RunWorkOptions {
    * `wallClockTimeoutMs` 的教训同一个形状(见 `host/serve.ts` 的注释)。
    */
   readonly onUsageRecorded?: (row: TurnUsageRow) => void;
+  /**
+   * **这条工作项的工作目录**(绝对路径,`<项目根>/work/<workId>/`)—— 由宿主在
+   * 派发时建好并透传进任务正文(`composeWorkPrompt` 的 `workDir`)。见那里的注释。
+   */
+  readonly workDir?: string;
 }
 
 /**
@@ -228,7 +233,18 @@ function checkRunnable(db: Database.Database, work: WorkRow): string | null {
 }
 
 /** 拼给 worker 的任务描述。 */
-export function composeWorkPrompt(work: WorkRow): string {
+export function composeWorkPrompt(
+  work: WorkRow,
+  /**
+   * **这条工作项的工作目录**(绝对路径,`<项目根>/work/<workId>`)。
+   *
+   * 由宿主建好并传进来(设计 `docs/DESIGN-WORKSPACE.md` §2:「`work/<workId>/` 在
+   * 派发那条工作项时建好,并把**绝对路径写进任务提示词** —— 当前这条通道是空的,
+   * 模型只能自己编目录名」)。缺省不写这一段:`platform-run` 那条 CLI 路径没有
+   * 「项目仓」这个概念,编一个目录出来是假话。
+   */
+  opts: { readonly workDir?: string } = {},
+): string {
   return [
     `# 工作项 ${work.id}`,
     "",
@@ -250,6 +266,17 @@ export function composeWorkPrompt(work: WorkRow): string {
     "`board_write` 时**把你这条工作项的 id 传进 `workId`**:",
     `\`workId: "${work.id}"\` —— 平台不猜「当前工作项」,不传就等于这些工件`,
     "不是任何工作项的执行产出(事后查「这条工作项交付了什么」会得到空)。",
+    // 工作目录:**平台建好的绝对路径**,不是让模型自己编一个(`wk_*` /
+    // `pj_*_output` 那套命名就是「没人告诉它」的产物 —— 盘上有,平台零支持)。
+    ...(opts.workDir !== undefined
+      ? [
+          "",
+          `你的工作目录是 \`${opts.workDir}\`(项目仓里的 \`work/${work.id}/\`)——`,
+          "中间产物与临时文件放进它,**不要自己编目录名**。",
+          "它就在项目仓之内:回合边界平台会把整个仓提交一次,所以它不是一块",
+          "用完就消失的临时空间。",
+        ]
+      : []),
   ].join("\n");
 }
 
@@ -307,7 +334,10 @@ export async function runWorkItem(opts: RunWorkOptions): Promise<ExecutionResult
     db: opts.db,
     agentId: before.assigneeAgentId,
     projectId: before.projectId,
-    message: composeWorkPrompt(before),
+    message: composeWorkPrompt(
+      before,
+      opts.workDir !== undefined ? { workDir: opts.workDir } : {},
+    ),
     // **工作项是知道的** —— `runTurn` 不知道自己在干哪个工作项,而这里手里就是
     // 它。不传的话「这个回合花的钱是投在哪件活上」在库里永远是 NULL(静默丢字段)。
     workId: opts.workId,

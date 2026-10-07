@@ -56,6 +56,12 @@ import { listProjectSummaries, type LiveCollectOptions } from "../transport/view
 import { getProjectRow, listProjects } from "../storage/repo/projects.js";
 import { getWork } from "../storage/repo/works.js";
 import { getAgent } from "../storage/repo/agents.js";
+import {
+  artifactBodyPaths, getArtifact, setArtifactCommitSha, updateArtifactBody,
+} from "../storage/repo/artifacts.js";
+import { projectWorkspaceRoot } from "../workspace/root.js";
+import { unavailableWorkspace } from "../workspace/git.js";
+import type { WorkspacePort } from "../workspace/port.js";
 import { log } from "../../shared/log.js";
 import { applySettingsPatch, toPublicSettings } from "../infra/settingsApply.js";
 import { listProviders, resolveModel, syncActiveProviderApiKeyEnv } from "../infra/providers.js";
@@ -291,28 +297,6 @@ export interface ServeOptions {
    */
   readonly maxConcurrentProjects?: number;
   /**
-   * **给每个项目一个独立的工作目录**(默认**关**)。
-   *
-   * 打开时:会话的 `cwd` = `<工作根>/projects/<projectId>`,接待会话仍是工作根本身。
-   * 它挡的是 SDK 的**按绝对路径的文件变更队列**造成的跨项目耦合
-   * (`pi-coding-agent/dist/core/tools/file-mutation-queue.js` 的
-   * `withFileMutationQueue(filePath, fn)`:`edit` / `write` 先 `resolveToCwd(path, cwd)`
-   * 再按绝对路径排队)—— 同一路径串行(**不会损坏文件**),不同路径并行。
-   * 于是两个项目的 worker 若用**同一个相对路径**,今天会解析到同一个绝对路径 →
-   * 排队、后写覆盖先写 = 语义冲突。独立 cwd 让同一个相对路径落在不同目录。
-   *
-   * ── 为什么默认关(这条与「D4 要做」的裁决不一致,理由在证据里)──────
-   *
-   * 打开它会**改掉已有项目的相对路径根**:工作根里已经产出的文件(真机现场:
-   * `~/sansheng-workspace/` 下就摆着当前唯一那个项目的交付物)在新根下**看不见**,
-   * 而没有任何东西会告诉 worker「你的文件搬走了」——那是一次静默破坏。
-   * 而收益(两个项目同时改同一个相对路径)需要 ≥2 个项目同时开工才发生:
-   * 真机库 `SELECT COUNT(*) FROM projects` = 1。所以顺序是「先把工作根搬进
-   * 项目子目录,再打开这个开关」,而不是反过来。
-   * 机制、测试与开关都在,打开只需一个参数(或 CLI 一行,见报告)。
-   */
-  readonly isolateProjectCwd?: boolean;
-  /**
    * 测试 seam:替换真实的 `createAgentSession`(与 `session.ts` 的 DI 同一条理由 ——
    * 「到底把什么交给了 SDK」/「中断有没有到达会话」这类断言不该需要 provider 与网络)。
    * 生产不传。
@@ -387,33 +371,354 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
 
   const cwd = opts.cwd ?? booted.settings.cwd;
 
+  // ══ 工作区:一个项目 = 一个 git 仓库(设计 `docs/DESIGN-WORKSPACE.md` §2/§3)══
+  //
+  // 三件事在这里接线,顺序就是它们的依赖顺序:
+  //   ① **建仓** —— 立项时(`ensureProjectWorkspace`),以及回合边界的兜底
+  //      (`ensureProjectRepo`:库里的项目可能比这次改动更老,那些项目没有仓);
+  //   ② **提交** —— 每个回合边界做一次 housekeeping(成功/失败/超时都做,7-N);
+  //   ③ **索引向 git 收敛** —— 提交前重算工件正文的 sha/bytes,提交后回填
+  //      `commit_sha`(设计 §3.4 的第 1、4 步)。
+
   /**
-   * 某个上下文的会话工作目录(D4)。
+   * 工作区端口。缺省由 `bootPlatform` 注入真实现;这里保证**拿不到时交给调用方的
+   * 是一句装配错误**,而不是 `undefined` —— 后者会让工具层在「没接盘」和
+   * 「写了但没生效」之间没有任何区别(设计 §4.3 的 fail-closed)。
+   */
+  function workspacePort(): WorkspacePort {
+    return (
+      booted.deps.workspace ??
+      unavailableWorkspace(
+        "本次装配没有工作区端口 —— 工件正文落不了盘,回合边界也没有仓可提交",
+      )
+    );
+  }
+
+  /** **全局工作根**。与会话 cwd 同一个根(见 `BootOptions.workspaceRoot` 的注释)。 */
+  function workspaceRootOf(): string {
+    return booted.deps.workspaceRoot ?? cwd;
+  }
+
+  /** 项目根 = `<工作根>/projects/<projectId>` —— 算式只有一处(`workspace/root.ts`)。 */
+  function projectRoot(projectId: string): string {
+    return projectWorkspaceRoot(workspaceRootOf(), projectId);
+  }
+
+  /**
+   * `.gitignore` —— **设计 §3.3 原文那几条**,不加不减。
    *
-   * **默认就是工作根本身**(`opts.isolateProjectCwd` 未打开)—— 这条默认值是有
-   * 证据的选择,不是懒:`settings.cwd` 是用户配的「工作根」,而设计文档明写
-   * `code.*` **项目无关**(`harness/authorize.ts:126`),真机工作根里还摆着
-   * 唯一那个项目已经产出的文件。打开隔离会把这些文件的相对路径根搬走,
-   * 而没有任何东西会通知 worker。
+   * ⚠️ 交付口径是「整仓对甲方可见」(设计 §7),所以这不是内部卫生:第 1 条是
+   * **唯一**挡在秘密与甲方之间的机制。要加规则就在项目里改这份文件
+   * (`initRepo` 只补缺、不覆盖),**不要**在这里悄悄加宽 —— 加宽会让本该提交的
+   * 模板文件也消失,而那种缺失没有任何判据会报。
+   */
+  const WORKSPACE_GITIGNORE = [
+    "# 秘密:永不提交,并在提交时告警",
+    ".env",
+    "*.key",
+    "*.pem",
+    "secrets/",
+    "",
+    "# 平台暂存",
+    ".platform-tmp/",
+    "",
+  ].join("\n");
+
+  /**
+   * 项目 README —— 平台写的是**目录约定**,项目名与目标从库里那一行来。
    *
-   * 打开后每个项目一个子目录。目录**必须真的存在**:SDK 的 `bash` 会
-   * `fsAccess(cwd)` 并在不存在时报「Working directory does not exist」
+   * 这条通道此前是空的:模型自己编目录名(`wk_*` / `pj_*_output` —— 盘上有这些
+   * 名字,而 `grep -rn "wk_\|_output" src/` 零命中)。目录约定写在 README 里,
+   * 至少有一个不靠记忆的落点。
+   */
+  function projectReadme(row: { name: string; goal: string }): string {
+    return [
+      `# ${row.name}`,
+      "",
+      "> 三生平台的工作区:一个项目 = 一个 git 仓库。目录约定写在下面,不靠记忆。",
+      "",
+      "## 目标",
+      "",
+      row.goal,
+      "",
+      "## 目录",
+      "",
+      "- `artifacts/` —— 工件正文(平台写;索引在库里的 `artifacts` 表)",
+      "- `work/<workId>/` —— 每个工作项的中间产物 / 临时文件",
+      "- `services/<name>/` —— 代码服务交付物(服务目录里要有 `Dockerfile`)",
+      "",
+      "这个文件只在**缺失时**由平台写入:改过它之后平台不会再覆盖。",
+      "",
+    ].join("\n");
+  }
+
+  /**
+   * 某个上下文的会话工作目录(设计 §2)。
+   *
+   * **无条件按项目**:项目会话的 cwd = `<工作根>/projects/<projectId>`;接待会话
+   * (`projectId === null`)仍在工作根本身、且**不建仓** —— 立项之前没有项目,
+   * 给一条空会话建仓等于凭空造出一个仓库。
+   *
+   * ⚠️ **没有「建不出来就退回工作根」这条兜底了**(原来的 `isolateProjectCwd` 分支
+   * 有,那个开关与分支已随「老数据不要」一起删)。退回工作根 = 把项目的相对路径根
+   * **静默搬走**,而模型会继续往工作根写 —— 屏幕上与「一切正常」一模一样。
+   * 所以建不出来就让会话建不起来(SDK 的 `bash` 会报 `Working directory does not
+   * exist`,这是看得见的),同时留一行 error。
+   *
+   * 目录**必须真的存在**:SDK 的 `bash` 会 `fsAccess(cwd)` 并在缺失时报错
    * (`pi-coding-agent/dist/core/tools/bash.js`),而 SDK 只建会话目录
    * (`SessionManager` 的 `sessionDir`),不建 cwd 本身。
-   * 建不出来时**退回工作根**并留一行 warn —— 建目录失败不该让这个项目连会话
-   * 都建不出来(那会把一个目录问题放大成「组织不动」)。
    */
   function sessionCwd(projectId: string | null): string {
-    if (opts.isolateProjectCwd !== true || projectId === null) return cwd;
-    const dir = join(cwd, "projects", projectId);
+    if (projectId === null) return cwd;
+    const dir = projectRoot(projectId);
+    try {
+      mkdirSync(dir, { recursive: true });
+    } catch (e) {
+      log.error(
+        `platform: 建项目 ${projectId} 的工作目录失败(${dir}):` +
+          `${e instanceof Error ? e.message : String(e)} —— **不退回工作根**` +
+          `(退回会把项目的相对路径根搬走,而模型照旧往工作根写)。`,
+      );
+    }
+    return dir;
+  }
+
+  /**
+   * 立项时把项目仓建出来(设计 §2 / §6 第 3 步):`mkdir -p <项目根>` +
+   * `git init` + 写 `.gitignore` / `README.md` + 首次提交。
+   *
+   * **幂等**:`initRepo` 只补缺的文件、已有仓时不重置任何东西。
+   * 失败**必须可见**(项目行已经进了库,收不回来;能做的只有把现场说出来)。
+   */
+  function ensureProjectWorkspace(projectId: string, row: { name: string; goal: string }): void {
+    const root = projectRoot(projectId);
+    try {
+      mkdirSync(root, { recursive: true });
+    } catch (e) {
+      reportWorkspaceProblem(
+        projectId,
+        "建目录失败",
+        `${root}:${e instanceof Error ? e.message : String(e)}`,
+      );
+      return;
+    }
+    const r = workspacePort().initRepo({
+      root,
+      gitignore: WORKSPACE_GITIGNORE,
+      readme: projectReadme(row),
+    });
+    if (!r.ok) {
+      reportWorkspaceProblem(projectId, "建仓失败", r.problem);
+      return;
+    }
+    log.muted(
+      `platform: 项目 ${projectId} 的工作区${r.value.created ? "已建仓" : "已存在"}` +
+        `(${root}${r.value.sha !== null ? ` · HEAD ${r.value.sha.slice(0, 8)}` : ""})`,
+    );
+  }
+
+  /**
+   * 回合边界的兜底建仓:仓**在**就只花一次 `existsSync`。
+   *
+   * 为什么需要它:仓本该在 `project_open` 建好,而**库里的项目可能比这次改动更老**
+   * (真实数据目录里的存量项目、测试里直接 INSERT 的项目行)。那些项目没有仓,
+   * 于是每个回合边界的提交都会失败 —— 一次 `existsSync` 换掉每回合一条可见失败。
+   */
+  function ensureProjectRepo(projectId: string, row: { name: string; goal: string }): boolean {
+    const root = projectRoot(projectId);
+    if (existsSync(join(root, ".git"))) return true;
+    ensureProjectWorkspace(projectId, row);
+    return existsSync(join(root, ".git"));
+  }
+
+  /**
+   * 索引**向 git 收敛**(设计 §3.4 第 1 步):对索引里登记的每一条正文路径重算
+   * `sha256` / `bytes`,与行里记的不一致就把它拉回事实。
+   *
+   * ⚠️ 这是 `updateArtifactBody` 的**第一个生产调用方**。没有它,人手工改过一次
+   * 工件正文之后库里的 `body_sha256` 会一直停在旧哈希上 —— 而「索引说谎」在读面上
+   * 表现为「读面说漂移」,看起来像故障,其实只是没有人做过这一步。读面报漂移与这里
+   * 收敛并不矛盾:两次提交之间的漂移照样看得见,下一次回合边界把它收敛掉。
+   *
+   * 文件**不在**盘上时不改行:`missing` 是读面要如实报的事实,在这里连行一起改掉
+   * 等于替它把「文件没了」抹平。
+   */
+  function reconcileArtifactBodies(projectId: string): Set<string> {
+    const touched = new Set<string>();
+    const root = projectRoot(projectId);
+    const ws = workspacePort();
+    for (const p of artifactBodyPaths(db, projectId)) {
+      const row = getArtifact(db, p.artifactId);
+      if (row === null) continue;
+      const rd = ws.read({ root, path: p.path });
+      if (!rd.ok) continue;
+      const sha = ws.sha256(rd.value);
+      const bytes = Buffer.byteLength(rd.value, "utf8");
+      if (sha === row.bodySha256 && bytes === row.bodyBytes) continue;
+      updateArtifactBody(
+        db,
+        p.artifactId,
+        { bodyPath: p.path, bodySha256: sha, bodyBytes: bytes },
+        now(),
+      );
+      touched.add(p.artifactId);
+      log.muted(
+        `platform: 项目 ${projectId} 的工件 ${p.artifactId} 正文与索引不一致 —— ` +
+          `索引已按盘上的事实收敛(${p.path})`,
+      );
+    }
+    return touched;
+  }
+
+  /**
+   * 回填「正文是被哪一次提交引入的」(设计 §3.4 第 4 步)。
+   *
+   * 判据是**两件事都成立**:① 这次提交里有这条路径(`git show` 成功);② 读出来的
+   * 字节与库里记的 `body_sha256` 一致。缺一不可 —— 只按路径回填会在「索引与盘不
+   * 一致」时记下一个指向**别的**内容的 sha,而那个假 sha 读出来是一份错的正文。
+   *
+   * 已经记过、且这次没被改过的行**不动**:`commit_sha` 的语义是「引入正文的提交」,
+   * 不是「最后一次提交」—— 后者会让平台每写一个工件就把所有工件的版本一起往前推。
+   */
+  function backfillCommitSha(
+    projectId: string,
+    sha: string,
+    reconciled: ReadonlySet<string>,
+  ): number {
+    const root = projectRoot(projectId);
+    const ws = workspacePort();
+    let n = 0;
+    for (const p of artifactBodyPaths(db, projectId)) {
+      const row = getArtifact(db, p.artifactId);
+      if (row === null) continue;
+      if (row.commitSha !== null && !reconciled.has(p.artifactId)) continue;
+      const at = ws.show({ root, sha, path: p.path });
+      if (!at.ok) continue;
+      if (ws.sha256(at.value) !== row.bodySha256) continue;
+      setArtifactCommitSha(db, p.artifactId, sha);
+      n++;
+    }
+    return n;
+  }
+
+  /**
+   * 平台级的工作区问题要**看得见**(设计 §3.1:静默吞掉会让「提交了」与「没提交」
+   * 在屏幕上长得一样)。
+   *
+   * 落点 = 一条 `kind='system'` 的**内部会话**消息(`agent_id` 为 NULL,与
+   * `announceDrain` / `reportUnannouncedTurn` 同一个形状)。项目页的「组织运行态」
+   * 按 `kind === 'system'` 收它们;正文首行前缀不认识时归「平台通知」一档,
+   * **正文原样显示** —— 所以这条消息不会因为前端没加一条前缀而消失
+   * (`web/src/lib/platformNotices.ts` 的 other 一类)。
+   *
+   * ⚠️ **同一个问题只播报一次**:提交失败与「有文件没进版本库」会**每个回合**重来
+   * (那正是「下次边界重试」的语义),每回合一条 system 消息会把「组织运行态」淹掉,
+   * 而报多了就没人看了。日志每回合照留;问题变了或恢复正常之后再来会重新播报。
+   */
+  const announcedWorkspaceProblems = new Map<string, string>();
+  function reportWorkspaceProblem(projectId: string, title: string, detail: string): void {
+    const line = `⚠️ 工作区${title}:${detail}`;
+    log.warn(`platform: 项目 ${projectId} ${line}`);
+    if (announcedWorkspaceProblems.get(projectId) === line) return;
+    announcedWorkspaceProblems.set(projectId, line);
+    const sessionId = ensureSession(db, projectId, now(), newId, "internal");
+    appendSessionMessage(db, {
+      id: newId("m"),
+      sessionId,
+      agentId: null,
+      kind: "system",
+      content:
+        `${line}\n` +
+        "这不影响这一回合已经完成的事,但**盘上的改动没有进版本库** —— " +
+        "下一个回合边界还会重试。",
+      createdAt: now(),
+      // 平台通知不属于任何封套(与 `announceDrain` / `reportUnannouncedTurn` 同)。
+      originSource: null,
+      triggerKind: null,
+    });
+  }
+
+  /**
+   * 回合边界的 housekeeping 提交(设计 §3.1 / §3.4)。
+   *
+   * 成功、失败、超时**都做** —— 失败也要留现场(7-N)。次序:
+   * ① 索引向盘收敛 ② 提交 ③ 回填 `commit_sha` ④ 把闸门挡下的条目说出来。
+   *
+   * ⚠️ **它是同步的**(端口实现全是 `execFileSync`),这一点是刻意的:回合结束那一刻
+   * 宿主已经广播了 `message_end` / `agent_end`,前端会立刻来拉一次工作区;而 Node 是
+   * 单线程 —— 同步提交跑完之前那次刷新请求根本进不来。于是屏幕上看到的就是提交之后
+   * 的状态,不需要为它另造一条 WS 事件。
+   */
+  function housekeepingCommit(projectId: string | null, agentId: string, outcome: string): void {
+    if (projectId === null) return; // 接待会话不建仓(设计 §2)
+    const row = getProjectRow(db, projectId);
+    if (row === null) return; // 项目已经不在库里(重置/删除):没有仓可提交
+    if (!ensureProjectRepo(projectId, row)) return; // 失败已在 reportWorkspaceProblem 里可见
+    const member = ORG.find((m) => m.id === agentId);
+    const name = member?.name ?? getAgent(db, agentId)?.displayName ?? agentId;
+    const ws = workspacePort();
+    const reconciled = reconcileArtifactBodies(projectId);
+    const r = ws.commit({
+      root: projectRoot(projectId),
+      // 归属由 git 承载:author 是**角色中文名**(唯一来源 `ORG`),committer 是平台
+      // (设计 §3.1 实测:`author=业务经理 <…> | committer=bot <…>`)。
+      author: `${name} <${agentId}@sansheng.local>`,
+      message: `housekeeping: ${name} 的回合结束(${outcome})`,
+    });
+    if (!r.ok) {
+      reportWorkspaceProblem(projectId, "提交失败", r.problem);
+      return;
+    }
+    let problemReported = false;
+    if (r.value.excluded.length > 0) {
+      const items = r.value.excluded
+        .map((e) => `${e.path}(${e.reason === "secret" ? "秘密" : "超大"})`)
+        .join("、");
+      reportWorkspaceProblem(
+        projectId,
+        "有文件没有进版本库",
+        `${items} —— 交付口径是整仓对甲方可见,**没进去的东西甲方也拿不到**。`,
+      );
+      problemReported = true;
+    }
+    if (r.value.sha !== null) {
+      // ⚠️ **不看 `committed`**:这一次没有新提交时 HEAD 仍然是「正文所在的那次提交」,
+      // 而索引里 `commit_sha` 为 NULL 的行同样要收敛 —— 否则一个仓是**懒建**的项目
+      // (首次提交由 `initRepo` 做、已经包含这些文件)会永远回填不上。
+      const n = backfillCommitSha(projectId, r.value.sha, reconciled);
+      if (r.value.committed) {
+        log.muted(
+          `platform: 项目 ${projectId} 的工作区已提交 ${r.value.sha.slice(0, 8)}` +
+            `(author ${name} · ${outcome} · 回填 ${n} 条 commit_sha)`,
+        );
+      } else if (n > 0) {
+        log.muted(
+          `platform: 项目 ${projectId} 的工作区无变更(HEAD ${r.value.sha.slice(0, 8)})` +
+            `—— 回填了 ${n} 条 commit_sha`,
+        );
+      }
+    }
+    // 恢复正常:下次再出问题(哪怕是同一条)会重新播报一次。
+    if (!problemReported) announcedWorkspaceProblems.delete(projectId);
+  }
+
+  /**
+   * 派发一条工作项时建它的工作目录(设计 §2):`<项目根>/work/<workId>/`,返回绝对路径。
+   *
+   * 建不出来时**不返回 null**:返回路径本身就是「工作目录是这里」这个事实,而
+   * 建不出来会由工具层写文件时响亮失败(写不进一个不存在的目录)。这里只把现场
+   * 说清楚。
+   */
+  function ensureWorkDir(projectId: string, workId: string): string {
+    const dir = join(projectRoot(projectId), "work", workId);
     try {
       mkdirSync(dir, { recursive: true });
     } catch (e) {
       log.warn(
-        `platform: 建项目 ${projectId} 的工作目录失败(${dir})—— 退回工作根 ${cwd}:` +
+        `platform: 建工作项 ${workId} 的工作目录失败(${dir}):` +
           `${e instanceof Error ? e.message : String(e)}`,
       );
-      return cwd;
     }
     return dir;
   }
@@ -557,14 +862,24 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
         await handleUserMessage(projectId, content, sessionId);
       },
       onAnswerQuestion: async (questionId, answer) => {
+        // ⚠️ **答复要落一条 `decision` 工件,而工件正文住项目仓里的文件** ——
+        // 所以 `workspace` / `workspaceRoot` 是**必填**(设计 §4.3,先文件后行)。
+        // 缺了工作区就是**没有落点**:那只能让这次答复失败,而**不能**插一行指向
+        // 不存在文件的记录(「有索引无内容」)。这里不传 `undefined`,而是传一个
+        // 明确拒绝的实现 —— 失败信息里能看见「是装配没接上」,不是「问题不存在」。
         const r = resolveClientQuestion(db, questionId, answer, now(), {
           newId,
           answeredByAgentId: "bm",
+          workspace: workspacePort(),
+          workspaceRoot: workspaceRootOf(),
         });
         if (!r.ok) {
+          // `content_write_failed` 是**装配/磁盘**的问题,不是数据问题 —— 现场一起
+          // 带出去,别让用户以为「这个问题不存在」(与 HTTP 那条答复路由同一条)。
+          const detail = r.problem !== undefined ? `${r.reason}:${r.problem}` : r.reason;
           hub.broadcast({
             type: "error",
-            error: { code: r.reason ?? "internal", message: `答复失败:${r.reason}` },
+            error: { code: r.reason ?? "internal", message: `答复失败:${detail}` },
           });
           return;
         }
@@ -736,6 +1051,14 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
           log.error(`platform: project_open 报回 ${newProjectId},但库里读不到它 —— 不切换`);
         } else {
           const fromIntake = projectId === null;
+          // ── **立项就建仓**(设计 §2 / §6 第 3 步)──────────────────────────
+          //
+          // 顺序:建目录 + `git init` + 写 `.gitignore` / `README.md` + 首次提交,
+          // **在广播之前**做。放在广播之后的话,前端收到 `project_opened` 就会去
+          // 拉工作区与项目页,而那一刻目录可能还不存在 —— 读面会如实报
+          // `runtime: "unavailable"`,用户看到的是「这个项目没有工作区」。
+          // 建仓失败**不阻止切换**(项目行已经在库里了,收不回来),但必须可见。
+          ensureProjectWorkspace(newProjectId, row);
           if (fromIntake) {
             // 顺序有讲究:**先迁消息,再广播,最后才丢会话**。
             //   迁 → 前端收到事件后立刻拉新项目的 messages,那时消息必须已经在了
@@ -1016,6 +1339,13 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
 
     /** 用户是否按了中断。区分「用户停的」与「自己炸了」—— 两者呈现完全不同。 */
     let aborted = false;
+    /**
+     * 回合**怎么结束的** —— 只用于回合边界那次 housekeeping 提交的说明。
+     *
+     * 它必须**成功 / 失败 / 超时 / 被中断四条路都写一遍**(7-N:现场要能在事后从
+     * 产物里看出来)。缺省写成「结束」是安全的:真失败会在 catch 那一支覆盖它。
+     */
+    let outcomeLabel = "结束";
     // **登记必须发生在第一次 await 之前。** 放在 `await runTurn(...)` 之后等于
     // 永远登记不上:WS 的每一条消息是各自 fire-and-forget 处理的,中断消息会在
     // 这个回合还卡在 await 里的时候就被处理掉。这正是「死接线」得以藏身的缝隙。
@@ -1078,6 +1408,8 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
       });
       // 助手消息落库(项目活过会话)。落的是**真正说话的那个 agent**,不是写死 bm。
       const text = turn.text.trim() !== "" ? turn.text : textBuf.join("");
+      // 回合怎么结束的 —— 带进回合边界那次 housekeeping 提交的说明。
+      outcomeLabel = aborted ? "被中断" : turn.timedOut ? "超时" : "结束";
       if (text.trim() !== "") {
         appendSessionMessage(db, {
           id: newId("m"), sessionId, agentId, kind: "assistant",
@@ -1187,6 +1519,13 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
       };
     } finally {
       inflight.delete(pooledKey(projectId, sessionId, agentId));
+      // ── **回合边界的 housekeeping 提交**(设计 §3.1 / §3.4)────────────
+      //
+      // 放在 `finally` 里是刻意的:**成功 / 失败 / 超时 / 被中断四条路都做** ——
+      // 失败也要留现场(7-N)。只挂在成功那一支的话,一个卡到墙钟被 abort 的回合
+      // 产出的东西(它可能已经写了代码,只是没来得及收尾)就永远不进版本库,
+      // 而屏幕上「这回合超时了」与「它的产出没被提交」长得完全不一样。
+      housekeepingCommit(projectId, agentId, outcomeLabel);
     }
   }
 
@@ -1204,6 +1543,12 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
   ): Promise<DrainWorkReport> {
     const before = getWork(db, workId);
     const title = before?.title ?? workId;
+    // ── **派发时就建工作目录**(设计 §2)──────────────────────────────
+    //
+    // `<项目根>/work/<workId>/` 在派发这条工作项时建好,并把**绝对路径**写进任务
+    // 提示词(经 `runWorkItem` 的 `workDir`)。在此之前这条通道是空的 —— 模型只能
+    // 自己编目录名,而盘上那些名字(`wk_*` / `pj_*_output`)零平台代码支持。
+    const workDir = ensureWorkDir(projectId, workId);
     // ⚠️ **内部角色固定走主对话**:工作项执行是**项目级**的,不是某条甲方开的线。
     const got = await getOrCreateSession({
       projectId, agentId, sessionId: mainSessionOf(projectId, agentId),
@@ -1234,6 +1579,8 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
     const textBuf: string[] = [];
     const thinkBuf: string[] = [];
     let aborted = false;
+    /** 回合怎么结束的 —— 见 `runAgentTurn` 同一处(只喂 housekeeping 提交说明)。 */
+    let outcomeLabel = "结束";
     inflight.set(pooledKey(projectId, sessionId, agentId), () => {
       aborted = true;
       void session.abort().catch((err: unknown) => {
@@ -1246,6 +1593,9 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
     try {
       const execution = await runWorkItem({
         session, db, workId,
+        // 工作目录的绝对路径 → 任务提示词(设计 §2)。这一条只在宿主这条路上有:
+        // 它手里有项目根,`runWorkItem` 自己不知道项目仓在哪。
+        workDir,
         // 与 `runAgentTurn` 那两行同一条理由、同一批接线:执行这条路上的回合
         // 同样要落 `turn_usage.session_id` 并把 `usage_recorded` 推给前端。
         // **两条路都要接** —— 只接聊天那条等于没接(与墙钟上界同一条教训,
@@ -1309,6 +1659,13 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
       // !failed` 那一支会替它走平台记账(今天 `execute_work` 恰好没有记账动作,
       // 但那是「今天恰好」)。现在如实报 `failed` + `refused`,理由一起带出去。
       const refused = execution.outcome === "refused";
+      outcomeLabel = refused
+        ? "被拒绝执行"
+        : aborted
+          ? "被中断"
+          : execution.turn.timedOut
+            ? "超时"
+            : "结束";
       return {
         workId,
         title: execution.work.title,
@@ -1324,6 +1681,7 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
           : {}),
       };
     } catch (e) {
+      outcomeLabel = aborted ? "被中断" : "失败";
       hub.broadcast({
         type: "error", projectId,
         error: {
@@ -1341,6 +1699,10 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
       };
     } finally {
       inflight.delete(pooledKey(projectId, sessionId, agentId));
+      // 执行那条路**同样**在回合边界提交(与 `runAgentTurn` 的 finally 同一条理由:
+      // 成功 / 失败 / 超时 / 被拒绝四条路都做)。worker 写的代码正是这里进的仓 ——
+      // 设计 §3.1 的「agent 交代码,平台交其余」两半都由它收尾。
+      housekeepingCommit(projectId, agentId, outcomeLabel);
     }
   }
 
@@ -1809,6 +2171,10 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
     // 代码服务交付物的**现读**边(最近提交)—— 与工具层同一个端口实例
     // (`booted.deps.codeService` 已按 `workspaceRoot` 建好,这里只是把它交出去)。
     ...(booted.deps.codeService !== undefined ? { codeService: booted.deps.codeService } : {}),
+    // 工作区端口:**正文端点(`GET /api/artifacts/:id/content`)与答复路由都经它**。
+    // 不接的话读面会如实回 `unavailable`(不会假装空正文),但正文就都读不出来 ——
+    // 所以这里给的是端口本身,拿不到时给一个明确拒绝的实现(不是 `undefined`)。
+    workspace: workspacePort(),
     live: {
       turns: () => hub.runningTurns(),
       dispatch: () => ({

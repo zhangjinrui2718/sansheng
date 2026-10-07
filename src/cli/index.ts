@@ -125,18 +125,11 @@ program
     "同时排空几个项目(硬上界;并发之后三条账全按项目记,它是全局花费的代理指标;默认 3)",
     "3",
   )
-  .option(
-    "--isolate-project-cwd",
-    "给每个项目一个独立的工作目录(<工作根>/projects/<项目 id>)。**默认关**:打开会把" +
-      "已有项目的相对路径根搬走(真机工作根下摆着当前那个项目的交付物),而没有任何" +
-      "东西会通知 worker —— 所以它必须是一次显式选择",
-    false,
-  )
   .action(async (opts: {
     host: string; port: string; cwd?: string; data?: string; open: boolean;
     maxCascadeRounds: string; schedulerInterval: string; dispatchInterval: string;
     turnWallClockMs: string; reportBatchSize: string; reportMaxDelayMs: string;
-    maxConcurrentProjects: string; isolateProjectCwd: boolean;
+    maxConcurrentProjects: string;
   }) => {
     const rounds = Number(opts.maxCascadeRounds);
     const interval = Number(opts.schedulerInterval);
@@ -164,11 +157,9 @@ program
         Number.isFinite(reportDelay) && reportDelay > 0 ? reportDelay : 300_000,
       maxConcurrentProjects:
         Number.isFinite(maxProjects) && maxProjects > 0 ? maxProjects : 3,
-      // ⚠️ **默认值不许变**:`isolateProjectCwd` 缺省是关的(D4 的证据:真机唯一
-      // 那个活项目的交付物就在工作根下,默认打开 = 静默搬走它的相对路径根)。
-      // 所以这里把 flag 的值**原样**透传 —— 不写 `?? false` 之类的兜底,免得
-      // 将来有人以为「不传就是打开」。
-      isolateProjectCwd: opts.isolateProjectCwd === true,
+      // ⚠️ `--isolate-project-cwd` 已删(2026-10-08):项目会话的 cwd **无条件**是
+      // `<工作根>/projects/<projectId>`,没有「关」的位置。见 `host/serve.ts` 的
+      // `sessionCwd` —— 留一个开关等于留一条与设计相反的路径。
     });
   });
 

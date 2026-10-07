@@ -190,6 +190,10 @@ async function startHost(): Promise<{
 }> {
   host = createPlatformHost({
     dataDir, host: "127.0.0.1", port: 0, version: "test",
+    // ⚠️ **必须显式给一个临时 cwd。** 不给的话 `cwd` 取 `settings.cwd`,而出厂值是
+    // `<家目录>/sansheng-workspace` —— 自设计 §2 起立项就会 `mkdir` + `git init`,
+    // 那些仓会真的建到用户的家目录里去。测试只碰 `mkdtemp`。
+    cwd: dataDir,
     // 定时器挪到一小时之后:这条测试要的是**门铃**这条真路径,不是定时器兜底
     dispatchIntervalMs: 3_600_000,
     createSession: makeCreateSession(),

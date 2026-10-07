@@ -26,10 +26,12 @@ import { openPlatformDb } from "../storage/db.js";
 import { SqliteMemory } from "../memory/sqliteMemory.js";
 import { createLoggingClientChannel } from "../client/port.js";
 import { createGitCodeService } from "../codeservice/git.js";
+import { createGitWorkspace } from "../workspace/git.js";
 import { resolveAllToolSets, strayToolSetFiles, toolSetForDataDir } from "../harness/toolSet.js";
 import { log } from "../../shared/log.js";
 import type { PlatformModel } from "./session.js";
 import type { RuntimeDeps } from "./assembly.js";
+import type { WorkspacePort } from "../workspace/port.js";
 
 export interface BootOptions {
   /** 数据目录(设置与密钥环从这里读) */
@@ -52,6 +54,14 @@ export interface BootOptions {
    * 核对却说它在工作根之外(见 `codeservice/git.ts` 的包含性校验)。
    */
   readonly workspaceRoot?: string;
+  /**
+   * **工作区端口**(测试 seam)。缺省就是真实现 `createGitWorkspace()`。
+   *
+   * 它**不是可选能力**:工件正文 2026-10-08 起住项目仓里的文件(设计
+   * `docs/DESIGN-WORKSPACE.md` §4),没有它 `board_write` 会 fail-closed 拒绝。
+   * 所以这里给的是「换一个实现」的口子,不是「可以不接」—— 缺省值就是真实现。
+   */
+  readonly workspace?: WorkspacePort;
 }
 
 export interface BootedPlatform {
@@ -167,6 +177,10 @@ export function bootPlatform(opts: BootOptions): BootedPlatform {
     codeService: createGitCodeService({
       workspaceRoot: opts.workspaceRoot ?? settings.cwd,
     }),
+    // 工作区(设计 §3.1 / §4.3):工件正文落盘 + 回合边界提交。
+    // 两者**成对**:端口提供能力,根提供「相对哪个根」(见 `RuntimeDeps` 的注释)。
+    workspace: opts.workspace ?? createGitWorkspace(),
+    workspaceRoot: opts.workspaceRoot ?? settings.cwd,
   };
 
   return {
