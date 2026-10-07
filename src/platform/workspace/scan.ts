@@ -23,6 +23,16 @@
  *      在盘上消失了」,那是一个更重的谎。索引侧有多少条由 `WorkspaceView.index`
  *      的计数如实承载。
  *
+ *   ④ **`missing` 逐条问盘,不拿本次遍历的列表当判据。** 遍历有深度 3 层 /
+ *      500 条上限(②),而索引里的路径不受这两个上限约束 —— 一个**真实存在**
+ *      的文件只要落在上限之外,就会从 `entries` 里缺席,于是「列表里没有」
+ *      被读成「盘上没有」,**一个稳定的假答案**。这类错误正是本项目最防的那种:
+ *      它不报错、不截断、看起来像一次成功的对账。所以 `missing` 用
+ *      {@link existsOnDisk} 对每条索引路径单独 stat。
+ *      ⚠️ `indexed` / `orphanFile` 仍然是**本次列表**的子集(它们描述的是
+ *      「列出来的东西是什么」),遍历不全时由 `truncated: true` 承载 —— 两者
+ *      语义不同,不要为了让三个集合对称而给它们同一套判据。
+ *
  * ── 为什么是纯函数 ────────────────────────────────────────────────
  *
  * 依赖(`root` / 索引路径)全部显式传入,不读全局、不碰库、不碰 settings ——
@@ -128,6 +138,43 @@ function reason(e: unknown): string {
 }
 
 /**
+ * 一条索引路径**本身**是否逃出了工作区(`../x` / 绝对路径)。
+ *
+ * 索引行是平台生成的,但「平台生成」不是判据 —— 判据是这条路径在**集合语义**上
+ * 属不属于这个工作区。含 `..` 或绝对路径的条目按定义不在工作区里,直接算
+ * 「盘上没有」,不去 `stat` 一个工作区之外的绝对路径(那会把扫描变成一个能读
+ * 任意路径存在性的探针,而且答案对读面毫无意义)。
+ */
+function escapesRoot(rel: string): boolean {
+  if (rel.startsWith("/")) return true;
+  return rel.split("/").some((seg) => seg === "..");
+}
+
+/**
+ * 逐条问盘:**这条项目根相对路径在盘上存在吗。**
+ *
+ * `statSync` 是主判据(任务书就是这么定的 —— 沿符号链接看目标);只有它失败时才
+ * 用 `lstatSync` 兜一次:断链的符号链接目标读不到,但**这个条目确实在盘上**,
+ * 而本次遍历已经按 `lstat` 把它列进了 `entries`。不兜的话同一个扫描会对同一个
+ * 路径同时说「列出来了」和「盘上没有」—— 读面自相矛盾。
+ */
+function existsOnDisk(root: string, rel: string): boolean {
+  if (escapesRoot(rel)) return false;
+  const abs = join(root, rel);
+  try {
+    statSync(abs);
+    return true;
+  } catch {
+    try {
+      lstatSync(abs);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+}
+
+/**
  * 扫一遍 `root`,并与 `indexedPaths`(项目根相对路径)对账。
  *
  * **纯函数**:同样的输入给同样的输出,不碰库、不读 settings、不写任何东西。
@@ -228,12 +275,13 @@ export function scanWorkspace(opts: {
   // 而读面的 diff / 测试都会跟着 flaky。
   entries.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
 
-  const onDiskAll = new Set(entries.map((e) => e.path));
   const indexed = entries.filter((e) => indexSet.has(e.path));
   const orphanFile = entries
     .filter((e) => e.kind === "file" && !indexSet.has(e.path))
     .map((e) => e.path);
-  const missing = [...indexSet].filter((p) => !onDiskAll.has(p)).sort();
+  // ⚠️ 见文件头 ④:**不是** `!onDiskListed.has(p)` —— 那会把落在遍历上限之外的
+  // 真实文件报成「库里有、盘上无」。逐条 stat 是唯一正确的判据。
+  const missing = [...indexSet].filter((p) => !existsOnDisk(root, p)).sort();
 
   return {
     runtime: "ok",
