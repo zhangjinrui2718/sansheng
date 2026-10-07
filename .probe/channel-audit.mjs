@@ -10,7 +10,7 @@
  * 本探针**不猜**,它把真机数据喂进真路径:
  *
  *   ① 历史面:真 REST 载荷(`GET /api/projects/:id/messages`,直接从运行中的
- *      2719 抓的 JSON)→ 真 `useChatStore.selectProject`(内部走真 `messageToTurn`)
+ *      2718 抓的 JSON)→ 真 `useChatStore.selectProject`(内部走真 `messageToTurn`)
  *      → 真 `channelContextOf` / `channelOf` / `partitionTurns`。
  *   ② 流式面:真 SDK 会话转录(`~/.sansheng/agent/sessions/` 下的 jsonl,里面是
  *      四个角色**真实调用过**的工具名与顺序)→ 按 `host/serve.ts` 的 `bridge()`
@@ -28,7 +28,7 @@ import { tmpdir } from "node:os";
 const ROOT = "/Users/fuyao/projects/sansheng";
 const LIVE = "/Users/fuyao/.sansheng";
 const SDK = join(LIVE, "agent/sessions/--Users-fuyao-sansheng-workspace--");
-const BASE = "http://127.0.0.1:2719";
+const BASE = "http://127.0.0.1:2718";
 const PROJECT_ID = "pj_muujuaia2cx8bpvp";
 
 // ── 临时工作区:真库**只读副本**(db + wal + shm 一起拿,否则读到的是旧页)─────

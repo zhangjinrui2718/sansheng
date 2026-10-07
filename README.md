@@ -16,7 +16,7 @@ npm install
 npm run build                 # 产出 dist/src/cli/index.js + dist/web
 
 node dist/src/cli/index.js platform-serve
-# → http://127.0.0.1:2719
+# → http://127.0.0.1:2718
 ```
 
 首启没有 provider:打开界面 → 设置 → 选 Provider / Model / 填 API Key / 设工作目录。
@@ -31,7 +31,7 @@ node dist/src/cli/index.js platform-serve
 
 | 命令 | 作用 |
 |---|---|
-| `platform-serve` | 常驻宿主:HTTP + WS + 托管前端 + 调度器(默认 `127.0.0.1:2719`) |
+| `platform-serve` | 常驻宿主:HTTP + WS + 托管前端 + 调度器(默认 `127.0.0.1:2718`) |
 | `platform smoke` | 真 provider 建真会话,校验「声明 vs SDK 实际激活」,并列出缺失的提示词单元 |
 | `platform-run` | 真跑一个工作项(**写真实数据目录**) |
 | `help` | 看全部选项 |
@@ -89,8 +89,8 @@ ceiling —— 想放开上界得走代码评审。L2 的坏文件**不会**被�
 ## 开发
 
 ```bash
-npm run dev        # 并发:tsx watch 起 platform-serve(2719) + vite(5173)
-                   # 浏览器开 http://localhost:5173(vite 把 /api 与 /ws 代理到 2719)
+npm run dev        # 并发:tsx watch 起 platform-serve(2718) + vite(5173)
+                   # 浏览器开 http://localhost:5173(vite 把 /api 与 /ws 代理到 2718)
 ```
 
 `npm test` 是 vitest。测试用**注入 seam** 替换 SDK 边界(不需要 provider / API Key /

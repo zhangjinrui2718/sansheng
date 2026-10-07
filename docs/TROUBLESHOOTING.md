@@ -34,7 +34,7 @@
 ## 现在的等价操作(照着这些,不要照着上面那份)
 
 ```bash
-# 起常驻宿主(HTTP + WS + 托管前端 + 调度器);默认 127.0.0.1:2719
+# 起常驻宿主(HTTP + WS + 托管前端 + 调度器);默认 127.0.0.1:2718
 node dist/src/cli/index.js platform-serve --data <数据目录> --port <端口>
 
 # 真 provider 建真会话,校验「声明 vs SDK 实际激活」,并列出缺失的提示词单元

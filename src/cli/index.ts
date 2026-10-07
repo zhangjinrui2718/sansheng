@@ -86,7 +86,7 @@ program
       "界面能用、client.* 闭环、调度器有地方待,三件事都依赖它。",
   )
   .option("--host <host>", "绑定地址", "127.0.0.1")
-  .option("-p, --port <port>", "端口", "2719")
+  .option("-p, --port <port>", "端口", "2718")
   .option("--cwd <path>", "会话工作目录(代码工具的根)")
   .option("--data <path>", "数据目录(默认 ~/.sansheng)")
   .option("--open", "起好后打开浏览器", false)
@@ -141,7 +141,7 @@ program
     await runPlatformServe({
       dataDir: opts.data ?? dataDir(),
       host: opts.host,
-      port: Number(opts.port) || 2719,
+      port: Number(opts.port) || 2718,
       ...(opts.cwd !== undefined ? { cwd: opts.cwd } : {}),
       version: "0.1.0",
       open: opts.open,
@@ -168,7 +168,7 @@ if (process.argv.length <= 2) {
   await runPlatformServe({
     dataDir: dataDir(),
     host: "127.0.0.1",
-    port: 2719,
+    port: 2718,
     version: "0.1.0",
     open: false,
   });

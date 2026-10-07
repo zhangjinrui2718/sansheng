@@ -10,7 +10,7 @@
   (交信息:文档 / 伪代码 / 架构图 / 汇报材料),新增 **编码工** `coding_worker`
   (交能跑的东西:可独立部署到 Docker 的**代码服务**)。
 - **组织架构是一等数据**:`agents` / `projects` / `project_assignments` 在库里,**角色属性在代码里**(`ROLE_SPECS`)。制品是工件(`artifacts` 表),不是聊天记录。
-- 默认 `127.0.0.1:2719`;数据目录默认 `~/.sansheng/`,可用 `--data` 或 `SANSHENG_DATA` 覆盖。
+- 默认 `127.0.0.1:2718`;数据目录默认 `~/.sansheng/`,可用 `--data` 或 `SANSHENG_DATA` 覆盖。
 - **「此刻」的读面只有一处**:`GET /api/projects/:id/live`(`ProjectLiveView`)—— 成员页的
   「正在做什么」与工件页产出图的「在跑」标记共用它。三个来源刻意分开:宿主内存的忙闩
   (`hub.runningTurns()`,重启即清零)/ 库里的工作项与 `collectTodos` 的待办 / 落库痕迹。
@@ -575,13 +575,13 @@ CLI 只有 4 个命令(`--help` 自己看);**无参数 = 起平台服务**:
 ```
 platform smoke      真 provider 建真会话,校验「声明 vs SDK 实际激活」,并列出缺失的提示词单元
 platform-run        真跑一个工作项(**写真实数据目录**)
-platform-serve      常驻宿主:HTTP + WS + 托管前端 + 排空定时器(默认 127.0.0.1:2719)
+platform-serve      常驻宿主:HTTP + WS + 托管前端 + 排空定时器(默认 127.0.0.1:2718)
 help
 ```
 
 真机入口:`node dist/src/cli/index.js platform-serve --data <临时目录> --port <端口>`(provider 配置需把 `~/.sansheng/` 里的 settings 与 keyring 拷进临时目录),然后 `curl /api/health` 应返回 `{"ok":true,...}`。
 
-> `package.json` 的三个入口(批次 19 修好,之前三个都指向不存在的文件/未知命令):`dev` = `dev:server`(`tsx watch src/cli/index.ts platform-serve`)+ `dev:web`(vite 5173);`start` = `node dist/src/cli/index.js platform-serve`。vite 的 `/api` 与 `/ws` 代理目标是 **2719**(`vite.config.ts` —— 曾错写成旧端口 2718)。
+> `package.json` 的三个入口(批次 19 修好,之前三个都指向不存在的文件/未知命令):`dev` = `dev:server`(`tsx watch src/cli/index.ts platform-serve`)+ `dev:web`(vite 5173);`start` = `node dist/src/cli/index.js platform-serve`。vite 的 `/api` 与 `/ws` 代理目标是 **2718**(`vite.config.ts`)。⚠️ 它**必须**与 `platform-serve` 的默认端口一致 —— 写错了 proxy 就指向一个没人听的端口,而界面只会「连不上」;这两处曾经各写一个(2718 / 2719),2026-10-08 统一回 2718。
 
 ## 验证链(改完必须全过)
 
@@ -657,7 +657,7 @@ npm run check:design      # 设计一致性 E1–E14
 
 ## 历史文档(读之前先知道它描述的是什么)
 
-- `README.md` 已于批次 19 **改写为现行系统**的说明(角色 / 2719 / `platform-serve` / 验证链)。它不再是历史文档。
+- `README.md` 已于批次 19 **改写为现行系统**的说明(角色 / 2718 / `platform-serve` / 验证链)。它不再是历史文档。
 - `docs/TROUBLESHOOTING.md` 已于批次 19 改成一份**「已失效」说明**:原文描述旧系统(读 `blackboards` / `conversations`,那两张表已被 `011_drop_legacy.sql` DROP),配套的 `scripts/diagnose.mjs` 与 `npm run diagnose` 已删除。**不要照着它排查**,它现在只做两件事:标出失效原因、把仍然成立的教训指回本文。原文逐字在 git 历史里:`git show e3d2812:docs/TROUBLESHOOTING.md`。
 - `docs/PRODUCT-DESIGN-2026-10-02.md`、`docs/CODE-REVIEW-2026-10-01.md`、`docs/AGENT-AUDIT-2026-10-03.md`、`docs/SECURITY-NOTES.md`、`MIGRATION-HANDOFF.md` 是**带日期的历史记录**(描述当时发生了什么):里面的路径、测试名、表名多已不存在。当历史读,**不要当操作手册**;也不要改它们 —— 改了是篡改。
 - `MIGRATION-HANDOFF.md` 是 pi → DSH 的迁移记录;`docs/pi-memory/` 是旧记忆全量归档。
