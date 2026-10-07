@@ -187,6 +187,7 @@ const TODO_KIND_LABEL: Record<TriggerTodoKind, string> = {
   recover_failed_work: "重新划失败的工作项",
   decompose_project: "拆解项目",
   execute_work: "执行工作项",
+  rework: "返工(质检判了不通过)",
   review_work: "审查产出",
   integrate: "整合成果",
   handover: "交付交接",

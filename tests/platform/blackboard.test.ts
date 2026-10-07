@@ -17,6 +17,7 @@ import { openPlatformMemoryDb } from "../../src/platform/storage/index.js";
 import { insertAgent } from "../../src/platform/storage/repo/agents.js";
 import { insertProject, loadProjectForAuthz } from "../../src/platform/storage/repo/projects.js";
 import { insertWork } from "../../src/platform/storage/repo/works.js";
+import { insertReviewVerdict } from "../../src/platform/storage/repo/reviewVerdicts.js";
 import { dispatch } from "../../src/platform/tools/registry.js";
 import type { ToolRunContext } from "../../src/platform/tools/types.js";
 import { createGitWorkspace } from "../../src/platform/workspace/git.js";
@@ -919,5 +920,94 @@ describe("board_write · 产出边(工具层判据:存在 + 同项目)", () => {
     if (r instanceof Promise) throw new Error("board_write 必须是同步工具");
     expect(r.ok).toBe(true);
     expect(listArtifacts(db, projectId)[0]!.workId).toBeNull();
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════
+// 返工落盘时把**被退回的那一版**退休(`superseded` 的第一个真写入口)
+// ══════════════════════════════════════════════════════════════════
+
+/**
+ * 用户裁决(2026-10-08)里的「原角色者拿到原因 + 原工件,进行**再次更新**」。
+ *
+ * 工件**不可原地改**(`board_write` 永远插一行新的;`updateArtifactBody` 的唯一生产
+ * 调用方是工作区索引对账,不是模型),所以「更新」在库里的正确形态是
+ * **新写一份 + 把被退回的那份退休** —— 这样「这条工作项当前是哪一版」永远只有一个答案。
+ */
+describe("返工 · 新交付物把被退回的旧版本标成 superseded", () => {
+  function mkWorkItem(): string {
+    const id = `wk${++seq}`;
+    insertWork(db, {
+      id, projectId, parentWorkId: null, title: `工作${seq}`, goal: "g",
+      status: "in_progress", assigneeAgentId: agentA, createdAt: T0 + seq, updatedAt: T0 + seq,
+    });
+    return id;
+  }
+
+  function mkDeliverable(workId: string, at: number, status = "accepted"): string {
+    const id = `dl${++seq}`;
+    const content = "<html><body>v</body></html>";
+    insertArtifact(db, {
+      id, projectId, conversationId: null, kind: "deliverable", status: status as "accepted",
+      authorAgentId: agentA, title: `交付物${seq}`,
+      bodyPath: `artifacts/${id}.html`, bodySha256: sha256(content), bodyBytes: bytesOf(content),
+      metadataJson: null, createdAt: at, updatedAt: at, workId,
+      deliverableType: "html_report",
+    });
+    return id;
+  }
+
+  function failVerdict(workId: string, at: number): void {
+    insertReviewVerdict(db, {
+      workId, projectId, verdict: "fail", severity: "high",
+      findingArtifactId: null, note: null, reviewedBy: agentB, createdAt: at,
+    });
+  }
+
+  const writeNew = (workId: string) => dispatch("board_write", {
+    kind: "deliverable", deliverableType: "html_report", status: "accepted",
+    title: "催收语音机器人技术方案(整合交付·第二版)",
+    body: "<html><body><h1>新版</h1></body></html>",
+    workId,
+  }, ctxFor());
+
+  it("**有 fail 结论 ⇒ 旧版被退休**,而且这件事如实回灌给模型", () => {
+    const w = mkWorkItem();
+    const old = mkDeliverable(w, T0 + 100);
+    failVerdict(w, T0 + 200);
+    const r = writeNew(w);
+    if (r instanceof Promise) throw new Error("board_write 必须是同步工具");
+    expect(r.ok, !r.ok ? r.message : "").toBe(true);
+    expect(getArtifact(db, old)!.status, "被退回的那一版必须退休").toBe("superseded");
+    if (r.ok) expect(r.text, "旧版退休了必须说出来(否则模型看板上少一条会莫名)").toContain("superseded");
+    // 当前版本仍然只有一份 accepted
+    const accepted = listArtifacts(db, projectId, { workId: w, kind: "deliverable", status: "accepted" });
+    expect(accepted).toHaveLength(1);
+    expect(accepted[0]!.status).toBe("accepted");
+  });
+
+  it("**没有 fail 结论 ⇒ 谁都不退休**(负样本:别把「同一工作项的第二份交付物」当成返工)", () => {
+    const w = mkWorkItem();
+    const first = mkDeliverable(w, T0 + 100);
+    const r = writeNew(w);
+    if (r instanceof Promise) throw new Error("board_write 必须是同步工具");
+    expect(r.ok, !r.ok ? r.message : "").toBe(true);
+    expect(getArtifact(db, first)!.status, "没人否过它,凭什么退休").toBe("accepted");
+  });
+
+  it("**新写的是草稿(`open`)⇒ 不退休** —— 否则这条工作项会一份已验收交付物都不剩", () => {
+    // 平台今天**没有任何地方**会把 open 的交付物改成 accepted(`applyArtifactStatus`
+    // 全仓零生产调用方),于是「旧的退休 + 新的是草稿」= handover 与收口永远不成立
+    // —— 那是我刚修掉的那个静默死锁的同款。宁可旧版多留一会儿。
+    const w = mkWorkItem();
+    const old = mkDeliverable(w, T0 + 100);
+    failVerdict(w, T0 + 200);
+    const r = dispatch("board_write", {
+      kind: "deliverable", deliverableType: "html_report", status: "open",
+      title: "草稿", body: "<html><body>draft</body></html>", workId: w,
+    }, ctxFor());
+    if (r instanceof Promise) throw new Error("board_write 必须是同步工具");
+    expect(r.ok, !r.ok ? r.message : "").toBe(true);
+    expect(getArtifact(db, old)!.status).toBe("accepted");
   });
 });

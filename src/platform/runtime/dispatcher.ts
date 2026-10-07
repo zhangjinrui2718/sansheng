@@ -112,7 +112,11 @@ import {
   isTerminalWorkStatus, type WorkRow, type WorkStatus,
 } from "../storage/repo/works.js";
 import { blockersForWork, listBlockers } from "../storage/repo/blockers.js";
-import { latestReviewVerdict } from "../storage/repo/reviewVerdicts.js";
+import { latestReviewVerdict, latestVerdictsByWork } from "../storage/repo/reviewVerdicts.js";
+import {
+  collectReworkPending, pendingReworkOfProject, reworkOwner,
+  renderReworkPacket, REWORK_ESCALATE_ROUND, type ReworkPending,
+} from "./rework.js";
 import {
   listArtifacts, getArtifact, type ArtifactRow,
 } from "../storage/repo/artifacts.js";
@@ -179,6 +183,29 @@ export const TODO_KINDS = [
   "decompose_project",
   /** 分派给我、前置已满足的工作项 */
   "execute_work",
+  /**
+   * **质检判了「不通过」,这条产出要有人返工**(2026-10-07 真机事故补)。
+   *
+   * 它补的是一整条断掉的回路。真机现场:根工作项被质检**连续三轮 fail**,
+   * 三份意见写得清清楚楚,而**三次审查之间一个执行回合都没有** ——
+   * 因为 fail 走的是「退回给工作项负责人」,而那条工作项是**容器**:
+   *
+   *   - 容器被 `pendingWork.ts` 的 `myOpenWorks` 排除(它不由执行者跑)⇒ 没人接手;
+   *   - 排空器每轮开头的 `closeIntegratedContainers` 见它「子项全终态 + 已审」⇒
+   *     8 秒内又把它收口成 `done` ⇒ 质检再审**同一份没变的东西**。
+   *
+   * ⚠️ **它不是「退回」这个动作的别名,而是「工件流转」的机械形态**:
+   * 质检结论是一条工件(`review_finding`)+ 一行结构化结论(`review_verdict`),
+   * 这条待办就是从那一行**推出来的下一步** —— 与另外 14 条规则同形:纯查询、判据在库里、
+   * 重启后照样算得出来。目的地由**产出的作者**决定,没有作者才兜底给项目经理
+   * (见 `runtime/rework.ts`,那里写着用户对这件事的裁决)。
+   *
+   * ⚠️ **终止判据是「这条工作项上出现了比质检结论更新的产出」** ——
+   * 没有它,`if` 每个 tick 都成立,规则会一直叫到尝试预算用尽(而预算按 AGENTS.md
+   * 的定性是**限流不是判据**)。真机上「三轮之间工件组成完全无变化」正是这条判据
+   * 说出来的事实。
+   */
+  "rework",
   /** 有工作项做完了、还等着审(`works.review_state = 'pending'`) */
   "review_work",
   /**
@@ -270,17 +297,20 @@ const PRIORITY: Readonly<Record<TodoKind, number>> = {
   recover_failed_work: 5,
   decompose_project: 6,
   execute_work: 7,
-  review_work: 8,
+  // 返工排在**审查之前**:它要重做的是审查已经否掉的那份产出,所以它必须先跑完,
+  // 才有新的东西可审(`review_work` 的判据也把「等返工」的那些排除掉了 —— 见那条规则)。
+  rework: 8,
+  review_work: 9,
   // 整合与交付接在**审查之后**(C3,§2.11.4):子树收口 → 整合 → 交付。
   // `integrate` 排在 `review_work` 之后是刻意的:容器自己也可能 `done` 而没审,
   // 那种情况下先让质检把 `review_work` 跑掉,再叫项目经理整合(否则会在
   // 「还有一条 done 没审」时提前整合 —— 而 ② 那一条判据正是禁止这个的)。
-  integrate: 9,
-  handover: 10,
-  report_downstream: 11,
+  integrate: 10,
+  handover: 11,
+  report_downstream: 12,
   // 收口排**最后**:它成立的前提是「上面每一条都不成立」,所以它排在最后不是
   // 优先级偏好,是**顺序依赖** —— 有任何一件没做完的事,这条就压根不成立。
-  close_project: 12,
+  close_project: 13,
 };
 
 export interface DriverTodo {
@@ -364,6 +394,16 @@ export const NUDGE_CAPABILITIES: readonly Capability[] = [
   // 的 `on` 里都有它(这一批里第一次真的有人用这个触发名)。纪律没变:门铃只是
   // 「去查一下」,判定仍然全部重新查库(它们读的是工件的 kind / work_id 这两列)。
   "blackboard.write",
+  /**
+   * 写下审查结论 → 叫醒一次「这条产出该返工了没有」的重新评估。
+   *
+   * ⚠️ **它此前不在里面**,而缺的正是「判 fail 之后那一步」:`review_verdict` 判
+   * `fail` 时**会**走 `updateWorkStatus` 把工作项退回,但那是**仓储调用**、不持能力,
+   * 所以门铃不会响(与 `resolveClientQuestion` 那条「纯仓储写 ⇒ 静默」同源)。
+   * 结果:`rework` 那条待办只能等 10 秒的兜底 tick —— 不改变判定(判定永远重新查库),
+   * 但把「刚被判不通过」这件事的响应推迟了一格。加它不改变任何判据。
+   */
+  "work.review_verdict",
   /**
    * 项目收口 → 叫醒一次「这个项目做完了没有」的重新评估。
    *
@@ -668,6 +708,19 @@ export interface RuleFacts {
    * 谁都可以改它,但**验收现场必须看得见它**。
    */
   readonly projectGoal: string;
+  /**
+   * **质检判了「不通过」、而还没有人重新交过东西**的工作项(`runtime/rework.ts`)。
+   *
+   * 它是 `rework` 那条规则**两侧**的判据来源:触发侧是「有谁在等返工」,
+   * 终止侧是 —— 一条工作项**不在这个列表里**就说明它已经重新交过产出(或者没被判 fail)。
+   *
+   * 同时它是另外三条规则的**抑制条件**(见各自的 `if`),而那三处抑制正是真机事故的
+   * 直接修复:一条刚被判 fail 的工作项**不该**被再次收口(`closeIntegratedContainers`)、
+   * **不该**被再叫去执行(`execute_work`,它要的是返工回合而不是普通执行回合,
+   * 后者不带质检意见)、**不该**被再次审查(`review_work` —— 库里那份产出一个字没变,
+   * 真机上就是这样审了三遍)。
+   */
+  readonly reworkPending: readonly ReworkPending[];
 }
 
 /** 一条规则产出的待办(还没挂上库里的尝试预算)。 */
@@ -835,6 +888,14 @@ export const RULES: readonly Rule[] = [
     on: ["work_status_changed", "tick"],
     if: (q) => {
       const out: TodoDraft[] = [];
+      // ⚠️ **等返工的工作项不走这一条**(2026-10-07 事故的第三个面)。
+      //
+      // 判据不同:这一条派的是「按工作项目标干活」的回合(`composeWorkPrompt`),
+      // 而等返工的工作项要的是**带着质检意见的返工回合**(`rework` 那条规则)——
+      // 让同一个 agent 同时收到两条待办只会有一轮白跑,拿哪条先跑都一样。
+      // 早于本批次的形态更糟:容器**两条都收不到**(容器不在 `myOpenWorks` 里),
+      // 于是 fail 之后没有任何人被叫醒 —— 真机上三次审查之间零回合。
+      const reworking = new Set(q.reworkPending.map((p) => p.workId));
       for (const m of q.members) {
         // 执行只有**执行角色**能做 —— `runWorkItem.checkRunnable` 会在角色不对时
         // 拒绝,与其浪费一次唤醒,不如在这里就只认执行角色。
@@ -842,6 +903,7 @@ export const RULES: readonly Rule[] = [
         // 永远收不到「该开工了」这条待办(2026-10-08 加编码工时正是这个坑)。
         if (!isExecutorRole(m.role)) continue;
         for (const w of m.pending.myOpenWorks) {
+          if (reworking.has(w.id)) continue;
           out.push({
             agentId: m.agentId, role: m.role, kind: "execute_work",
             key: `execute_work:${w.id}`, target: w.id, refs: [w.id], targetState: w.updatedAt,
@@ -998,6 +1060,55 @@ export const RULES: readonly Rule[] = [
       "「叫几次」,不决定「叫不叫」。",
   },
   {
+    id: "rework_failed_review",
+    // 触发名说的是「这条规则的输出会因为什么而变」:
+    //   `work_status_changed` —— 判 fail 的那次调用会把工作项从 `done` 退回
+    //     (唯一写口 `updateWorkStatus`),那是它出现的信号;
+    //   `artifact_inserted` —— **返工完成的信号**:这条工作项上出现了比质检结论
+    //     更新的产出(`blackboard.write` 会敲门铃),于是这条待办消失。
+    // 两侧都读工件的**结构化列**(`kind` / `work_id` / `created_at`),不读正文。
+    on: ["work_status_changed", "artifact_inserted", "tick"],
+    if: (q) => {
+      const out: TodoDraft[] = [];
+      for (const p of q.reworkPending) {
+        const owner = reworkOwner(p, q.members);
+        if (owner === null) continue; // 项目里连项目经理都没有 —— 装配问题,不是判据
+        out.push({
+          agentId: owner.agentId, role: owner.role, kind: "rework",
+          // key 按**工作项**单键:一件产出的返工就是一件事。集合谓词在这里没有意义
+          // (与 `review_work` 的 join 不同 —— 那个是「一批等审的」)。
+          key: `rework:${p.workId}`, target: p.workId, refs: [p.workId],
+          // ⚠️ `targetState` **刻意是 null**:这条待办的「目标动了」= **重新交了一份产出**,
+          // 而那一件事在库里表现为「待办消失」(`reworkPendingOf` 转 null)⇒ `pruneAttempts`
+          // 把预算清掉(`repo/dispatch.ts`)。若改挂 `works.updated_at`,一次 no-op 的
+          // `work_update` 就能把预算清零 —— 那正是「重复即停」的失效方向。
+          targetState: null,
+          label: p.producedArtifactIds.length === 0
+            ? `返工「${p.workTitle}」(第 ${p.round} 轮,它一份产出都没有)`
+            : `返工「${p.workTitle}」的产出(第 ${p.round} 轮,质检判不通过)`,
+        });
+      }
+      return out;
+    },
+    then: { kind: "rework", targetRole: "roster" },
+    why:
+      "**2026-10-07 真机事故的直接修复**。现场:项目「催收语音机器人技术方案」的根工作项被" +
+      "质检**连续三轮 fail**,三份审查意见共一万多字节(还自己写了「建议升级」),而" +
+      "**三次审查之间一个执行回合都没有**(`turn_usage` 可查)。两个缺陷叠在一起:" +
+      "① `review_verdict` 判 fail 走 `updateWorkStatus(work,'in_progress')`,而那条工作项是" +
+      "**容器**(有子项)⇒ `pendingWork.ts` 的 `myOpenWorks` 把容器排除在外 ⇒ **没有执行者会接手**" +
+      "(工具当时回给模型的话是「原执行者会再跑一轮」—— 平台做不到那件事,于是模型在假前提上推理);" +
+      "② 排空器每轮开头的 `closeIntegratedContainers` 见那条根「非终态 + 子项全终态且已审」⇒" +
+      "**8 秒内又把它收口成 done** ⇒ 再叫质检审**同一份没变的东西**(真机:`dispatch_events` 里" +
+      "4 条一字不差的「已完成」)。" +
+      "⇒ 修法不是「再退回一次」,而是**让质检结论这一条工件真的继续流转**:判据是" +
+      "「最近一次结论是 fail 且那之后它自己没有新产出」,**目的地由产出的作者决定**" +
+      "(用户裁决:有作者给作者,找不到人解决就给 PM;第 " + REWORK_ESCALATE_ROUND + " 轮起换人)。" +
+      "⚠️ 这条规则的出现**必然**让另外三处收窄(同一次修复的三个面):`review_done_works`" +
+      "不再审「等返工」的产出(真机就是这样审了三遍)、`execute_assigned_work` 不再把它当普通" +
+      "执行回合派出去(那个回合不带质检意见)、`closeIntegratedContainers` 不再撤销这次退回。",
+  },
+  {
     id: "review_done_works",
     // `review_state` 的唯一写口就是 `works.status` 的唯一写口(`updateWorkStatus`),
     // 所以「刚做完」在这里表现为一次工作项状态迁移。
@@ -1005,7 +1116,16 @@ export const RULES: readonly Rule[] = [
     if: (q) => {
       const qa = q.members.find((m) => m.role === "quality_reviewer");
       if (qa === undefined || q.pendingReview.length === 0) return [];
-      const ids = q.pendingReview.map((w) => w.id).sort();
+      // ⚠️ **等返工的那些不审**(2026-10-07 事故的第四个面)。
+      //
+      // 真机上就是这样审了三遍:工作项被判 fail → 平台 8 秒内又把它收口成 done
+      // → 这条规则看到「done + pending」→ 质检再审**同一份一个字节都没变的产出**,
+      // 第三次的审查意见写着「三轮以来工件组成完全无变化」。判据在库里就写着:
+      // 那条工作项最近一次结论是 fail、且那之后它自己没有任何新产出 ⇒
+      // **它不是在等审,是在等返工** —— 再审只能是同一句话再说一遍。
+      const reworking = new Set(q.reworkPending.map((p) => p.workId));
+      const ids = q.pendingReview.filter((w) => !reworking.has(w.id)).map((w) => w.id).sort();
+      if (ids.length === 0) return [];
       return [{
         agentId: qa.agentId, role: "quality_reviewer", kind: "review_work",
         key: `review_work:${ids.join("+")}`, target: null, refs: ids, targetState: null,
@@ -1111,6 +1231,11 @@ export const RULES: readonly Rule[] = [
           deliveryCollected(root, children) &&
           !hasDeliverableOnSubtree(root, children, q.deliverableWorkIds)
         ) {
+          // ⚠️ **等返工的根不走这一条**:它要的不是「整合子项」,而是「把质检指出的
+          // 问题解决掉」—— 那条路由 `rework` 规则带着质检意见派出去(目的地可能是
+          // 原作者,也可能是被升级到的 PM)。两条规则同时点火 = 一个根被叫两次,
+          // 而其中一次不带任何质检现场(2026-10-07 事故第五个面)。
+          if (q.reworkPending.some((p) => p.workId === root.id)) continue;
           ready.push(root);
         }
       }
@@ -1426,6 +1551,13 @@ function closeIntegratedContainers(
   projectId: string,
   at: number,
   log: (line: string) => void,
+  /**
+   * **在等返工**的工作项 id(`runtime/rework.ts` 的判据)。
+   *
+   * 由调用方传进来而不是在这里现查:调用方(`drainProject`)**每一轮都要**这个集合,
+   * 而「同一件事查两遍」的下一步就是「两份定义」(判据一旦被复制,迟早漂)。
+   */
+  reworkIds: ReadonlySet<string>,
 ): readonly string[] {
   const works = listWorks(db, projectId);
   const children = childrenByParent(works);
@@ -1438,6 +1570,8 @@ function closeIntegratedContainers(
   for (const root of works) {
     if (root.parentWorkId !== null) continue; // 只看根:容器就是「有子项的根」那一类
     if (isTerminalWorkStatus(root.status)) continue;
+    // 刚被质检退回、还没人返工 ⇒ **不许收口**(否则就是那个 8 秒循环)
+    if (reworkIds.has(root.id)) continue;
     if (!deliveryCollected(root, children)) continue;
     if (!hasDeliverableOnSubtree(root, children, deliverableWorkIds)) continue;
     const r = updateWorkStatus(db, root.id, "done", at);
@@ -1594,6 +1728,10 @@ function collectRuleFacts(
     nonTerminalWorkCount: works.filter((w) => !isTerminalWorkStatus(w.status)).length,
     unresolvedBlockerCount: listBlockers(db, projectId, { unresolvedOnly: true }).length,
     projectGoal: getProjectRow(db, projectId)?.goal ?? "",
+    // 查库的活在这里做完:规则拿不到 db(见 `RuleFacts` 的注释)。
+    // 结论按工作项**一次查全**(`latestVerdictsByWork`),不逐条查 —— 逐条查会让
+    // 每个 tick 的查询数随工作项数线性长。
+    reworkPending: collectReworkPending(db, projectId, works, latestVerdictsByWork(db, projectId)),
   };
 }
 
@@ -1786,13 +1924,57 @@ export function renderTask(db: Database.Database, todo: DriverTodo): string {
         "有审查意见工件就一并给 `findingArtifactId`)\n\n" +
         "⚠️ **第 2 步不是可选项**:平台**只认这个调用**,不读你写的正文。" +
         "不给结论 ⇒ 平台不认为你审过了,这条产出会被**重新交给你审**。" +
-        "而 `verdict='fail'` 会让平台把这条工作项**退回给原来的执行者重做一轮** —— " +
+        "而 `verdict='fail'` 会让平台把这份产出**退回给写它的人**返工" +
+        "(判据是产出边上的作者,不是工作项的负责人;这条工作项一份产出都没有时交给项目经理;" +
+        `同一件事到第 ${REWORK_ESCALATE_ROUND} 轮会换人)—— ` +
         "所以判 fail 之前先问一句:是「目标没达成」还是「形式没对齐」?" +
         "后者若不影响可用性,判 fail 会让整轮白跑。\n\n" +
         "**两份不是一回事**:工件是给人看的现场,`review_verdict` 是给机器读的判据。" +
         "只有前者的话,平台分不清「通过」与「不通过」—— 那正是 2026-10-06 那次" +
         "「质检判了不通过、平台却标成已审」的根因。"
       );
+    case "rework": {
+      // ── 「返工包」:质检结论 + 上一轮的产出 id,**一个字的正文都不搬** ──
+      //
+      // 用户裁决(2026-10-08):「质检包(质检结论 + 原工件 id,不要重复原文,否则浪费)」。
+      // 现场从库里**现查**(待办只带 id),与 `collectTodos` 的判据**同一个函数** ——
+      // 在这里另写一份「谁在等返工」就是两份定义。
+      const workId = todo.refs[0];
+      const pending = workId === undefined
+        ? undefined
+        : pendingReworkOfProject(db, todo.projectId).find((p) => p.workId === workId);
+      if (pending === undefined) {
+        // 现场与待办不一致(常见原因:这条工作项刚有人交了新产出 ⇒ 它已经不在等返工了)。
+        // **不编一套现场**:如实说平台此刻查到的形状,让模型自己 `work_list` 看。
+        return (
+          "# 现在轮到你了:返工\n\n" +
+          "平台刚查了一遍库:这条工作项**此刻已经不在等返工了**" +
+          "(有人交过新产出,或者它的最新结论不再是「不通过」)。\n\n" +
+          "先用 `work_list` / `board_list` 看清现状,再决定要不要动手 —— " +
+          "**别凭这条待办的标题猜内容**:它可能已经过期了。"
+        );
+      }
+      const members = loadProjectRoster(db, todo.projectId)
+        .flatMap((m) => (isProjectRole(m.role) ? [{ agentId: m.id, role: m.role }] : []));
+      const owner = reworkOwner(pending, members);
+      const work = getWork(db, pending.workId);
+      const kids = work === null
+        ? []
+        : childrenByParent(listWorks(db, todo.projectId)).get(pending.workId) ?? [];
+      return [
+        renderReworkPacket(pending, owner?.reason ?? "author"),
+        // 容器(`有子项`的那种根)额外把子树摆出来:**它要交的是这条工作项自己的
+        // 那份产出**,而不是把子项重写一遍 —— 真机上缺的正是「一份整合稿」。
+        ...(kids.length > 0
+          ? [
+              "",
+              "## 这条工作项底下有什么(它是容器,要交的是**它自己**那份产出)",
+              "",
+              renderSubtrees(db, todo),
+            ]
+          : []),
+      ].join("\n");
+    }
     case "report_downstream":
       return (
         // ⚠️ **刻意不下命令、不复述判据。**
@@ -2460,11 +2642,40 @@ export async function drainProject(deps: DrainDeps): Promise<DrainResult> {
     //   - 先收口再查库,新终态的根这一轮就能点亮它的 `review_work`(质检那一条),
     //     不必等下一个 tick。
     //   - 收口本身不占 `maxRounds` 的配额:它是平台的账,不是一个 agent 回合。
-    for (const id of closeIntegratedContainers(deps.db, deps.projectId, deps.now(), deps.log)) {
+    //
+    // ⚠️ **2026-10-07 起它跳过所有「在等返工」的根**。原因就是这条修复要治的那个
+    // 8 秒循环:质检判 fail 会把那条根退回 `in_progress`,而这条收口的判据
+    // (「子项全终态且已审」)对它**照样成立** ⇒ 于是它被立刻收口成 `done`,
+    // 质检再审**同一份没变的东西**(真机连审三轮,`dispatch_events` 里 4 条一字不差
+    // 的「已完成」)。「刚被退回、还没人返工」这件事在库里就是
+    // `pendingReworkOfProject`,所以抑制条件与 `rework` 那条规则**同一个判据**。
+    const reworkIds = new Set(
+      pendingReworkOfProject(deps.db, deps.projectId).map((p) => p.workId),
+    );
+    for (const id of closeIntegratedContainers(deps.db, deps.projectId, deps.now(), deps.log, reworkIds)) {
       deps.log(
         `dispatcher: 容器 ${id} 已收口 → done(它的交付整合完了);` +
           "等一下质检会按 review_work 审这条整合产物",
       );
+    }
+
+    // ── 平台记账(021 的消费侧):**已经判过 `pass` 的产出,标成已审** ──────
+    //
+    // ⚠️ **2026-10-07 真机死锁的直接修复。** 判据与消费点原本不同源:
+    // `markWorkReviewed` 的判据在 021 之后翻成了「存在一条 pass 结论」,
+    // 而消费动作仍绑在**回合类型**上(`todo.kind === "review_work"`)⇒
+    // pass 写在任何别的回合里都不会被消费。真机现场:质检在 `answer_ask` 回合里
+    // 判了「通过」(17:09:18),而那条 `review_work` 的尝试预算已经 3/3 用尽 ⇒
+    // **那个回合再也不会发生** ⇒ `review_state` 永远是 `pending` ⇒
+    // `close_finished_project` 要求「待审产出 = 0」⇒ 项目永远收不了口,
+    // 而且因为预算用尽只播报一次,**连告警都没有**(静默死锁)。
+    //
+    // 修法与上面那条收口**同一条纪律**:「这件事办过了没有」永远重新查库,
+    // 声明式、幂等、重启后补跑 —— 与「哪个回合办成的」彻底解耦。
+    for (const w of listWorksPendingReview(deps.db, deps.projectId)) {
+      if (latestReviewVerdict(deps.db, w.id)?.verdict !== "pass") continue;
+      markWorkReviewed(deps.db, w.id, deps.now());
+      deps.log(`dispatcher: ${w.id} 已判通过 → 标成已审(review_state='done')`);
     }
 
     const board = collectTodos({

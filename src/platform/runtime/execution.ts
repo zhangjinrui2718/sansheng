@@ -55,7 +55,9 @@ import {
 import {
   listArtifacts, type ArtifactRow,
 } from "../storage/repo/artifacts.js";
-import { isExecutorRole, EXECUTOR_ROLES, type ArtifactKind } from "../identity/role.js";
+import {
+  isExecutorRole, isProducedArtifactKind, EXECUTOR_ROLES,
+} from "../identity/role.js";
 import { listBlockers } from "../storage/repo/blockers.js";
 import { getAgent } from "../storage/repo/agents.js";
 import type { TurnUsageRow } from "../storage/repo/usage.js";
@@ -194,12 +196,14 @@ export interface RunWorkOptions {
 }
 
 /**
- * **只表达「关于(about)」、不表达「产出(produces)」的工件 kind。**
+ * 「关于 / 产出」的判据住在 **kind 的真相源** (`identity/role.ts` 的
+ * {@link ABOUT_ONLY_ARTIFACT_KINDS`) —— 因为它现在有两个消费者:这里算
+ * 「这一回合交付了什么」,`runtime/rework.ts` 算「该为这条产出负责的人」。
+ * 各写一份 `kind !== "review_finding"` 正是本项目付过多次代价的「两份定义迟早漂」。
  *
- * `artifacts.work_id`(migration 014)这一条边的语义在真机上被证实是**两个意思的
+ * `artifacts.work_id`(migration 014)这条边的语义在真机上被证实是**两个意思的
  * 并集**:「这条工作项**产出了**它」与「这条工件**关于**这条工作项」。质检是后者的
- * 第一个实例 —— 它审完一条工作项,会把 `review_finding` 挂到**被审的那一条**上
- * (真机第一跑就发生)。
+ * 第一个实例 —— 它审完一条工作项,会把 `review_finding` 挂到**被审的那一条**上。
  *
  * 于是「这条工作项交付了什么」若直接拿 `work_id` 当答案,一条 `done` 的工作项会把
  * 自己的**质检意见**算成自己的产出。这里按 kind 排除,**不删那条边**:它是质检意见
@@ -211,7 +215,6 @@ export interface RunWorkOptions {
  * 「work_id 指对了」+「作者是本回合的执行者」+「kind 不在本表里」三条**机械**
  * 判据把两者分开 —— 见 `runWorkItem` 里那段。
  */
-export const ABOUT_ONLY_ARTIFACT_KINDS: readonly ArtifactKind[] = ["review_finding"];
 
 /** 工作项的可执行性前置检查。**不满足就拒绝,不硬跑。** */
 function checkRunnable(db: Database.Database, work: WorkRow): string | null {
@@ -385,7 +388,7 @@ export async function runWorkItem(opts: RunWorkOptions): Promise<ExecutionResult
   const producedArtifacts = listArtifacts(opts.db, before.projectId, { workId: before.id })
     .filter((a) => !artifactsBefore.has(a.id))
     .filter((a) => a.authorAgentId === before.assigneeAgentId)
-    .filter((a) => !ABOUT_ONLY_ARTIFACT_KINDS.includes(a.kind));
+    .filter((a) => isProducedArtifactKind(a.kind));
   const raisedBlockers = listBlockers(opts.db, before.projectId)
     .filter((b) => !blockersBefore.has(b.id))
     .map((b) => b.id);

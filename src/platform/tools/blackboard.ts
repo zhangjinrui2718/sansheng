@@ -22,6 +22,7 @@ import {
   type ArtifactStatus, type ArtifactLinkRel, type DeliverableType,
 } from "../storage/repo/artifacts.js";
 import { isArtifactKind, ARTIFACT_KINDS, type ArtifactKind } from "../identity/role.js";
+import { latestReviewVerdict } from "../storage/repo/reviewVerdicts.js";
 import { CODE_SERVICE_REQUIRED_META, type CodeServiceFacts } from "../codeservice/port.js";
 import { getWork } from "../storage/repo/works.js";
 import {
@@ -522,6 +523,37 @@ const boardWrite: PlatformTool = {
       );
     }
 
+    // ── 返工之后:**被退回的那一版**标成「已被取代」 ──────────────────
+    //
+    // 用户裁决(2026-10-08)里的「原角色者拿到原因 + 原工件,进行再次更新」。
+    // 工件**不可原地改**(`board_write` 永远插一行新的;`updateArtifactBody` 的唯一
+    // 生产调用方是工作区索引对账,不是模型),所以「更新」在这里的正确形态是
+    // **新写一份 + 把旧的那份退休** —— 这样「当前是哪一版」在库里始终只有一个答案。
+    //
+    // 判据(三条同时成立,全是结构化列):
+    //   ① 这次写的是 `deliverable` 且挂到了某条工作项上(`workId`);
+    //   ② 这条工作项最近一次审查结论是 **`fail`**;
+    //   ③ 候选是**比那次结论更早**、且仍是 `accepted` 的交付物 —— 那正是被质检否掉、
+    //      而作者刚刚重交的那一版。
+    //
+    // ⚠️ **只在新交付物是 `accepted` 时做**。若作者交的是一份 `open` 草稿就把旧的
+    // `accepted` 退休,这条工作项会**一份已验收交付物都不剩**,而平台今天**没有任何
+    // 地方会把 `open` 的交付物改成 `accepted`**(`applyArtifactStatus` 全仓零生产调用方)
+    // ⇒ `handover` 与 `close_finished_project` 都会永远不成立 —— 那是一个我刚修掉
+    // 的那个死锁的同款。宁可「旧版多留一会儿」,也不要造一个没人能推的终局。
+    const supersededIds: string[] = [];
+    if (kind === "deliverable" && workId !== null && statusRaw === "accepted") {
+      const lastFail = latestReviewVerdict(ctx.db, workId);
+      if (lastFail !== null && lastFail.verdict === "fail") {
+        for (const prev of listArtifacts(ctx.db, pid, { workId, kind: "deliverable", limit: 500 })) {
+          if (prev.id === id || prev.status !== "accepted") continue;
+          if (prev.createdAt >= lastFail.createdAt) continue;
+          setArtifactStatus(ctx.db, prev.id, "superseded", at);
+          supersededIds.push(prev.id);
+        }
+      }
+    }
+
     // 关联边逐条加。失败不回滚工件 —— 工件本身已经写成了,边是可选的补充;
     // 但必须把哪条边没加成如实报出来,不许静默忽略。
     const warnings: string[] = [];
@@ -575,7 +607,14 @@ const boardWrite: PlatformTool = {
         (warnings.length > 0 ? `\n⚠️ 部分关联未建立:${warnings.join(";")}` : "") +
         // 把产出边如实回灌给模型 —— 否则它无法从工具输出里确认自己填对了,
         // 而下一次「这条工作项产出了什么」正是靠这行字。
-        (workId !== null ? `\n产出工作项:${workId}` : ""),
+        (workId !== null ? `\n产出工作项:${workId}` : "") +
+        // 「旧的那一版退休了」必须说出来:否则模型下一轮看板上会少一条它写过的
+        // 交付物,而它无从知道那是平台按返工语义退休的(与 `ignoredFiles` 同一条纪律:
+        // 没进去的与进去了的必须长得不一样)。
+        (supersededIds.length > 0
+          ? `\n被退回的旧版本已标成 superseded(已被取代):${supersededIds.join("、")}` +
+            ` —— 这条工作项上「当前版本」从此只有 ${id}`
+          : ""),
     );
   },
 };

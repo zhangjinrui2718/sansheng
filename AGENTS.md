@@ -48,7 +48,7 @@
   判据的一部分:同一对节点上两类边**方向一致**时不是环(真机那份数据就是这样),方向相反
   才是环(`mutualPairs` 会点名是哪两条边)。写反会让「交付」跑到最左、并且把一个不存在的
   环报出来(`web/src/lib/workGraph.ts` 的 `collectEdges`)。
-- 基线:**1851 passed / 91 test files** · 两条 typecheck 0 error · `check:design` E1–E14 全绿(5 角色)。
+- 基线:**1891 passed / 93 test files** · 两条 typecheck 0 error · `check:design` E1–E14 全绿(5 角色)。
 - **角色中文名只有一处**:`src/platform/runtime/org.ts` 的 `ORG`(播种 + `RoleHarnessView.displayName`
   共用);前端兜底表 `web/src/lib/vocab.ts` 的 `ROLE_LABEL` 必须逐项相同,由
   `tests/web/role-names.test.ts` 跨边界对照。**不许在某个页面里再写一张名字表**
@@ -276,6 +276,35 @@ dev/prod + CI/CD」,09:54 业务经理只回了一句「我先看下你之前留
 | ❌ 被挡 | `project.update` 与 `work.*` / `collab.*` / `blackboard.*` / `change.*` / `blocker.*` |
 
 **豁免的是「说话」,不是「改」。** 另:接待会话的 `renderProjectContext(null)` 从**空串**改成**列清单** + 新增 `project_list` 工具 —— 业务经理此前**没有任何一条路**能知道库里有哪些项目(`project_read` 要一个已知的 projectId,而那个 id 从哪来?)。
+
+### 第 15 条规则 `rework_failed_review`(2026-10-07 真机「质检连审三遍」补)
+
+真机现场(项目「催收语音机器人技术方案」):根工作项被质检**连续三轮 fail**,而 `turn_usage`
+显示**三次审查之间一个执行回合都没有**。两个缺陷叠加 ——① **`fail` 对容器是空操作**:判 fail 走
+`updateWorkStatus(work,'in_progress')`,而那条工作项是**容器**⇒ `myOpenWorks` 排除容器 ⇒
+**没人接手**(工具当时回给模型的话「原执行者会再跑一轮」是假的,模型据此在第二轮写下
+「worker 仍无任何实质性输出动作」);② **收口撤销了退回**:每轮开头的
+`closeIntegratedContainers` 见它「非终态 + 子项全终态且已审」⇒ 8–16 秒内又写回 `done` ⇒
+质检再审**同一份没变的东西**(`dispatch_events` 里 4 条一字不差的「已完成」)。
+
+**修法不是「再退回一次」,而是让质检结论这条工件继续流转**(用户裁决:不搞「退回」概念)。
+判据全在 `runtime/rework.ts`(纯查询,重启后照样算得出来):**谁在等返工** = 最近一次结论是
+`fail` 且那之后这条工作项**自己**没有新产出;**退给谁** = **产出的作者**(不看 `assignee`;
+⚠️ 用 `isProducedArtifactKind` —— 014 那条边是「产出 ∪ 关于」,`review_finding` 挂**被审的那条**
+上,naive 实现会把返工退给**质检自己**),没有自己的产出 ⇒ **项目经理**,第 **3** 轮起换人;
+**返工包** = 只有结构化事实(轮次 / 结论 / severity / 意见 id / 上一轮产出 id),**正文一个字都
+不搬**;**终止** = 重新交了产出 ⇒ 待办消失 ⇒ 清预算(`targetState` 刻意是 `null`)。
+
+**同一次修复的另外五个面**(少一个就退回原样):**① `review_done_works` 不再审「等返工」的产出**;
+**② `execute_assigned_work` 不再给它点火**;**③ `closeIntegratedContainers` 跳过等返工的根**;
+**④ `pass` 的消费与回合类型解耦** —— 另一个**静默死锁**:消费绑在
+`todo.kind === 'review_work'` 上,而 pass 写在 `answer_ask` 回合里、那条待办预算又已用尽(3/3)
+⇒ 那个回合再也不会发生 ⇒ `review_state` 永远 `pending` ⇒ 收口要求「待审产出 = 0」⇒ 项目永远
+active,**连告警都没有**;**⑤ 返工落盘时把被退回的那一版标 `superseded`**(⚠️ 只在新的那份是
+`accepted` 时做)。**细节全在 `rework.ts` 头注释与那条规则的 `why` 里;回归
+`tests/platform/rework.test.ts`(每个用例都建在**有子项**的容器形状上,带四个变异自检)。
+⚠️ 它能走到真机是因为测试的形状与真实数据不一样:`review-verdict.test.ts` 的夹具是
+`parentWorkId: null` 的「整合与最终交付」—— 一个**没有子项的「整合」**。** 
 
 ### 第 14 条规则 `recover_failed_work`(2026-10-06 真机停摆补)
 
@@ -559,7 +588,7 @@ help
 ```
 npx tsc -p tsconfig.server.json --noEmit
 npx tsc -p tsconfig.web.json --noEmit
-npm test                  # 1851 passed / 91 files
+npm test                  # 1891 passed / 93 files
 npm run build
 npm run check:design      # 设计一致性 E1–E14
 ```

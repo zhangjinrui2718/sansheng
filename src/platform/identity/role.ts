@@ -127,6 +127,27 @@ export const ARTIFACT_KINDS = [
 ] as const satisfies readonly ArtifactKind[];
 
 /**
+ * **只表达「关于某条工作项」、不表达「这条工作项产出了什么」的 kind。**
+ *
+ * 判据来自 migration 014:`artifacts.work_id` 一条边承载**两个语义** ——
+ * 「产出」(执行者把 evidence / deliverable 挂在它干的那条上)∪「关于」
+ * (质检把 `review_finding` 挂在**被审的那条**上)。所以「这条工作项交付了什么」
+ * **不能**直接拿 `work_id` 反查作者:那样会把质检自己的审查意见算成这条工作项的产出,
+ * 于是「返工该退给谁」会答成**质检自己**。
+ *
+ * ⚠️ **它是「产出」这个词唯一的机器判据**,消费者必须用同一个答案:
+ *   - `runtime/execution.ts` 算「这一回合交付了什么」(产出边 + 作者 + 本集合)
+ *   - `runtime/rework.ts` 算「该为这条产出负责的人」(返工目的地)
+ * 各写一份 `kind !== "review_finding"` 就是本项目付过多次代价的「两份定义迟早漂」。
+ */
+export const ABOUT_ONLY_ARTIFACT_KINDS: readonly ArtifactKind[] = ["review_finding"];
+
+/** 这条工件算不算「某条工作项的产出」—— `work_id` 那条边的**产出侧**判据。 */
+export function isProducedArtifactKind(kind: ArtifactKind): boolean {
+  return !ABOUT_ONLY_ARTIFACT_KINDS.includes(kind);
+}
+
+/**
  * 由协议工具创建、模型不能手写的 kind。转录自设计 1 §6.2。
  *
  * 注意含 `decision`:它确实会被 `answer` / `escalate` 流程原子创建。

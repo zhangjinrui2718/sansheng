@@ -139,9 +139,13 @@ describe("B1 · 规则表:每个 `TodoKind` 恰好一条规则(C3 之后 10 条,
     // 工作项撞墙钟被记成 `failed` 之后,**没有任何规则认领 `failed`** ⇒ 整项目零待办,
     // 而「零待办」与「组织已经把活干完了」在日志里长得一模一样
     // (`collectTodos` 实测 `runnable: 0, exhausted: 0` —— 不是预算用尽,是压根没规则)。
+    // 2026-10-07 的「质检连审三遍同一份产出」补上第 15 条 `rework_failed_review`:
+    // 判 fail 之后**没有任何规则认领「这条产出要返工」** —— 容器更惨(容器不在
+    // `myOpenWorks` 里,连 `execute_work` 都收不到),而收口又把它 8 秒内写回 `done`
+    // ⇒ 质检对着库里一个字节都没变的产出连判三轮(`turn_usage`:三次审查之间零回合)。
     // 这几个数字**同时**改是对的:集合相等那条断言才是闭合性本身。
-    expect(RULES).toHaveLength(14);
-    expect(TODO_KINDS).toHaveLength(14);
+    expect(RULES).toHaveLength(15);
+    expect(TODO_KINDS).toHaveLength(15);
     // 集合相等 ⇒ 「表产出的 kind」与「闭集」是同一个集合
     expect([...kinds].sort()).toEqual([...TODO_KINDS].sort());
     // 且没有两条规则争同一个 kind(否则「谁负责这一条」没有答案)
@@ -173,7 +177,7 @@ describe("B1 · 规则表:每个 `TodoKind` 恰好一条规则(C3 之后 10 条,
     }
   });
 
-  it("**`artifact_inserted` 只被下面四条规则用**(B2 的纪律:事件不是判据)", () => {
+  it("**`artifact_inserted` 只被下面五条规则用**(B2 的纪律:事件不是判据)", () => {
     // B2 让产出工件去敲门铃,而**没有**让任何规则开始读工件 —— 所以当时这条断言
     // 写的是「`artifact_inserted` 不在任何规则的 `on` 里」。C3 的 `integrate` /
     // `handover` 是**唯一**计划内合法打破它的地方(B2 的注释里就预告了这一刻);
@@ -183,6 +187,9 @@ describe("B1 · 规则表:每个 `TodoKind` 恰好一条规则(C3 之后 10 条,
     // 真机终局的 `close_finished_project` 是第三处:「有一份新的 `deliverable` 落库」
     // 正是「这个项目可能刚干完」的那个可观测信号(而 `projects.status` 只在
     // **关闭**时才变,不能当触发名 —— 那是一个结果不是一个事件)。
+    // 2026-10-07 的 `rework_failed_review` 是第四处,而且它是这一列的**终止信号**:
+    // 返工完成的唯一结构化表现就是「这条工作项上出现了比质检结论更新的产出」
+    // ——它就是一条 `artifact_inserted`,没有别的候选。
     // 所以这里改成钉**谁**用它:多一条规则都不许。
     //
     // 它守的仍然是同一条纪律:规则的 `if` 只许读工件的**结构化列**(kind /
@@ -190,7 +197,7 @@ describe("B1 · 规则表:每个 `TodoKind` 恰好一条规则(C3 之后 10 条,
     const usingArtifact = RULES.filter((r) => r.on.includes("artifact_inserted")).map((r) => r.id);
     expect(usingArtifact.sort()).toEqual([
       "close_finished_project", "handover_deliverable", "integrate_reviewed_subtree",
-      "resume_client",
+      "resume_client", "rework_failed_review",
     ]);
     const used = new Set<string>(RULES.flatMap((r) => [...r.on]));
     expect([...used].sort()).toEqual([
