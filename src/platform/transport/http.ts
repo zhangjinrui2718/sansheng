@@ -42,6 +42,7 @@ import { resolveClientQuestion } from "../tools/client.js";
 import { ensureOrg, ensureProjectOrg, orgReady, roleDisplayName } from "../runtime/org.js";
 import { loadPromptUnits, unitPath } from "../runtime/promptAssembly.js";
 import { solveToolset } from "../harness/authorize.js";
+import { toolBriefs } from "../tools/briefs.js";
 import { resolveToolSet, strayToolSetFiles, toolSetDir } from "../harness/toolSet.js";
 import { loadProjectForAuthz } from "../storage/repo/projects.js";
 import { ROLE_SPECS, PROJECT_ROLES, type ProjectRole } from "../identity/role.js";
@@ -1206,6 +1207,11 @@ export function buildHarnessView(db: Database.Database, dataDir: string): Harnes
       boundaryDeny: [...spec.boundaryDeny],
       promptUnits,
       tools: solved !== null ? [...solved.tools] : [],
+      // 「这堆英文名都是些啥」的读面:类型(能力的中文分组)/ 名称 / 作用。
+      // 作用取自 `tools/*.ts` 里 `PlatformTool.description` 的**原文** —— 见
+      // `tools/briefs.ts` 文件头(前端再抄一份中文说明会得到两份会漂开的真相)。
+      // ⚠️ 与 `tools` **同序同长**:求解不了时两边都空,不留下一个「有名字没说明」的悬空。
+      toolBriefs: solved !== null ? toolBriefs(solved.tools) : [],
       // 「这一栏求解过了没有」——没有 agent 行时 `tools: []` **不是「0 个」,是
       // 「算不出来」**。两者在界面上必须分开,否则成员页会显示一个看起来很正常的
       // 「实得工具 0 个」(2026-10-05 真机现场)。

@@ -243,6 +243,41 @@
   .ss-pill[data-tone="ochre"] { background: rgba(199, 107, 74, 0.16); color: var(--ochre); }
   .ss-pill[data-tone="bone"] { background: var(--ink-3); color: var(--bone-dim); }
 
+  /* ── 工具面表格(Harness 面板):类型 / 名称 / 作用 ────────────────
+   *
+   * 三列的宽度纪律不同:类型与名称**不换行**(它们是短标签,换行会把表读散),
+   * 作用**换行**(那一列是唯一一段正文)。作用复用会话的 markdown 渲染
+   * (`<Markdown>`,描述原文里带强调),所以这里把 `.ss-md` 压到表格的字号量级、
+   * 去掉段落下边距 —— 否则每个单元格都会被撑成 14px + 8px 边距,表格立刻不像表格。
+   */
+  .ss-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12px;
+    line-height: 1.55;
+  }
+  .ss-table th, .ss-table td {
+    border-top: 1px solid var(--ink-3);
+    padding: 4px 8px 4px 0;
+    text-align: left;
+    vertical-align: top;
+  }
+  .ss-table th {
+    color: var(--bone-mute);
+    font-weight: 500;
+    white-space: nowrap;
+  }
+  .ss-table td { color: var(--bone-dim); }
+  .ss-table .ss-table-group { white-space: nowrap; }
+  .ss-table .ss-table-name {
+    white-space: nowrap;
+    font-family: theme('fontFamily.mono');
+    color: var(--bone);
+  }
+  .ss-table .ss-table-purpose .ss-md { font-size: 12px; line-height: 1.55; }
+  .ss-table .ss-table-purpose .ss-md p { margin: 0 0 4px; }
+  .ss-table .ss-table-purpose .ss-md p:last-child { margin-bottom: 0; }
+
   /* ── 运行态:工件页 DAG 与成员页「正在做什么」共用的一组构件 ──────────
    *
    * 这三个类只做**一件事**:让「此刻在动」在屏幕上有一个**会动**的形态。

@@ -95,13 +95,33 @@
  * 集合文件状态)。`HarnessRolePane` 因此多了一个 `embedded`:嵌进这张卡时
  * **不再渲染它自己的 `Section` 外壳与 aside**(否则展开后卡片套卡片、同一个
  * 角色名出现两次)。
+ *
+ * ── 2026-10-08:提示词单元的呈现 + 工具表(用户点名两处)────────────────
+ *
+ * 用户的原话(逐字):
+ *
+ *   「成员tab下面的harness,
+ *     1. 提示词单元可以收起,不要展示那么长,我觉得可以截断前500个字,然后两个
+ *        按钮,一个按钮展开全部,一个按钮编辑
+ *     2. 工具 做一个表格,按照类型、名称、作用来,现在搞一对英文名称的list,
+ *        完全不知道都有些啥」
+ *
+ * 两处都改在这一层,判据在 `tests/web/harness-by-role.test.ts`:
+ *
+ *   - **`PromptUnitEditor`**:正文默认只画**前 {@link UNIT_PREVIEW_CHARS} 个字**
+ *     (旧形状是 `Clamp lines={2}` —— 按行截断在不同宽度下截掉的内容不一样),
+ *     下面两个按钮「展开全部 / 收起」与「编辑 / 收起编辑」。编辑区**默认不出现**
+ *     (以前是一个默认折叠的 `<Disclosure>`)。
+ *   - **`ToolTable`**(`components/members/ToolTable.tsx`):工具面从「一串英文名」
+ *     换成三列表格 —— 类型(能力的中文分组)/ 名称 / 作用(工具注册表里写给模型的
+ *     原文说明)。数据来自 `RoleHarnessView.toolBriefs`(`tools/briefs.ts` 转写),
+ *     **前端不另写一张中文名表** —— 那会得到第二份会漂开的「这个工具是干嘛的」。
  */
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type {
   HarnessView, ProjectRole, PromptUnitView, RoleHarnessView,
 } from "@shared/types/platform";
 import {
-  Clamp,
   Disclosure,
   EmptyState,
   Flag,
@@ -109,6 +129,7 @@ import {
   Pill,
   Section,
 } from "@/components/ui/primitives";
+import { ToolTable } from "@/components/members/ToolTable";
 import {
   ApiError,
   errorMessage,
@@ -118,6 +139,15 @@ import {
   updatePromptUnit,
 } from "@/lib/api";
 import { ROLE_LABEL } from "@/lib/vocab";
+
+/**
+ * 提示词单元默认画多少个字(超过就只给前这么多,由「展开全部」补全)。
+ *
+ * 用户点名的数字(原话:「可以截断前 500 个字」)。**按字数**而不是按行数:
+ * 旧形状的 `Clamp lines={2}` 在不同窗口宽度下截掉的内容不一样,而「截掉的是哪一截」
+ * 正是用户判断要不要展开的唯一依据。
+ */
+export const UNIT_PREVIEW_CHARS = 500;
 
 /** 一次保存 / 恢复的结果。`failed` 带上 `validIds` —— 后端在 `unknown_unit` 时给。 */
 export type OpState =
@@ -208,6 +238,23 @@ export function harnessStatusText(role: RoleHarnessView): string {
       : "实得工具 求解不了(组织未播种)") +
     ` · 集合文件 ${toolSetStateLabel(role.toolSet.state)}`
   );
+}
+
+/**
+ * ④ 块里「实得工具」那一行的正文。三态与摘要行(`harnessStatusText`)**同一套判据**,
+ * 不在这里另立一套:
+ *
+ *   `toolsSolved === false`  = **算不出来**(库里连这个角色的 agent 行都没有);
+ *   求解过了且 `tools.length === 0` = **真的是 0 个**(接待阶段的合法形状);
+ *   其余 = 计数。
+ *
+ * ⚠️ 前两种在屏幕上**不许长成一个样**:0 是一个事实,「算不出来」是一个缺口。
+ * 本项目的真机现场就是这两件事长得一模一样(2026-10-05,见 `harnessStatusText`)。
+ */
+function toolCountText(role: RoleHarnessView): string {
+  if (role.toolsSolved === false) return "求解不了(组织未播种)";
+  if (role.tools.length === 0) return "0 个(过完三道门确实一个都没有)";
+  return `${role.tools.length} 个`;
 }
 
 /**
@@ -410,13 +457,27 @@ export function HarnessRolePane({
           />
           <KV
             label="实得工具"
-            value={
-              role.tools.length > 0
-                ? role.tools.join(" · ")
-                : "无(集合文件把工具面收空了,或还没有种子角色)"
-            }
-            title="已过三重门控:ROLE_SPECS[].ceiling(代码内常量)∧ 集合文件 harness/tools/{role}.json ∧ 执行点。"
+            value={toolCountText(role)}
+            title="已过三重门控:ROLE_SPECS[].ceiling(代码内常量)∧ 集合文件 harness/tools/{role}.json ∧ 执行点。下表逐条给出类型 / 名称 / 作用。"
           />
+          {/* ── 工具表(类型 / 名称 / 作用)────────────────────────────
+              用户的原话:「工具 做一个表格,按照类型、名称、作用来,现在搞一对英文
+              名称的 list,完全不知道都有些啥」。所以 `tools` 那一串英文名不再直接
+              画出来 —— 逐条给类型(能力的中文分组)、名称与作用(注册表里写给模型的
+              原文说明,由 `tools/briefs.ts` 转写)。
+
+              ⚠️ `toolBriefs` 缺席(旧后端)时**退化回老形状**那一串英文名,
+              **不许**把「这一份读面没带说明」显示成「没有工具」—— 那与本项目反复
+              栽的「把不知道显示成 0」是同一种错。 */}
+          {role.toolBriefs !== undefined && role.toolBriefs.length > 0 ? (
+            <ToolTable briefs={role.toolBriefs} />
+          ) : role.tools.length > 0 ? (
+            <KV
+              label="工具名单"
+              value={role.tools.join(" · ")}
+              title="这一份 harness 视图没带工具说明(toolBriefs 字段缺席,通常是后端比前端旧)—— 所以这里只能给出名字。重启服务后刷新会变成三列表格。"
+            />
+          ) : null}
           <KV
             label="集合文件"
             value={toolSetLabel}
@@ -766,9 +827,15 @@ function PromptUnitEditor({
 }) {
   const [op, setOp] = useState<OpState>({ kind: "idle" });
   const [confirming, setConfirming] = useState(false);
+  /** 「展开全部」:默认只给前 {@link UNIT_PREVIEW_CHARS} 个字 */
+  const [expanded, setExpanded] = useState(false);
+  /** 「编辑」:默认不给 textarea —— 一屏里不再有十几段长正文 */
+  const [editing, setEditing] = useState(false);
 
   const edited = value !== unit.content;
   const busy = op.kind === "busy";
+  /** 预览读数(纯函数,500 字边界在 `tests/web/harness-by-role.test.ts` 里钉住)。 */
+  const preview = unitPreview(unit.content);
 
   async function save() {
     if (busy) return;
@@ -837,136 +904,278 @@ function PromptUnitEditor({
         </span>
       </div>
 
-      {unit.content.length > 0 && (
-        <Clamp lines={2} style={{ marginTop: 2 }}>
-          {unit.content}
-        </Clamp>
-      )}
+      {/* ── 正文预览:默认只给**前 500 个字** ────────────────────────────
+          用户的原话:「提示词单元可以收起,不要展示那么长,我觉得可以截断前 500 个
+          字,然后两个按钮,一个按钮展开全部,一个按钮编辑」。
 
-      {/* 编辑区**默认折叠** —— 一屏里不再有十几段长正文。
-          展开后仍是完整的老行为(回读值当状态、两段式确认、失败原样显示)。 */}
-      <Disclosure
-        summary={unit.loaded ? `编辑正文(${unit.chars} 字符)` : "编写正文(盘上还没有这个文件)"}
-      >
-        <div className="flex flex-col gap-1.5">
-          <div className="ss-meta font-mono truncate" title={unit.path}>
-            {unit.path}
-          </div>
-          <textarea
-            value={value}
-            rows={12}
-            spellCheck={false}
-            disabled={busy}
-            onChange={(e) => onChange(e.target.value)}
-            aria-label={`${unit.id} 正文`}
-            placeholder={
-              unit.loaded ? undefined : "这个单元在盘上还没有文件 —— 存下去就是它的第一次创建(没有旧内容可备份)。"
-            }
-            style={{
-              background: "var(--ink-1)",
-              border: "1px solid var(--ink-3)",
-              borderRadius: 6,
-              padding: "6px 8px",
-              fontFamily: "monospace",
-              fontSize: 11,
-              lineHeight: 1.6,
-              color: "var(--bone)",
-              outline: "none",
-              resize: "vertical",
-              width: "100%",
-              minHeight: 160,
-            }}
-          />
-
-          <div className="flex items-center gap-2 flex-wrap">
-            <button
-              type="button"
-              className="sansheng-button-primary"
-              style={{ padding: "4px 12px", fontSize: 12 }}
-              disabled={busy || !edited}
-              title={edited ? "写盘(改前自动备份;保存后显示后端回读的正文)" : "内容与盘上一致,无需保存"}
-              onClick={() => void save()}
-            >
-              {op.kind === "busy" && op.what === "save" ? "保存中…" : "保存"}
-            </button>
-
-            {confirming ? (
-              <>
-                <button
-                  type="button"
-                  className="sansheng-button"
-                  style={{ padding: "4px 12px", fontSize: 12, color: "var(--cinnabar)", borderColor: "var(--cinnabar)" }}
-                  disabled={busy}
-                  onClick={() => void doReset()}
-                >
-                  {op.kind === "busy" && op.what === "reset" ? "恢复中…" : "确认恢复出厂"}
-                </button>
-                <button
-                  type="button"
-                  className="sansheng-button"
-                  style={{ padding: "4px 12px", fontSize: 12 }}
-                  disabled={busy}
-                  onClick={() => setConfirming(false)}
-                >
-                  取消
-                </button>
-                <span className="ss-meta" style={{ color: "var(--cinnabar)" }}>
-                  会丢弃本单元的全部改动(当前内容先落一份备份)
-                </span>
-              </>
-            ) : (
-              <button
-                type="button"
-                className="sansheng-button"
-                style={{ padding: "4px 12px", fontSize: 12 }}
-                disabled={busy}
-                title="写回出厂副本的字节。不是删文件 —— 删文件会让这个单元变成「未装载」,agent 从此不知道这条规矩。"
-                onClick={() => setConfirming(true)}
-              >
-                恢复出厂
-              </button>
-            )}
-
-            {edited && (
-              <button
-                type="button"
-                className="sansheng-button"
-                style={{ padding: "4px 12px", fontSize: 12 }}
-                disabled={busy}
-                onClick={() => {
-                  onChange(unit.content);
-                  setOp({ kind: "idle" });
-                }}
-              >
-                放弃改动
-              </button>
-            )}
-
-            <span className="ss-meta ml-auto">
-              单次请求,没有自动保存 —— 不点保存就不会写盘
-            </span>
-          </div>
-
-          {op.kind === "ok" && (
-            <span className="ss-meta" style={{ color: "var(--jade)" }}>
-              {op.text}
+          为什么按**字数**而不是按行数(旧形状是 `Clamp lines={2}`):提示词单元是
+          markdown 段落,「两行」在不同窗口宽度下截掉的内容不一样 —— 而「截掉的是哪
+          一截」正是用户判断要不要展开的唯一依据。按字数截断在哪都一样。
+          正文按**原文**画(mono + pre-wrap):它是盘上那个 .md 的字节,
+          渲染成 markdown 会把 `#` / `**` 这些「单元里到底写了什么」的痕迹抹掉。 */}
+      {unit.content.length > 0 && !editing && (
+        <div
+          style={{
+            marginTop: 2,
+            whiteSpace: "pre-wrap",
+            overflowWrap: "anywhere",
+            fontFamily: "monospace",
+            fontSize: 11,
+            lineHeight: 1.6,
+            color: "var(--bone-dim)",
+          }}
+        >
+          {expanded ? unit.content : preview.text}
+          {!expanded && preview.truncated && (
+            <span className="ss-meta">
+              {"\n"}… 还有 {preview.hidden} 字符没显示(上面是前 {UNIT_PREVIEW_CHARS} 个)
             </span>
           )}
+        </div>
+      )}
 
-          {op.kind === "failed" && (
-            // ⚠️ 同样的理由:这里在卡片本体的 `article` 里,不再套第二层
-            // `sansheng-card`(失败提示本来就该是红色小字,不是另一张卡)。
-            <div className="p-2 text-xs" style={{ color: "var(--cinnabar)" }}>
-              <div>操作失败:{op.message}</div>
-              {op.validIds !== undefined && op.validIds.length > 0 && (
-                <div style={{ marginTop: 4 }}>
-                  后端说这个 id 不认识。合法 id:{op.validIds.join(" · ")}
-                </div>
-              )}
+      {/* ── 两个按钮:展开全部 / 编辑 ──────────────────────────────────
+          ⚠️ 「展开全部」只在真被截断时出现 —— 短正文上给一个按了没反应的按钮
+          是装饰,不是入口(负样本在 `tests/web/harness-by-role.test.ts`)。 */}
+      <div className="flex items-center gap-2 flex-wrap" style={{ marginTop: 4 }}>
+        {preview.truncated && (
+          <button
+            type="button"
+            className="sansheng-button"
+            style={{ padding: "2px 10px", fontSize: 11 }}
+            title={
+              expanded
+                ? `收起到前 ${UNIT_PREVIEW_CHARS} 个字`
+                : `展开全部 ${unit.chars} 字符`
+            }
+            onClick={() => setExpanded((v) => !v)}
+          >
+            {expanded ? "收起" : "展开全部"}
+          </button>
+        )}
+        <button
+          type="button"
+          className="sansheng-button"
+          style={{ padding: "2px 10px", fontSize: 11 }}
+          title={
+            editing
+              ? "收起编辑区(没保存的改动会留在上面,标着「未保存」)"
+              : unit.loaded
+                ? "直接改这个单元的正文 —— 改完要点保存才写盘"
+                : "盘上还没有这个文件 —— 存下去就是它的第一次创建"
+          }
+          onClick={() => setEditing((v) => !v)}
+        >
+          {editing ? "收起编辑" : "编辑"}
+        </button>
+        {!editing && !unit.loaded && (
+          <span className="ss-meta">盘上还没有这个文件 —— 点「编辑」写下它的第一条正文</span>
+        )}
+      </div>
+
+      {/* 编辑区**默认不出现** —— 一屏里不再有十几段长正文。
+          打开后仍是完整的老行为(回读值当状态、两段式确认、失败原样显示)。 */}
+      {editing && (
+        <PromptUnitEditForm
+          unit={unit}
+          value={value}
+          busy={busy}
+          confirming={confirming}
+          op={op}
+          edited={edited}
+          onChange={onChange}
+          onSave={() => void save()}
+          onReset={() => void doReset()}
+          onConfirmReset={() => setConfirming(true)}
+          onCancelConfirm={() => setConfirming(false)}
+          onDiscard={() => {
+            onChange(unit.content);
+            setOp({ kind: "idle" });
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+/**
+ * 一个单元的**正文预览读数**(纯函数)。
+ *
+ * 判据只有一条:**默认只画前 {@link UNIT_PREVIEW_CHARS} 个字**,而且「被截掉了多少」
+ * 是算出来的、不是猜的(`hidden`)。抽成纯函数是为了能在 SSR 之外直接断言 500 这个
+ * 边界(499 / 500 / 501 三个样本),而不是只看一个长正文的渲染结果。
+ */
+export function unitPreview(content: string): {
+  /** 折叠态该画的正文 */
+  text: string;
+  /** 是不是真的被截断了(= 该不该出现「展开全部」) */
+  truncated: boolean;
+  /** 没显示出来的字符数 */
+  hidden: number;
+} {
+  if (content.length <= UNIT_PREVIEW_CHARS) return { text: content, truncated: false, hidden: 0 };
+  return {
+    text: content.slice(0, UNIT_PREVIEW_CHARS),
+    truncated: true,
+    hidden: content.length - UNIT_PREVIEW_CHARS,
+  };
+}
+
+/**
+ * 编辑区(纯 props:不取数、不持状态、不调接口)。
+ *
+ * 为什么把它从 `PromptUnitEditor` 里**分出来并导出**:默认态**不该出现 textarea**,
+ * 而「不该出现」这条断言在 SSR 里很容易变成空转(整块没渲染也照样通过)。
+ * 分出来之后,同一个渲染路径可以被单独喂一份「编辑中」的 props ⇒ 那条负样本
+ * 有一个**真会画出 textarea 的正样本**作对照(本项目对空转检查的固定处置,
+ * 同 `HarnessRolePane` / `RoleHarnessDisclosure` 那一刀)。
+ *
+ * 异步与确认态仍在 `PromptUnitEditor` 里(`op` / `confirming` 作为 props 传进来),
+ * 所以「回读值当状态」「两段式确认」「失败原样显示」三条老行为一条都没变。
+ */
+export function PromptUnitEditForm({
+  unit,
+  value,
+  busy,
+  confirming,
+  op,
+  edited,
+  onChange,
+  onSave,
+  onReset,
+  onConfirmReset,
+  onCancelConfirm,
+  onDiscard,
+}: {
+  unit: PromptUnitView;
+  value: string;
+  busy: boolean;
+  confirming: boolean;
+  op: OpState;
+  /** 编辑框里的内容与盘上不一致(「未保存」pill 与「放弃改动」按钮的判据) */
+  edited: boolean;
+  onChange: (next: string) => void;
+  onSave: () => void;
+  onReset: () => void;
+  onConfirmReset: () => void;
+  onCancelConfirm: () => void;
+  onDiscard: () => void;
+}) {
+  return (
+    <div className="flex flex-col gap-1.5" style={{ marginTop: 6 }}>
+      <div className="ss-meta font-mono truncate" title={unit.path}>
+        {unit.path}
+      </div>
+      <textarea
+        value={value}
+        rows={12}
+        spellCheck={false}
+        disabled={busy}
+        onChange={(e) => onChange(e.target.value)}
+        aria-label={`${unit.id} 正文`}
+        placeholder={
+          unit.loaded ? undefined : "这个单元在盘上还没有文件 —— 存下去就是它的第一次创建(没有旧内容可备份)。"
+        }
+        style={{
+          background: "var(--ink-1)",
+          border: "1px solid var(--ink-3)",
+          borderRadius: 6,
+          padding: "6px 8px",
+          fontFamily: "monospace",
+          fontSize: 11,
+          lineHeight: 1.6,
+          color: "var(--bone)",
+          outline: "none",
+          resize: "vertical",
+          width: "100%",
+          minHeight: 160,
+        }}
+      />
+
+      <div className="flex items-center gap-2 flex-wrap">
+        <button
+          type="button"
+          className="sansheng-button-primary"
+          style={{ padding: "4px 12px", fontSize: 12 }}
+          disabled={busy || !edited}
+          title={edited ? "写盘(改前自动备份;保存后显示后端回读的正文)" : "内容与盘上一致,无需保存"}
+          onClick={onSave}
+        >
+          {op.kind === "busy" && op.what === "save" ? "保存中…" : "保存"}
+        </button>
+
+        {confirming ? (
+          <>
+            <button
+              type="button"
+              className="sansheng-button"
+              style={{ padding: "4px 12px", fontSize: 12, color: "var(--cinnabar)", borderColor: "var(--cinnabar)" }}
+              disabled={busy}
+              onClick={onReset}
+            >
+              {op.kind === "busy" && op.what === "reset" ? "恢复中…" : "确认恢复出厂"}
+            </button>
+            <button
+              type="button"
+              className="sansheng-button"
+              style={{ padding: "4px 12px", fontSize: 12 }}
+              disabled={busy}
+              onClick={onCancelConfirm}
+            >
+              取消
+            </button>
+            <span className="ss-meta" style={{ color: "var(--cinnabar)" }}>
+              会丢弃本单元的全部改动(当前内容先落一份备份)
+            </span>
+          </>
+        ) : (
+          <button
+            type="button"
+            className="sansheng-button"
+            style={{ padding: "4px 12px", fontSize: 12 }}
+            disabled={busy}
+            title="写回出厂副本的字节。不是删文件 —— 删文件会让这个单元变成「未装载」,agent 从此不知道这条规矩。"
+            onClick={onConfirmReset}
+          >
+            恢复出厂
+          </button>
+        )}
+
+        {edited && (
+          <button
+            type="button"
+            className="sansheng-button"
+            style={{ padding: "4px 12px", fontSize: 12 }}
+            disabled={busy}
+            onClick={onDiscard}
+          >
+            放弃改动
+          </button>
+        )}
+
+        <span className="ss-meta ml-auto">
+          单次请求,没有自动保存 —— 不点保存就不会写盘
+        </span>
+      </div>
+
+      {op.kind === "ok" && (
+        <span className="ss-meta" style={{ color: "var(--jade)" }}>
+          {op.text}
+        </span>
+      )}
+
+      {op.kind === "failed" && (
+        // ⚠️ 同样的理由:这里在卡片本体的 `article` 里,不再套第二层
+        // `sansheng-card`(失败提示本来就该是红色小字,不是另一张卡)。
+        <div className="p-2 text-xs" style={{ color: "var(--cinnabar)" }}>
+          <div>操作失败:{op.message}</div>
+          {op.validIds !== undefined && op.validIds.length > 0 && (
+            <div style={{ marginTop: 4 }}>
+              后端说这个 id 不认识。合法 id:{op.validIds.join(" · ")}
             </div>
           )}
         </div>
-      </Disclosure>
+      )}
     </div>
   );
 }

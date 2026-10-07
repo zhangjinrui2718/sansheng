@@ -873,6 +873,31 @@ export interface ToolSetFileView {
   problem?: string;
 }
 
+/**
+ * 工具面上**一个工具**的呈现:类型 / 名称 / 作用。
+ *
+ * 为什么这一份由**服务端**给,而不是前端自己写一张名字表:工具的「作用」只有一个
+ * 真相源 —— `PlatformTool.description`(`src/platform/tools/*.ts` 里,由写这个工具的
+ * 人写下的那段)。前端再抄一份中文说明,两处迟早漂开,而漂开的表现是
+ * 「界面上写的用途」与「模型实际拿到的说明」不一样 —— 屏幕上完全看不出来。
+ *
+ * ⚠️ `purpose` 是**给模型看的原文**(里面有 markdown 强调、有「你」),不是为界面
+ * 重写过的文案。界面照原样渲染 —— 改写成一句更好读的话就等于在这里造第二份真相。
+ * 唯一一处例外是 SDK 内置那 7 个:平台注册表里没有它们,SDK 只给英文描述,
+ * 所以由 `src/platform/tools/briefs.ts` 补一句中文(那一句是平台对这一层的说明)。
+ */
+export interface ToolBriefView {
+  name: string;
+  /** 谁提供:`platform` = 平台自有工具;`sdk` = Pi SDK 内置(读文件 / 跑 shell 那一类) */
+  source: "platform" | "sdk";
+  /** 能力 id(求解期授权的单位,`ceiling` 里写的就是它,如 `blackboard.read`) */
+  capability: string;
+  /** 类型 = 能力所属的中文分组(项目 / 工作项 / 协作 / 工件 …) */
+  group: string;
+  /** 作用:平台注册表里那段说明;SDK 内置的是平台补的中文一句 */
+  purpose: string;
+}
+
 export interface RoleHarnessView {
   role: ProjectRole;
   displayName: string;
@@ -884,6 +909,14 @@ export interface RoleHarnessView {
   promptUnits: PromptUnitView[];
   /** 该角色实际拿到的工具名(已过三重门控,**含 L2 集合文件**) */
   tools: string[];
+  /**
+   * `tools` 每一项的类型 / 名称 / 作用,**与 `tools` 同序、同长**。
+   *
+   * ⚠️ **可选**,而且前端必须容忍它缺席(契约只增字段):旧的读面 / 还没重启的进程
+   * 不返回它 ⇒ 界面退化回「一串英文名」的老形状,而**不许**把「没有说明」显示成
+   * 「没有工具」—— 那与本项目反复栽的「把不知道显示成 0」是同一种错。
+   */
+  toolBriefs?: ToolBriefView[];
   /**
    * `tools` 这一栏**求解过了没有**。
    *

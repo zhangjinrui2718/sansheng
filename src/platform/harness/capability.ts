@@ -103,6 +103,72 @@ export const CAPABILITIES = [
 ] as const satisfies readonly Capability[];
 
 /**
+ * 能力 → **中文分组**(只给界面读;授权判定一个字节都不用它)。
+ *
+ * 为什么需要它:能力 id 本身是英文的点分名(`blackboard.read`),而成员页那张
+ * 工具表要回答的是「这堆英文名到底都是些啥」。类型那一列取这里的分组名,
+ * 于是 `board_list` / `board_read` 一眼归到「工件」,而不是又一行英文。
+ *
+ * ⚠️ **它是内容还是名字?** 分组名是**代码内常量**,不是从数据里读的 —— 与角色中文名
+ * 同一个处置:只有这一处真相。给它写一张 `Record<Capability, string>`,TS 会在
+ * 能力联合增删时**当场报缺项**,不会静默漂开。
+ *
+ * ⚠️ 分组**不是**授权单位(`ceiling` 里写的仍是能力 id),所以这里改一个名字
+ * 不影响任何判定 —— 它只改屏幕上那一格的字。
+ */
+export const CAPABILITY_GROUP: Readonly<Record<Capability, string>> = {
+  // BC1 项目与工作
+  "project.open": "项目",
+  "project.read": "项目",
+  "project.update": "项目",
+  "project.close": "项目",
+  "work.create": "工作项",
+  "work.update": "工作项",
+  "work.assign": "工作项",
+  "work.read": "工作项",
+  "work.list": "工作项",
+  // BC2 协作
+  "collab.ask": "协作",
+  "collab.answer": "协作",
+  "collab.read": "协作",
+  "collab.convene": "协作",
+  "collab.meeting.read": "协作",
+  "collab.meeting.respond": "协作",
+  "collab.meeting.conclude": "协作",
+  "collab.escalate": "协作",
+  // BC3 工件
+  "blackboard.read": "工件",
+  "blackboard.write": "工件",
+  // BC4 变更与阻塞
+  "change.propose": "变更",
+  "change.review": "变更",
+  "change.read": "变更",
+  "blocker.open": "阻塞",
+  "blocker.update": "阻塞",
+  "blocker.read": "阻塞",
+  // BC7 记忆
+  "memory.read": "记忆",
+  "memory.write": "记忆",
+  // 知识语料
+  "knowledge.read": "知识语料",
+  // 面向甲方
+  "client.ask": "甲方",
+  "client.message": "甲方",
+  // 执行:三个 code.* 能力的工具是 read / grep / find / ls / edit / write / bash
+  // —— 它们操作的是这台机器上的文件与命令,所以类型叫「本机操作」而不是「执行」。
+  "code.read": "本机操作",
+  "code.write": "本机操作",
+  "code.exec": "本机操作",
+  "work.report": "汇报",
+  "work.review_verdict": "审查",
+};
+
+/** 一个能力的中文分组(界面用)。键是闭合联合,所以这里不会漏项。 */
+export function capabilityGroup(cap: Capability): string {
+  return CAPABILITY_GROUP[cap];
+}
+
+/**
  * 工具名闭合联合 = Pi SDK 内置 8 个 + 平台自有 33 个。
  *
  * SDK 侧:`read` / `grep` / `find` / `ls` / `edit` / `write` / `bash` / `powershell`。

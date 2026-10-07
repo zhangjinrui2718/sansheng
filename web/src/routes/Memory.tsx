@@ -236,7 +236,7 @@ export function MemoryPage() {
     <div className="ss-page">
       <PageHeader
         title="记忆"
-        hint="用户画像 + 记忆碎片 + 知识语料(只读)"
+        hint="用户画像 + 记忆碎片 + 知识语料"
         hintTitle="三段是**两套东西**:画像 / 碎片来自 GET /api/profile 与 /api/memory/fragments —— 关于**用户**,模型写、会淡忘;知识语料来自 GET /api/knowledge —— 关于**项目 / 组织**,平台索引、agent 只读、不淡忘(设计 docs/DESIGN-KNOWLEDGE.md)。没有条目时是空态,不展示示例。kind 是闭合联合,不扩展。"
         aside={
           <StatStrip
@@ -247,7 +247,7 @@ export function MemoryPage() {
                 label: "语料块",
                 value: knowledge === null ? "—" : knowledge.runtime === "ok" ? knowledge.chunks : "读不到",
                 tone: knowledge !== null && knowledge.runtime === "ok" ? "jade" : "mute",
-                title: "知识语料(只读)的块数;读不到 ≠ 0",
+                title: "知识语料的块数;读不到 ≠ 0",
               },
             ]}
           />
@@ -354,7 +354,7 @@ export function MemoryPage() {
       </Section>
 
       <Section
-        title="知识语料(只读)"
+        title="知识语料"
         count={knowledge !== null && knowledge.runtime === "ok" ? knowledge.chunks : undefined}
         hint="关于项目 / 组织 · 平台索引 · agent 只读"
         hintTitle={
@@ -402,6 +402,11 @@ export function MemoryPage() {
                     title: "与「语料块」必须相等;不等 = 索引损坏",
                   },
                   {
+                    label: "覆盖项目",
+                    value: `${knowledge.projects.filter((p) => p.chunks > 0).length} / ${knowledge.projects.length}`,
+                    title: "有语料的项目数 / 项目总数 —— 只给数,不列项目(这一页是跨项目的面)",
+                  },
+                  {
                     label: "上次索引",
                     value: knowledge.lastIndexedAt === null ? "从未" : `${fmtSpan(knowledge.at - knowledge.lastIndexedAt)}前`,
                   },
@@ -427,46 +432,9 @@ export function MemoryPage() {
               </div>
             ) : null}
 
-            {/* ③ 按项目分行:量级 + 时效(没语料的项目也出现 —— 那就是"没跑到") */}
-            {knowledge.projects.length > 0 ? (
-              <div className="grid gap-1">
-                {knowledge.projects.map((row) => {
-                  const waiting = row.pending.artifacts + row.pending.messages;
-                  return (
-                    <div
-                      key={row.projectId}
-                      className="sansheng-card p-2 flex items-center justify-between gap-2 flex-wrap"
-                    >
-                      <span className="ss-body truncate" title={`${row.projectId} · ${row.status}`}>
-                        {row.name}
-                      </span>
-                      <span className="ss-meta flex items-center gap-2 flex-wrap">
-                        <span>块 {row.chunks}</span>
-                        <span>工件 {row.sourcesIndexed.artifacts} / 消息 {row.sourcesIndexed.messages}</span>
-                        <span>
-                          上次索引{" "}
-                          {row.lastIndexedAt === null ? "从未" : `${fmtSpan(knowledge.at - row.lastIndexedAt)}前`}
-                        </span>
-                        {waiting > 0 ? <Pill tone="amber">未进 {waiting}</Pill> : null}
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setChunkProject(row.projectId);
-                            void loadChunks(q, row.projectId);
-                          }}
-                          style={FILTER_BUTTON_STYLE}
-                          title="只看这个项目的明细"
-                        >
-                          查明细
-                        </button>
-                      </span>
-                    </div>
-                  );
-                })}
-              </div>
-            ) : null}
-
-            {/* ④ 明细:检索(有 q)或浏览(没 q) */}
+            {/* ③ 明细:检索(有 q)或浏览(没 q)。
+                ⚠️ 项目这一维只作为这里的**筛选控件**出现,不在概览里铺开 ——
+                这一页是跨项目的面,把某个项目的名字与它的量摆上来会读成"这页在讲那个项目"。 */}
             <div className="sansheng-card p-2 grid gap-2">
               <form
                 className="flex items-center gap-2 flex-wrap"

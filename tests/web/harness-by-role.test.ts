@@ -58,19 +58,39 @@
  *     嵌进外层卡片时 `HarnessRolePane` **不再画自己那一份 `Section` 外壳**
  *     (正负样本各一条 —— 否则展开后是卡片套卡片、角色名出现两次)。判据 ② 也
  *     补了卡片层的「配置默认折叠 + `defaultOpen` 正样本」。
+ *
+ * ── 2026-10-08:判据 ⑨ / ⑩(用户点名的两处)────────────────────────
+ *
+ * 用户的原话(逐字):
+ *
+ *   「成员tab下面的harness,
+ *     1. 提示词单元可以收起,不要展示那么长,我觉得可以截断前500个字,然后两个
+ *        按钮,一个按钮展开全部,一个按钮编辑
+ *     2. 工具 做一个表格,按照类型、名称、作用来,现在搞一对英文名称的list,
+ *        完全不知道都有些啥」
+ *
+ *   - **判据 ⑨**:默认只画前 `UNIT_PREVIEW_CHARS`(500)个字,第 501 个字之后
+ *     **不在屏幕上**;短正文不许出现「展开全部」(按不动的按钮是装饰);
+ *     默认态**没有 textarea**,而「编辑中」的正样本必须有(否则那条负样本空转)。
+ *   - **判据 ⑩**:工具面是三列表格(类型 / 名称 / 作用),不再是 `a · b · c`
+ *     那一串英文名;`toolBriefs` 缺席(旧后端)⇒ 退化回英文名单,而**不许**
+ *     显示成「没有工具」。
  */
 import { describe, expect, it, vi } from "vitest";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import type {
-  HarnessView, ProjectRole, PromptUnitView, RoleHarnessView, ToolSetFileView,
+  HarnessView, ProjectRole, PromptUnitView, RoleHarnessView, ToolBriefView, ToolSetFileView,
 } from "@shared/types/platform";
 import {
   HarnessRolePane,
+  PromptUnitEditForm,
   RoleHarnessDisclosure,
   harnessStatusText,
   roleIssueCount,
   sharedUnitOwners,
+  unitPreview,
+  type OpState,
 } from "@/components/members/RoleHarness";
 import { Disclosure } from "@/components/ui/primitives";
 
@@ -559,5 +579,178 @@ describe("⑧ 卡片头告警 Pill 与 `embedded`(同一个角色名/标题不�
     const full = renderPane(WK);
     expect(full).toContain("<section");
     expect(full).toContain(WK.displayName);
+  });
+});
+
+// ── 判据 9:提示词单元默认只给前 500 个字 + 两个按钮 ─────────────────
+//
+// 2026-10-08,用户原话:「提示词单元可以收起,不要展示那么长,我觉得可以截断前 500
+// 个字,然后两个按钮,一个按钮展开全部,一个按钮编辑」。
+//
+// 旧形状是 `Clamp lines={2}`(**按行**截断)—— 同一个单元在窄窗口与宽窗口下截掉的
+// 内容不一样,而「截掉的是哪一截」正是用户判断要不要展开的唯一依据。所以判据落在
+// **字数**上,而且边界拿 499 / 500 / 501 三个样本钉(只测一个长正文的话,
+// 「到底截到第几个字」没有任何东西在管)。
+describe("⑨ 提示词单元:默认前 500 字,两个按钮(展开全部 / 编辑)", () => {
+  const HEAD = "甲".repeat(500);
+  const LONG_TEXT = `${HEAD}尾部哨兵`;
+  const LONG = unit("research_worker.core", { content: LONG_TEXT, chars: LONG_TEXT.length });
+  const SHORT = unit("collaboration.ask", { content: "短短一段正文", chars: 6 });
+
+  it("`unitPreview`:500 字边界三个样本(499 / 500 / 501)", () => {
+    expect(unitPreview("甲".repeat(499))).toEqual({ text: "甲".repeat(499), truncated: false, hidden: 0 });
+    // 恰好 500:一个字都没被截掉 ⇒ 不该出现「展开全部」
+    expect(unitPreview(HEAD)).toEqual({ text: HEAD, truncated: false, hidden: 0 });
+    // 501:截到 500,少显示 1 个 —— `hidden` 是算出来的,不是猜的
+    expect(unitPreview(`${HEAD}尾`)).toEqual({ text: HEAD, truncated: true, hidden: 1 });
+    // 非空自检:夹具真的跨过了那条线
+    expect(LONG_TEXT.length).toBe(504);
+  });
+
+  it("长单元:第 501 个字之后**不在屏幕上**,并如实报出少显示了几个字", () => {
+    const text = visible(renderPane(role("research_worker", "研究工", { promptUnits: [LONG] })));
+    expect(text, "前 500 个字没有画出来").toContain(HEAD);
+    expect(text, "第 501 个字之后的正文被画出来了 —— 截断没生效").not.toContain("尾部哨兵");
+    expect(text).toContain("还有 4 字符没显示");
+    expect(text).toContain("上面是前 500 个");
+  });
+
+  it("长单元:两个按钮都在(「展开全部」与「编辑」,都是真按钮不是页面上碰巧出现的字)", () => {
+    const html = renderPane(role("research_worker", "研究工", { promptUnits: [LONG] }));
+    // ⚠️ 断言按钮的**标记形状**而不是裸词:面板里还有一句「提示词单元 · 可编辑」,
+    // 裸 `toContain("编辑")` 会被它满足 —— 那样的正样本是空转的。
+    expect(html).toMatch(/>展开全部<\/button>/);
+    expect(html).toMatch(/>编辑<\/button>/);
+  });
+
+  it("负样本:短单元(≤500 字)**不许**出现「展开全部」(没有可展开的东西)", () => {
+    const html = visible(renderPane(role("research_worker", "研究工", { promptUnits: [SHORT] })));
+    expect(html).toContain("短短一段正文");
+    expect(html).not.toMatch(/>展开全部<\/button>/);
+    // 「编辑」在两种长度下都在 —— 证明上一条不是「整块没渲染」
+    expect(html).toMatch(/>编辑<\/button>/);
+  });
+
+  it("默认态没有 textarea(编辑区不出现)—— 而「编辑中」**必须**有(正样本)", () => {
+    const pane = renderPane(role("research_worker", "研究工", { promptUnits: [LONG] }));
+    expect(pane, "默认态就画了 textarea —— 一屏又是长正文").not.toContain("<textarea");
+
+    // ✅ 正样本:同一个渲染路径喂一份「编辑中」的 props ⇒ textarea 与保存/恢复出厂都在。
+    // 没有这一条,上面那句「默认态没有 textarea」在整块被删掉时也会通过。
+    const form = renderToStaticMarkup(createElement(PromptUnitEditForm, formProps(LONG)));
+    expect(form).toContain("<textarea");
+    expect(form).toContain("保存");
+    expect(form).toContain("恢复出厂");
+    expect(visible(form)).toContain("单次请求,没有自动保存");
+  });
+
+  it("编辑区仍是老行为:两段式确认与失败原文原样显示", () => {
+    const confirming = renderToStaticMarkup(
+      createElement(PromptUnitEditForm, { ...formProps(LONG), confirming: true, edited: true }),
+    );
+    expect(confirming).toContain("确认恢复出厂");
+    expect(confirming).toContain("取消");
+    expect(confirming).toContain("放弃改动");
+
+    const failed = renderToStaticMarkup(
+      createElement(PromptUnitEditForm, {
+        ...formProps(LONG),
+        edited: true,
+        op: { kind: "failed", message: "unknown_unit: 不认识这个 id", validIds: ["a.b"] },
+      }),
+    );
+    const text = visible(failed);
+    expect(text).toContain("操作失败:unknown_unit: 不认识这个 id");
+    expect(text, "后端回灌的合法 id 清单没显示").toContain("a.b");
+  });
+});
+
+/** `PromptUnitEditForm`(编辑区)的 props 夹具 —— 纯展示组件,一个回调都不真的跑。 */
+function formProps(unitFixture: PromptUnitView) {
+  const idle: OpState = { kind: "idle" };
+  return {
+    unit: unitFixture,
+    value: unitFixture.content,
+    busy: false,
+    confirming: false,
+    op: idle,
+    edited: false,
+    onChange: vi.fn(),
+    onSave: vi.fn(),
+    onReset: vi.fn(),
+    onConfirmReset: vi.fn(),
+    onCancelConfirm: vi.fn(),
+    onDiscard: vi.fn(),
+  };
+}
+
+// ── 判据 10:工具面是「类型 / 名称 / 作用」三列表格 ──────────────────
+//
+// 2026-10-08,用户原话:「工具 做一个表格,按照类型、名称、作用来,现在搞一对英文
+// 名称的 list,完全不知道都有些啥」。
+//
+// ⚠️ 说明文字**来自服务端**(`RoleHarnessView.toolBriefs`,转写自工具注册表的
+// `description`),前端不另写一张中文表 —— 那会得到第二份会漂开的「这工具是干嘛的」。
+// 服务端那一侧的覆盖判据在 `tests/platform/tool-briefs.test.ts`。
+describe("⑩ 工具面:类型 / 名称 / 作用三列表格(不再是一串英文名)", () => {
+  const BRIEFS: ToolBriefView[] = [
+    {
+      name: "board_list", source: "platform", capability: "blackboard.read",
+      group: "工件", purpose: "列项目黑板上的工件。",
+    },
+    {
+      name: "read", source: "sdk", capability: "code.read",
+      group: "本机操作", purpose: "读文件正文。",
+    },
+  ];
+
+  const withBriefs = role("research_worker", "研究工", {
+    promptUnits: [unit("research_worker.core")],
+    tools: ["board_list", "read"],
+    toolBriefs: BRIEFS,
+  });
+
+  it("三列表头都在,且逐条给出类型 / 名称 / 作用", () => {
+    const html = renderPane(withBriefs);
+    expect(html).toContain("<table");
+    expect(html).toMatch(/<th[^>]*>类型<\/th>/);
+    expect(html).toMatch(/<th[^>]*>名称<\/th>/);
+    expect(html).toMatch(/<th[^>]*>作用<\/th>/);
+
+    const text = visible(html);
+    expect(text, "类型列(能力的中文分组)没画出来").toContain("工件");
+    expect(text, "名称列没画出来").toContain("board_list");
+    expect(text, "作用列没画出来").toContain("列项目黑板上的工件。");
+    expect(text, "SDK 内置的工具没有标出来").toContain("SDK 内置");
+    expect(text).toContain("本机操作");
+    expect(text).toContain("读文件正文。");
+  });
+
+  it("负样本:老形状「a · b · c」那一串英文名不许再出现", () => {
+    const text = visible(renderPane(withBriefs));
+    expect(text, "还是把工具名单拼成一行 —— 用户看不懂的那一版回来了").not.toContain("board_list · read");
+  });
+
+  it("旧读面(没有 toolBriefs 这一栏)⇒ 退化回英文名单,**不许**显示成「没有工具」", () => {
+    const legacy = role("research_worker", "研究工", {
+      promptUnits: [unit("research_worker.core")],
+      tools: ["board_list", "read"],
+    });
+    const html = renderPane(legacy);
+    const text = visible(html);
+    expect(text, "旧后端的名单没显示出来").toContain("board_list · read");
+    expect(text).toContain("工具名单");
+    expect(html, "没说明却画了一张空表").not.toContain("<table");
+  });
+
+  it("briefs 为空数组(读面自相矛盾)⇒ 同样退化,不画空表", () => {
+    const broken = role("research_worker", "研究工", {
+      promptUnits: [unit("research_worker.core")],
+      tools: ["board_list"],
+      toolBriefs: [],
+    });
+    const html = renderPane(broken);
+    expect(html).not.toContain("<table");
+    expect(visible(html)).toContain("board_list");
   });
 });
