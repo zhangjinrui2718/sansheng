@@ -21,8 +21,17 @@
  * 写回出厂字节 = default 态。两者对 agent 的行为影响完全不同。
  * 所以需要**出厂副本** —— 构建时从仓库 `harness/` 拷进 `dist/harness/`。
  */
-import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import {
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { dirname, join } from "node:path";
 import { ROLE_SPECS, PROJECT_ROLES } from "../identity/role.js";
 
 /** 备份保留份数(与旧系统 7-O 同:留最近 10 份)。 */
@@ -120,6 +129,86 @@ function pruneBackups(dataDir: string, unitId: string): void {
   } catch {
     /* 清理失败不影响写入 */
   }
+}
+
+/** 一次 seed 的结果。四个桶,调用方必须**逐个**处理,不能只看 seeded。 */
+export interface SeedResult {
+  /** 本次从出厂副本落盘的单元 id。 */
+  readonly seeded: readonly string[];
+  /** 落盘前就已存在、**原样未动**的单元 id。 */
+  readonly alreadyPresent: readonly string[];
+  /** 出厂副本不存在的单元 id(该单元保持「未装载」,等用户手点恢复出厂)。 */
+  readonly factoryMissing: readonly string[];
+  /** 出厂副本在,但落盘失败的单元(形如 `id(原因)`)。 */
+  readonly failed: readonly string[];
+}
+
+/**
+ * 启动时 seed:把**缺失**的提示词单元从出厂副本补到 dataDir。
+ *
+ * ── 只补缺失,绝不覆盖 ────────────────────────────────────────────
+ *
+ * 这一条是本函数存在的全部理由,也是它与 `resetPromptUnit` 的**语义分界**:
+ *
+ *   · **恢复出厂**(用户点按钮)—— 用户的**显式指令**,意图就是「我不要我改的
+ *     这份了,换回默认」。所以它**覆盖**,而且覆盖前先备份(规矩②)。
+ *   · **启动 seed**(用户什么都没干)—— 系统的**静默兜底**,意图只是
+ *     「别让新装的 agent 少一条规矩」。它**只填空缺**。
+ *
+ * 把 seed 写成覆盖(例如直接调 `resetPromptUnit` 走一遍)会静默吃掉用户编辑:
+ * 用户精心改过的提示词在**下次重启**后变回默认,而界面上没有任何东西提示过他 ——
+ * 用户唯一的发现方式是「我明明改过,怎么又回来了」。
+ * 这与「恢复出厂」在 agent 侧的效果同样致命(它确实生效了),但它是**静默**的,
+ * 所以更难查。**覆盖必须永远是用户亲手点的那个动作。**
+ *
+ * ── 幂等 ──────────────────────────────────────────────────────────
+ *
+ * 纯「存在性检查 + 补写」,无备份、无临时文件、无计数器。第二次启动
+ * 全部落在 `alreadyPresent`,一次也不写。所以重启/反复 `platform-serve`
+ * 不会污染 dataDir,也不会产生备份堆积。
+ *
+ * ── 失败不许静默,也不许拦住启动 ────────────────────────────────────
+ *
+ * 出厂副本缺失(构建漏拷 `copy-harness.mjs`)对**某一个**单元不是致命的:
+ * 其余 13 个照常落盘,这个单元退回 `loaded: false`,agent 少一条规矩但照常跑。
+ * 所以这里返回分桶结果而不是抛异常 —— 是否警告由调用方决定,
+ * 但结果必须让它**有能力**如实报告。
+ */
+export function seedPromptUnits(dirs: FactoryDirs): SeedResult {
+  const seeded: string[] = [];
+  const alreadyPresent: string[] = [];
+  const factoryMissing: string[] = [];
+  const failed: string[] = [];
+
+  for (const unitId of promptUnitIds()) {
+    const target = unitFilePath(dirs, unitId);
+
+    // 在位 ⇒ 一个字节都不碰。这是「不覆盖」的全部实现,没有例外分支。
+    if (existsSync(target)) {
+      alreadyPresent.push(unitId);
+      continue;
+    }
+
+    const factory = join(dirs.factoryDir, `${unitId}.md`);
+    if (!existsSync(factory)) {
+      factoryMissing.push(unitId);
+      continue;
+    }
+
+    try {
+      // 用 copyFileSync 而不是 writePromptUnit:后者是「用户写」的语义
+      // (备份 + 回读校验),seed 不是用户写,不该在那条路上留下备份痕迹。
+      mkdirSync(dirname(target), { recursive: true });
+      copyFileSync(factory, target);
+      seeded.push(unitId);
+    } catch (err) {
+      // 与 factoryMissing 分开记 —— 报成「出厂副本缺失」会掩盖真实原因
+      // (比如 dataDir 不可写),调用方就会对着错误的方向去排查。
+      failed.push(`${unitId}(${err instanceof Error ? err.message : String(err)})`);
+    }
+  }
+
+  return { seeded, alreadyPresent, factoryMissing, failed };
 }
 
 /**

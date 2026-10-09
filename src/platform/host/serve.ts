@@ -61,6 +61,7 @@ import {
 import { ROLE_SPECS } from "../identity/role.js";
 import { resolveClientQuestion } from "../tools/client.js";
 import { listProjectSummaries, type LiveCollectOptions } from "../transport/views.js";
+import { seedPromptUnits, type FactoryDirs } from "../harness/write.js";
 import { getProjectRow, listProjects } from "../storage/repo/projects.js";
 import { getWork } from "../storage/repo/works.js";
 import { getAgent } from "../storage/repo/agents.js";
@@ -313,6 +314,20 @@ export interface ServeOptions {
 }
 
 const HERE = fileURLToPath(new URL(".", import.meta.url));
+
+/**
+ * 出厂副本目录(`dist/harness/system_prompts`)。
+ *
+ * HERE = `dist/src/platform/host/` → 上三级是 `dist/` → 再进 `harness/system_prompts/`
+ * (构建时由 `scripts/copy-harness.mjs` 从仓库 `harness/` 拷过去)。
+ *
+ * **单独一个函数而不是两处 `resolve`** —— 启动 seed 和「恢复出厂」必须指向
+ * 同一个目录:分两处写的话,改错其中一处得到的症状是「启动时说出厂副本缺失,
+ * 而界面上「恢复出厂」按钮一切正常」,极难归因。
+ */
+function platformFactoryDir(): string {
+  return resolve(HERE, "../../../harness/system_prompts");
+}
 
 export interface PlatformHost {
   readonly app: Hono;
@@ -2293,9 +2308,9 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
     },
     harnessDirs: {
       dataDir: opts.dataDir,
-      // 出厂副本:`dist/src/platform/host/` 上三级是 `dist/`,再进 `harness/system_prompts/`
-      // (构建时由 package.json 的 build:server 从仓库 harness/ 拷过去)
-      factoryDir: resolve(HERE, "../../../harness/system_prompts"),
+      // 出厂副本目录与启动 seed 共用同一个解析函数 —— 另写一份 `resolve` 就会漂,
+      // 而漂的表现是「启动时警告出厂副本缺失、界面上「恢复出厂」却好好的」
+      factoryDir: platformFactoryDir(),
     },
     reset: () => {
       // 常驻会话必须丢掉:它们绑着已被删掉的项目,继续用会往空项目里写消息
@@ -2492,6 +2507,27 @@ export async function runPlatformServe(opts: ServeOptions): Promise<{ close: () 
 
   log.ok(`Sansheng 平台服务`);
   log.muted(`  数据目录: ${opts.dataDir}`);
+
+  // ── 启动 seed:把缺失的提示词单元从出厂副本补齐 ──────────────────
+  // 不做这一步,全新 dataDir 里的每个单元都是 `loaded: false`,agent 从第一条
+  // 消息起就不知道那些规矩 —— 而用户在界面上看不出任何异常,只能逐个 agent
+  // 手点「恢复出厂」。那是启动期最没必要的一段手工劳动。
+  //
+  // **只补缺失、不覆盖**(语义分界见 `seedPromptUnits` 的注释):用户改过的
+  // 单元一个字节都不动。「恢复出厂」是用户点的,seed 是系统做的。
+  const seed = seedPromptUnits({ dataDir: opts.dataDir, factoryDir: platformFactoryDir() });
+  log.ok(
+    `  提示词单元:已落盘 ${seed.seeded.length} / 已在位 ${seed.alreadyPresent.length} / 出厂副本缺失 ${seed.factoryMissing.length}`,
+  );
+  // 出厂副本缺失要**说出来**:少拷一个单元时除了这行,没有任何别的地方会提到它,
+  // 而它的后果是某个 agent 静默地少一条规矩。不警告 = 把构建期的疏忽
+  // 推迟成运行期无法归因的「它怎么不知道这条」。
+  for (const unitId of seed.factoryMissing) {
+    log.warn(`  ⚠ 提示词单元「${unitId}」出厂副本缺失 —— 该单元保持未装载(其余单元已正常落盘)`);
+  }
+  for (const f of seed.failed) {
+    log.warn(`  ⚠ 提示词单元落盘失败 ${f} —— 该单元保持未装载`);
+  }
   if (!orgReady(host.booted.deps.db)) {
     log.muted(`  组织未就绪 —— 第一次收到消息或建项目时会自动播种`);
   }
