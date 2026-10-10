@@ -70,15 +70,16 @@ import {
 } from "../storage/repo/usage.js";
 import { ensureSession } from "../transport/hub.js";
 import {
-  getSession, insertSession, listSessions, listSessionMessages,
+  getSession, insertSession, listAllSessions, listSessions, listSessionMessages,
   isSessionMessageKind, isSessionMessageSource, isSessionMessageTodoKind, isSessionMessageTriggerKind,
 } from "../storage/repo/sessions.js";
-import type { SessionMessageKind, SessionMessageRow } from "../storage/repo/sessions.js";
+import type { SessionMessageKind, SessionMessageRow, SessionRow } from "../storage/repo/sessions.js";
 import type {
   ArtifactContentView,
   HarnessView, MemberConversationView, MemberConversationsResponse,
   KnowledgeChunkView,
-  PromptUnitView, RepoCommitsView, RoleHarnessView, SessionMessageView, WorkspaceView,
+  PromptUnitView, RepoCommitsView, RoleHarnessView, SessionIndexEntry,
+  SessionMessageView, SessionSummaryView, WorkspaceView,
 } from "@shared/types/platform.js";
 import type { ResetReport } from "../host/reset.js";
 import {
@@ -193,6 +194,50 @@ const err = (code: string, message: string, status: 400 | 404 | 409 | 500 = 400)
  * `body_path` 列一定在);库真跑到一半时,该让 SQL 响亮报错,而不是回一个
  * 「索引还没落地」把「机制缺一半」与「项目还没产出」说成同一件事。
  */
+/**
+ * 一行会话 → 读面摘要。**两个端点共用这一份** ——
+ * `GET /api/projects/:id/sessions`(对话页)与 `GET /api/sessions`(左栏二级目录)。
+ *
+ * ⚠️ 共用是刻意的:这两处的 `title` 兜底**必须**是同一个答案 —— 交付会话的名字
+ * 来自它交付的那份工件(`deliverableArtifactId` → 工件标题)。写成两处,它们
+ * 就会在工件被改名 / 某天少写一个字段时**当场漂开**,而左栏与对话页显示不同的
+ * 线程名,看起来像「有两个同名的东西」。
+ *
+ * 次序也在这里定(主对话在前,其余按最近活跃度)—— 前端不重排,免得两处读面
+ * 对同一条线给出不同的位置。
+ */
+function sessionSummariesOf(db: Database.Database, rows: SessionRow[]): SessionSummaryView[] {
+  return rows
+    .map((s) => {
+      const last = listSessionMessages(db, s.id, 1);
+      const lastAt = last.length > 0 ? last[0]!.createdAt : s.createdAt;
+      // ⚠️ **交付会话的名字来自它交付的那份工件**(`handover` 开出来的那条)。
+      //
+      // 真机实测:一个跑完的项目底下有 **8 条**会话 —— 7 场交付各一条 + 1 条
+      // 项目内部会话(C4 的设计:交付一条线,不让「哪条对话是哪场交付开的」
+      // 变成猜的)。024 之后它们都叫 `main` 且没有 title,于是页签上会是
+      // **8 个一模一样的「主对话」** —— 那不是信息,是噪音。
+      //
+      // 这里**不重写库里的 title**,只在读面兜底:工件的标题是**真数据**
+      // (不是编的),而存量行改写 title 属于「为了好看去改事实」。
+      const deliverable = s.deliverableArtifactId === null
+        ? null
+        : getArtifact(db, s.deliverableArtifactId);
+      return {
+        id: s.id,
+        kind: s.kind,
+        title: s.title ?? deliverable?.title ?? null,
+        channel: s.channel,
+        deliverableArtifactId: s.deliverableArtifactId,
+        createdAt: s.createdAt,
+        lastMessageAt: lastAt,
+      };
+    })
+    .sort((a, b) =>
+      (a.kind === "main" ? 0 : 1) - (b.kind === "main" ? 0 : 1) || b.lastMessageAt - a.lastMessageAt,
+    );
+}
+
 function toWorkspaceView(opts: {
   projectId: string;
   root: string;
@@ -470,6 +515,43 @@ export function createPlatformApp(deps: HttpDeps): Hono {
    * 所以前端必须有地方知道「有哪些」。`kind='main'` 那条排在最前:它是排空器
    * 触发的回合落的地方(待办是项目级的),也是不指定时的默认落点。
    */
+  /**
+   * **左栏二级目录的数据源**:一次取齐**所有项目**的对话线,按项目分组由前端做。
+   *
+   * ⚠️ 为什么不逐个项目问 `GET /api/projects/:id/sessions`:左栏在**所有路由**下
+   * 都挂着,那个 N+1 会一直付 —— 而项目数与线数都随使用增长。
+   *
+   * ⚠️ **不含接待会话**(它是 `project_id IS NULL`,而接待在左栏里是独立入口)。
+   * ⚠️ 这里**不** `ensureSession`:那是 `GET /api/projects/:id/sessions` 的语义
+   * —— 「至少有主对话这一条」是那条端点的责任(前端拿它决定看哪条线)。本端点
+   * 是纯读面:一个**还没说过一句话**的项目在左栏里该显示成「0 条线」,而不是
+   * 因为被读了一次就凭空多出一条主对话。
+   */
+  app.get("/api/sessions", (c) => {
+    // 先按项目分组,**再**逐组过摘要函数 —— 次序(主对话在前)在组内定,
+    // 而分组依据只存在于 `SessionRow` 上,摘要行里没有 `projectId` 这一列。
+    const owner = new Map<string, string>();
+    const byProject = new Map<string, SessionRow[]>();
+    for (const s of listAllSessions(db)) {
+      // `listAllSessions` 已过滤 `project_id IS NULL` —— 这里点破的是**类型**
+      // 仍然可空(SQL 的 WHERE 不进类型),不是重复过滤。
+      if (s.projectId === null) continue;
+      owner.set(s.id, s.projectId);
+      const bucket = byProject.get(s.projectId);
+      if (bucket === undefined) byProject.set(s.projectId, [s]);
+      else bucket.push(s);
+    }
+    const sessions: SessionIndexEntry[] = [];
+    for (const rows of byProject.values()) {
+      for (const s of sessionSummariesOf(db, rows)) {
+        const projectId = owner.get(s.id);
+        if (projectId === undefined) continue;
+        sessions.push({ ...s, projectId });
+      }
+    }
+    return c.json({ sessions });
+  });
+
   app.get("/api/projects/:id/sessions", (c) => {
     const id = c.req.param("id");
     if (getProjectRow(db, id) === null) return c.json(err("not_found", "项目不存在", 404).body, 404);

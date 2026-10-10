@@ -1116,6 +1116,30 @@ export interface ProjectSessionsResponse {
 }
 
 /**
+ * `GET /api/sessions` —— **全部项目的会话**,一次取齐。
+ *
+ * ── 为什么需要它(而不是左栏去逐个项目问)────────────────────
+ *
+ * `GET /api/projects/:id/sessions` 只回答「**当前**项目底下有哪些线」—— 它服务
+ * 的是对话页里那条选择器。左栏要显示**每一个**项目的线,逐个问就是 N+1 次请求,
+ * 而左栏在所有路由下都挂着(不只是对话页),那个 N 会一直付。
+ *
+ * ⇒ 这一条是**左栏二级目录的唯一数据源**:项目列表给第一层,这条给第二层。
+ *
+ * ⚠️ **不含接待会话**(`project_id IS NULL`)。接待会话在左栏里是独立入口,
+ * 不属于任何项目 —— 混进来会让它在界面上出现两次。
+ */
+export interface SessionIndexEntry extends SessionSummaryView {
+  /** 归属项目。**恒非空** —— 接待会话不在这个索引里。 */
+  projectId: string;
+}
+
+export interface SessionsIndexResponse {
+  /** 每条都按「主对话在前,其余按最近活跃度」排好序 —— 次序在服务端定,前端不重排。 */
+  sessions: SessionIndexEntry[];
+}
+
+/**
  * `GET /api/intake/messages` —— **接待会话**(第一个项目之前)的一条连续对话。
  *
  * `projectId` 恒为 `null`:那不是「缺失」,而是这条会话的身份(它还不属于任何项目)。

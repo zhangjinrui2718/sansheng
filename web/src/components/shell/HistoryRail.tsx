@@ -1,42 +1,57 @@
 /**
- * 项目左栏(旧 `HistoryRail` —— 会话列表 → **项目列表**)
+ * 项目左栏 —— **项目(一级) + 对话线(二级)**。
  *
- * ── 为什么整块换掉 ──────────────────────────────────────────────
+ * ── 为什么是两层 ───────────────────────────────────────────────
  *
- * 旧左栏列的是**会话**(`GET /api/conversations?limit=50`),每条显示标题 / 预览 /
- * 消息数。新模型里「对话不再独立存在」:项目是一等实体,每个项目一条连续对话。
- * 所以这一栏列的是**项目**(名称 / 状态 / 规模),点一下 = 切上下文。
+ * ① **数据模型就是两层**:`project_sessions.project_id` + `kind='main'|'thread'`
+ *   (migration 024)。左栏原先只有一层,是因为它写在 **024 之前** —— 本文件头
+ *   曾逐字写着「新模型里『对话不再独立存在』」。024 把对话恢复成一等实体之后,
+ *   那一层就**只存在于对话页里的一条横向页签**(`SessionPicker`,已删)。
  *
- * ── 「+ 新建」不再是表单 ────────────────────────────────────────
+ * ② **横向页签的规模不可控,而纵向列表天然可滚动。** 真机上某个项目底下有 9 条线,
+ *   页签被压成「一个字一行」,右边几个**渲染了但点不到**(被父级 `overflow-hidden`
+ *   裁出可视区)—— 看着像「样式没加载」和「按钮失效」,真因只是**一行放不下**。
  *
- * 上一版点「+ 新建」弹的是 name / client / goal 三个输入框 —— 用户提交时撞上
- * `project_open` 的参数校验,报「goal 不能为空」。那是**让甲方替业务经理立项**:
- * 立项是业务经理的动作。所以现在这个按钮切到**接待会话**(`startIntake()`):
- * 用户与业务经理说想要什么,谈拢之后由业务经理调 `project_open`,
- * 服务端广播 `project_opened`,本栏自动出现新项目并切过去。
+ * ③ **主对话不是「众多线程之一」**。它是排空器触发的回合默认落点(待办是
+ *   项目级的,不属于任何一条线),在页签里和交付线平级会让人以为它是随便哪条。
  *
- * ── 徽标:按项目分组,不是一条混合流 ─────────────────────────────
+ * ── 三条纪律 ────────────────────────────────────────────────────
  *
- * 每个项目显示自己的「待你回答 N 个问题」(来自 `counts.pendingQuestions`,
- * 该字段就是为左栏徽标准备的 —— 契约注释原话)。校准后的裁决是**按项目分组呈现**,
- * 所以这里是一个个项目各自的徽标,而不是把全仓问题混成一条流水账
- * (混合流在「待办」页,那里才有全局队列)。
+ * · **接待会话不在二级里**(`GET /api/sessions` 明确不含 `project_id IS NULL`),
+ *   它在上面有独立一行 —— 混进来会让它在界面上出现两次,而两次点进去是不同的对话。
+ * · **默认只展开当前项目**,其余折叠并显示线数 —— 项目多了左栏会长。
+ * · **「待你回答 N 个问题」按项目分组**:`counts.pendingQuestions` 那个字段就是
+ *   为本栏徽标准备的(契约注释原话),而校准后的裁决是按项目分组呈现,
+ *   不是把全仓问题混成一条流水账。
  *
- * 数据源:store 的 `projects`(由 `GET /api/projects` 填充),`projectsRevision`
- * 打戳时重拉 —— WS 的提问/工作项/工件事件都会递增它。
+ * 数据源:`projects`(`GET /api/projects`)+ `sessionsByProject`(`GET /api/sessions`),
+ * 二者都随 `projectsRevision` 重拉 —— WS 的提问 / 工作项 / 工件事件都会递增它。
  */
+import { useState } from "react";
 import { useChatStore } from "@/stores/chat";
 import { Pill } from "@/components/ui/primitives";
 import { projectStatusLabel, projectStatusTone, excerpt } from "@/lib/vocab";
+import type { ProjectSummary, SessionSummaryView } from "@shared/types/platform";
 
 export function HistoryRail() {
   const projects = useChatStore((s) => s.projects);
   const projectId = useChatStore((s) => s.projectId);
   const intakeActive = useChatStore((s) => s.intakeActive);
+  const sessionId = useChatStore((s) => s.sessionId);
   const loading = useChatStore((s) => s.projectsLoading);
   const error = useChatStore((s) => s.error);
+  const sessionIndexError = useChatStore((s) => s.sessionIndexError);
   const selectProject = useChatStore((s) => s.selectProject);
   const startIntake = useChatStore((s) => s.startIntake);
+
+  /**
+   * 手动折叠/展开。**没表态过的项目按「是不是当前项目」定** ——
+   * `expanded[id] ?? isActive`,而不是把初值抄进 state(那会让「切项目」时
+   * 展开状态不跟着走,而它是切项目这个动作的一部分)。
+   */
+  const [expanded, setExpanded] = useState<Record<string, boolean>>({});
+  /** 正在起名的项目 id —— 同时只有一个表单,免得左栏被输入框撑开。 */
+  const [namingFor, setNamingFor] = useState<string | null>(null);
 
   // 项目列表的加载由 App 统一负责(它在所有路由下都挂着,且按 projectsRevision
   // 重拉)—— 本组件只读 store,不自己 fetch,避免同一份列表在两处各拉一次。
@@ -108,50 +123,276 @@ export function HistoryRail() {
         {projects.map((p) => {
           const isActive = p.id === projectId && !intakeActive;
           const pending = p.counts.pendingQuestions;
+          // ⚠️ `?? isActive` 而非 `|| isActive` —— 后者会把「显式折叠当前项目」
+          // 也吃掉(折叠是 false,`false || true` 又是 true),于是那个箭头按不动。
+          const isOpen = expanded[p.id] ?? isActive;
           return (
-            <button
+            <ProjectNode
               key={p.id}
-              type="button"
-              onClick={() => void selectProject(p.id)}
-              className="text-left rounded-md px-2.5 py-1.5 transition-colors"
-              style={{
-                background: isActive ? "var(--ink-2)" : "transparent",
-                border: isActive ? "1px solid var(--jade)" : "1px solid transparent",
-                borderLeft: isActive ? undefined : "1px solid var(--ink-3)",
-                cursor: "pointer",
+              project={p}
+              isActive={isActive}
+              isOpen={isOpen}
+              pending={pending}
+              sessionId={isActive ? sessionId : null}
+              naming={namingFor === p.id}
+              onToggle={() => setExpanded((prev) => ({ ...prev, [p.id]: !isOpen }))}
+              onSelectProject={() => void selectProject(p.id)}
+              onSelectSession={(sid) => void selectProject(p.id, { sessionId: sid })}
+              onStartNaming={() => setNamingFor(p.id)}
+              onCancelNaming={() => setNamingFor(null)}
+              onSubmitNaming={(title) => {
+                setNamingFor(null);
+                void createThread(p.id, title);
               }}
-              title={`${p.name} · ${p.client || "无甲方"} · 工作项 ${p.counts.openWorks}/${p.counts.works} 未完成 · 工件 ${p.counts.artifacts}`}
-            >
-              <div className="flex items-baseline justify-between gap-2">
-                <span
-                  className="font-serif truncate"
-                  style={{ fontSize: 13, color: "var(--bone)", letterSpacing: ".04em" }}
-                >
-                  {p.name}
-                </span>
-                <span className="flex-none">
-                  <Pill tone={projectStatusTone(p.status)}>{projectStatusLabel(p.status)}</Pill>
-                </span>
-              </div>
-              <div className="flex items-baseline gap-2 mt-0.5">
-                <span className="truncate flex-1" style={{ fontSize: 11, color: "var(--bone-mute)" }}>
-                  {p.goal ? excerpt(p.goal, 40) : p.client || "(无目标)"}
-                </span>
-                {/* 「待你回答 N 个问题」—— 这个徽标是本栏存在的核心信息,
-                    为 0 时不渲染(不摆一个测出来的 0)。 */}
-                {pending > 0 && (
-                  <span className="flex-none">
-                    <Pill tone="amber" title={`${p.name} 有 ${pending} 个问题等你回答`}>
-                      待答 {pending}
-                    </Pill>
-                  </span>
-                )}
-              </div>
-            </button>
+            />
           );
         })}
+
+        {/* ⚠️ 索引读不到**不**升级成整栏错误 —— 项目列表仍然是真的,
+            只是第二层暂时没有。⚠️ 它也**不是**「所有项目都没有线」:
+            那与 `sessionIndexError === null` 且每个项目都 0 条是两件事。 */}
+        {sessionIndexError !== null && (
+          <div
+            className="rounded-md px-3 py-2"
+            style={{
+              background: "var(--ink-2)",
+              border: "1px dashed var(--ink-3)",
+              color: "var(--bone-mute)",
+              fontSize: 11,
+            }}
+          >
+            对话线读不到: {sessionIndexError}
+          </div>
+        )}
       </div>
     </aside>
+  );
+}
+
+/**
+ * 另开一条线。**先切项目再开线** —— `newThread` 用的是**当前**项目的 id,
+ * 而「＋」出现在每个项目下面(含没展开的那个),直接调会在上一个项目里开线。
+ */
+async function createThread(projectId: string, title: string | undefined): Promise<void> {
+  const store = useChatStore.getState();
+  if (store.projectId !== projectId || store.intakeActive) {
+    await store.selectProject(projectId);
+  }
+  if (useChatStore.getState().projectId !== projectId) return;
+  await useChatStore.getState().newThread(title);
+}
+
+/** 一级节点 + 它下面的线。拆出来是为了让 `projects.map` 本身保持可读。 */
+function ProjectNode(props: {
+  project: ProjectSummary;
+  isActive: boolean;
+  isOpen: boolean;
+  pending: number;
+  /** 只有当前项目才有「哪条线被选中」可言 —— 别的项目那一条状态在这里是空的。 */
+  sessionId: string | null;
+  naming: boolean;
+  onToggle(): void;
+  onSelectProject(): void;
+  onSelectSession(sessionId: string): void;
+  onStartNaming(): void;
+  onCancelNaming(): void;
+  onSubmitNaming(title: string | undefined): void;
+}) {
+  const { project: p, isActive, isOpen, pending } = props;
+  const sessions = useChatStore((s) => s.sessionsByProject[p.id]);
+  const lines = sessions ?? [];
+
+  return (
+    <div
+      className="rounded-md"
+      style={{
+        background: isActive ? "var(--ink-2)" : "transparent",
+        border: `1px solid ${isActive ? "var(--jade)" : "transparent"}`,
+        borderLeft: isActive ? undefined : "1px solid var(--ink-3)",
+      }}
+    >
+      <div className="flex items-start gap-1 px-2 py-1.5">
+        {/*
+          展开箭头与项目名**分开两个按钮**:箭头只管展开/收起(不发任何请求),
+          名字才是「切到这个项目」。合成一个按钮的话,想收起当前项目就只能
+          先切走 —— 而「看一眼这个项目有几条线」是一个正当的、不该改变上下文的动作。
+        */}
+        <button
+          type="button"
+          onClick={props.onToggle}
+          aria-expanded={isOpen}
+          aria-label={isOpen ? `收起 ${p.name}` : `展开 ${p.name} 的对话线`}
+          style={{
+            flex: "none", width: 14, marginTop: 2, padding: 0,
+            background: "none", border: "none", cursor: "pointer",
+            color: "var(--bone-mute)", fontSize: 10, lineHeight: "1.4",
+          }}
+          title={isOpen ? "收起对话线" : `展开 ${lines.length} 条对话线`}
+        >
+          {isOpen ? "▾" : lines.length > 0 ? `(${lines.length})` : "▸"}
+        </button>
+
+        <button
+          type="button"
+          onClick={props.onSelectProject}
+          className="text-left flex-1 min-w-0"
+          style={{ background: "none", border: "none", padding: 0, cursor: "pointer" }}
+          title={`${p.name} · ${p.client || "无甲方"} · 工作项 ${p.counts.openWorks}/${p.counts.works} 未完成 · 工件 ${p.counts.artifacts}`}
+        >
+          <div className="flex items-baseline justify-between gap-2">
+            <span
+              className="font-serif truncate"
+              style={{ fontSize: 13, color: "var(--bone)", letterSpacing: ".04em" }}
+            >
+              {p.name}
+            </span>
+            <span className="flex-none">
+              <Pill tone={projectStatusTone(p.status)}>{projectStatusLabel(p.status)}</Pill>
+            </span>
+          </div>
+          <div className="flex items-baseline gap-2 mt-0.5">
+            <span className="truncate flex-1" style={{ fontSize: 11, color: "var(--bone-mute)" }}>
+              {p.goal ? excerpt(p.goal, 40) : p.client || "(无目标)"}
+            </span>
+            {/* 「待你回答 N 个问题」—— 这个徽标是本栏存在的核心信息,
+                为 0 时不渲染(不摆一个测出来的 0)。 */}
+            {pending > 0 && (
+              <span className="flex-none">
+                <Pill tone="amber" title={`${p.name} 有 ${pending} 个问题等你回答`}>
+                  待答 {pending}
+                </Pill>
+              </span>
+            )}
+          </div>
+        </button>
+      </div>
+
+      {isOpen && (
+        <div className="pb-1" style={{ paddingLeft: 20, paddingRight: 8 }}>
+          {/*
+            ⚠️ **零条线不渲染「(无对话线)」** —— `GET /api/sessions` 是纯读面,
+            不 `ensureSession`,所以一个刚立项还没说过话的项目**真的**是空的。
+            而它随后第一次发消息时主对话才被建出来(见 `hub.ts` 的 `ensureSession`)。
+            空列表在这里是**正常状态**,而摆一个「无」字会把正常显示成故障。
+          */}
+          {lines.map((s) => (
+            <SessionRow
+              key={s.id}
+              session={s}
+              active={props.sessionId === s.id}
+              onSelect={() => props.onSelectSession(s.id)}
+            />
+          ))}
+
+          {props.naming ? (
+            <NewThreadForm
+              onCancel={props.onCancelNaming}
+              onSubmit={props.onSubmitNaming}
+            />
+          ) : (
+            <button
+              type="button"
+              onClick={props.onStartNaming}
+              style={{
+                display: "block", width: "100%", textAlign: "left",
+                fontSize: 11, whiteSpace: "nowrap",
+                color: "var(--bone-mute)", background: "none",
+                border: "none", padding: "2px 4px", cursor: "pointer",
+              }}
+              title="另开一条对话线:同一件事的不同侧面各走一条,上下文不互相污染"
+            >
+              + 新对话线
+            </button>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * 二级节点:一条对话线。
+ *
+ * ⚠️ 标题**过长要截断**而不是撑宽左栏 —— 一级节点右边已经站着状态徽标与
+ * 「待答 N」,而左栏本身是固定宽的;标题撑开会把徽标推出可视区,那个症状
+ * 在旧页签版本上已经出现过一次。
+ */
+function SessionRow(props: { session: SessionSummaryView; active: boolean; onSelect(): void }) {
+  const { session: s, active } = props;
+  const label = s.title ?? (s.kind === "main" ? "主对话" : "对话");
+  return (
+    <button
+      type="button"
+      onClick={props.onSelect}
+      className="text-left truncate"
+      style={{
+        display: "block", width: "100%",
+        fontSize: 11, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis",
+        color: active ? "var(--bone)" : "var(--bone-mute)",
+        background: active ? "var(--ink-1)" : "none",
+        border: "none",
+        borderLeft: active ? "2px solid var(--jade)" : "2px solid transparent",
+        padding: "2px 4px", cursor: "pointer",
+      }}
+      title={
+        s.kind === "main"
+          ? "主对话:平台叫醒业务经理的回合落在这里"
+          : "另开的对话线:只有你在这里说的话会进来"
+      }
+    >
+      {label}
+    </button>
+  );
+}
+
+/**
+ * 起名框。**留空就开** —— 平台不猜这条线该叫什么(§2.11:规则不做语义猜测),
+ * 编一个「对话 2」出来会让人以为甲方真的这么命名过。
+ *
+ * ⚠️ 它是**受控**的:值在本地 state 里,`onSubmit` 把它交出去。
+ * 上一版把它写成了一个 `value={propsTitleValue()}` 的占位(永远空串)——
+ * 那看起来能输入,实际一个字都留不住,而**界面表现完全正常**。
+ */
+function NewThreadForm(props: { onCancel(): void; onSubmit(title: string | undefined): void }) {
+  const [value, setValue] = useState("");
+  return (
+    <div className="flex items-center gap-1" style={{ flexWrap: "nowrap" }}>
+      <input
+        autoFocus
+        value={value}
+        onChange={(e) => setValue(e.target.value)}
+        placeholder="这条线聊什么(可留空)"
+        style={{
+          fontSize: 11, flex: 1, minWidth: 0, padding: "2px 6px",
+          background: "var(--ink-1)", color: "var(--bone)",
+          border: "1px solid var(--ink-3)", borderRadius: 4,
+        }}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") {
+            const t = value.trim();
+            props.onSubmit(t === "" ? undefined : t);
+          }
+          if (e.key === "Escape") props.onCancel();
+        }}
+      />
+      <button
+        type="button"
+        style={{ fontSize: 11, whiteSpace: "nowrap", cursor: "pointer", flex: "none" }}
+        onClick={() => {
+          const t = value.trim();
+          props.onSubmit(t === "" ? undefined : t);
+        }}
+      >
+        开
+      </button>
+      <button
+        type="button"
+        style={{ fontSize: 11, whiteSpace: "nowrap", cursor: "pointer", flex: "none" }}
+        onClick={props.onCancel}
+      >
+        取消
+      </button>
+    </div>
   );
 }
 

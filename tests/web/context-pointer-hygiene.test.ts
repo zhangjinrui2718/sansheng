@@ -57,19 +57,29 @@ beforeEach(() => {
 afterEach(() => vi.restoreAllMocks());
 
 describe("① `startIntake()` 必须清掉上一个项目的会话指针", () => {
-  it("从项目切回接待会话:`sessionId` 与 `sessions` 都被清空", async () => {
+  it("从项目切回接待会话:`sessionId` 被清空,而全局线索引**刻意不清**", async () => {
     // 先假装在项目 A 的对话里
     useChatStore.setState({
       projectId: "pA",
       intakeActive: false,
       sessionId: "s_A_main",
-      sessions: [
-        {
-          id: "s_A_main", kind: "main", title: null, channel: "internal",
-          deliverableArtifactId: null, createdAt: 1, lastMessageAt: 2,
-        },
-      ],
-    });
+      // ⚠️ 这里曾经是一个扁平的 `sessions: SessionSummary[]`(只装**当前**项目的线),
+      // 守卫断言它被清空。改二级目录后它变成 `sessionsByProject` —— **全局**索引
+      // (所有项目的线),左栏在所有路由下都画着它。
+      //
+      // ⇒ 守卫的**判据**从「这个数组被清空」改成「**指针**被清空、**索引**不清」。
+      // 这不是把守卫改松:`sessionsByProject` 里没有任何东西会被发出去(发送只带
+      // `projectId` + `sessionId`,见下一条 `it`),而清掉它会让**所有**项目的
+      // 二级目录同时消失 —— 拿一条可见的故障换一个看不见的风险。
+      sessionsByProject: {
+        pA: [
+          {
+            id: "s_A_main", kind: "main", title: null, channel: "internal",
+            deliverableArtifactId: null, createdAt: 1, lastMessageAt: 2,
+          },
+        ],
+      },
+    } as never);
     vi.stubGlobal("fetch", async () => ({
       ok: true, status: 200, statusText: "OK",
       text: async () => JSON.stringify({ messages: [] }),
@@ -80,18 +90,22 @@ describe("① `startIntake()` 必须清掉上一个项目的会话指针", () =>
     const s = useChatStore.getState();
     expect(s.intakeActive).toBe(true);
     expect(s.projectId).toBeNull();
-    // ⚠️ **这两条是这次修的全部** —— 留着上一条项目的指针,下一次发送就会
-    // 带着它出去,而服务端会以「不属于项目 null」拒收。
+    // ⚠️ **这条是这次修的全部** —— 留着上一条项目的 `sessionId`,下一次发送就会
+    // 带着它出去,而服务端会以「不属于项目 null」拒收(2026-10-06 真机事故)。
     expect(s.sessionId, "上一条项目的会话 id 不能带进接待会话").not.toBe("s_A_main");
-    expect(s.sessions, "上一条项目的会话列表不能带进接待会话").toEqual([]);
+    // ⚠️ 索引**不该**被清:它是全局读面,清掉会让左栏每个项目的二级目录同时空掉。
+    expect(
+      s.sessionsByProject.pA?.[0]?.id,
+      "全局线索引不是上下文指针,切回接待会话不该清它",
+    ).toBe("s_A_main");
     vi.unstubAllGlobals();
   });
 
   it("接待会话里发出的 `send` **不带** `sessionId`", async () => {
     // 接待会话全局只有一条 —— 带上 id 只会多一条能错的路径。
     useChatStore.setState({
-      projectId: null, intakeActive: true, sessionId: null, sessions: [],
-    });
+      projectId: null, intakeActive: true, sessionId: null, sessionsByProject: {},
+    } as never);
     useChatStore.getState().sendMessage("谈一个新项目");
     expect(sent).toHaveLength(1);
     expect(sent[0]!.projectId).toBeNull();

@@ -163,6 +163,15 @@ export interface ChatState {
   // ── 项目 ──
   projects: ProjectSummary[];
   projectsLoading: boolean;
+  /**
+   * 会话索引(左栏二级目录)读不到时的消息。
+   *
+   * ⚠️ **与 `error` 分开**:那个会让对话页进入错误态、顶掉正在看的内容;
+   * 而「线列表读不到」只影响左栏的第二层 —— 把它升级成整页错误,就是拿一件
+   * 小事盖掉大事。⚠️ `null` **不是**「该项目没有线」——那是 `sessionsByProject`
+   * 里那个键不存在。
+   */
+  sessionIndexError: string | null;
   /** 当前项目 = 当前上下文(项目即上下文容器)。 */
   projectId: string | null;
   /**
@@ -185,8 +194,24 @@ export interface ChatState {
    * `null` 在这里是「还没解析出来」,而这两件事必须分得开。
    */
   sessionId: string | null;
-  /** 这个项目下面有哪几条对话线(读面 `GET /api/projects/:id/sessions`)。 */
-  sessions: SessionSummary[];
+  /**
+   * **每个项目底下有哪几条对话线**,按项目分组(读面 `GET /api/sessions`)。
+   *
+   * ⚠️ 它是**全局**索引而不是「当前项目的那几条」—— 因为左栏的二级目录要在
+   * **所有项目**上显示线,而左栏在所有路由下都挂着。曾经这里是一条扁平的
+   * `SessionSummary[]`(只装当前项目的),于是第二层信息只能被挤进对话页里
+   * 那条横向页签 —— 真机 9 条线时它压成「一个字一行」且右边几个按钮点不到
+   * (见那个组件删除前的文件头)。
+   *
+   * ⚠️ **接待会话不在这里**(`projectId` 恒非空)—— 它在左栏里是独立入口。
+   */
+  sessionsByProject: Record<string, SessionSummary[]>;
+  /**
+   * 某项目底下的线。**没有就是空数组**,不是 `undefined` ——
+   * 「这个项目一条线都没有」是正常状态(刚立项还没说过话),
+   * 而读面不能把它渲染成「加载中」或「坏了」。
+   */
+  sessionsOf(projectId: string): SessionSummary[];
   /** 首屏上下文是否已经决定过(见 `decideInitialContext`)。 */
   contextDecided: boolean;
   /**
@@ -381,13 +406,21 @@ export interface ChatState {
   socket: PlatformSocket | null;
 
   loadProjects(): Promise<void>;
+  loadSessionIndex(): Promise<void>;
   /**
    * 切到某个项目。
    *
    * ⚠️ `notice` 是**给用户看的一句话**(切换原因)。它在切换时出现在对话页顶部,
    * 直到下一次切换或用户发消息为止 —— 因为「界面变了」这件事必须**有解释**。
    */
-  selectProject(id: string, opts?: { notice?: string }): Promise<void>;
+  /**
+   * `opts.sessionId` = **落指定的那条线**,而不是默认的主对话。
+   *
+   * 左栏二级目录点某个线程时用它(那个线程可能属于**另一个**项目)。顺序是
+   * 「先切项目,再落线」—— 反过来会拿上一个项目的 `projectId` 去选线,
+   * 表现是「点了 B 项目的线,却打开了 A 项目的对话」,而界面上没有任何报错。
+   */
+  selectProject(id: string, opts?: { notice?: string; sessionId?: string }): Promise<void>;
   /**
    * 切到某条对话线(migration 024)。
    *
@@ -672,10 +705,13 @@ function messageToTurn(m: SessionMessageView, projectId: string | null): Turn {
 export const useChatStore = create<ChatState>((set, get) => ({
   projects: [],
   projectsLoading: false,
+  sessionIndexError: null,
   projectId: null,
   intakeActive: false,
   sessionId: null,
-  sessions: [],
+  sessionsByProject: {},
+  /** ⚠️ 读 getter 而不是存第二份数组 —— 两份会漂开。 */
+  sessionsOf: (projectId) => get().sessionsByProject[projectId] ?? [],
   contextDecided: false,
   contextNotice: null,
   projectRevision: 0,
@@ -707,8 +743,35 @@ export const useChatStore = create<ChatState>((set, get) => ({
     try {
       const { projects } = await api.listProjects();
       set({ projects: Array.isArray(projects) ? projects : [], projectsLoading: false, error: null });
+      // ⚠️ 左栏的二级目录要**每个项目**的线。逐个项目问 `listProjectSessions`
+      // 就是 N+1,而左栏在所有路由下都挂着 —— 一次取齐(`loadSessionIndex`)。
+      //
+      // ⚠️ 它**不并进上面那个 try**:会话索引挂了不该让项目列表变成「加载失败」。
+      // 两件事的失败后果不同,合成一个 try 就是拿一件坏的事遮住另一件。
+      void get().loadSessionIndex();
     } catch (e) {
       set({ projectsLoading: false, error: { code: "projects_load_failed", message: errorMessage(e) } });
+    }
+  },
+
+  /**
+   * 拉全项目的对话线索引(左栏二级目录)。
+   *
+   * ⚠️ **失败时如实报出,但不抛**:左栏仍要列项目 —— 一个只有项目、没有线的
+   * 左栏是「这个项目还没开过对话」,而把整个左栏换成错误块会让人以为项目也没了。
+   */
+  async loadSessionIndex() {
+    try {
+      const res = await api.listAllSessions();
+      const next: Record<string, SessionSummary[]> = {};
+      for (const s of res.sessions ?? []) {
+        const bucket = next[s.projectId];
+        if (bucket === undefined) next[s.projectId] = [s];
+        else bucket.push(s);
+      }
+      set({ sessionsByProject: next, sessionIndexError: null });
+    } catch (e) {
+      set({ sessionIndexError: errorMessage(e) });
     }
   },
 
@@ -717,7 +780,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
       projectId: id,
       intakeActive: false,
       sessionId: null,
-      sessions: [],
+      // ⚠️ 这里**不再清 `sessionsByProject`** —— 它是**全局**索引(所有项目的线),
+      // 以前那条扁平的 `sessions: []` 装的是「上一个项目的线」,清掉是对的;
+      // 把全局索引清掉会让左栏所有项目的二级目录同时消失。
       contextNotice: opts?.notice ?? null,
       turns: [],
       inFlight: {},
@@ -731,16 +796,26 @@ export const useChatStore = create<ChatState>((set, get) => ({
     // 先拉会话清单,再挑一条线 —— **顺序不能反**:主线��可能已经不存在了
     // (交付会话被开出来过),那时挑不出可看的线,而直接拉 messages 会拿到
     // 一个「归并了所有线」的结果。
-    let sessions: SessionSummary[] = [];
-    try {
-      sessions = (await api.listProjectSessions(id)).sessions ?? [];
-    } catch (e) {
-      if (get().projectId !== id) return;
-      set({ error: { code: "sessions_load_failed", message: errorMessage(e) }, status: "error" });
-      return;
+    // 先取这个项目的线。**优先用左栏那份全局索引** —— 它已经随项目列表取过了,
+    // 不再逐项目问一次;而拿不到(旧索引 / 刚开线还没刷新)时回落到单项目端点,
+    // 因为「进一个项目必须有线可看」是硬要求(一条线都没有 = 发不出消息)。
+    let sessions = get().sessionsOf(id);
+    if (sessions.length === 0) {
+      try {
+        sessions = (await api.listProjectSessions(id)).sessions ?? [];
+      } catch (e) {
+        if (get().projectId !== id) return;
+        set({ error: { code: "sessions_load_failed", message: errorMessage(e) }, status: "error" });
+        return;
+      }
     }
     if (get().projectId !== id) return;
-    set({ sessions });
+    // 把回落拿到的那份并回索引 —— 否则左栏这一项仍然是空的(两份读面给出不同答案)。
+    set((s) => ({
+      sessionsByProject: sessions.length > 0
+        ? { ...s.sessionsByProject, [id]: sessions }
+        : s.sessionsByProject,
+    }));
     // 默认看**主对话**:待办的回合落在那里,甲方不开新线时它就是那条线。
     const main = sessions.find((s) => s.kind === "main") ?? sessions[0];
     if (main === undefined) {
@@ -752,7 +827,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
       void get().refreshRunning();
       return;
     }
-    await get().selectSession(main.id);
+    // ⚠️ `opts.sessionId` **必须在会话清单之后**才生效 —— 它得先被确认存在
+    // 于这个项目里。早于 `main` 的分支处理会导致「点一条已被删/不属于本项目的线」
+    // 也照样切过去。
+    const wanted = opts?.sessionId !== undefined
+      ? sessions.find((s) => s.id === opts.sessionId)
+      : undefined;
+    await get().selectSession(wanted?.id ?? main.id);
   },
 
   /**
@@ -785,14 +866,16 @@ export const useChatStore = create<ChatState>((set, get) => ({
     const id = get().projectId;
     if (id === null) return;
     const r = await api.createProjectSession(id, title);
+    // ⚠️ 并进**索引**,而不是当前项目那份 —— 左栏是全局读面,只更一处会让
+    // 「切到别的项目再切回来」时新线消失(重拉才补上)。
     set((s) => ({
-      sessions: [
-        ...s.sessions,
-        {
+      sessionsByProject: {
+        ...s.sessionsByProject,
+        [id]: [...(s.sessionsByProject[id] ?? []), {
           id: r.sessionId, kind: "thread", title: r.title, channel: "internal",
           deliverableArtifactId: null, createdAt: Date.now(), lastMessageAt: Date.now(),
-        },
-      ],
+        }],
+      },
     }));
     await get().selectSession(r.sessionId);
   },
@@ -823,7 +906,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       // 而「被服务端拒收」这件事**没有任何反馈** —— 表现与「服务端挂了」一模一样,
       // 且整条链路上没有一个异常:每一个动作都是正常点击。
       sessionId: null,
-      sessions: [],
+      // 同上:`sessionsByProject` 是**全局**索引,接待会话不拥有它,不清。
       turns: [],
       inFlight: {},
       inFlightOrder: [],

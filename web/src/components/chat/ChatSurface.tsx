@@ -31,7 +31,6 @@ import { useEffect, useMemo, useState } from "react";
 import { inFlightTurns, useChatStore } from "@/stores/chat";
 import { useSettingsStore, activeProviderOf } from "@/stores/settings";
 import { MessageList } from "./MessageList";
-import { SessionPicker } from "./SessionPicker";
 import { ChatComposer } from "./ChatComposer";
 import { Pill } from "@/components/ui/primitives";
 import { projectStatusLabel, projectStatusTone } from "@/lib/vocab";
@@ -98,6 +97,24 @@ export function ChatSurface() {
   // `sessionId` 是「这个项目里的哪条线」。只给前一个 ⇒ 一个项目下面所有线的
   // 消息混进同一个面板。
   const sessionId = useChatStore((s) => s.sessionId);
+  /**
+   * 页头上那个 `› 线名`。
+   *
+   * ⚠️ 必须**订阅** `sessionsByProject`,不能在 `useMemo` 里 `getState()` ——
+   * 那不订阅:索引更新了(比如刚开了一条线)这个值不会重算,页头就停在旧名字上,
+   * 而左栏已经变了 —— 两处读面给出不同答案。
+   *
+   * ⚠️ `null` 的含义要分清:**没选中任何线**(项目刚立项、还没有会话)与
+   * 「有它但那条线没名字」—— 后者显示 `s.title ?? "对话"`。前者**什么都不显示**,
+   * 而不是显示「对话」:那会把「还没到能选线的时候」说成「有一条线没起名」。
+   */
+  const sessionsByProject = useChatStore((s) => s.sessionsByProject);
+  const currentLine = useMemo(() => {
+    if (projectId === null || sessionId === null) return null;
+    const hit = (sessionsByProject[projectId] ?? []).find((s) => s.id === sessionId);
+    if (hit === undefined) return null;
+    return hit.title ?? (hit.kind === "main" ? "主对话" : "对话");
+  }, [projectId, sessionId, sessionsByProject]);
   // 服务端那份「此刻有回合在跑」—— 本地 WS 状态在刷新/切换之后会归零,
   // 那一份是**唯一**还能说出「它还在跑」的东西(见 `surfaceStatusOf` 的第三个参数)。
   const remoteRunning = useChatStore((s) => s.remoteRunning);
@@ -141,6 +158,23 @@ export function ChatSurface() {
           <span style={{ fontSize: 13, color: "var(--bone)" }}>
             {intakeActive ? "接待 · 业务经理" : project ? project.name : "未选项目"}
           </span>
+          {/*
+            当前在**哪条线**。页签删掉之后,左栏高亮是唯一的定位手段,而对话页
+            正文里看不出区别 —— 在 A 线和 B 线说的内容长得一样。标题可能是一份
+            **交付物**的标题(后端读面兜底),所以不限于甲方起的名。
+          */}
+          {!intakeActive && currentLine !== null && (
+            <>
+              <span style={{ fontSize: 11, color: "var(--ink-3)" }}>›</span>
+              <span
+                className="truncate"
+                style={{ fontSize: 12, color: "var(--bone-dim)", maxWidth: 260 }}
+                title={currentLine}
+              >
+                {currentLine}
+              </span>
+            </>
+          )}
           {intakeActive ? (
             <Pill tone="jade" title="第一个项目之前的那段对话:业务经理与你对齐诉求,谈拢后由他立项">
               谈新项目
@@ -176,11 +210,11 @@ export function ChatSurface() {
         </div>
       </div>
 
-      {/* ⚠️ **独占第二行**(2026-10-06 修)。第一版把它塞进上面那一行的中间,
-          与「项目名」「运行态」抢宽度 —— 真机上 9 条线把那一行撑爆,按钮被
-          卡片的 `overflow-hidden` 裁在可视区之外(点不到),而且没有 nowrap 时
-          CJK 会被压成「一个字一行」(看起来像样式没加载)。 */}
-      <SessionPicker />
+      {/* ⚠️ 原来这里有一整行 `<SessionPicker />`(对话线的横向页签)。它已移到
+          左栏做成**二级目录**(见 `HistoryRail.tsx` 的文件头):横向页签在 9 条线
+          时被压成「一个字一行」且右边几个按钮点不到,而左栏的纵向列表天然可滚动。
+          「我在哪条线」现在由上面页头那个 `› 线名` 承担 —— 页签删掉后,左栏高亮
+          与页头标题是同一件事的两处读面,必须来自同一个 store 字段。 */}
 
       {/* ⚠️ **上下文刚换过时的那一句解释**(2026-10-06 真机事故的修复)。
           接待会话里立项 → 服务端把消息整体迁进新项目 → 界面切过去。

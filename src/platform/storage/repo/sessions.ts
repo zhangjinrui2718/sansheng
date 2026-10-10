@@ -315,6 +315,25 @@ export function listSessions(db: Database.Database, projectId: string | null): S
 }
 
 /**
+ * **全部项目的会话**(左栏二级目录的读面)。
+ *
+ * ⚠️ 它**不是** `listSessions(db, null)` —— 那个按 `project_id IS NULL` 取,返回的是
+ * **接待会话**(第一个项目之前的那一条)。两者混起来的失败形态很具体:接待会话
+ * 会被渲染成「某个项目的线」,而它在左栏里有自己的一行(`接待 · 谈新项目`),
+ * 于是在界面上出现两次 —— 而两次点进去是**不同的对话**。
+ *
+ * 接待会话在左栏里是**独立入口**,所以这里只取 `project_id IS NOT NULL`。
+ */
+export function listAllSessions(db: Database.Database): SessionRow[] {
+  const rows = db
+    .prepare(
+      `SELECT * FROM project_sessions WHERE project_id IS NOT NULL ORDER BY created_at DESC`,
+    )
+    .all() as RawConversation[];
+  return rows.map(toSessionRow);
+}
+
+/**
  * **某个通道**的那条会话(设计 1 §2.11.6)。
  *
  * ⚠️ **这是 C4 拆地雷的落点:按 `(project_id, channel)` 取,不再挑「项目里最新

@@ -54,6 +54,7 @@ import type {
   MessagesResponse,
   ProjectDetail,
   ProjectSessionsResponse,
+  SessionsIndexResponse,
   IntakeLiveView,
   ProjectLiveView,
   ProjectStatus,
@@ -223,6 +224,16 @@ export function getProjectMessages(id: string, sessionId?: string): Promise<Mess
 /** 这个项目下面有哪几条对话线(migration 024)。 */
 export function listProjectSessions(id: string): Promise<ProjectSessionsResponse> {
   return request<ProjectSessionsResponse>(`/projects/${encodeURIComponent(id)}/sessions`);
+}
+
+/**
+ * **所有项目**的对话线,一次取齐 —— 左栏二级目录的唯一数据源。
+ *
+ * ⚠️ 不逐个项目调 `listProjectSessions`:左栏在所有路由下都挂着,那是 N+1。
+ * ⚠️ 不含接待会话(`projectId` 恒非空),接待在左栏里是独立入口。
+ */
+export function listAllSessions(): Promise<SessionsIndexResponse> {
+  return request<SessionsIndexResponse>(`/sessions`);
 }
 
 /**
