@@ -20,6 +20,9 @@
  *     而一个不带计数的页签等于「有事在等你」这件事没人知道(真机第一条
  *     `client_question` 落地时它就是这么被漏掉的)。现在它是
  *     `components/client/ClientQuestionDock.tsx`,长在对话页右下角。
+ *     **「待你验收」也同样搬了过来**(2026-10-12,用户裁决)—— 它与「待答」是
+ *     同一类数据(球在甲方那边),原来长在「项目」页里,而甲方 90% 的时间不在那儿。
+ *     现在对话页右栏是**三块**:`components/shell/ChatRightRail.tsx`。
  *  2. **`POST /api/kernel/reset` 已不存在**,「重置 Kernel」按钮删除;相关的
  *     `vecLoaded` 降级提示也删除 —— 新契约的 `HealthResponse` 里没有 `vecLoaded`,
  *     旧 `/api/health` 的 `d.ts`(服务器时间)同样不在契约里,所以顶栏改为显示
@@ -33,14 +36,13 @@ import type { ReactNode } from "react";
 import type { AppConfigResponse, HealthResponse } from "@shared/types/platform";
 import { TopBar } from "./components/shell/TopBar";
 import { HistoryRail } from "./components/shell/HistoryRail";
-import { AgentPanel } from "./components/shell/AgentPanel";
+import { ChatRightRail } from "./components/shell/ChatRightRail";
 import { ChatSurface } from "./components/chat/ChatSurface";
 import { SettingsPanel } from "./components/settings/SettingsPanel";
 import { ProjectDetailPage } from "./routes/ProjectDetail";
 import { WorksPage } from "./routes/Works";
 import { MembersPage } from "./routes/Members";
 import { MemoryPage } from "./routes/Memory";
-import { ClientQuestionDock } from "./components/client/ClientQuestionDock";
 import { useSettingsStore, activeProviderOf } from "./stores/settings";
 import { useChatStore } from "./stores/chat";
 import { initAppSocket } from "./lib/appSocket";
@@ -146,16 +148,12 @@ export function App() {
         <main className="grid grid-cols-app gap-3 px-4 pb-4" style={{ minHeight: 0 }}>
           <HistoryRail />
           {needsSetup ? <SetupHint onGo={() => setRoute("settings")} /> : <ChatSurface />}
-          {/* 右栏 = 两块上下并列:**「本项目」(上面,答「现在怎么样」)与
-              **「待答」**(下面,答「有什么在等我」)。它们读的是同一件事的两个面,
-              所以并排放在一栏里 —— 原先是顶栏第 4 个不带计数的页签,而提问发生了
-              用户根本不知道(真机第一条 `client_question` 就这么被漏掉的)。
-              配比:上面 `flex-1`(它在内部滚),下面 `flex-none` + `maxHeight` 封顶。
-              详见 `components/client/ClientQuestionDock.tsx` 的文件头。 */}
-          <div className="flex flex-col gap-3" style={{ minHeight: 0 }}>
-            <AgentPanel />
-            <ClientQuestionDock />
-          </div>
+          {/* 右栏 = 三块上下并列:**「本项目」(现在怎么样)+「待你验收」(等你
+              点头)+「待答」(等你回答)。后两块都是「需要甲方动手」的事,所以挨着
+              放。⚠️ 三块共用**同一个**项目详情实例(hook 落在 `ChatRightRail` 里)
+              —— 各自拉一份会让同一份数据在两块面板里显示不同的加载态。
+              详见 `components/shell/ChatRightRail.tsx` 的文件头。 */}
+          <ChatRightRail />
         </main>
       ) : route === "project" ? (
         page(<ProjectDetailPage />)

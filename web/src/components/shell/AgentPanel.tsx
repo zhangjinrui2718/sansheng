@@ -12,11 +12,13 @@
  * ── 与「成员」页的分工 ──────────────────────────────────────────
  *
  * 本组件是**摘要**(计数 + 未完成工作项的短列表);职责/L 能力的详情在成员页。
- * 慢速兜底轮询(5s)保留:WS 断流时这一栏是那几秒里唯一的真相。
+ *
+ * ⚠️ **它不自己拉数据**:2026-10-12 起详情由 `ChatRightRail` 拉一次、把
+ * `ProjectDetailState` 传给右栏三块。理由见 `ChatRightRail.tsx` 的文件头 ——
+ * 多个 hook 实例会让同一份数据在两块面板里显示**不同的加载态**。
  */
 import { EmptyState, KV, Pill, StatStrip } from "@/components/ui/primitives";
-import { useProjectDetail } from "@/lib/data";
-import { useChatStore } from "@/stores/chat";
+import type { ProjectDetailState } from "@/lib/data";
 import {
   ROLE_LABEL,
   WORK_ALIVE,
@@ -27,16 +29,15 @@ import {
   workStatusTone,
 } from "@/lib/vocab";
 
-export function AgentPanel() {
-  const projectId = useChatStore((s) => s.projectId);
-  const { detail, blockers, loading, error } = useProjectDetail(projectId, { pollMs: 5000 });
+export function AgentPanel({ state }: { state: ProjectDetailState }) {
+  const { projectId, detail, blockers, loading, error } = state;
 
   const openWorks = detail?.works.filter((w) => WORK_ALIVE.has(w.status)) ?? [];
 
   return (
-    /* `flex-1`:右栏现在有**两块**上下并列(「本项目」+「待答」,见 `App.tsx`
-       那一层 flex),这一块要占满剩余高度、内部自己滚,不然两块会各按内容高度
-       挤在一起 —— 内容少的时候下半栏会塌掉。 */
+    /* `flex-1`:右栏现在有**三块**上下并列(「本项目」+「待你验收」+「待答」,见
+       `ChatRightRail.tsx` 那一层 flex),这一块要占满剩余高度、内部自己滚,不然
+       三块会各按内容高度挤在一起 —— 内容少的时候下面两栏会塌掉。 */
     <aside className="sansheng-card overflow-hidden flex flex-col flex-1" style={{ minHeight: 0 }}>
       <div
         className="px-3 py-2 flex items-center justify-between gap-2 flex-none"

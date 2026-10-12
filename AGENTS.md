@@ -25,6 +25,12 @@
   **「Harness」并入「成员」**(`web/src/components/members/RoleHarness.tsx`,同日)。
   **「待办」页签也已删除**(2026-10-06):它是**唯一需要甲方动手**的数据,而甲方 90% 的时间在
   「对话」页 —— 现在长在对话页右下角(`web/src/components/client/ClientQuestionDock.tsx`)。
+  **对话页右栏现在是三块**(2026-10-12,用户裁决把「待你验收」从项目页搬过来):
+  `web/src/components/shell/ChatRightRail.tsx` = 「本项目」(`AgentPanel`)+
+  「待你验收」(`AcceptanceDock`)+ 「待答」(`ClientQuestionDock`)。
+  ⚠️ **三块共用**同一个 `useProjectDetail` 实例(hook 落在 `ChatRightRail` 里)——
+  各自拉一份会让同一份数据一处写「加载中」、另一处写「没有」(回归
+  `tests/web/acceptance-dock.test.ts` 钉住「四个文件里 `useProjectDetail(` 只出现一次」)。
   **「记忆」页三段是两套东西**:用户画像 / 记忆碎片(关于**用户**,模型写、会淡忘)+
   **知识语料**(关于**项目 / 组织**,平台索引、agent 只读 —— 见下「知识语料」一节)。
   **工作项页的信息顺序 = 依赖关系图 → 推进图 → 选中的环节**(前者**不折叠**,用户点名的顺序);
@@ -54,7 +60,7 @@
   判据的一部分:同一对节点上两类边**方向一致**时不是环(真机那份数据就是这样),方向相反
   才是环(`mutualPairs` 会点名是哪两条边)。写反会让「交付」跑到最左、并且把一个不存在的
   环报出来(`web/src/lib/workGraph.ts` 的 `collectEdges`)。
-- 基线:**1993 passed / 99 test files** · 两条 typecheck 0 error · `check:design` E1–E14 全绿(5 角色)。
+- 基线:**2034 passed / 103 test files** · 两条 typecheck 0 error · `check:design` E1–E14 全绿(5 角色)。
 - **角色中文名只有一处**:`src/platform/runtime/org.ts` 的 `ORG`(播种 / `roleDisplayName()` /
   `RoleHarnessView.displayName` / **系统提示里的「# 你的角色:X」**全走它);
   前端兜底表 `web/src/lib/vocab.ts` 的 `ROLE_LABEL` 必须逐项相同,由
@@ -686,7 +692,7 @@ turn_usage / client_questions / review_verdicts / artifacts / knowledge_chunks)�
 
 ⚠️ **收口项目上不给按钮**:`ArtifactAcceptanceView.projectClosed` —— 后端一律 409
 (收口不可逆),所以读面说「已交付 · 未被验收(项目已收口)」而**不是**给一排兑现不了的按钮;
-`counts.pendingAcceptance` 与项目页那张「待你验收」清单**同口径**(终态项目恒 0,
+`counts.pendingAcceptance` 与**对话页右栏那张「待你验收」面板**(`AcceptanceDock.tsx`)**同口径**(终态项目恒 0,
 免得出现「徽标 7、清单空」)。**事实一条不删**:那份交付物的卡片照旧如实说它没被验收过
 —— 真机那个项目 2026-10-07 就 `done` 了,而验收是 10-08 才有的,那 7 份交付物全是这个形状。
 

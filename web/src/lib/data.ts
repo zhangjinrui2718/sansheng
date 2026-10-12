@@ -266,6 +266,26 @@ export function liveForDisplay(
 export const LIVE_POLL_MS = 2500;
 
 /**
+ * `useProjectDetail` 的返回值**加上 `projectId`**。
+ *
+ * ⚠️ **为什么右栏要把它整个传下去,而不是各自调一次 hook**:两个 hook 实例
+ * 会各自 fetch、各自维护 `loading` ⇒ **同一份数据在两块面板里可能一处写
+ * 「加载中」、另一处写「没有等你验收的东西」**。这不是理论上的不整齐 ——
+ * 它会把「还没查过」渲染成「查过了是空的」,那正是这个项目反复吃亏的那类
+ * 静默失败。右栏那三块共用**一个**实例,落点见 `components/shell/ChatRightRail.tsx`。
+ *
+ * `projectId` 也在里面:「还没选项目」这一档是右栏三块**共同**的前置条件,
+ * 判在持有数据的那一处,不在每一块里各写一遍。
+ */
+export type ProjectDetailState = {
+  projectId: string | null;
+  detail: ProjectDetail | null;
+  blockers: BlockerView[];
+  loading: boolean;
+  error: string | null;
+};
+
+/**
  * 项目详情 + 阻塞(「哪件事被卡住了」)。`projectId` 为空时不发请求。
  *
  * `pollMs` 只给右侧摘要栏做慢速兜底(WS 断流时它要能收敛);页面不轮询。
@@ -273,12 +293,7 @@ export const LIVE_POLL_MS = 2500;
 export function useProjectDetail(
   projectId: string | null,
   options?: { pollMs?: number },
-): {
-  detail: ProjectDetail | null;
-  blockers: BlockerView[];
-  loading: boolean;
-  error: string | null;
-} {
+): ProjectDetailState {
   const revision = useChatStore((s) => s.projectRevision);
   const pollMs = options?.pollMs ?? 0;
   const [detail, setDetail] = useState<ProjectDetail | null>(null);
@@ -319,7 +334,7 @@ export function useProjectDetail(
     return () => clearInterval(id);
   }, [load, pollMs]);
 
-  return { detail, blockers, loading, error };
+  return { projectId, detail, blockers, loading, error };
 }
 
 /** 所有项目里等甲方答的问题(待办 / 评审队列)。 */

@@ -40,7 +40,7 @@
 import { useCallback, useState } from "react";
 import { PageHeader, Pill, Section, StatStrip, EmptyState, KV, Flag } from "@/components/ui/primitives";
 import { ClientQuestionCard } from "@/components/client/ClientQuestionCard";
-import { DeliveryVerdictActions } from "@/components/deliverable/DeliveryVerdictActions";
+
 import {
   useProjectAsks, useProjectChanges, useProjectDetail, useProjectLive, useProjectMessages,
   useProjectUsage, useProjectWorkspace,
@@ -58,8 +58,6 @@ import {
   blockerStatusTone,
   changeStatusLabel,
   changeStatusTone,
-  deliverableTypeLabel,
-  deliverableTypeTone,
   excerpt,
   fmtTokens,
   fmtTime,
@@ -204,8 +202,8 @@ export function ProjectDetailPage() {
                   value: detail.counts.pendingAcceptance,
                   tone: detail.counts.pendingAcceptance > 0 ? "amber" : undefined,
                   title:
-                    "已经交付给你、而还没表态的交付物(029)。与「待答」并列:两件事都是「有事在等你」。" +
-                    "判据与收口门同源 —— 它们不清零,项目就收不了口。",
+                    "已经交付给你、而还没表态的交付物(029)。清单在**对话页右栏「本项目」下面**" +
+                    "——这一页只留计数。判据与收口门同源 —— 它们不清零,项目就收不了口。",
                 },
                 {
                   label: "内部提问",
@@ -446,56 +444,12 @@ export function ProjectDetailPage() {
             )}
           </Section>
 
-          {/*
-            「待你验收」(029)。为什么它与「待你回答」并列而不是塞进工件列表:
-            它是**球在甲方那边**的时刻 —— 交付物已经交到你手上了,组织这边没有
-            任何人会再动它,直到你说收或不收。放远了就等于「有事在等你」没人知道
-            (真机第一条 client_question 就是这么被漏掉的,见 ClientQuestionDock 头注释)。
-          */}
-          <Section
-            title="待你验收"
-            count={detail.awaitingAcceptance.length}
-            hint="需要你处理 · 收不收由你说"
-            hintTitle="来源:ProjectDetail.awaitingAcceptance(029)。判据只有一条:已交付(有交付会话)、而且甲方还没有裁决 —— 与收口门、project_close 门读的是同一条(deliveryAcceptance)。这里点了才算数:模型写在工件上的 accepted 是「定稿」,不是你的验收。"
-          >
-            {detail.awaitingAcceptance.length === 0 ? (
-              <EmptyState>没有等你验收的东西。</EmptyState>
-            ) : (
-              <div className="grid gap-2">
-                {detail.awaitingAcceptance.map((a) => (
-                  <article key={a.artifactId} className="sansheng-card p-3" title={a.artifactId}>
-                    <div className="flex items-center gap-2 flex-wrap">
-                      {a.deliverableType !== null && (
-                        <Pill tone={deliverableTypeTone(a.deliverableType)} title="deliverable_type">
-                          {deliverableTypeLabel(a.deliverableType)}
-                        </Pill>
-                      )}
-                      <span className="ss-body" style={{ color: "var(--bone)" }}>
-                        {a.title || "(无标题)"}
-                      </span>
-                      <span className="ss-meta ml-auto">交付于 {fmtTime(a.deliveredAt)}</span>
-                    </div>
-                    {/* ⚠️ 这里的 `acceptance` 不是「编出来的」:能出现在这张清单里
-                        **按定义**就是 handedOver && verdict === null(见
-                        `views.ts` 的 awaitingAcceptanceOf)。所以这三个字段是
-                        这条清单的判据本身,而不是一个猜的默认值。 */}
-                    <DeliveryVerdictActions
-                      artifactId={a.artifactId}
-                      title={a.title}
-                      acceptance={{
-                        handedOver: true, verdict: null, note: null, at: null,
-                        // 这一段**只在项目不是终态时才渲染**(`awaitingAcceptanceOf`
-                        // 对收口项目返回空数组)⇒ 这里的 `false` 是那条判据的推论,
-                        // 不是一个乐观的默认值。
-                        projectClosed: false,
-                      }}
-                    />
-                  </article>
-                ))}
-              </div>
-            )}
-          </Section>
-
+          {/* ⚠️ **「待你验收」不在这一页了**(2026-10-12,用户裁决)。它原来长在
+            「工作项」与「待你回答」之间,现在搬到**对话页右栏的「本项目」下面**
+            (`components/client/AcceptanceDock.tsx`)—— 与「待答」同一类数据:
+            球在甲方那边,而甲方 90% 的时间在对话页。
+            ⇒ 下面的 `待验收` 计数**留着**:删掉它等于「有事在等你」在这页上
+            又变成没人知道(真机第一条 `client_question` 就是这么被漏掉的)。 */}
           <Section
             title="待你回答"
             count={detail.pendingQuestions.length}
