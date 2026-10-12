@@ -35,12 +35,20 @@
  * 历史里**删掉一条已经发生过的话** —— 而历史消息不该被追溯删除。放在面板里就
  * 自然:答完即从这一块消失、刷新还在、不会因为滚动位置找不到。
  *
- * ── 跨项目:显示,但不假装它属于当前项目 ──────────────────────────
+ * ── 按项目显示:切到哪个项目,才看到哪个项目的提问(2026-10-12)─
  *
- * 这一块长在「本项目」下面,但它的数据是**全局**的(`GET /api/client-questions`
- * 跨所有项目)。若只显示当前项目,别的项目的提问就又变成没人知道 —— 那正是这个
- * 页签当初存在的理由。所以:**当前项目的不标项目名**(它在「本项目」底下,归属
- * 不言自明),别的项目的那条上面带一行暗色项目名。跨项目的事实如实显示,不藏。
+ * 这一块原先是**全局**的(`GET /api/client-questions` 跨所有项目):别的项目那条上
+ * 面带一行暗色项目名,当前项目的不标。**用户裁决改成按项目显示**,与「待你验收」同一口径
+ * —— 两块都在右栏、都答「本项目有什么在等我」,一块按项目一块不按,读起来是自相矛盾
+ * 的:上面「本项目一切正常」,下面挂着别的项目的提问等它回答。
+ *
+ * ⚠️ **代价是明摆着的**:别的项目的提问在这里看不见了。不藏的补偿是**左栏** ——
+ * `HistoryRail` 那个项目节点上带 `counts.pendingQuestions`,「待你回答 N 个问题」按项目
+ * 标在项目名下(HistoryRail.tsx:125),所以「别处有 N 件」仍然看得见、知道去哪儿点。
+ *
+ * ⚠️ **随之而来的一个真问题**:已收口项目那几件原来报的是**全局**计数,按项目显示之后
+ * 它会把别的项目的条数报在当前项目名下。后端因此补了 `closedProjectQuestions`
+ * (带项目坐标),计数从那一份里按项目数出来 —— 见下面那一节。
  *
  * ── ⚠️ **已收口项目的提问不在这个队列里,而且必须说出来**(2026-10-07)─
  *
@@ -50,8 +58,10 @@
  * `client.*` 仍可用 —— 「豁免的是说话,不是改」),三条就一直挂在「待答」里,
  * 而用户点「回答」只会多落一条 `decision`,**没有任何人会被叫醒**。
  *
- * 所以后端把它们排除,并**把条数一起返回**(`fromClosedProjects`)。这里**必须显示**:
- * 悄悄少三条会让用户以为「问题自己消失了」—— 见不到现场等于没有现场(7-N)。
+ * 所以后端把它们排除,并**把条数一起返回**(`fromClosedProjects` + 带项目坐标的
+ * `closedProjectQuestions`)。这里**必须显示**:悄悄少三条会让用户以为「问题自己
+ * 消失了」—— 见不到现场等于没有现场(7-N)。⚠️ 只**数**、不渲染成可答的卡片:
+ * 渲染了就是给一排点了也没人处理的按钮。
  * 事实一条都没删:项目页(那个读面本来就是项目内的)照常显示,答复接口仍然可用。
  *
  * ── 数据来源与刷新 ────────────────────────────────────────────────
@@ -60,25 +70,20 @@
  * WS 的 `client_question` 事件会 bump 那个戳([stores/chat.ts:875]),所以新提问
  * 落地后这一块会自己刷新,不靠轮询。
  */
-import { useMemo } from "react";
 import { ClientQuestionCard } from "./ClientQuestionCard";
 import { Pill } from "@/components/ui/primitives";
 import { useClientQuestions } from "@/lib/data";
+import { scopeClientQuestions } from "@/lib/questionScope";
 import { useChatStore } from "@/stores/chat";
-import type { ClientQuestionView } from "@shared/types/platform";
 
 export function ClientQuestionDock() {
-  const { data: questions, loading, error, fromClosedProjects } = useClientQuestions();
-  /** 当前上下文 —— 只用来决定「要不要给这条标项目名」(见 `DockCard`)。 */
+  const { data: questions, loading, error, closedProjectQuestions } = useClientQuestions();
   const projectId = useChatStore((s) => s.projectId);
 
   // 早问的先答(FIFO)—— 队列的公平性比「最新的先看」重要。
-  // ⚠️ 不按项目分组(原先「待办」页是分组标题):这一块要陪「本项目」一起滚,
-  //   分组标题会把可答的区域压得太窄,而项目归属由 `DockCard` 那一行小字给出了。
-  const items = useMemo(
-    () => [...questions].sort((a, b) => a.createdAt - b.createdAt),
-    [questions],
-  );
+  // ⚠️ 按项目筛选(见文件头与 `lib/questionScope.ts`):切到哪个项目才看到哪个项目的;
+  //   没选项目 ⇒ 空(不退化成全局面板)。
+  const { items, closedCount } = scopeClientQuestions(questions, closedProjectQuestions, projectId);
   const count = items.length;
 
   return (
@@ -94,7 +99,11 @@ export function ClientQuestionDock() {
         {count > 0 ? (
           <Pill tone="amber">{count} 件等你回答</Pill>
         ) : (
-          <span className="ss-meta">没有等你回答的问题</span>
+          /* ⚠️ 「还没查到」≠「查过了是空」——没选项目 / 读失败 / 还在加载都说「还没查到」,
+             否则会把「没看」说成「没有」(见文件头)。 */
+          projectId !== null && error === null && !loading ? (
+            <span className="ss-meta">没有等你回答的问题</span>
+          ) : null
         )}
       </div>
 
@@ -103,59 +112,42 @@ export function ClientQuestionDock() {
           <div className="ss-meta" style={{ color: "var(--cinnabar)" }}>
             加载失败:{error}
           </div>
+        ) : projectId === null ? (
+          <div className="ss-meta">先在左栏选一个项目 —— 这一块只看当前项目的提问。</div>
         ) : loading && count === 0 ? (
           /* 「还没查过」与「查过了是空」在 hooks 里已分开(loading 初值 true),
-             走到空态就真的是空队列。 */
+             走到空态就真的是这个项目没有队列。 */
           <div className="ss-meta">加载中…</div>
         ) : count === 0 ? (
           <div className="ss-meta">
-            没有等你回答的问题 —— 各项目的业务经理都没卡在甲方这里。
+            没有等你回答的问题 —— 本项目的业务经理没卡在你这里。
           </div>
         ) : (
-          items.map((q) => <DockCard key={q.id} q={q} currentProjectId={projectId} />)
+          items.map((q) => <ClientQuestionCard key={q.id} q={q} />)
         )}
       </div>
 
       {count > 0 && (
-          <div className="ss-meta px-3 py-1 flex-none" title="GET /api/client-questions">
-            答案会落成 decision 工件,项目上留得下
-          </div>
-        )}
-
-        {/*
-          ⚠️ **不许静默丢弃**(见文件头那一节)。`fromClosedProjects` 大于 0 时
-          必须有一行说明,否则用户会以为「那几件自己消失了」—— 而事实是它们
-          属于已收口的项目,那里的业务经理永远不会被叫醒。
-          `to` 是纯文案占位:点击不导航(这一块本身不持有项目 id 的导航态)。
-        */}
-        {fromClosedProjects > 0 && (
-          <div
-            className="ss-meta px-3 py-1 flex-none"
-            style={{ borderTop: "1px solid var(--ink-3)", color: "var(--ochre)" }}
-            data-from-closed-projects={fromClosedProjects}
-            title="这些提问属于已收口的项目。排空器只跑 active 的项目,所以那里没有人会被叫醒来处理它们 —— 它们不再是「待答」。事实仍在项目页里。"
-          >
-            另有 {fromClosedProjects} 件来自已收口项目,不再等回复(项目页里还看得见)
-          </div>
-        )}
-    </section>
-  );
-}
-
-/**
- * 一条提问。**当前项目的不标项目名** —— 它就在「本项目」下面,标出来是噪音;
- * 别的项目的那条必须标,否则它在右栏里会被读成当前项目欠你的活。
- */
-function DockCard({ q, currentProjectId }: { q: ClientQuestionView; currentProjectId: string | null }) {
-  const mine = q.projectId === currentProjectId;
-  return (
-    <div className="flex flex-col gap-1">
-      {!mine && (
-        <span className="ss-meta" style={{ color: "var(--ochre)" }} title="别的项目的问题">
-          {q.projectName}
-        </span>
+        <div className="ss-meta px-3 py-1 flex-none" title="GET /api/client-questions">
+          答案会落成 decision 工件,项目上留得下
+        </div>
       )}
-      <ClientQuestionCard q={q} />
-    </div>
+
+      {/*
+        ⚠️ **不许静默丢弃**(见文件头那一节)。> 0 时必须有一行说明,否则用户会以为
+        「那几件自己消失了」—— 而事实是它们属于已收口的项目,那里的业务经理永远
+        不会被叫醒。⚠️ 数的是**本项目**那一份(后端那个 `fromClosedProjects` 是全局的)。
+      */}
+      {closedCount > 0 && (
+        <div
+          className="ss-meta px-3 py-1 flex-none"
+          style={{ borderTop: "1px solid var(--ink-3)", color: "var(--ochre)" }}
+          data-from-closed-projects={closedCount}
+          title="这些提问属于已收口的项目。排空器只跑 active 的项目,所以那里没有人会被叫醒来处理它们 —— 它们不再是「待答」。事实仍在项目页里。"
+        >
+          另有 {closedCount} 件来自已收口,不再等回复(项目页里还看得见)
+        </div>
+      )}
+    </section>
   );
 }

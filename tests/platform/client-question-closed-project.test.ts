@@ -103,8 +103,10 @@ describe("待答队列 · 收口项目的提问不算待答", () => {
   });
 
   it("**跨项目本身保留**:两个都在进行的项目,两条都在队列里", () => {
-    // 这条是**负样本**,防的是「顺手改成只显示当前项目」——
-    // 那会让别的项目的提问重新变成没人知道(这个面板当初就是为了这个才存在的)。
+    // 这条钉的是**接口**:后端仍然给全局列表 —— 2026-10-12 起「待答」面板改成按项目
+    // 显示,但那是**显示口径**,不是数据面的隐藏(别处要用、要审计的都还拿得到)。
+    // ⚠️ 筛选落在 `web/src/lib/questionScope.ts`(回归 `tests/web/question-scope.test.ts`),
+    // 别把它顺手挪到后端 —— 那会让「本项目有几件待答」这种问题**无接口可问**。
     const a = mkProject("项目甲");
     const b = mkProject("项目乙");
     const qa = ask(a, "甲的问题");
@@ -156,6 +158,62 @@ describe("待答队列 · 收口项目的提问不算待答", () => {
     const r = listAllClientQuestions(db);
     expect(r.questions).toEqual([]);
     expect(r.fromClosedProjects).toBe(0);
+  });
+
+  // ── `closedProjectQuestions`(2026-10-12 加)────────────────────────
+  //
+  // 为什么加:面板改成按项目显示之后,光有 `fromClosedProjects` 那个**全局**计数
+  // 答不对问题 —— 它会把别的项目的收口条数报在当前项目名下。所以那批排除掉的提问
+  // 也要**带项目坐标**给出来。回归 `tests/web/question-scope.test.ts` 管显示侧。
+
+  it("收口的那批**带项目坐标**给出来(所以前端能数出「本项目」那一份)", () => {
+    const live = mkProject("还在进行");
+    const closed = mkProject("已收口", "done");
+    const qLive = ask(live, "还在进行的那个问题");
+    const qClosed = ask(closed, "收口之后才提的那个问题");
+
+    const r = listAllClientQuestions(db);
+    expect(r.closedProjectQuestions.map((q) => q.id)).toEqual([qClosed]);
+    expect(r.closedProjectQuestions[0].projectId).toBe(closed);
+    expect(r.closedProjectQuestions[0].projectName).toBe("已收口");
+    // 两份数据**互补且不重叠**:一条能答、一条只数
+    expect(r.questions.map((q) => q.id)).toEqual([qLive]);
+    expect(r.questions.some((q) => q.id === qClosed)).toBe(false);
+    expect(r.closedProjectQuestions.some((q) => q.id === qLive)).toBe(false);
+  });
+
+  it("`fromClosedProjects` 与那份列表**同源**(别让两个数字各说各话)", () => {
+    const live = mkProject("还在进行");
+    const d1 = mkProject("已收口一", "done");
+    const d2 = mkProject("已收口二", "abandoned");
+    ask(live, "还在等的");
+    ask(d1, "收口后问的 1");
+    ask(d2, "收口后问的 2");
+    const r = listAllClientQuestions(db);
+    expect(r.fromClosedProjects).toBe(2);
+    expect(r.closedProjectQuestions).toHaveLength(r.fromClosedProjects);
+  });
+
+  it("收口的那批**按时间排**(与队列同一套排序)", () => {
+    const d = mkProject("已收口", "done");
+    ask(d, "早的");
+    ask(d, "晚的");
+    const r = listAllClientQuestions(db);
+    expect(r.closedProjectQuestions).toHaveLength(2);
+    expect(r.closedProjectQuestions[0].createdAt).toBeLessThanOrEqual(
+      r.closedProjectQuestions[1].createdAt,
+    );
+  });
+
+  it("**判据自检**:若有人把收口那批也塞回 `questions`(失去区分),这一格会红", () => {
+    // 「只能数、不能答」这条靠的是**两份列表不重叠**。所以这里把两份合起来验一遍:
+    // 1 条能答 + 1 条只能数 = 2,而不是 2 条都能答。
+    const closed = mkProject("已收口", "done");
+    ask(closed, "收口后问的");
+    const r = listAllClientQuestions(db);
+    expect(r.questions.length + r.closedProjectQuestions.length).toBe(1);
+    expect(r.questions).toHaveLength(0);
+    expect(r.closedProjectQuestions).toHaveLength(1);
   });
 
   it("排空器确实只跑 active —— **这条是本测试存在的理由**,别让它悄悄变成别的", () => {

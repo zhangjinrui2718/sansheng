@@ -901,6 +901,18 @@ export interface ClientQuestionList {
   questions: ClientQuestionView[];
   /** 因项目已收口(`done`/`abandoned`)而没有进入待答队列的条数。 */
   fromClosedProjects: number;
+  /**
+   * 上面那批被排除的提问,**按项目分**地给出(与 `questions` 同一形状)。
+   *
+   * ⚠️ 2026-10-12 起「待答」面板**按当前项目显示**(与「待你验收」同口径:切到哪个项目
+   * 才看到哪个项目的),所以光有一个**全局**计数答不对问题 —— 它会把别的项目的收口条数
+   * 报在当前项目名下。前端从这一份里数出**本项目**的条数。
+   *
+   * ⚠️ **只许数,不许当待办渲染**:它们不在 `questions` 里正是因为兑现不了(排空器只跑
+   * active 项目),给出坐标是为了**按项目如实报数**,不是为了让用户对着一排点了也没人
+   * 处理的按钮。
+   */
+  closedProjectQuestions: ClientQuestionView[];
 }
 
 export interface BlockerView {

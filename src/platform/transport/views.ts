@@ -819,27 +819,39 @@ function awaitingAcceptanceOf(
  *
  * ⚠️ **不静默丢弃**:被排除的条数由 `fromClosedProjects` 一并返回,前端必须显示出来。
  * 悄悄少三条会让用户以为「问题自己消失了」—— 那正是 7-N(见不到现场等于没有现场)。
+ * 另见返回类型里 `closedProjectQuestions` 的注释:2026-10-12 起面板按项目显示,
+ * 光有一个全局计数答不对问题,需要带项目坐标的那一份。
  */
 export function listAllClientQuestions(db: Database.Database): {
   questions: ClientQuestionView[];
   /** 因项目已收口而**没有**进入待答队列的条数。⚠️ 必须被显示,不许静默丢弃。 */
   fromClosedProjects: number;
+  /**
+   * 同样因项目已收口而被排除的那些提问,**按项目分**地给出(与 `questions` 同一形状)。
+   *
+   * ⚠️ 为什么要它:2026-10-12 起「待答」面板**按当前项目显示**(与「待你验收」同口径),
+   * 于是 `fromClosedProjects` 那个**全局**计数就答错了问题 —— 它会把别的项目的收口条数
+   * 报在当前项目名下(「这个项目里为什么说有 3 件来自已收口项目」)。带项目坐标之后,
+   * 前端才能报出**本项目**的那一份;而本项目是收口状态时这一份恒 ≥ 0 且有意义。
+   *
+   * ⚠️ **只许数,不许当待办渲染**:它们不在 `questions` 里正是因为兑现不了(见文件头),
+   * 给出坐标是为了**按项目如实报数**,不是为了让用户对着一排兑现不了的按钮。
+   */
+  closedProjectQuestions: ClientQuestionView[];
 } {
   const name = agentNameCache(db);
   const out: ClientQuestionView[] = [];
-  let fromClosedProjects = 0;
+  const closedOut: ClientQuestionView[] = [];
   for (const p of listProjects(db)) {
     const closed = p.status === "done" || p.status === "abandoned";
     for (const a of listArtifacts(db, p.id, { kind: "client_question", status: "open" })) {
-      if (closed) {
-        fromClosedProjects += 1;
-        continue;
-      }
-      out.push(toClientQuestionView(db, a, name));
+      (closed ? closedOut : out).push(toClientQuestionView(db, a, name));
     }
   }
-  out.sort((a, b) => a.createdAt - b.createdAt);
-  return { questions: out, fromClosedProjects };
+  const byAge = (a: ClientQuestionView, b: ClientQuestionView): number => a.createdAt - b.createdAt;
+  out.sort(byAge);
+  closedOut.sort(byAge);
+  return { questions: out, fromClosedProjects: closedOut.length, closedProjectQuestions: closedOut };
 }
 
 export function listProjectAsks(db: Database.Database, projectId: string): AskView[] {

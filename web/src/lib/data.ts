@@ -341,6 +341,12 @@ export function useProjectDetail(
 export function useClientQuestions(): Loaded<ClientQuestionView[]> & {
   /** 因项目已收口而不在待答队列里的条数。⚠️ 必须被显示,不许静默丢弃(见契约注释)。 */
   fromClosedProjects: number;
+  /**
+   * 那批被排除的提问,**带项目坐标**(与上面那个全局计数同源)。
+   * ⚠️ 面板按当前项目显示之后,全局计数答不对问题(会把别的项目的条数报在当前项目
+   * 名下)—— 计数必须从这一份里按项目数出来。
+   */
+  closedProjectQuestions: ClientQuestionView[];
 } {
   const revision = useChatStore((s) => s.projectsRevision);
   const r = useLoad(() => api.listClientQuestions(), [revision]);
@@ -349,6 +355,7 @@ export function useClientQuestions(): Loaded<ClientQuestionView[]> & {
     loading: r.loading,
     error: r.error,
     fromClosedProjects: r.data?.fromClosedProjects ?? 0,
+    closedProjectQuestions: r.data?.closedProjectQuestions ?? [],
   };
 }
 
