@@ -60,7 +60,7 @@
   判据的一部分:同一对节点上两类边**方向一致**时不是环(真机那份数据就是这样),方向相反
   才是环(`mutualPairs` 会点名是哪两条边)。写反会让「交付」跑到最左、并且把一个不存在的
   环报出来(`web/src/lib/workGraph.ts` 的 `collectEdges`)。
-- 基线:**2034 passed / 103 test files** · 两条 typecheck 0 error · `check:design` E1–E14 全绿(5 角色)。
+- 基线:**2050 passed / 104 test files** · 两条 typecheck 0 error · `check:design` E1–E14 全绿(5 角色)。
 - **角色中文名只有一处**:`src/platform/runtime/org.ts` 的 `ORG`(播种 / `roleDisplayName()` /
   `RoleHarnessView.displayName` / **系统提示里的「# 你的角色:X」**全走它);
   前端兜底表 `web/src/lib/vocab.ts` 的 `ROLE_LABEL` 必须逐项相同,由
@@ -787,12 +787,72 @@ help
 
 > `package.json` 的三个入口(批次 19 修好,之前三个都指向不存在的文件/未知命令):`dev` = `dev:server`(`tsx watch src/cli/index.ts platform-serve`)+ `dev:web`(vite 5173);`start` = `node dist/src/cli/index.js platform-serve`。vite 的 `/api` 与 `/ws` 代理目标是 **2718**(`vite.config.ts`)。⚠️ 它**必须**与 `platform-serve` 的默认端口一致 —— 写错了 proxy 就指向一个没人听的端口,而界面只会「连不上」;这两处曾经各写一个(2718 / 2719),2026-10-08 统一回 2718。
 
+## pi 依赖:三生**不依赖**本机装没装 pi(2026-10-15 实测)
+
+`package.json` 里 `@earendil-works/pi-coding-agent` 是**普通 npm 依赖**(2026-10-15 从 0.87.1 升到 **1.2.0**,与本机 pi CLI 对齐),装进三生自己的 `node_modules`。全部 30 个 pi 包来自公共 registry(npmmirror / npmjs),`src/` 里唯一的 `execFileSync` 调的是 `git`,**零处引用 `.pi`**。
+
+实测:空 `HOME`(无 `.pi`)+ 临时数据目录起 `platform-serve` ⇒ `/api/health` 正常、自建 `sansheng-workspace` 与 `harness/system_prompts`、**HOME 里始终没出现 `.pi`**、启动日志零 warn。⇒ 目标机器只要 **Node ≥ 22.19**(pi 的 engines,比本仓写的 `>=22` 高)+ 能访问 registry。
+
+### 配置从哪来 —— 三生自己的数据目录,不是 pi 的
+
+| 配置 | 读自 |
+|---|---|
+| provider / modelId / baseUrl | `<dataDir>/settings.json` |
+| API key | `<dataDir>/.keyring`(`boot.ts:95`;masterKey 是**明文 base64**) |
+| **凭据 → pi 的通道** | **环境变量**(`syncActiveProviderApiKeyEnv()`,`boot.ts:114`,建 session 前一次)—— pi 侧从 `agentDir/auth.json` **或 env** 取 |
+| model 元数据 | pi-ai **内置 catalog**(见下) |
+| 提示词单元 | `<dataDir>/harness/system_prompts/{unitId}.md` |
+| 工具集合(L2) | `<dataDir>/harness/tools/{role}.json` |
+| agentDir | `<dataDir>/agent`(`serve.ts:1324`,可被 settings 覆盖) |
+
+⚠️ **`<dataDir>/agent/models.json` 与 `auth.json` 三生从不写** —— 那一格是空的。
+
+### ⚠️ 唯一的真耦合:SDK 兜底指向 `~/.pi/agent`
+
+pi `core/sdk.js:71-75`:`agentDir` 的兜底是 `getDefaultAgentDir()` = **`~/.pi/agent`**;`authPath` / `modelsPath` **只在传了 `agentDir` 时**才指向它。三生 `serve.ts:1324` 总是传 ⇒ 隔离。但**这是「调用点自觉」撑着的,不是结构性保证**:哪条路径建会话时漏传 `agentDir`,就会**静默读到 pi 的 `models.json` 与 `auth.json`**,不报错。
+
+### 加一个内置 catalog 里没有的 model
+
+`resolveModel()`(`providers.ts:169`)只查 pi-ai 内置 catalog,而 `getBuiltinModel` 是**纯静态查表**(pi-ai `providers/all.js:49` `MODELS[provider]?.[modelId]`),**不读任何用户文件**。⇒ 上游没有的 model,三生既跑不起来、设置界面(`listProviders` 走同一个 `MODELS`,`providers.ts:53`)也列不出来。
+
+**注入一处 catalog 数据 ⇒ 两个消费者同时生效**,这是选它而不改 `providers.ts` 的理由(改源码要碰两个点):
+
+```
+scripts/model-catalog-overrides.json   # 数据,形状与磁盘 catalog 逐字对应
+scripts/patch-model-catalog.mjs        # 合并器(幂等)
+package.json → "postinstall"           # npm install 时重放
+```
+
+⚠️ **磁盘上 model 的 key 必须带 `chat:` 前缀** —— 那是 `providers/data/*.json` 的形状,pi-ai 载入内存时会剥掉,所以运行期 `getBuiltinModel('minimax-cn','MiniMax-M3')` 查的是**裸 id**。写错前缀 = 静默不生效。覆盖语义:同名 model 覆盖内置值。
+
+> 不用 `patch-package` 的理由:catalog 是**单行压缩 JSON**,它产出的 diff 人读不懂、review 不了。
+>
+> ⚠️ 正确形态仍是「让 `resolveModel` 读 `<dataDir>` 下的用户覆盖层」—— 那才是「任意用户都能加 model」的结构性功能(需开批次 + 回归测试)。当前注入法**只服务本机**,且作为 npm 包发布时会给**消费者的 `node_modules`** 也注入同一个 model。
+
+## 更新与部署:改了 pi 依赖或 catalog 之后,**`npm run build` 不够**
+
+```
+git pull
+npm install        # ← 必需:pi 包版本与 catalog patch 都落在 node_modules 里
+npm run build
+```
+
+`npm run build` 只编译(`tsc` + `vite build` + `copy-harness.mjs`),**不碰 `node_modules`**。2026-10-15 起有两类改动是它覆盖不到的:pi 包版本升级、catalog 注入 —— 两者都靠 `npm install`(及其 `postinstall`)落地。
+
+⚠️ 装了 `postinstall` 之后 **`npm install` 会改 `node_modules`**(幂等,第二次是「已一致 N」不写盘)。判有没有生效:
+
+```
+node -e "console.log(Object.keys(require('./node_modules/@earendil-works/pi-ai/dist/providers/data/minimax-cn.json')['anthropic-messages']))"
+```
+
+`npm ci` / `npm install --ignore-scripts` 会跳过 `postinstall` ⇒ 那次得手动 `node scripts/patch-model-catalog.mjs`。
+
 ## 验证链(改完必须全过)
 
 ```
 npx tsc -p tsconfig.server.json --noEmit
 npx tsc -p tsconfig.web.json --noEmit
-npm test                  # 1993 passed / 99 files
+npm test                  # 2050 passed / 104 files
 npm run build
 npm run check:design      # 设计一致性 E1–E14
 ```
