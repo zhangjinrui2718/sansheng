@@ -58,6 +58,7 @@ export function ChatSurface() {
   const projects = useChatStore((s) => s.projects);
   const sendMessage = useChatStore((s) => s.sendMessage);
   const sendInterrupt = useChatStore((s) => s.sendInterrupt);
+  const startIntake = useChatStore((s) => s.startIntake);
   const settings = useSettingsStore((s) => s.settings);
   const hasKey = !!activeProviderOf(settings)?.hasApiKey;
 
@@ -176,9 +177,24 @@ export function ChatSurface() {
             </>
           )}
           {intakeActive ? (
-            <Pill tone="jade" title="第一个项目之前的那段对话:业务经理与你对齐诉求,谈拢后由他立项">
-              谈新项目
-            </Pill>
+            <>
+              <Pill tone="jade" title="第一个项目之前的那段对话:业务经理与你对齐诉求,谈拢后由他立项">
+                谈新项目
+              </Pill>
+              {/* 「重新谈」= 左栏 + 新建 的头部冗余入口。
+                  ⚠️ 不是 /new 字面语义:接待消息已落库,这条按钮只重置前端视图
+                  并回到接待入口 —— 不删除已落库的消息。如要真清空接待线,
+                  那是后端新能力,需要单独决策。 */}
+              <button
+                type="button"
+                className="sansheng-button flex-none"
+                style={{ padding: "2px 8px", fontSize: 11 }}
+                onClick={() => void startIntake()}
+                title="回到接待入口 —— 等同左栏 + 新建;接待消息已落库,这条按钮只重置前端视图,不删除已落库的消息"
+              >
+                ↻ 重新谈
+              </button>
+            </>
           ) : (
             project && (
               <Pill tone={projectStatusTone(project.status)}>{projectStatusLabel(project.status)}</Pill>
