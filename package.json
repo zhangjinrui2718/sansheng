@@ -24,6 +24,7 @@
     "build:server": "tsc -p tsconfig.server.json && node scripts/copy-harness.mjs",
     "build:web": "vite build",
     "build": "npm-run-all build:server build:web",
+    "postinstall": "node scripts/patch-model-catalog.mjs",
     "start": "node dist/src/cli/index.js platform-serve",
     "typecheck": "tsc -p tsconfig.server.json --noEmit && tsc -p tsconfig.web.json --noEmit",
     "check:design": "node docs/check-design-consistency.mjs",

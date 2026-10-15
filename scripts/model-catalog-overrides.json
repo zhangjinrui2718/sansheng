@@ -1,0 +1,28 @@
+{
+  "$comment": [
+    "往 pi-ai 内置 catalog 里补 model 的数据源。scripts/patch-model-catalog.mjs 读它。",
+    "形状与 node_modules/@earendil-works/pi-ai/dist/providers/data/<provider>.json **逐字对应**:",
+    "第一层 = 文件名(provider),第二层 = api,第三层 = model。",
+    "⚠️ 第三层的 key 必须带 `chat:` 前缀 —— 那是**磁盘上**的形状;pi-ai 载入内存时会剥掉它,",
+    "   所以运行期 `getBuiltinModel('minimax-cn', 'MiniMax-M3')` 查的是裸 id。写错前缀 = 静默不生效。",
+    "覆盖语义:本文件同名 model **覆盖**内置值(上游哪天自己加了,这里说了算)。",
+    "新增 model 必须带全 `type` 字段 —— 内置 3 条都有,siblings 即是模板。"
+  ],
+  "minimax-cn": {
+    "anthropic-messages": {
+      "chat:MiniMax-M3.1-Flash-Preview": {
+        "id": "MiniMax-M3.1-Flash-Preview",
+        "name": "MiniMax-M3.1-Flash-Preview",
+        "api": "anthropic-messages",
+        "provider": "minimax-cn",
+        "baseUrl": "https://api.minimaxi.com/anthropic",
+        "reasoning": true,
+        "input": ["text"],
+        "cost": { "input": 0.3, "output": 1.2, "cacheRead": 0.06, "cacheWrite": 0 },
+        "contextWindow": 1000000,
+        "maxTokens": 131072,
+        "type": "chat"
+      }
+    }
+  }
+}
