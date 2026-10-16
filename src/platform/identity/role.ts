@@ -229,6 +229,10 @@ export const ROLE_SPECS: Readonly<Record<ProjectRole, RoleSpec>> = {
       "blocker.open", "blocker.update", "blocker.read",
       "memory.read", "memory.write", "knowledge.read",
       "client.ask", "client.message",
+      // MCP(2026-10-16):只有「读」,没有「授权」。业务经理看得见有哪些外部
+      // server、谁开着,但**开不开由人(HTTP)决定** —— 它是甲方接口,不该
+      // 替甲方扩权。
+      "mcp.read",
     ],
     writeKinds: ["project_brief", "decision", "note"],
     promptUnits: [
@@ -256,6 +260,10 @@ export const ROLE_SPECS: Readonly<Record<ProjectRole, RoleSpec>> = {
       "change.propose", "change.review", "change.read",
       "blocker.open", "blocker.update", "blocker.read",
       "memory.read", "knowledge.read", "work.report",
+      // MCP(2026-10-16):项目经理是**唯一**能改 MCP 授权的角色。
+      // 它不持有 `code.*`、不执行外部工具,只是替人把授权开关按需求落地 ——
+      // 「谁授权」与「谁能用」是分开的(见 `mcp/grants.ts` 文件头)。
+      "mcp.read", "mcp.grant",
     ],
     // `deliverable` = **整合的产物**(把子项产出收成一份交付)。
     // ⚠️ 2026-10-08 起它不再是项目经理独有:两个执行角色都持有它,因为它们

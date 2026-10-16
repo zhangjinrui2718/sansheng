@@ -131,12 +131,32 @@ function tightenKeyringPermissions(filePath: string): void {
   }
 }
 
-/** 检测字符串是否像加密 blob(iv:tag:cipher 全 base64) */
+/**
+ * 检测字符串是否像加密 blob(iv:tag:cipher 三段 base64)。
+ *
+ * ⚠️ **长度下界只加在 iv 与 tag 上**(它们恒为 12 / 16 字节 ⇒ base64 后 ≥ 16 字符),
+ * cipher 段只要求 ≥ 4(base64 的最小合法长度)。
+ *
+ * 2026-10-16 修掉的真缺陷:原先**三段都**要求 `length >= 8`,于是**短明文**
+ * (≤ 3 字节,例如一个 token)加密之后 cipher 段只有 4 个字符 ⇒ `isEncrypted`
+ * 返回 false ⇒ `decrypt()` 静默**明文直通** ⇒ 调用方拿到的是**密文本身**,
+ * 而且形状上完全正常。MCP 的 secret 层第一个撞上它(一个短 token 就够)。
+ *
+ * 收紧成「iv/tag 必须够长、cipher 段只要是合法 base64」之后,一段短明文的
+ * 密文也能被认出来。误判风险:一个恰好长得像 `AAAA…(≥16):AAAA…(≥16):AAAA`
+ * 的**明文**会被当成密文 —— 而 API key / token 含 `-` `_` `.`,落不到这个形状。
+ */
 export function isEncrypted(s: string): boolean {
   if (!s || typeof s !== "string") return false;
   const parts = s.split(":");
   if (parts.length !== 3) return false;
-  return parts.every((p) => /^[A-Za-z0-9+/]+=*$/.test(p) && p.length >= 8);
+  const [iv, tag, cipher] = parts;
+  if (iv === undefined || tag === undefined || cipher === undefined) return false;
+  const b64 = /^[A-Za-z0-9+/]+=*$/;
+  return (
+    iv.length >= 16 && tag.length >= 16 && cipher.length >= 4 &&
+    b64.test(iv) && b64.test(tag) && b64.test(cipher)
+  );
 }
 
 /** 检测是否是 masked placeholder(如 "sk-***" 或 "****"),不能拿来加密 */

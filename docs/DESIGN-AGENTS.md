@@ -90,6 +90,7 @@
 | `memory.read` | 检索长期记忆 |
 | `memory.write` | 写入长期记忆 —— **仅本角色持有**(见 §11) |
 | `knowledge.read` | 检索项目语料(对话 / 工件正文;索引由平台做,只读) |
+| `mcp.read` | 列外部工具(MCP)server 目录与各角色授权 ← **只有「读」,没有「授权」**:它是甲方接口,不该替甲方扩权 |
 | **`client.ask`** | **向甲方提问** ← 仅本角色持有 |
 | **`client.message`** | **向甲方播报** ← 仅本角色持有 |
 
@@ -109,6 +110,7 @@
     "change_propose", "change_list", "change_read",
     "blocker_open", "blocker_update", "blocker_list", "blocker_read",
     "memory_search", "memory_remember", "knowledge_search", "knowledge_read",
+    "mcp_list",
     "ask_client", "tell_client"
   ],
   "deny": ["work_create", "work_update", "work_assign", "work_list", "work_read",
@@ -116,7 +118,7 @@
 }
 ```
 
-**25 个工具。** 注意 `clientFacing: true` 是它能拿到最后两个的唯一原因 —— `ScopeGate` 规则 1。
+**26 个工具。** 注意 `clientFacing: true` 是它能拿到最后两个的唯一原因 —— `ScopeGate` 规则 1。
 
 `deny` 列出它的两条边界:**不拆解工作**(`work.*` 全族)与**不碰代码**(SDK 七件)。业务经理收敛诉求,不排期也不干活。
 
@@ -160,7 +162,7 @@
 
 ### 3.3 Capability Ceiling
 
-`project.read` · `work.create` · `work.update` · `work.assign` · `work.read` · `work.list` · `collab.ask` · `collab.escalate` · `collab.answer` · `collab.read` · `collab.convene` · `collab.meeting.read` · `collab.meeting.respond` · `collab.meeting.conclude` · `blackboard.read` · `blackboard.write` · `change.propose` · `change.review` · `change.read` · `blocker.open` · `blocker.update` · `blocker.read` · `memory.read` · `knowledge.read` · `work.report`
+`project.read` · `work.create` · `work.update` · `work.assign` · `work.read` · `work.list` · `collab.ask` · `collab.escalate` · `collab.answer` · `collab.read` · `collab.convene` · `collab.meeting.read` · `collab.meeting.respond` · `collab.meeting.conclude` · `blackboard.read` · `blackboard.write` · `change.propose` · `change.review` · `change.read` · `blocker.open` · `blocker.update` · `blocker.read` · `memory.read` · `knowledge.read` · `mcp.read` · `mcp.grant` · `work.report`
 
 > 上表**全部写全名**,不用「`collab.ask` / `escalate` / `answer`」这种继承式简写 —— 这是实现者要照抄的规范列表,简写会让 `collab.meeting.*` 那几条看起来像独立命名空间。
 
@@ -178,13 +180,14 @@
     "board_list", "board_read", "board_write",
     "change_propose", "change_review", "change_list", "change_read",
     "blocker_open", "blocker_update", "blocker_list", "blocker_read",
-    "memory_search", "knowledge_search", "knowledge_read"
+    "memory_search", "knowledge_search", "knowledge_read",
+    "mcp_list", "mcp_grant", "mcp_revoke"
   ],
   "deny": ["ask_client", "tell_client", "project_update", "project_close"]
 }
 ```
 
-**31 个工具。** `deny` 里显式列了四项,都是**它拿不到且不该拿到**的:对甲方说话的两个,和改项目范围的两个(改范围要走 `change_propose`)。这是有意的可见性 —— 比让它们在 UI 上「不存在」更能说明边界。
+**34 个工具。** `deny` 里显式列了四项,都是**它拿不到且不该拿到**的:对甲方说话的两个,和改项目范围的两个(改范围要走 `change_propose`)。这是有意的可见性 —— 比让它们在 UI 上「不存在」更能说明边界。
 
 ### 3.5 提示词单元
 
@@ -492,6 +495,8 @@
 | `memory.read` | ✅ | ✅ | ✅ | ✅ | ✅ |
 | `memory.write` | ✅ | — | — | — |
 | `knowledge.read` | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `mcp.read` | ✅ | ✅ | — | — | — |
+| `mcp.grant` | — | ✅ | — | — | — |
 | `work.report` | — | ✅ | ✅ | ✅ | — |
 | `work.review_verdict` | — | — | — | — | ✅ |
 | `code.read` | — | — | ✅ | ✅ | — |
@@ -500,13 +505,20 @@
 | **`client.ask`** | **✅** | — | — | — | — |
 | **`client.message`** | **✅** | — | — | — | — |
 
-**共 35 条 capability。** 读这张表最该看的是**最后两行** —— 整个组织里只有一个角色能跟甲方说话,这不是提示词里的约定,是这张表的形状决定的。
+**共 37 条 capability。** 读这张表最该看的是**最后两行** —— 整个组织里只有一个角色能跟甲方说话,这不是提示词里的约定,是这张表的形状决定的。
 
 三处值得单独注意:
 
 - **`collab.escalate` 业务经理是空的** —— 它上面没有人了,升级出口是 `client.ask`。其余四个角色的 `escalate` 目标由平台计算,**模型无法指定**,所以「不越级」是机制保证的(设计 1 §5.3)。
 - **`project.update` / `project.close` 只有业务经理** —— 项目经理要改范围必须走 `change.propose`,不能直接改项目目标。这是让变更管理有意义的必要条件。
 - **`collab.meeting.conclude` 与 `collab.meeting.respond` 分离** —— 参会者能表态,只有主持人能收尾。否则「会议结论」没有责任人。
+- **`mcp.read` / `mcp.grant` 只给前两个角色** —— 三个执行角色与质检**一条都不加**:
+  它们已经有 `code.exec`(任意跑命令)与 `code.read`,再叠一层外部工具是**纯扩权**,
+  没有对应的收益。业务经理只拿到「读」(看得见有哪些外部 server、谁开着),项目经理
+  才拿到「授权」—— 它不执行外部工具,只是替人把开关按需求落地。
+  ⚠️ 注意表里**没有**「新增 server 定义」这一行:定义 = 任意命令执行 / 任意出网,
+  是**人的资产**,平台刻意不提供工具(与 `POST /api/artifacts/:id/verdict` 同款处置,
+  理由见设计 1 §3.5)。
 
 `memory.write` 只给业务经理,理由见 §11。
 

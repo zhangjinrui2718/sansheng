@@ -150,9 +150,14 @@ describe("能力面已完整(BC5 接线前置)", () => {
     // 它此前**没有任何一条路**能查,真机上因此对甲方做过的项目完全失明)。
     // 36 → 38:知识语料(2026-10-08)的 `knowledge_search` / `knowledge_read`
     // (设计 `docs/DESIGN-KNOWLEDGE.md`;**没有**写侧工具 —— 索引由平台做)。
+    // 38 → **41**:MCP(2026-10-16)的 `mcp_list` / `mcp_grant` / `mcp_revoke`
+    // (设计 1 §3.2 的 `mcp.read` / `mcp.grant`;**没有**「新增 server 定义」的工具 ——
+    //  定义 = 任意命令执行 / 任意出网,那是人的资产,见 tools/mcp.ts 文件头)。
+    // ⚠️ 工单上写的是「38 → 40」,**那是算错了**:三条工具不是两条。
+    // 写成 40 会让这条哨兵当场变红 —— 而它红的方式恰好说明它是有用的。
     // 这个数**必须手工跟着改** —— 若从代码自动推导,它就永远等于自己,
     // 那一刻它就不再是「有没有人偷偷加了工具」的哨兵了。
-    expect(registrySnapshot().implemented).toBe(38);
+    expect(registrySnapshot().implemented).toBe(41);
   });
 
   it("client 工具已注册", () => {

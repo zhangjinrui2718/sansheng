@@ -72,8 +72,9 @@ describe("每个工具都有 brief(名称 / 来源 / 能力 / 分组 / 作用)",
       expect(b.group, `${t} 落到了「未分类」—— 能力↔工具表脱节了`).not.toBe("未分类");
       expect(b.purpose.trim().length, `${t} 没有作用说明`).toBeGreaterThan(0);
     }
-    // 非空自检:上面那一圈真的转了 45 个工具(38 平台 + 7 SDK)
-    expect(ALL_TOOLS.length).toBe(45);
+    // 非空自检:上面那一圈真的转了 48 个工具(41 平台 + 7 SDK)
+    // 45 → 48:2026-10-16 的 MCP 三条(mcp_list / mcp_grant / mcp_revoke)。
+    expect(ALL_TOOLS.length).toBe(48);
   });
 
   it("**平台工具的作用 === 注册表里的 description**(不是这里另抄的一份)", () => {
@@ -81,7 +82,8 @@ describe("每个工具都有 brief(名称 / 来源 / 能力 / 分组 / 作用)",
       expect(toolBrief(name).purpose, `${name} 的说明与注册表分叉了`).toBe(tool.description);
     }
     // 正样本:注册表本身非空,否则上面那圈是空转
-    expect(TOOL_INDEX.size).toBe(38);
+    // 38 → 41:同上(MCP 三条)。**手工数** —— 它是「有没有人偷偷加工具」的哨兵。
+    expect(TOOL_INDEX.size).toBe(41);
   });
 
   it("SDK 内置 7 个:各有一句**中文**说明(照抄英文描述不算补)", () => {

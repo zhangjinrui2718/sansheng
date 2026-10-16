@@ -34,6 +34,7 @@ import { CONTROL_TOOLS } from "./control.js";
 import { COLLAB_TOOLS } from "./collab.js";
 import { MEMORY_TOOLS } from "./memory.js";
 import { KNOWLEDGE_TOOLS } from "./knowledge.js";
+import { MCP_TOOLS } from "./mcp.js";
 import { CLIENT_TOOLS } from "./client.js";
 import { REVIEW_TOOLS } from "./review.js";
 import { NUDGE_CAPABILITIES } from "../runtime/dispatcher.js";
@@ -47,6 +48,9 @@ export const ALL_PLATFORM_TOOLS: readonly PlatformTool[] = [
   ...COLLAB_TOOLS,
   ...MEMORY_TOOLS,
   ...KNOWLEDGE_TOOLS,
+  // MCP:只碰**授权文件**。⚠️ 这里刻意**没有**「新增 / 修改 server 定义」的工具 ——
+  // 那会让某个模型能替甲方决定平台执行哪条命令(见 tools/mcp.ts 文件头)。
+  ...MCP_TOOLS,
   ...CLIENT_TOOLS,
   ...REVIEW_TOOLS,
 ];

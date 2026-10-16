@@ -2312,6 +2312,9 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
       // 而漂的表现是「启动时警告出厂副本缺失、界面上「恢复出厂」却好好的」
       factoryDir: platformFactoryDir(),
     },
+    // MCP 的 secret 端口。与 provider 凭据**共用同一个 `.keyring`** ——
+    // 所以两份密文能互相解开(换 MCP token 不需要重登 provider)。
+    secretStore: booted.deps.secretStore,
     reset: () => {
       // 常驻会话必须丢掉:它们绑着已被删掉的项目,继续用会往空项目里写消息
       disposeAllSessions("数据重置");

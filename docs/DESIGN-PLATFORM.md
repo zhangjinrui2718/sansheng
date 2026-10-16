@@ -1200,6 +1200,13 @@ export type Capability =
   // 知识语料(设计 docs/DESIGN-KNOWLEDGE.md):只读检索 —— 索引由平台做、
   // agent 只消费,所以没有对应的写能力。
   | "knowledge.read"
+  // MCP(Model Context Protocol)外部工具,2026-10-16。两层权限方向相反:
+  // **server 定义是人的资产**(只有 HTTP 写面;任何角色的 ceiling 里都没有
+  // 对应的工具 —— 定义一条 server = 允许平台执行任意命令 / 向任意地址出网,
+  // 与「甲方验收裁决」同款处置,见 §3.3 的说明)。
+  // 而**授权**(在已定义的名字里开关)才是 agent 可做的。
+  | "mcp.read"        // 列外部 server 目录 + 各角色当前授权
+  | "mcp.grant"       // 给某角色开 / 关一个**已定义**的 server
   // 面向甲方(受 scope 门控,见 §4.3)
   | "client.ask"
   | "client.message"
@@ -1249,6 +1256,9 @@ export type Capability =
 | `memory.read` | `memory_search` | query, limit? | 片段列表 |
 | `memory.write` | `memory_remember` | kind, content, importance? | fragment id |
 | `knowledge.read` | `knowledge_search`, `knowledge_read` | `knowledge_search`: query, limit?, kind? · `knowledge_read`: chunkId | 命中片段 + 来源坐标(工件 id / 消息 id + 项目)/ 一个片段的正文 |
+| `mcp.read` | `mcp_list` | (无) | server 目录 + 每条被哪些角色授权 + 本角色当前有没有 |
+| `mcp.grant` | `mcp_grant`, `mcp_revoke` | `mcp_grant`/`mcp_revoke`: server, role | 回读确认 + **「只对新建会话生效」**提示 |
+| ~~(无工具)~~ | ~~`mcp_add_server`~~ | — | **刻意不存在**:定义 server 是人的资产,做成工具就意味着某个模型能替甲方决定平台执行什么(同 `POST /api/artifacts/:id/verdict`)|
 | `client.ask` | `ask_client` | question, options[], lean? | `{ questionId }`(挂起等待用户) |
 | `client.message` | `tell_client` | text | 播报 |
 | `code.read` | `read` / `grep` / `find` / `ls` | SDK 内置 | |
@@ -1257,18 +1267,11 @@ export type Capability =
 | `work.report` | `report` | workId, status, summary, artifacts? |
 | `work.review_verdict` | `review_verdict` | workId, verdict(pass\|fail), severity, findingArtifactId?, note? | 质检的结论 | |
 
-**35 条 capability 展开成 45 个工具。**
+**37 条 capability 展开成 48 个工具。**
 
-`work.assign` 与 `work.create` 共用同一套 `assignee{role, spec?}` 解析(见 §3.3)—— 改派和分派走同一条路径,避免「改派绕过了歧义检查」这种不一致。
-
-**`board_list` / `board_read` 签名变更**(相对现状):
-
-```
-board_list(projectId, kind?, status?, author?, limit?)   ← 不再按 conversationId
-board_read(artifactId)
-```
-
-这是本次升级最关键的一处签名破坏 —— 作用域从「对话」变成「项目」。
+> 2026-10-16:35 → 37 条(MCP 的 `mcp.read` / `mcp.grant`)、45 → **48** 个工具
+> (新增 `mcp_list` / `mcp_grant` / `mcp_revoke` 三条 —— **是三条不是两条**,
+> 因为 `mcp.grant` 展开成 grant + revoke 两个工具,粒度与 `blackboard.read` 同纪律)。
 
 ### 3.3 角色解析:工具收角色,存储存 agent
 
@@ -1301,6 +1304,70 @@ works.assignee_agent_id = agent_xxx
 `canvas_*` / `net_*` 这批沙箱工具在本次设计中**降级为内部实现**:canvas 是代码工作根的抽象,net 出口对所有角色**永久关闭**(7-E 已裁决,本设计维持)。
 
 ---
+
+### 3.5 MCP:两个方向相反的权限层(2026-10-16,Wave 1)
+
+MCP(Model Context Protocol)让 agent 调用**外部系统**的工具。三层,权限方向各不相同:
+
+| 层 | 落点 | 谁写 | 能不能扩权 | 坏了怎么退化 |
+|---|---|---|---|---|
+| **定义** | `<dataDir>/harness/mcp/servers.json` | **人**(HTTP `POST /api/mcp/servers`)**;没有任何工具** | **能** —— 任意命令 / 任意出网 | 整份不生效 + `problem` 可见 |
+| **凭据** | `<dataDir>/harness/mcp/secrets.json`(0600) | 人(HTTP `PUT .../secrets`) | 能 | 读不到 ⇒ 不解密,`${VAR}` 原样交给 pi |
+| **授权** | `<dataDir>/harness/mcp/{role}.json` | **agent 可做**(`mcp_grant`/`mcp_revoke`)+ 人(HTTP `PUT /api/mcp/roles/:role`) | **不能** —— 只在目录里已存在的名字里开关 | **零授权**(更严)+ `problem` 可见 |
+
+⚠️ **授权的退化方向与工具集合文件刻意相反**(`harness/tools/{role}.json` 坏 ⇒
+按 `ceiling` **全集**,方向是放宽)。理由:集合文件是**收窄**机制,坏掉退回出厂
+全集最坏也只是回到默认;而 MCP 授权文件是**增量**机制,「全放行」没有任何东西
+可回落 —— 那是一次笔误换一次**静默提权**。两条纪律里「坏文件绝不能静默」是共同的。
+
+⚠️ **两条硬拒绝**:`env` / `headers` 里以 `!` 开头的值一律拒收(pi 的 `!cmd`
+是「执行这条命令并取其输出」= 配置里就能打开的任意命令执行通道;只允许 `${VAR}` 引用);
+`command` 与 `url` 必须有且只有一个。
+
+**运行时**(建会话那一刻):
+
+```
+授权文件 + servers.json
+  → mcp/solve.ts    solveMcpFor(deps, agent, project): McpSolution
+  → mcp/piConfig.ts toLoadedMcpConfig(...)  → pi 的 LoadedMcpConfig
+  → runtime/session.ts  DefaultResourceLoader({ extensionFactories: [...] })
+                     + session.bindExtensions({})
+  → createAgentSession({ tools: [...内置+平台, ...mcp__<server>__*] })
+```
+
+授权只影响**新建的会话**(会话池键是 `(项目, 会话, agent)`),所以 `mcp.grant`
+**不在** `NUDGE_CAPABILITIES` 里:叫醒所有 agent 只会让它们拿着旧授权醒来。
+`mcp_grant` 的返回文本与本节都写明了这一点。
+
+**Wave 1 的缺口(如实记,不许用假字段盖过去)**:
+
+- **没有连接状态端点**。pi 把连接状态写进 `<agentDir>/mcp.log`,平台读不到。
+  `wiring.mcpConnectionState` 恒为 `"unavailable"` —— 与 `ProjectLiveView.runtime`
+  同一条纪律:**宁可没有,也不伪造**。
+- **不支持 OAuth 登录**。三生没有 TUI,跑不了 `pi mcp login` 的浏览器回调;
+  `openUrl` 只记日志并 `log.warn`。处置是给该 server 配一个长期 token secret。
+- **不进成本观测**。MCP 调用不写 `turn_usage`,所以「某条工作项的外部工具花了多少」
+  查不到(与 §11 的 `byWork` 同款缺口,只是本轮没接线)。
+- **没有 WebUI**。Wave 1 只有 HTTP 与工具;界面上看不到这一层。
+- **codemode 被关掉**(`autoEnableCodemode: false`,每个 server `exposure: "direct"`):
+  codemode 的调用「do not depend on the active tool set」(pi 的 `docs/mcp.md`),
+  **平台的 allowlist 拦不住它**。所以只留逐条进 allowlist 的 `direct`。
+- **pi 的资源工具**(`list_mcp_resources` / `read_mcp_resource` /
+  `list_mcp_resource_templates`)到达**每一个 enabled 且非 hidden 的 server**,所以未授权的
+  server 在交给 pi 的配置里**必须**显式写成 `{ enabled: false, exposure: "hidden" }`,
+  不能只是不列。反过来,授权存在时 allowlist 里有 `mcp__` 条目 → pi 的过滤器打开 →
+  那三个工具本身不在名单里 ⇒ 它们在 Wave 1 **不可达**。
+
+`work.assign` 与 `work.create` 共用同一套 `assignee{role, spec?}` 解析(见 §3.3)—— 改派和分派走同一条路径,避免「改派绕过了歧义检查」这种不一致。
+
+**`board_list` / `board_read` 签名变更**(相对现状):
+
+```
+board_list(projectId, kind?, status?, author?, limit?)   ← 不再按 conversationId
+board_read(artifactId)
+```
+
+这是本次升级最关键的一处签名破坏 —— 作用域从「对话」变成「项目」。
 
 ## 4. 作用域与授权(核心机制)
 
@@ -1370,9 +1437,22 @@ function ScopeGate(cap: Capability, agent: Agent, project: Project): GateResult 
     return isAssigned(project, targetAgentId) ? GRANT : DENY("目标不在本项目");
   }
   // 规则 3:项目内能力需要 active 项目
+  //   前缀族:project. / work. / collab. / blackboard. / change. / blocker. / **mcp.**
+  //   例外(收口后仍可用,「说话」那一族):project.read / project.open / project.close
+  //   —— 与 client.* / memory.* / knowledge.read 同理,它们从来就没被收口挡过。
   return project.status === "active" ? GRANT : DENY("项目非 active");
 }
 ```
+
+⚠️ **`mcp.` 在 project-scoped 那一列里(2026-10-16)**,与 `work.*` / `collab.*` 同级:
+项目一收口,交付已经发生、结论已经落库,继续连外部系统只是在为一个不再变化的结论
+付钱并拿新事实。而它**没有**被放进「收口后仍可用」那三项 —— 豁免的是「说话」
+(`project.read` / `open` / `close`),不是「用外部工具」。
+
+⚠️ 这一条要在**两处**同时落地,缺一个就会漏:求解期把工具面挡掉
+(`PROJECT_SCOPED_PREFIXES` 含 `"mcp."`),运行期把 server 配置解成零
+(`mcp/solve.ts` 的 `closed_project` 状态)。只挡工具面的话,pi 那边照样把 server
+连上 —— 那一次连接要 spawn 进程 / 出网,比多给一个工具贵得多。
 
 **规则 1 就是「甲方只与业务经理交互」的机器表达。** 判定依据是 `ROLE_SPECS[agent.role].clientFacing` —— **代码内常量,全局,不可变**。即便用户往 `planner.json` 里手写 `"client.message"`,求解器也会在 scope 这一步拒掉,并把原因落到 `blockedByScope` 里对用户可见 —— 沿用 7-E/7-O 的 fail-closed + 可见性纪律。
 

@@ -19,12 +19,17 @@ import { loadProjectForAuthz } from "../storage/repo/projects.js";
 import { loadProjectRoster } from "../storage/repo/projects.js";
 import { ROLE_SPECS, isProjectRole, type ProjectRole } from "../identity/role.js";
 import { solveToolset, type Agent, type Project, type ToolSetFile } from "../harness/authorize.js";
+import type { McpGrantFile } from "../mcp/grants.js";
+import { solveMcpFor } from "../mcp/solve.js";
+import type { SecretStore } from "../mcp/secrets.js";
 import type { Capability, ToolName } from "../harness/capability.js";
 import type { MemoryPort } from "../memory/port.js";
 import type { ClientChannel } from "../client/port.js";
 import type { CodeServicePort } from "../codeservice/port.js";
 import type { WorkspacePort } from "../workspace/port.js";
 import type { ToolRunContext } from "../tools/types.js";
+
+import type { McpSolution } from "../mcp/solve.js";
 
 /** 进程级依赖。会话工厂持有一份,每次工具调用按 agent + project 组装。 */
 export interface RuntimeDeps {
@@ -62,6 +67,37 @@ export interface RuntimeDeps {
   readonly newId?: (prefix: string) => string;
   /** 用户可编辑的工具集合文件内容(缺省 = 出厂行为) */
   readonly toolSetFor?: (role: ProjectRole) => ToolSetFile | undefined;
+  /**
+   * **数据目录**。MCP 那一层的三个文件(`harness/mcp/{servers,secrets}.json`
+   * 与 `{role}.json`)都在它下面。
+   *
+   * ⚠️ **可选**:只挂 HTTP 的装配与不少单元测试不注入它,那时 MCP 一律解成
+   * 「零 server」——而不是去猜一个默认目录(猜错 = 把配置读到了别处)。
+   */
+  readonly dataDir?: string;
+  /**
+   * **角色对 MCP server 的授权**(`<dataDir>/harness/mcp/{role}.json` 的内容)。
+   *
+   * 与 {@link toolSetFor} 同一个理由、同一种实现:生产是 `mcpForDataDir(dataDir)`,
+   * **每次建会话现读盘**——缓存正是「用户改了没效果」的来源(7-B)。
+   *
+   * ⚠️ **方向与 `toolSetFor` 相反**:这里缺省 = **零授权**(不是「全放行」)。
+   * 授权文件是增量机制,坏文件/缺文件都退化到更严的一侧,理由见
+   * `mcp/grants.ts` 文件头。
+   */
+  readonly mcpFor?: (role: ProjectRole) => McpGrantFile | undefined;
+  /**
+   * **secret 存取端口**(MCP 那一层;生产由 `bootPlatform` 用真 `Keyring` 注入)。
+   *
+   * ⚠️ **缺省 = 不解密** —— 那时 `servers.json` 里写的 `${VAR}` 引用原样交给 pi
+   * (它自己从进程环境解析)。这不是「静默降级成空凭据」:`${VAR}` 本来就是
+   * 不需要平台参与的引用形式。明文 secret 只能经 Keyring 落盘,没有第二条路。
+   *
+   * 为什么是端口而不是直接用 `Keyring`:`Keyring` 在 `bootPlatform` 内部 new,
+   * **没有挂到 `RuntimeDeps` 上**(它只被 `SettingsStore` 持有);而且这个端口
+   * 只有 `seal` / `open` 两个动作,类型层就堵掉了「顺手把明文打出来」。
+   */
+  readonly secretStore?: SecretStore;
   /**
    * 状态迁移的门铃(排空器的触发点之一)。**不携带状态**,只说「去查一下」。
    *
@@ -172,6 +208,7 @@ export function buildToolContext(
     ...(deps.workspace !== undefined ? { workspace: deps.workspace } : {}),
     ...(deps.workspaceRoot !== undefined ? { workspaceRoot: deps.workspaceRoot } : {}),
     ...(deps.onStateChange !== undefined ? { nudge: deps.onStateChange } : {}),
+    ...(deps.dataDir !== undefined ? { dataDir: deps.dataDir } : {}),
   } satisfies Omit<ToolRunContext, "project">;
 
   if (projectId === null) {
@@ -220,6 +257,12 @@ export interface AgentSessionPlan {
   readonly promptUnits: readonly string[];
   /** 项目花名册(工具解析 {role,spec} 时用)。接待模式下为空 —— 还没有项目 */
   readonly roster: ReadonlyArray<{ id: string; role: string; displayName: string }>;
+  /**
+   * MCP 求解结果(2026-10-16)。**它在 `tools` 之外** —— MCP 的工具名
+   * (`mcp__<server>__<tool>`)由外部 server 在运行时才决定,平台在求解期
+   * 不知道它们叫什么,所以只能交一份 server 配置 + 一组 allowlist 模式。
+   */
+  readonly mcp: McpSolution;
 }
 
 export type PlanResult =
@@ -245,6 +288,7 @@ export function planAgentSession(
 
   const { ctx, project } = assembled;
   const solved = solveToolset(ctx.agent, project, deps.toolSetFor?.(ctx.agent.role));
+  const mcp = solveMcpFor(deps, ctx.agent, project);
 
   return {
     ok: true,
@@ -257,6 +301,7 @@ export function planAgentSession(
       blockedByScope: solved.blockedByScope.map((d) => d.subject),
       unknownTools: solved.unknownTools.map((d) => d.subject),
       promptUnits: ROLE_SPECS[ctx.agent.role].promptUnits,
+      mcp,
       roster:
         projectId === null
           ? []

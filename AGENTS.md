@@ -60,7 +60,7 @@
   判据的一部分:同一对节点上两类边**方向一致**时不是环(真机那份数据就是这样),方向相反
   才是环(`mutualPairs` 会点名是哪两条边)。写反会让「交付」跑到最左、并且把一个不存在的
   环报出来(`web/src/lib/workGraph.ts` 的 `collectEdges`)。
-- 基线:**2050 passed / 104 test files** · 两条 typecheck 0 error · `check:design` E1–E14 全绿(5 角色)。
+- 基线:**2156 passed / 110 test files** · 两条 typecheck 0 error · `check:design` E1–E14 全绿(5 角色)。
 - **角色中文名只有一处**:`src/platform/runtime/org.ts` 的 `ORG`(播种 / `roleDisplayName()` /
   `RoleHarnessView.displayName` / **系统提示里的「# 你的角色:X」**全走它);
   前端兜底表 `web/src/lib/vocab.ts` 的 `ROLE_LABEL` 必须逐项相同,由
@@ -74,7 +74,7 @@
   (把旧写法喂回去,它当场变红)。这是本项目第 3 类静默失败(坏掉的检查返回了看起来正常的答案)的一次复发。
 - 日志只走 stdout:`~/.sansheng/logs/sansheng.log` 恒为 0 字节,别去 tail 它。
 
-## 源码地图(`find src -name '*.ts' | wc -l` = 77)
+## 源码地图(`find src -name '*.ts' | wc -l` = 83)
 
 ```
 src/cli/                 CLI 入口(index.ts + paths.ts)
@@ -84,7 +84,8 @@ src/platform/transport/  传输:http(API)/ hub(WS 广播)/ views
 src/platform/runtime/    boot session turn execution assembly promptAssembly pendingWork
                          projectContext dispatcher org sdkAdapter rework
                          (rework.ts = 「退回给谁」的判据,质检返工与甲方拒收共用)
-src/platform/tools/      工具层:12 个文件、38 个平台工具定义 + registry.ts 的 dispatch()
+src/platform/tools/      工具层:14 个文件、41 个平台工具定义 + registry.ts 的 dispatch()
+src/platform/mcp/        MCP:server 目录 / secret 存储 / 角色授权 / 求解 / pi 配置转换(见下「MCP」一节)
 src/platform/codeservice/ 代码服务:port.ts(端口)+ git.ts(真实现,盘上核对仓库)
 src/platform/harness/    授权:capability(能力↔工具表)/ authorize(三道门)/ toolSet(L2 集合文件读盘)/ write(提示词写盘)
 src/platform/identity/   角色:role.ts 的 ROLE_SPECS
@@ -97,7 +98,7 @@ src/platform/client/     ClientChannel 端口
 shared/types/            跨端协议类型(platform.ts / settings.ts)
 ```
 
-工具表合计 **45 个工具 = 38 平台 + 7 SDK 内置**,能力 **35** 条 —— 这几个数字由 `check:design`
+工具表合计 **48 个工具 = 41 平台 + 7 SDK 内置**,能力 **37** 条 —— 这几个数字由 `check:design`
 (能力/工具)与 `tests/platform/client.test.ts` 的哨兵(已实现工具数)每次核对。
 
 > **不要按「单向分层」的假设推理依赖方向。** 实测 `identity ↔ harness` 之间有**值级 import 环**(`src/platform/identity/role.ts` 从 `src/platform/harness/capability.ts` 取能力表,`src/platform/harness/authorize.ts` 从 `src/platform/identity/role.ts` 取 `ROLE_SPECS`),`transport` 也会向上引 `host`。这是现状,不代表可以随手加新的反向依赖。
@@ -722,6 +723,78 @@ turn_usage / client_questions / review_verdicts / artifacts / knowledge_chunks)�
 `dispatcher-c3` 的期望值改判(交付之后**不再**立刻 `close_project`,并补了「甲方接受之后
 那条待办真的会来」的正向续演)。
 
+## MCP:定义归人,授权可 agent(2026-10-16 · Wave 1)
+
+**两个动作被刻意分成两层**,合成一层就出事:
+
+| 层 | 动作 | 谁有权 | 落点 |
+|---|---|---|---|
+| **定义** | 新增一个 server(command / url / env) | **只有人** | `POST /api/mcp/servers` |
+| **授权** | 把**已存在**的 server 开给某角色 | **人 + agent 都能** | `PUT /api/mcp/roles/:role` 或 `mcp_grant` |
+| **运行时** | 建会话时冻结一份快照 | 平台 | `RuntimeDeps.mcpFor` |
+
+⚠️ **没有任何一个工具能新增 server 定义**。理由与 029 同源:`POST /api/artifacts/:id/verdict`
+「不是工具、不在任何角色的 ceiling 里 —— 做成工具就意味着某个模型能替甲方拍板」。
+MCP server 定义 = 在这台机器上执行任意命令 / 向任意地址出网,同款处置。
+工具只有三个:`mcp_list`(读)/ `mcp_grant` / `mcp_revoke`。
+
+### 落点是文件,不是表
+
+```
+<dataDir>/harness/mcp/servers.json      ← 目录(HTTP 写)
+<dataDir>/harness/mcp/secrets.json      ← secret(Keyring 加密,0600)
+<dataDir>/harness/mcp/{role}.json       ← 该角色授权,形状同 ToolSetFile:{allow,deny}
+```
+
+**不建数据库表**。模块 = `src/platform/mcp/{config,secrets,grants,solve,piConfig}.ts`。
+HTTP 面:`GET|POST /api/mcp/servers` · `PUT /api/mcp/servers/:name/secrets` ·
+`DELETE /api/mcp/servers/:name`(仍被授权 ⇒ **409 并列出那些角色**,不静默级联)·
+`GET|PUT /api/mcp/roles/:role` · `GET /api/mcp/roles/:role/backups` ·
+`GET /api/mcp/dir`(配置目录 + `strayFiles` 落在空处的意图)。
+
+- **secret 明文不进 DB、不进任何 API 响应、不进日志、不回写文件**;解不开的只报**键名**。
+- `env`/`headers` 里**硬拒 `!` 开头的值**(pi 的 `!command` 是任意命令执行后门),只允许 `${VAR}`。
+- **角色分配**:`mcp.read` 给 business_manager 与 project_manager;`mcp.grant` **只给 project_manager**;
+  两个执行角色与质检**零 MCP**(他们已有 `code.exec`,再叠外部工具是纯扩权)。
+- **收口项目停用 MCP**:`authorize.ts` 的 `PROJECT_SCOPED_PREFIXES` 加了 `"mcp."`,
+  且**没有**加进 `DIALOGUE_SURVIVES_CLOSURE`(豁免的是「说话」,不是「用外部工具」)。
+- ⚠️ **授权只影响新建的会话** —— 会话池键是 `(项目, 会话, agent)`。改完授权要对已存在的会话
+  重建才生效。`mcp.grant` 因此**不在** `NUDGE_CAPABILITIES` 里(叫醒 agent 对旧会话无效,只是噪音)。
+
+### 坏授权文件的退路方向与 L2 集合文件**相反**(故意的)
+
+`harness/toolSet.ts` 的坏文件退化成「ceiling 全集」= **放宽**;而 MCP 授权文件是**增量机制**,
+坏文件必须退化成 **零授权**。授权文件的坏掉若按「全放行」处置,一次笔误就是一次**静默提权**。
+两个文件头的注释都写了这条,`tests/platform/mcp-grants.test.ts` 钉住对照。
+
+### ⚠️ pi 1.2.0 的四个坑(每一处都有断言钉住,`tests/platform/mcp-wiring.test.ts`)
+
+1. **SDK 会话不加载内置扩展** —— `session.ts:249` 自己传
+   `extensionFactories: [createToolSearchExtension(), createMcpExtension({...})]`。
+2. **`bindExtensions` 不会被 `createAgentSession` 自动调用**(`dist/core/agent-session.js:2630`
+   有该方法,`dist/core/sdk.js` **零调用**)⇒ 不显式 `await` 它,server 永不连接且**表面零报错**。
+   建出来的 session 没有该方法 / 绑定失败,都写进 `wiring.mcpBindError`,**不静默**。
+3. **fail-open** —— `agent-session.js:193-197` 的 `_allowlistFiltersMcp` 只在「allowlist 空」
+   或「有条目以 `mcp__` 开头」时为 true,`:1123 _isAllowedTool` 在 false 时**保留全部 MCP 工具注册**。
+   ⇒ 有授权时 `mcp__<server>__*` **必须**进 `unifiedAllowlist`(`sdkAdapter.ts:228`),
+   而它不在闭合 `ToolName` 集里 ⇒ `classifyToolset` 单独给了 `mcpPatterns` 这个桶,
+   既不进 `TOOL_INDEX` 查找、也不算 `unplaceable`。
+4. **资源工具越界** —— `list_mcp_resources` 等到达「每个 enabled 非 hidden 的 server」。
+   ⇒ 未授权的 server 必须**显式** `{enabled:false, exposure:"hidden"}`,**不能只是不列**。
+
+另两条:`autoEnableCodemode: false` 写死(codemode 的调用**不经过** active tool set,
+allowlist 拦不住它);**刻意不给 `projectConfig`**(pi 默认还会读 `<cwd>/.pi/mcp.json`,
+而 cwd = 项目仓根 ⇒ 会进 git、对甲方可见)。
+
+### Wave 1 的缺口(如实记,别当已接线)
+
+- **没有 WebUI** —— 配置走 HTTP 接口或 agent 工具;UI 是它未来的一个消费者。
+- **不支持 OAuth 登录** —— `openUrl` 只 `log.warn` 记下 URL(三生没有 TUI,跑不了浏览器回调)。
+- **连接状态读不到** —— pi 把它写进 `<agentDir>/mcp.log`,平台读不着。
+  `PiConfigResult.connectionState` 的类型是**字面量 `"unavailable"`**:宁可没有这个字段,
+  也不伪造一个「已连接」(与 `ProjectLiveView.runtime = "unavailable"` 同一条纪律)。
+- **MCP 调用暂不接进 `turn_usage` 成本观测**。
+
 ## 成本:只做观测,不设上界(2026-10-08)
 
 > **用户裁决**:「针对『成本没有上界』现在这个阶段可以放松一点,**先只做 observation**」。
@@ -852,7 +925,7 @@ node -e "console.log(Object.keys(require('./node_modules/@earendil-works/pi-ai/d
 ```
 npx tsc -p tsconfig.server.json --noEmit
 npx tsc -p tsconfig.web.json --noEmit
-npm test                  # 2050 passed / 104 files
+npm test                  # 2156 passed / 110 files
 npm run build
 npm run check:design      # 设计一致性 E1–E14
 ```

@@ -28,6 +28,9 @@ import { createLoggingClientChannel } from "../client/port.js";
 import { createGitCodeService } from "../codeservice/git.js";
 import { createGitWorkspace } from "../workspace/git.js";
 import { resolveAllToolSets, strayToolSetFiles, toolSetForDataDir } from "../harness/toolSet.js";
+import { mcpForDataDir, resolveAllGrants, strayMcpFiles } from "../mcp/grants.js";
+import { resolveMcpCatalog, mcpDir } from "../mcp/config.js";
+import { keyringSecretStore } from "../mcp/secrets.js";
 import { log } from "../../shared/log.js";
 import type { PlatformModel } from "./session.js";
 import type { RuntimeDeps } from "./assembly.js";
@@ -142,6 +145,20 @@ export function bootPlatform(opts: BootOptions): BootedPlatform {
    */
   const toolSetFor = toolSetForDataDir(opts.dataDir);
 
+  /**
+   * MCP 角色授权的接线(2026-10-16)。
+   *
+   * ⚠️ **懒读,每次建会话现读** —— 与 `toolSetFor` 同理由:用户改完授权不该需要
+   * 重启服务(缓存正是「用户改了没效果」的来源)。
+   * ⚠️ **缺省是零授权,不是「全放行」** —— 授权文件是增量机制,方向见
+   * `mcp/grants.ts` 文件头。
+   */
+  const mcpFor = mcpForDataDir(opts.dataDir);
+
+  // MCP 的 secret 端口。用**同一个 keyring 文件**(`.keyring`),所以两份密文
+  // 能互相解开 —— 这正是我们要的(否则换 token 要重登 provider)。
+  const secretStore = keyringSecretStore(keyring);
+
   // 开机时把 L2 的**真实状态**说出来。三种状态里只有 `ok` 会真的收窄工具面;
   // `invalid` 会退化成 ceiling 全集(方向上是**放宽**)—— 那一条必须以 warn
   // 出现,否则「文件坏了」和「文件生效了」在日志里长得一模一样。
@@ -164,6 +181,36 @@ export function bootPlatform(opts: BootOptions): BootedPlatform {
     );
   }
 
+  // MCP 的**真实状态**。三段:目录 / 每个角色的授权 / 落在空处的意图。
+  //
+  // ⚠️ 零授权角色**也要说一句**(与 smoke 同规格):「没配」和「配坏了」在
+  // 启动日志里长得一模一样 —— 而 MCP 的坏文件方向是**零授权**(更严),
+  // 不说出来的后果是「外部工具全都不工作,日志一片正常」。
+  const catalog = resolveMcpCatalog(opts.dataDir);
+  if (catalog.state === "invalid") {
+    log.warn(`mcp: server 目录无效 ← ${catalog.path}\n        ${catalog.problem ?? ""}`);
+  } else if (catalog.state === "ok") {
+    log.muted(`mcp: server 目录生效 ← ${catalog.path}(${catalog.servers.length} 条)`);
+  } else {
+    log.muted(`mcp: 没有 server 目录(${mcpDir(opts.dataDir)}/servers.json)—— 本平台不接任何外部工具`);
+  }
+  for (const g of resolveAllGrants(opts.dataDir)) {
+    if (g.state === "ok") {
+      log.muted(
+        `mcp: 授权生效 ${g.role} ← ${g.path} (allow ${g.file?.allow.length ?? 0} 条 · deny ${g.file?.deny.length ?? 0} 条)`,
+      );
+    } else if (g.state === "invalid") {
+      log.warn(`mcp: 授权文件无效 ${g.role} ← ${g.path}\n        ${g.problem ?? ""}`);
+    }
+  }
+  const strayMcp = strayMcpFiles(opts.dataDir);
+  if (strayMcp.length > 0) {
+    log.warn(
+      `mcp: MCP 目录里有不认识的 ${strayMcp.length} 个文件(${strayMcp.join(", ")})—— ` +
+        `授权文件名必须是 ${"<role>.json"},不认识的不会被读取`,
+    );
+  }
+
   const deps: RuntimeDeps = {
     db,
     ...(memory !== undefined ? { memory } : {}),
@@ -171,6 +218,9 @@ export function bootPlatform(opts: BootOptions): BootedPlatform {
     now: opts.now ?? (() => Date.now()),
     newId: opts.newId ?? defaultNewId,
     toolSetFor,
+    dataDir: opts.dataDir,
+    mcpFor,
+    secretStore,
     // 代码服务的核对面(migration 026 的 `code_service` 交付物)。
     // ⚠️ 根取 `workspaceRoot ?? settings.cwd`,与 `serve.ts` 的 `sessionCwd()`
     // 走同一个默认值 —— 详见 `BootOptions.workspaceRoot`。

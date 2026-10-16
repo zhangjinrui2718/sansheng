@@ -85,6 +85,21 @@ import type { ResetReport } from "../host/reset.js";
 import {
   listBackups, promptUnitIds, resetPromptUnit, writePromptUnit, type FactoryDirs,
 } from "../harness/write.js";
+import {
+  resolveMcpCatalog, catalogNames, isValidServerName, parseMcpCatalog, writeMcpCatalog, mcpDir,
+  type McpServerDef,
+} from "../mcp/config.js";
+import {
+  readGrantFile, grantedRolesOf, writeGrantFile, listGrantBackups, strayMcpFiles,
+} from "../mcp/grants.js";
+import {
+  readEncryptedSecrets, writeEncryptedSecrets, deleteEncryptedSecrets, hasSecrets,
+} from "../mcp/secrets.js";
+import type { SecretStore } from "../mcp/secrets.js";
+import { mkdirSync, renameSync, writeFileSync } from "node:fs";
+import type {
+  McpCatalogView, McpRoleGrantView, McpServerView,
+} from "@shared/types/platform.js";
 
 export interface HttpDeps {
   readonly db: Database.Database;
@@ -125,6 +140,12 @@ export interface HttpDeps {
   readonly reset: () => ResetReport;
   /** harness 写面的两个目录(数据目录 + 出厂副本目录) */
   readonly harnessDirs: FactoryDirs;
+  /**
+   * **secret 存取端口**(MCP;生产由宿主注入,它与 provider 凭据共用同一个
+   * `.keyring`)。缺省时 `PUT /api/mcp/servers/:name/secrets` **拒绝**并报装配错误 ——
+   * 宁可写不进去,也不把明文写到磁盘上。
+   */
+  readonly secretStore?: SecretStore;
   /**
    * **代码服务的核对面**(migration 026)。用来读一个代码服务交付物的**最近提交**
    * —— 那是「这一版到底改了什么」的唯一现场,而它只有在盘上才读得到。
@@ -174,6 +195,19 @@ const err = (code: string, message: string, status: 400 | 404 | 409 | 500 = 400)
   body: { error: { code, message } },
   status,
 });
+
+/**
+ * 同上,但带一个**补充清单**(合法 server 名 / 合法角色 / 仍然授权着的角色)。
+ *
+ * 8-F 的教训:拒绝必须让调用方能据此自纠,所以「不知道有哪些」时要把清单给出去,
+ * 而不是让它去猜。字段名与平台既有形状一致(`validIds` / 各自专用名)。
+ */
+const errWith = (
+  code: string,
+  message: string,
+  extra: Readonly<Record<string, unknown>>,
+  status: 400 | 404 | 409 | 500 = 400,
+) => ({ body: { error: { code, message, ...extra } }, status });
 
 /**
  * 把「一次扫描 + 索引侧状态」装配成 `WorkspaceView`(设计 §4.4)。
@@ -1220,6 +1254,301 @@ app.get("/api/client-questions", (c) => c.json(listAllClientQuestions(db)));
 
   app.get("/api/harness/units/:unitId/backups", (c) =>
     c.json({ backups: listBackups(deps.dataDir, c.req.param("unitId")) }),
+  );
+
+  // ── MCP(外部工具)· 2026-10-16 ──────────────────────────────────
+  //
+  // **这一段是 server 定义的**唯一**写面**,而它是人的资产:模型没有对应工具。
+  // 与 `POST /api/artifacts/:id/verdict` 同款处置(那是甲方裁决)。
+  //
+  // ⚠️ **两条纪律**:
+  //   ① **secret 的值永不出现** —— 读面只给 `hasSecrets` 与 key 名。
+  //   ② **不造「连接状态」端点** —— Wave 1 平台读不到每个会话的 MCP 连接状态
+  //      (pi 把它写进 `<agentDir>/mcp.log`)。宁可没有这个字段,也不伪造
+  //      「已连接」—— 与 `ProjectLiveView.runtime = "unavailable"` 同源。
+  //
+  // 写面逐条遵守 `harness/write.ts` 的四条规矩:闭合注册表防路径穿越(server 名
+  // 过 `isValidServerName`,role 过 `PROJECT_ROLES`)、备份是写的前置、
+  // 报成功 = 回读磁盘上那份、备份保留 10 份。
+
+  /** 一条 server 的读面。⚠️ 不含 secret 值,也不含连接状态。 */
+  function toMcpServerView(name: string): McpServerView | null {
+    const catalog = resolveMcpCatalog(deps.dataDir);
+    const def = catalog.servers.find((s) => s.name === name);
+    if (def === undefined) return null;
+    return {
+      name: def.name,
+      transport: def.transport,
+      ...(def.command !== undefined ? { command: def.command } : {}),
+      ...(def.args !== undefined ? { args: [...def.args] } : {}),
+      ...(def.url !== undefined ? { url: def.url } : {}),
+      ...(def.description !== undefined ? { description: def.description } : {}),
+      // ⚠️ 只给**键名**:`${VAR}` 引用本身可以给,值里可能藏 secret 的那些不给。
+      ...(def.env !== undefined ? { envKeys: Object.keys(def.env).sort() } : {}),
+      ...(def.headers !== undefined ? { headerKeys: Object.keys(def.headers).sort() } : {}),
+      hasSecrets: hasSecrets(deps.dataDir, def.name),
+      grantedTo: grantedRolesOf(deps.dataDir, def.name),
+    };
+  }
+
+  function buildMcpCatalogView(): McpCatalogView {
+    const catalog = resolveMcpCatalog(deps.dataDir);
+    const views: McpServerView[] = [];
+    for (const s of catalog.servers) {
+      const v = toMcpServerView(s.name);
+      if (v !== null) views.push(v);
+    }
+    return {
+      servers: views,
+      ...(catalog.problem !== undefined ? { problem: catalog.problem } : {}),
+      path: catalog.path,
+    };
+  }
+
+  function buildMcpRoleGrantView(role: ProjectRole): McpRoleGrantView {
+    const r = readGrantFile(deps.dataDir, role);
+    const catalog = resolveMcpCatalog(deps.dataDir);
+    const available = catalogNames(catalog);
+    const allow = r.file?.allow ?? [];
+    const unknownServers = allow.filter((n) => !available.includes(n));
+    return {
+      role,
+      allow: [...allow],
+      deny: [...(r.file?.deny ?? [])],
+      state: r.state,
+      path: r.path,
+      ...(r.problem !== undefined ? { problem: r.problem } : {}),
+      ...(unknownServers.length > 0 ? { unknownServers } : {}),
+      availableServers: available,
+    };
+  }
+
+  app.get("/api/mcp/servers", (c) => c.json(buildMcpCatalogView()));
+
+  app.post("/api/mcp/servers", async (c) => {
+    const body = (await c.req.json().catch(() => null)) as Record<string, unknown> | null;
+    if (body === null) {
+      return c.json(err("invalid_args", "请求体需要一条 server 定义").body, 400);
+    }
+    const name = body["name"];
+    if (typeof name !== "string" || !isValidServerName(name)) {
+      return c.json(
+        err("invalid_args", `server 名「${String(name)}」不合法 —— 只允许字母 / 数字 / _ / -(1~64 字符)`).body,
+        400,
+      );
+    }
+    // 整体替换这一条:先剔除同名的,再让校验器判定新的一条。
+    const current = resolveMcpCatalog(deps.dataDir);
+    // 目录坏着时**不能**拿它当基底 —— 那会把别的错误一起写进去。
+    // 改成拒绝,并说明原因。⚠️ `absent` 不是「坏」:它是一份空目录,基底就是空。
+    let base: readonly McpServerDef[] | null;
+    if (current.state === "ok") base = current.servers.filter((s) => s.name !== name);
+    else if (current.state === "absent") base = [];
+    else base = null;
+    if (base === null) {
+      return c.json(
+        {
+          error: {
+            code: "catalog_invalid",
+            message:
+              `server 目录当前读不了(${current.path}),先修好它再改。${current.problem ?? ""}\n` +
+              `不接受在坏目录上叠加一条 —— 那会把「一个笔误」变成「目录全部重写」`,
+          },
+        },
+        409,
+      );
+    }
+    const parsed = parseMcpCatalog({ servers: { [name]: body } });
+    if (!parsed.ok) {
+      return c.json(err("invalid_args", parsed.detail).body, 400);
+    }
+    const w = writeMcpCatalog(deps.dataDir, { ...current, servers: [...base, ...parsed.servers] }, deps.now());
+    if (!w.ok) {
+      return c.json({ error: { code: w.reason ?? "write_failed", message: w.detail ?? "写入失败" } }, 500);
+    }
+    // 规矩③:返回**回读**到的那一条
+    const view = toMcpServerView(name);
+    return c.json({
+      ok: true,
+      server: view,
+      ...(w.backupPath !== undefined ? { backupPath: w.backupPath } : {}),
+    });
+  });
+
+  app.put("/api/mcp/servers/:name/secrets", async (c) => {
+    const name = c.req.param("name");
+    if (!isValidServerName(name)) {
+      return c.json(err("invalid_args", `server 名「${name}」不合法`).body, 400);
+    }
+    const catalog = resolveMcpCatalog(deps.dataDir);
+    if (!catalog.servers.some((s) => s.name === name)) {
+      const e = errWith("not_found", `目录里没有名为「${name}」的 server`, { validIds: catalogNames(catalog) }, 404);
+      return c.json(e.body, e.status);
+    }
+    const body = (await c.req.json().catch(() => null)) as { env?: unknown; headers?: unknown } | null;
+    if (body === null || (body.env === undefined && body.headers === undefined)) {
+      return c.json(err("invalid_args", "请求体需要 { env?: {...}, headers?: {...} }").body, 400);
+    }
+    const clean = (v: unknown, field: string): { ok: true; value: Record<string, string> } | { ok: false; message: string } => {
+      if (v === undefined) return { ok: true, value: {} };
+      if (typeof v !== "object" || v === null || Array.isArray(v)) {
+        return { ok: false, message: `${field} 必须是一个对象` };
+      }
+      const out: Record<string, string> = {};
+      for (const [k, val] of Object.entries(v as Record<string, unknown>)) {
+        if (typeof val !== "string") return { ok: false, message: `${field}.${k} 必须是字符串` };
+        if (val.startsWith("!")) {
+          return {
+            ok: false,
+            message:
+              `${field}.${k} 以 "!" 开头 —— pi 的 "!<命令>" 语法会**执行这条命令**并取它的输出,` +
+              `那是任意命令执行通道,平台一律不收。secret 请直接写明文(它会被 Keyring 加密落盘)`,
+          };
+        }
+        out[k] = val;
+      }
+      return { ok: true, value: out };
+    };
+    const envR = clean(body.env, "env");
+    if (!envR.ok) return c.json(err("invalid_args", envR.message).body, 400);
+    const headersR = clean(body.headers, "headers");
+    if (!headersR.ok) return c.json(err("invalid_args", headersR.message).body, 400);
+
+    const store = deps.secretStore;
+    if (store === undefined) {
+      const e = err(
+        "internal",
+        "装配错误:没有 secret 端口(keyring)—— 拒绝把明文写到磁盘上",
+        500,
+      );
+      return c.json(e.body, e.status);
+    }
+    const sealedEnv: Record<string, string> = {};
+    for (const [k, v] of Object.entries(envR.value)) sealedEnv[k] = store.seal(v);
+    const sealedHeaders: Record<string, string> = {};
+    for (const [k, v] of Object.entries(headersR.value)) sealedHeaders[k] = store.seal(v);
+
+    const readBack = writeEncryptedSecrets(
+      deps.dataDir,
+      name,
+      { env: sealedEnv, headers: sealedHeaders },
+    );
+    // ⚠️ 响应里**只有 hasSecrets**,绝没有回显密文(密文也是凭据材料)。
+    return c.json({
+      ok: true,
+      name,
+      hasSecrets: hasSecrets(deps.dataDir, name),
+      secretKeys: {
+        env: Object.keys(readBack.env).sort(),
+        headers: Object.keys(readBack.headers).sort(),
+      },
+    });
+  });
+
+  app.delete("/api/mcp/servers/:name", (c) => {
+    const name = c.req.param("name");
+    if (!isValidServerName(name)) {
+      return c.json(err("invalid_args", `server 名「${name}」不合法`).body, 400);
+    }
+    const catalog = resolveMcpCatalog(deps.dataDir);
+    if (catalog.state !== "ok" || !catalog.servers.some((s) => s.name === name)) {
+      return c.json(
+        errWith("not_found", `目录里没有名为「${name}」的 server`, { validIds: catalogNames(catalog) }, 404),
+        404,
+      );
+    }
+    // ⚠️ 不静默级联删授权:仍被谁授权着,就点名那些人并让调用方自己决定。
+    const granted = grantedRolesOf(deps.dataDir, name);
+    if (granted.length > 0) {
+      return c.json(
+        {
+          error: {
+            code: "still_granted",
+            message:
+              `「${name}」仍被授权给:${granted.join(", ")} —— 删掉定义不会自动收回授权` +
+              `(那些授权会变成 unknownServers,不再生效)。要一起清,请先对每个角色调 PUT /api/mcp/roles/:role`,
+            grantedTo: granted,
+          },
+        },
+        409,
+      );
+    }
+    const next = catalog.servers.filter((s) => s.name !== name);
+    const w = writeMcpCatalog(deps.dataDir, { ...catalog, servers: next }, deps.now());
+    if (!w.ok) {
+      return c.json({ error: { code: w.reason ?? "write_failed", message: w.detail ?? "写入失败" } }, 500);
+    }
+    deleteEncryptedSecrets(deps.dataDir, name);
+    return c.json({ ok: true, deleted: name, ...(w.backupPath !== undefined ? { backupPath: w.backupPath } : {}) });
+  });
+
+  app.get("/api/mcp/roles/:role", (c) => {
+    const role = c.req.param("role");
+    if (!(PROJECT_ROLES as readonly string[]).includes(role)) {
+      const e = errWith("invalid_args", `未知角色「${role}」`, { validIds: [...PROJECT_ROLES] });
+      return c.json(e.body, e.status);
+    }
+    return c.json(buildMcpRoleGrantView(role as ProjectRole));
+  });
+
+  app.put("/api/mcp/roles/:role", async (c) => {
+    const role = c.req.param("role");
+    if (!(PROJECT_ROLES as readonly string[]).includes(role)) {
+      const e = errWith("invalid_args", `未知角色「${role}」`, { validIds: [...PROJECT_ROLES] });
+      return c.json(e.body, e.status);
+    }
+    const body = (await c.req.json().catch(() => null)) as { allow?: unknown; deny?: unknown } | null;
+    if (
+      body === null ||
+      !Array.isArray(body.allow) ||
+      body.allow.some((x) => typeof x !== "string") ||
+      !Array.isArray(body.deny) ||
+      body.deny.some((x) => typeof x !== "string")
+    ) {
+      return c.json(err("invalid_args", "请求体需要 { allow: string[], deny: string[] }(两个都必须存在)").body, 400);
+    }
+    const catalog = resolveMcpCatalog(deps.dataDir);
+    const available = catalogNames(catalog);
+    const allow = body.allow as string[];
+    const unknown = [...allow, ...(body.deny as string[])].filter((n) => !available.includes(n));
+    if (unknown.length > 0) {
+      // 未知名字 → 400 + 列出可用名。**不静默忽略**:那会让用户以为写进去了。
+      return c.json(
+        {
+          error: {
+            code: "unknown_server",
+            message:
+              `这些 server 名不在目录里:${unknown.join(", ")} —— 定义是**人的资产**且只能通过 ` +
+              `POST /api/mcp/servers 创建,所以授权不能凭空提一个名字。`,
+            availableServers: available,
+          },
+        },
+        400,
+      );
+    }
+    const w = writeGrantFile(
+      deps.dataDir,
+      role as ProjectRole,
+      { allow, deny: body.deny as string[] },
+      deps.now(),
+    );
+    if (!w.ok) {
+      return c.json({ error: { code: w.reason ?? "write_failed", message: w.detail ?? "写入失败" } }, 500);
+    }
+    return c.json({ ...buildMcpRoleGrantView(role as ProjectRole), ...(w.backupPath !== undefined ? { backupPath: w.backupPath } : {}) });
+  });
+
+  app.get("/api/mcp/roles/:role/backups", (c) => {
+    const role = c.req.param("role");
+    if (!(PROJECT_ROLES as readonly string[]).includes(role)) {
+      const e = errWith("invalid_args", `未知角色「${role}」`, { validIds: [...PROJECT_ROLES] });
+      return c.json(e.body, e.status);
+    }
+    return c.json({ backups: listGrantBackups(deps.dataDir, role as ProjectRole) });
+  });
+
+  app.get("/api/mcp/dir", (c) =>
+    c.json({ dir: mcpDir(deps.dataDir), strayFiles: strayMcpFiles(deps.dataDir) }),
   );
 
   // ── 记忆画像(结构化摘要,与片段互补)──────────────────────────

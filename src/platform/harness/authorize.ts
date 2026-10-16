@@ -125,12 +125,21 @@ export interface SolveResult {
  *   - `memory.*`  —— 记忆是关于「用户」的,跨项目(设计 2 §10)
  *   - `code.*`    —— 工作在 `settings.cwd` 里,不属于某个 project
  * `client.*` 单独走 clientFacing 规则,不重复要求 active(它以业务经理身份成立)。
+ *
+ * ⚠️ **`mcp.` 在这一列里(2026-10-16)**,与 `work.*` / `collab.*` 同级。
+ * 项目一收口,组织就**不该再让它的 agent 去动外部系统**:交付已经发生、
+ * 结论已经落库,继续连外部工具只是在为一个不再变化的结论付钱 + 拿新事实。
+ * ⚠️ 而 `DIALOGUE_SURVIVES_CLOSURE` **没有**放它进去 —— 豁免的是「说话」
+ * (`project.read` / `open` / `close` 那三项),不是「用外部工具」。
+ * 同理 `knowledge.read` 从来就不是 project-scoped 的(它跨项目全局可读),
+ * 本轮**没有**顺手把它改成 scoped —— 那是一次与 MCP 无关的语义变更。
  */
 const PROJECT_SCOPED_PREFIXES = [
   "project.",
   "work.",
   "collab.",
   "blackboard.",
+  "mcp.",
   "change.",
   "blocker.",
 ] as const;

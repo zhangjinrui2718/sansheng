@@ -38,7 +38,7 @@ import {
   type DeliveryAcceptance,
 } from "../storage/repo/deliveryVerdicts.js";
 import {
-  getProjectRow, listProjects, listAssignments, type ProjectRow,
+  getProjectRow, listProjects, listAssignments, isTerminalProjectStatus, type ProjectRow,
 } from "../storage/repo/projects.js";
 import { isProjectRole, type ProjectRole } from "../identity/role.js";
 import type { ProjectUsageAggregate, TurnUsageRow } from "../storage/repo/usage.js";
@@ -214,12 +214,11 @@ function acceptanceOfArtifact(
 /**
  * 项目是不是**终态**(收口不可逆)`done` / `abandoned`。
  *
- * 判据只有这一处 —— 收口门、验收读面、`pendingAcceptance` 的口径都从它来。
- * 写两遍就会出现「状态说已结项、而页面还在等你验收」这种自相矛盾。
+ * ⚠️ **判据的单一真相现在在 `storage/repo/projects.ts`**(2026-10-16 移过来,
+ * 因为 `mcp/solve.ts` 需要同一条判据,而从传输层 import 会形成加载环)。
+ * 这里只做再导出,让既有的 `from "./views.js"` 调用方一个字节都不用改。
  */
-export function isTerminalProjectStatus(s: ProjectStatus): boolean {
-  return s === "done" || s === "abandoned";
-}
+export { isTerminalProjectStatus };
 
 /**
  * `metadata_json` → 代码服务坐标(migration 026)。

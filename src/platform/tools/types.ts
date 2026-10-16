@@ -106,6 +106,17 @@ export interface ToolRunContext {
    * 缺省(未注入,例如纯工具单测)时什么都不发生:门铃只是加速,定时器兜底。
    */
   readonly nudge?: () => void;
+
+  /**
+   * **数据目录**(2026-10-16,为 MCP 那一层加的)。
+   *
+   * MCP 的三个文件都在它下面:`harness/mcp/servers.json`(server 定义)、
+   * `harness/mcp/secrets.json`(Keyring 加密的凭据)、`harness/mcp/{role}.json`(授权)。
+   *
+   * ⚠️ **可选**:缺省时 `mcp_*` 工具**报装配错误**,而不是假装「没有 MCP」——
+   * 「读不到」与「没有」是两种不同的回答(见 `ProjectLiveView.runtime`)。
+   */
+  readonly dataDir?: string;
 }
 
 /**

@@ -164,11 +164,33 @@ export interface ClassifiedToolset {
    */
   readonly unplaceable: readonly ToolName[];
   /**
-   * 交给 `createAgentSession({ tools })` 的**统一 allowlist** —— 内置 + 平台全都在里面。
+   * MCP 的 allowlist **模式**(`mcp__<server>__*`),2026-10-16。
+   *
+   * ⚠️ 为什么单独一个桶:它们既不是 SDK 内置、也不是 `TOOL_INDEX` 里的平台工具
+   * —— 名字由**外部 server 在运行时才决定**,平台在求解期根本不知道它们叫什么。
+   * 若照旧走进 `TOOL_INDEX` 查找,`mcp__docs__search` 会被判成 `unplaceable`
+   * 而**硬失败整个建会话**(「交不出去的工具等于声称有而实际没有」——
+   * 那条纪律本身没错,但它对这一类名字**不适用**:它们不是交不出去,
+   * 是交给 pi 的 MCP 扩展去交)。
+   *
+   * ⚠️ **模式必须在统一 allowlist 里**(不只是记下来):
+   * pi 的 `AgentSession._allowlistFiltersMcp` 只有在「allowlist 为空」或
+   * 「某个条目以 `mcp__` 开头」时才为 true,而 `_isAllowedTool` 在它为 false 时
+   * **保留全部 MCP 工具注册**(fail-open)。所以把模式放进去正是那把开关。
+   * 零授权时 `mcpPatterns` 为空 ⇒ allowlist 里没有 `mcp__` 条目 ⇒ 那一档
+   * 保持开启,而因为一条 server 都没启用,那里**没有任何工具可注册**。
+   */
+  readonly mcpPatterns: readonly string[];
+  /**
+   * 交给 `createAgentSession({ tools })` 的**统一 allowlist** —— 内置 + 平台 + MCP 模式全都在里面。
+   *
+   * ⚠️ 类型是 `string[]` 而不是 `ToolName[]`:最后一段是 MCP 模式,
+   * 它们**不在闭合集里**(`ToolName` 是平台与 SDK 的工具名闭集)。
+   * 这正是它们需要一个单独桶的原因。
    *
    * 不能只放内置:那会把 customTools 一起关掉(见文件头 ①)。
    */
-  readonly unifiedAllowlist: readonly ToolName[];
+  readonly unifiedAllowlist: readonly string[];
 }
 
 /**
@@ -176,8 +198,14 @@ export interface ClassifiedToolset {
  *
  * 这是**唯一**该做这个判断的地方 —— 会话工厂按名字自己猜是这类 bug 的温床:
  * 两边的工具名都是闭合集,猜错的那个会静默失踪。
+ *
+ * `mcpPatterns` 由调用方显式传进来:它**不是**从 `tools` 里推出来的 ——
+ * MCP 工具名不在闭合集里,平台在求解期只知道 server 名单(`mcp/solve.ts`)。
  */
-export function classifyToolset(tools: readonly ToolName[]): ClassifiedToolset {
+export function classifyToolset(
+  tools: readonly ToolName[],
+  mcpPatterns: readonly string[] = [],
+): ClassifiedToolset {
   const builtinTools: SdkToolName[] = [];
   const platformTools: PlatformTool[] = [];
   const unplaceable: ToolName[] = [];
@@ -194,6 +222,10 @@ export function classifyToolset(tools: readonly ToolName[]): ClassifiedToolset {
 
   // 统一名单的**顺序与来源无关**,但必须完整覆盖求解结果 ——
   // 少一个就静默失踪,多一个就未声明越权
-  const unifiedAllowlist: ToolName[] = [...builtinTools, ...platformTools.map((t) => t.name)];
-  return { builtinTools, platformTools, unplaceable, unifiedAllowlist };
+  const unifiedAllowlist: string[] = [
+    ...builtinTools,
+    ...platformTools.map((t) => t.name),
+    ...mcpPatterns,
+  ];
+  return { builtinTools, platformTools, unplaceable, mcpPatterns, unifiedAllowlist };
 }

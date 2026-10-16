@@ -1073,6 +1073,63 @@ export interface HarnessView {
   writable: true;
 }
 
+// ── MCP(外部工具)· 2026-10-16 ───────────────────────────────────
+//
+// ⚠️ **server 定义是人的资产**:只有 HTTP 能写,平台**刻意没有**对应的工具。
+// 授权(在已定义的名字里开关)才是 agent 可做的(见 `mcp_grant` / `mcp_revoke`)。
+//
+// ⚠️ **`McpServerView` 里没有 secret 的值,也没有「连接状态」**:
+//   secret 只以 `hasSecrets: boolean` 出现;连接状态平台读不到(pi 写进
+//   `<agentDir>/mcp.log`),宁可没有也不伪造 —— 与 `ProjectLiveView.runtime`
+//   的纪律同源。
+
+export interface McpServerView {
+  name: string;
+  transport: "stdio" | "http";
+  /** stdio 专用 */
+  command?: string;
+  args?: readonly string[];
+  /** http 专用 */
+  url?: string;
+  description?: string;
+  /**
+   * `${VAR}` 引用与 key 名(**不含值**)。
+   *
+   * ⚠️ 值里出现过 secret 的键不在这里 —— 那些只出现在 `hasSecrets` 里。
+   */
+  envKeys?: readonly string[];
+  headerKeys?: readonly string[];
+  /** 有没有配 secret。**永远只是布尔值**。 */
+  hasSecrets: boolean;
+  /** 哪些角色被授权了这个 server(读的是授权文件本身) */
+  grantedTo: readonly string[];
+  /** 目录里存在、但**被 `!command` 之类规则拒收**的那一条 —— 读面必须让人看见 */
+  problem?: string;
+}
+
+export interface McpCatalogView {
+  servers: McpServerView[];
+  /** server 目录文件坏掉的原因(`state === "invalid"` 时非空) */
+  problem?: string;
+  /** 目录路径(让用户知道去哪编辑) */
+  path: string;
+}
+
+export interface McpRoleGrantView {
+  role: string;
+  allow: readonly string[];
+  deny: readonly string[];
+  state: "absent" | "ok" | "invalid";
+  path: string;
+  /** `state === "invalid"` 时非空 —— 方向与工具集合文件相反:退化成**零授权** */
+  problem?: string;
+  /** 授权文件里写了、目录里没有的名字 —— **不静默生效** */
+  unknownServers?: readonly string[];
+  /** 可用的 server 名(写面回灌,让调用方自纠而不是去猜) */
+  availableServers?: readonly string[];
+  backups?: ReadonlyArray<{ file: string; path: string }>;
+}
+
 // ── HTTP 响应 ────────────────────────────────────────────────────
 
 export interface ApiErrorBody {

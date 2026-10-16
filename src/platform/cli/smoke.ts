@@ -39,6 +39,7 @@ import { planAgentSession } from "../runtime/assembly.js";
 import { insertAgent } from "../storage/repo/agents.js";
 import { insertProject, addMember } from "../storage/repo/projects.js";
 import { ROLE_SPECS, PROJECT_ROLES, type ProjectRole, type Specialization } from "../identity/role.js";
+import { describeMcpSolution } from "../mcp/piConfig.js";
 
 export interface PlatformSmokeOptions {
   /** 真实数据目录(读 provider 配置) */
@@ -115,6 +116,21 @@ export async function runPlatformSmoke(opts: PlatformSmokeOptions): Promise<bool
       if (arr.length > 0) out(`  ⚠️ ${label}: ${arr.join(", ")}`);
     }
 
+    // ── 外部工具(MCP)· 与上面同规格 ──
+    // ⚠️ **零授权角色也要打印一行** —— 「没配」与「配坏了」在输出里长得一模一样,
+    // 而 MCP 的坏文件方向是**零授权**(更严):不说出来的后果是「外部工具全都不工作,
+    // 而这一屏一切正常」。
+    rule("外部工具(MCP)");
+    for (const demoAgent of DEMO_AGENTS) {
+      const plannedForRole = planAgentSession(booted.deps, demoAgent.id, "demo-project");
+      if (!plannedForRole.ok) {
+        out(`  ${demoAgent.role}: 规划失败(${plannedForRole.reason})`);
+        continue;
+      }
+      // 零授权角色也要打印一行(理由见上)
+      out(describeMcpSolution(plannedForRole.plan.mcp).split("\n").map((l) => `  ${l}`).join("\n"));
+    }
+
     // ── 真建会话 ──
     rule("建会话(真 SDK)");
     const created = await createPlatformSession(booted.deps, agentId, "demo-project", {
@@ -129,8 +145,22 @@ export async function runPlatformSmoke(opts: PlatformSmokeOptions): Promise<bool
       return false;
     }
     out(`  ✓ 会话已建立`);
-    out(`  统一 allowlist:      ${created.wiring.allowlist.length} 个(内置 + 平台)`);
+    out(`  统一 allowlist:      ${created.wiring.allowlist.length} 个(内置 + 平台${created.wiring.mcpPatterns.length > 0 ? ` + MCP 模式 ${created.wiring.mcpPatterns.length}` : ""})`);
     out(`  customTools 实现:    ${created.wiring.customToolNames.length} 个`);
+    out(`  MCP server:          ${created.wiring.mcpServers.join(", ") || "(无授权)"}`);
+    if (created.wiring.mcpPatterns.length > 0) {
+      out(`  MCP allowlist 模式:  ${created.wiring.mcpPatterns.join(", ")}`);
+    }
+    if (created.wiring.mcpUnknownServers.length > 0) {
+      out(`  ⚠️ 授权里有、目录里没有:${created.wiring.mcpUnknownServers.join(", ")}(不静默生效)`);
+    }
+    if (created.wiring.mcpUnresolvedSecrets.length > 0) {
+      out(`  ⚠️ 解不开的 secret(只列键名):${created.wiring.mcpUnresolvedSecrets.join(", ")}`);
+    }
+    if (created.wiring.mcpBindError !== undefined) {
+      out(`  ⚠️ bindExtensions 失败:${created.wiring.mcpBindError}`);
+    }
+    out(`  MCP 连接状态:        ${created.wiring.mcpConnectionState}(Wave 1 读不到 —— 宁可没有也不伪造)`);
 
     // ── 提示词是否真的送达(7-B 那一课的守卫)──
     rule("提示词(7-B 死接线守卫)");

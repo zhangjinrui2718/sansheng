@@ -42,6 +42,22 @@ export function isProjectStatus(v: unknown): v is ProjectStatus {
   return typeof v === "string" && (PROJECT_STATUSES as readonly string[]).includes(v);
 }
 
+/**
+ * 项目是不是**终态**(收口不可逆)`done` / `abandoned`。
+ *
+ * **单一真相在这里**(`transport/views.ts` 现在只是再导出它):收口门、验收读面、
+ * `pendingAcceptance` 的口径、MCP 的作用域门都从它来。
+ *
+ * ⚠️ 2026-10-16 之前它在 `transport/views.ts` 里,而 `mcp/solve.ts` 需要同一条
+ * 判据 —— 从那里 import 会形成一条加载环(`views → runtime/dispatcher →
+ * tools/registry → tools/mcp → mcp/solve → views`)。把判据落到**仓储层**
+ * (`ProjectStatus` 这个类型本来就来自 `harness/authorize`,与传输层无关)解开了它。
+ * 写两遍就会出现「状态说已结项、而另一处还在给它派活」这种自相矛盾。
+ */
+export function isTerminalProjectStatus(s: ProjectStatus): boolean {
+  return s === "done" || s === "abandoned";
+}
+
 interface RawProject {
   id: string;
   name: string;

@@ -51,6 +51,21 @@ export type Capability =
   // ── 知识语料(设计 `docs/DESIGN-KNOWLEDGE.md`)──
   // **只读**:索引由平台做(零模型调用),agent 只消费 —— 所以没有 knowledge.write
   | "knowledge.read"
+  // ── MCP(Model Context Protocol)外部工具 ──
+  //
+  // ⚠️ **这两条只管「授权」,不管「定义」** —— 那条分界是 MCP 层的全部要点:
+  //   · server **定义**(命令 / URL / 凭据)= **人的资产**,只有 HTTP 写面
+  //     (`POST /api/mcp/servers`),**任何角色的 ceiling 里都没有对应工具**。
+  //     理由与 `POST /api/artifacts/:id/verdict` 同款:做成工具就意味着某个
+  //     模型能替甲方决定「平台可以执行哪条命令、可以向哪个地址出网」。
+  //   · server **授权**(谁能用哪个)= agent 可做,这就是下面这两条。
+  //
+  // 而**真正把工具交到模型面前**的那一步在 SDK 侧:授权解析出来的 server 会
+  // 被装进 pi 的 MCP 扩展,以 `mcp__<server>__<tool>` 的名字注册进
+  // `createAgentSession({ tools })` 的统一 allowlist(见 `runtime/session.ts`)。
+  // 所以这两个工具的产出**不是「多了一个工具」,而是「下一个会话多了几个外部工具」**。
+  | "mcp.read" // 列外部 server 目录 + 本角色当前授权
+  | "mcp.grant" // 给某角色开 / 关一个**已定义**的 server
   // ── 面向甲方(受 scope 门控,见设计 1 §4.3)──
   | "client.ask"
   | "client.message"
@@ -93,6 +108,8 @@ export const CAPABILITIES = [
   "memory.read",
   "memory.write",
   "knowledge.read",
+  "mcp.read",
+  "mcp.grant",
   "client.ask",
   "client.message",
   "code.read",
@@ -151,6 +168,10 @@ export const CAPABILITY_GROUP: Readonly<Record<Capability, string>> = {
   "memory.write": "记忆",
   // 知识语料
   "knowledge.read": "知识语料",
+  // MCP 外部工具。分组叫「外部工具」而不是「MCP」—— 成员页那一格是给甲方看的,
+  // 而「连到外部系统的工具」这句话本身就是边界提示。
+  "mcp.read": "外部工具",
+  "mcp.grant": "外部工具",
   // 面向甲方
   "client.ask": "甲方",
   "client.message": "甲方",
@@ -189,6 +210,7 @@ export type PlatformToolName =
   | "blocker_open" | "blocker_update" | "blocker_list" | "blocker_read"
   | "memory_search" | "memory_remember"
   | "knowledge_search" | "knowledge_read"
+  | "mcp_list" | "mcp_grant" | "mcp_revoke"
   | "ask_client" | "tell_client"
   | "report"
   | "review_verdict";
@@ -245,6 +267,14 @@ export const CAPABILITY_TOOLS: Readonly<Record<Capability, readonly ToolName[]>>
   // 与 board_list / board_read 同一条"粒度是工具级"的纪律 ——
   // 只想看列表不该连带拿到正文(而正文会吃光提示词预算)。
   "knowledge.read": ["knowledge_search", "knowledge_read"],
+  // MCP。⚠️ `mcp.read` 与 `mcp.grant` 的工具**都只碰授权文件**
+  // (`<dataDir>/harness/mcp/{role}.json`),一个字节都不改 server 定义 ——
+  // 那是 HTTP 写面那条路的专属。
+  //
+  // 粒度是工具级(与 `blackboard.read` → board_list/board_read 同纪律):
+  // 「看一眼有哪些 server」不该连带拿到「给谁开 server」的权限。
+  "mcp.read": ["mcp_list"],
+  "mcp.grant": ["mcp_grant", "mcp_revoke"],
   // 甲方
   "client.ask": ["ask_client"],
   "client.message": ["tell_client"],
