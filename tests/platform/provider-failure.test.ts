@@ -580,6 +580,32 @@ describe("⑤ dispatcher · 降级成功 ⇒ 尝试预算归零", () => {
     // 归零之后下一次 bump 从 1 重新数。
     expect(bumpAttempt(db, { projectId: "p1", todoKey: "k", targetState: null, at: T0 })).toBe(1);
   });
+
+  it("不变式:一条待办回到**可派发**时,`notified_at` 必然已经是 NULL ⇒ 降级清它不会砸掉 `escalate_abandoned_todo` 的判据", async () => {
+    const { bumpAttempt, markAttemptNotified, resetAttempt, listAttempts: ledger } = await import(
+      "../../src/platform/storage/repo/dispatch.js"
+    );
+    const key = "k2";
+    // 预算用尽(3 次)⇒ 平台**真的停在那里**并播报过 ⇒ 灯亮。
+    for (let i = 0; i < 3; i += 1) {
+      bumpAttempt(db, { projectId: "p1", todoKey: key, targetState: T0, at: T0 });
+    }
+    markAttemptNotified(db, "p1", key, T0);
+    expect(ledger(db, "p1").get(key)?.notifiedAt).not.toBeNull();
+
+    // 目标动了 ⇒ `bumpAttempt` 在**同一条 UPDATE** 里把 attempts 归 1
+    // **并**把 notified_at 清掉 ⇒ 这条待办回到**可派发**状态。
+    expect(bumpAttempt(db, { projectId: "p1", todoKey: key, targetState: T0 + 1, at: T0 })).toBe(1);
+    expect(ledger(db, "p1").get(key)?.attempts).toBe(1);
+    expect(ledger(db, "p1").get(key)?.notifiedAt).toBeNull();
+
+    // ⇒ 推论(本函数注释里写着的那条):**可派发 ⇒ notified_at 必为 NULL**。
+    // 所以 `resetAttempt` 清的那盏灯本来就是灭的,`escalate_abandoned_todo`
+    // (`dispatcher.ts:2090` 读 `notifiedAt`)的判据不受影响。
+    resetAttempt(db, "p1", key);
+    expect(ledger(db, "p1").get(key)?.notifiedAt).toBeNull();
+    expect(ledger(db, "p1").get(key)?.attempts).toBe(0);
+  });
 });
 
 // ══════════════════════════════════════════════════════════════════

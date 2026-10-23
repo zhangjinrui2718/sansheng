@@ -392,6 +392,17 @@ export function bumpAttempt(
  * `notified_at` 清空(`notified_at` 非空 = 「平台真的停在那里并播报过」——
  * 降级之后平台**没有**停下来,所以那盏灯得灭,否则下一轮它会以为已经播报过了)。
  *
+ * ⚠️ **`notified_at` 清空为什么安全**(2026-10-23 核实过,别再把它当风险):
+ * `notified_at` 只在**待办第一次用尽预算**时被写上(`dispatcher.ts` 的
+ * `markAttemptNotified`),而一条待办从 `exhausted` 回到 `runnable` 只有一条路
+ * —— **目标动了**;那条路上 `bumpAttempt` 在**同一条 UPDATE** 里把 `attempts`
+ * 归 1 **并**把 `notified_at` 清成 NULL。
+ * ⇒ **任何当前可被派发的待办,`notified_at` 必然已经是 NULL**(要么从没
+ * exhausted 过,要么目标一动就清了)。而本函数只跑在**已派发**的那一条上
+ * ⇒ 它清的那盏灯**本来就是灭的** ⇒ `escalate_abandoned_todo` 的判据
+ * (`dispatcher.ts:2090` 读 `notifiedAt`)**不受影响**。
+ * 清它是为了语义正确(「平台没停在那里」),不是为了让灯灭。
+ *
  * ⚠️ **`target_state` 不动**:它记的是「目标行的 `updated_at`」,用来判「目标
  * 真的动了就清零」。降级不改目标 ⇒ 不该在这里伪造目标变化。
  */
