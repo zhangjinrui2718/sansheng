@@ -63,7 +63,7 @@ import { resolveClientQuestion } from "../tools/client.js";
 import { listProjectSummaries, type LiveCollectOptions } from "../transport/views.js";
 import { seedPromptUnits, type FactoryDirs } from "../harness/write.js";
 import { getProjectRow, listProjects } from "../storage/repo/projects.js";
-import { getWork } from "../storage/repo/works.js";
+import { getWork, updateWorkStatus, isTerminalWorkStatus } from "../storage/repo/works.js";
 import { getAgent } from "../storage/repo/agents.js";
 import {
   artifactBodyPaths, getArtifact, setArtifactCommitSha, updateArtifactBody,
@@ -73,7 +73,14 @@ import { unavailableWorkspace } from "../workspace/git.js";
 import type { WorkspacePort } from "../workspace/port.js";
 import { log } from "../../shared/log.js";
 import { applySettingsPatch, toPublicSettings } from "../infra/settingsApply.js";
+import type { ProviderConfig } from "../infra/settings.js";
 import { listProviders, resolveModel, syncActiveProviderApiKeyEnv } from "../infra/providers.js";
+import {
+  classifyProviderFailure,
+  describeProviderFailure,
+  providerFailureLabel,
+  type ProviderFailure,
+} from "../runtime/providerFailure.js";
 import { listPendingDispatchEvents } from "../storage/repo/dispatch.js";
 // ⚠️ **`todoKindReachesClient` 是**值**导入,所以走相对路径而不是 `@shared/*`** ——
 // 2026-10-06 撞过一次:`import { todoKindReachesClient } from "@shared/types/platform.js"`
@@ -817,11 +824,29 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
    */
   let currentModel = booted.model;
 
+  /**
+   * 当前 provider 配置。**可变** —— 降级会换掉它(平台级 failover,2026-10-22)。
+   *
+   * ⚠️ 它与 {@link currentModel} **并列**:降级是**换一家 provider**,不只是换模型 ——
+   * 同一个 provider 的另一个模型不会绕过限流(限流是账号/配额级的)。
+   */
+  let currentProvider: ProviderConfig | null = booted.provider;
+
+  /**
+   * 降级候选的**轮转游标**。
+   *
+   * ⚠️ 为什么需要它:候选按配置顺序排,不轮转的话每次降级都打**列表里的第一家** ——
+   * 而第一家很可能就是刚刚限流的那家的邻居(同一个服务商)。轮转让「下一次降级」
+   * 往后挪一位,避免每次都打同一家。
+   */
+  let failoverCursor = 0;
+
   /** 重新按当前设置解析模型。写设置后调用。 */
   async function reResolveModel(): Promise<void> {
     const p = booted.settingsStore.activeProvider();
     if (p === undefined) {
       currentModel = null;
+      currentProvider = null;
       return;
     }
     // 凭据要先同步到 env 再解析 —— 与 bootPlatform 里同一条理由
@@ -832,7 +857,166 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
       apiKey: p.apiKey,
       baseUrl: p.baseUrl ?? null,
     });
+    // ⚠️ **用户在界面上改设置 ⇒ 回到他选的那个 provider** —— 降级只是临时借用,
+    // 用户显式切换的优先级高于它。
+    currentProvider = p;
     log.muted(`platform: 模型已重新解析 → ${currentModel !== null ? `${p.provider}/${p.modelId}` : "(失败)"}`);
+  }
+
+  /**
+   * **可用的备用 provider**(2026-10-22 provider 故障降级)。
+   *
+   * 候选 = 除当前 provider 外的其它 provider,只留两条硬条件:
+   * ① `apiKey !== ""` —— 没凭据的 provider 连**连接**都建立不了,不是「备用」;
+   * ② `resolveModel(...)` 非 null —— 模型不认识的话,切过去也只是换个错。
+   *
+   * ⚠️ **分类判据不在这里**:「这次故障该不该降级」由
+   * `providerFailure.ts` 的 `kind` / `retryable` 决定(单一真相),本函数只回答
+   * 「有谁可以换」。
+   */
+  function failoverCandidates(): ProviderConfig[] {
+    const all = booted.settingsStore.load().providers;
+    const currentId = currentProvider?.id;
+    const out: ProviderConfig[] = [];
+    for (const p of all) {
+      if (p.id === currentId) continue;
+      if (p.apiKey === "") continue;
+      if (
+        resolveModel({
+          provider: p.provider,
+          modelId: p.modelId,
+          apiKey: p.apiKey,
+          baseUrl: p.baseUrl ?? null,
+        }) === null
+      ) {
+        continue;
+      }
+      out.push(p);
+    }
+    return out;
+  }
+
+  /**
+   * **平台级降级**:换一家 provider 继续。
+   *
+   * ⚠️ **降级是平台级的,不是 per-session**:平台的既有设计就是「一个 active
+   * provider」(`boot.ts` 只取 `activeProviderId` 那一个),per-session 换 provider
+   * 会让同一项目里的五个角色跑在不同模型上 —— 那不是降级,那是分裂。
+   *
+   * @param reason 降级原因(进日志与平台通知)
+   * @param busyGuard 忙闩判据 —— **注入**而不是在函数里读 hub,是为了让测试能
+   *        构造「还有别的回合在跑」这一现场(而不是去 mock 整个枢纽)。
+   * @returns 降级后的 provider;`null` = 没降成(调用方走终态路径)
+   */
+  function degradeProvider(
+    reason: string,
+    busyGuard: () => boolean,
+  ): ProviderConfig | null {
+    const candidates = failoverCandidates();
+    if (candidates.length === 0) return null;
+    // ⚠️ **忙闩检查**:`syncActiveProviderApiKeyEnv` 改的是**进程级 env**,
+    // 在别的回合正跑时改会把它们打到(它们会拿错 key)。
+    // **宁可这次失败,不要误伤别的回合。**
+    if (busyGuard()) {
+      log.warn(
+        `platform: provider 降级被拒 —— 还有别的回合在跑(` +
+          `换 provider 要改进程级 env,在别的回合正跑时改会打到它们)`,
+      );
+      return null;
+    }
+    const backup = candidates[failoverCursor % candidates.length];
+    // ⚠️ `noUncheckedIndexedAccess` ⇒ 索引出来的是 `| undefined`。这不是「理论上
+    // 可能」:上头刚判过 `candidates.length === 0` 就 return 了,所以它**不可能**
+    // 是 undefined —— 但类型系统不知道,所以这里给一个**响亮**的失败而不是
+    // `as ProviderConfig`(断言糊过去 = 把一个不变量变成一个谎言)。
+    if (backup === undefined) return null;
+    failoverCursor = (failoverCursor + 1) % Math.max(candidates.length, 1);
+    const from = currentProvider === null ? "(无)" : `${currentProvider.provider}/${currentProvider.modelId}`;
+    // 凭据先同步到 env —— 与 bootPlatform / reResolveModel 同一条理由。
+    syncActiveProviderApiKeyEnv(backup.provider, backup.apiKey);
+    currentProvider = backup;
+    currentModel = resolveModel({
+      provider: backup.provider,
+      modelId: backup.modelId,
+      apiKey: backup.apiKey,
+      baseUrl: backup.baseUrl ?? null,
+    });
+    // ⚠️ **旧会话绑的是旧模型**:继续用会把请求发到已经限流的那家。
+    disposeAllSessions("provider 降级");
+    log.warn(
+      `platform: provider 降级:${from} → ${backup.provider}/${backup.modelId}(原因:${reason})`,
+    );
+    return backup;
+  }
+
+  /**
+   * 降级之后给甲方/项目页看的**一句可执行的话**。
+   *
+   * ⚠️ 措辞只有一处(`describeProviderFailure`),聊天路径与工作路径共用 ——
+   * 两处各写一遍就会在「多一个词少一个词」上漂开。
+   */
+  function providerFailureMessage(
+    failure: ProviderFailure,
+    retries: number,
+    degradedTo: string | null,
+    nextStep: string,
+  ): string {
+    return describeProviderFailure(failure, retries, degradedTo, nextStep);
+  }
+
+  /**
+   * 当前 provider 的一个**人能认出来的名字**(日志 / 平台通知里用)。
+   *
+   * ⚠️ 没配 provider 时不许写空串 —— 空串在告警里长得像「provider 名字忘了写」,
+   * 而真实原因是「压根没配 provider」。`(无)` 把那两种情形分开。
+   */
+  function currentProviderLabel(): string {
+    if (currentProvider === null) return "(无)";
+    return `${currentProvider.provider}/${currentProvider.modelId}`;
+  }
+
+  /**
+   * 「还有**别的**回合在跑吗」—— 降级的忙闩判据(2026-10-22)。
+   *
+   * ⚠️ **必须排除自己**:当前这一回合本身就占着闩(`withTurnLatch` /
+   * `handleUserMessage` 那一路),不算进去的话,每个 provider 故障都会被当成
+   * 「还有别的回合在跑」⇒ **永远不降级**(而降级恰恰是最该做的那一步)。
+   */
+  function otherTurnRunning(projectId: string | null, agentId: string): boolean {
+    return hub
+      .runningTurns()
+      .some((t) => !(t.projectId === projectId && t.agentId === agentId));
+  }
+
+  /**
+   * 降级之后落一条**平台通知**。
+   *
+   * ⚠️ **通道 = `internal`、`agent_id` 为 NULL** —— 与 `announceDrain` /
+   * `reportUnannouncedTurn` 同款:平台通知不是任何一个角色对甲方说的话。
+   *
+   * ⚠️ **首行前缀 `⚠️ 供应商`**:前端 `classifyPlatformNotice` 对不认识的前缀
+   * 归 `other` 档、**正文原样渲染** ⇒ 这条会进项目页「组织运行态」。
+   * **不要在前端加常量** —— 那会多一个没有读者的声明(前端零改动是这批的设计决定)。
+   */
+  function announceProviderFailover(
+    projectId: string,
+    from: string,
+    to: string,
+    reason: string,
+  ): void {
+    const sessionId = ensureSession(db, projectId, now(), newId, "internal");
+    appendSessionMessage(db, {
+      id: newId("m"),
+      sessionId,
+      agentId: null,
+      kind: "system",
+      content:
+        `⚠️ 供应商:已从 ${from} 切到备用 provider ${to}(原因:${reason})。` +
+        `这条工作项会被重新派发(不记失败)。`,
+      createdAt: now(),
+      // 同 `announceDrain`:平台通知不属于任何封套。
+      originSource: null, triggerKind: null,
+    });
   }
 
   // ── 常驻会话(键 = 上下文 + agent)────────────────────────────
@@ -1359,6 +1543,22 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
      * 告警只能写「有 6 次没跑起来」——那仍然是一个说不清理由的数字。
      */
     readonly failureReason?: string;
+    /**
+     * 这一轮被 provider 拒绝了(限流 / 断网 / 5xx / 额度)——**看得见的第一半**。
+     *
+     * ⚠️ **为什么 pi 的这类故障此前什么都不报**:pi 把它们变成一条
+     * `stopReason:"error"` 的 assistant 消息(**不抛异常**)⇒ 平台这一侧
+     * 「会话建不出来 / 抛错」那两条判据都不成立 ⇒ **静默**。
+     */
+    readonly providerError?: ProviderFailure;
+    /**
+     * **有人接手了**:平台已切到备用 provider,这一轮**不算失败**。
+     *
+     * ⚠️ 它与 `failed` 分开:降级之后活儿原封不动地等着,这一轮**没跑起来**
+     * —— 但它**不该烧掉尝试预算**(那个 3 次是**给人用**的限流,
+     * 见 `dispatcher.ts` 的 `resetAttempt`)。
+     */
+    readonly providerFailed?: boolean;
   }
 
   /**
@@ -1543,7 +1743,10 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
       //
       // **不替模型补话**:这里只报事实,不生成任何占位正文 —— 甲方要的是他的答案,
       // 平台编一句「我还需要一些信息」是把一次失败说成一次澄清(7-D)。
-      if (turn.unanswered != null && trigger.kind === "user") {
+      // ⚠️ **provider 故障时**不报「没下文」:那会把限流说成「模型没说话」——
+      // 两个故障叠在一起报 = 报多了就没人看了。provider 故障走下面那条
+      // `provider_error` 通道。
+      if (turn.unanswered != null && trigger.kind === "user" && turn.providerError == null) {
         const u = turn.unanswered;
         log.warn(
           `platform: ${channelLabel(projectId)}上 ${agentId} 的这一回合**没有回答甲方**` +
@@ -1571,6 +1774,71 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
             `(已产出 ${text.length} 字符)`,
         );
       }
+      // ── provider 故障:看得见(2026-10-22 批次)──────────────────────
+      //
+      // ⚠️ **为什么必须报**:pi 把 429 / 断网 / 5xx 变成一条
+      // `stopReason:"error"` 的 assistant 消息(**不抛异常**)⇒ 平台这一侧
+      // 原来**什么都不报** —— 甲方看到的是「他答完了,然后就没有然后了」。
+      // 这与 2026-10-07 那次「没下文」是同一个形状的沉默。
+      //
+      // ⚠️ **聊天路径不自动重发用户那条消息**:历史里已经有它,平台不替甲方
+      // 重复发言(与「不替模型补话」同一条纪律)。降级成功后请甲方重发一次。
+      let providerDegraded = false;
+      /** provider 故障但**没人接手** —— 这一轮真的没成。 */
+      let providerRejected = false;
+      if (turn.providerError != null) {
+        const failure = turn.providerError;
+        const retries = turn.providerRetries ?? 0;
+        // ⚠️ **降级前的 provider 名字要先拓下来**:`degradeProvider` 会把
+        // `currentProvider` 换成备用的,事后拓就拓成新那个了(那就把「换到哪儿」
+        // 说成了「从哪儿换」—— 一个看着正常的错误答案)。
+        const fromLabel = currentProviderLabel();
+        // 聊天路径的降级条件比工作路径**宽一档**:只多一条「本回合没干过活」
+        // (聊天回合可能已经写文件 / 发了消息 ⇒ 重发不安全),其余一致。
+        // ⚠️ 分类判据只有一处:`providerFailure.ts` 的 kind / retryable。
+        const degraded =
+          failure.retryable &&
+          turn.toolCalls.length === 0 &&
+          !turn.timedOut &&
+          !aborted
+            ? degradeProvider(
+                `provider 故障(${providerFailureLabel(failure.kind)})`,
+                () => otherTurnRunning(projectId, agentId),
+              )
+            : null;
+        providerDegraded = degraded !== null;
+        if (degraded !== null && projectId !== null) {
+          announceProviderFailover(
+            projectId,
+            fromLabel,
+            `${degraded.provider}/${degraded.modelId}`,
+            providerFailureLabel(failure.kind),
+          );
+        } else if (degraded === null) {
+          // 没人接手 ⇒ 这一轮真的没成(排空器那一条路要靠这个不消费事件、
+          // 并让「叫醒三次」的预算真被烧掉一次 —— 外部在拒绝时烧掉那个
+          // **给人用**的预算才是对的)。
+          providerRejected = true;
+        }
+        const nextStep =
+          degraded !== null
+            ? "已切到备用 provider,请重发一次"
+            : failure.retryable
+              ? "可以稍后重试,或到「设置」里换一个 provider"
+              : "需要到「设置」里换 provider 或检查账号额度/凭据";
+        hub.broadcast({
+          type: "error", projectId,
+          error: {
+            code: "provider_error",
+            message: providerFailureMessage(
+              failure,
+              retries,
+              degraded === null ? null : `${degraded.provider}/${degraded.modelId}`,
+              nextStep,
+            ),
+          },
+        });
+      }
       if (turn.timedOut) {
         hub.broadcast({
           type: "error", projectId,
@@ -1589,7 +1857,12 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
       }
       return {
         aborted, timedOut: turn.timedOut, text, toolCalls: turn.toolCalls,
-        openedProjectIds: turn.openedProjectIds, failed: false,
+        openedProjectIds: turn.openedProjectIds,
+        // ⚠️ **provider 故障且没人接手 ⇒ 这一轮算失败**:它没能把待办办了,
+        // 消费那一支就不该走(证据还在,下一轮重来)。
+        failed: providerRejected,
+        ...(turn.providerError !== undefined ? { providerError: turn.providerError } : {}),
+        ...(providerDegraded ? { providerFailed: true } : {}),
       };
     } catch (e) {
       // **中断不是故障。** 把一次「停止」报成 `turn_failed` 会让用户以为出了错,
@@ -1749,6 +2022,88 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
           error: { code: "turn_timeout", message: `工作项 ${workId} 的回合超时收尾` },
         });
       }
+      // ── provider 故障:看得见 + 降级 / 终态(2026-10-22 批次)─────────
+      //
+      // ⚠️ **为什么工作路径比聊天路径更重**:聊天回合失败只是甲方没等到一句话;
+      // 工作回合失败是一条**没有产出**的工作项 —— 而「没有产出」这件事
+      // 在库里看不出来(工作项还挂在 `in_progress` 上,排空器会再叫醒它,
+      // 于是它一直装忙)。所以这一支必须给出**终态**或**降级**,
+      // 不能什么都不做。
+      let providerDegraded = false;
+      /** 降不了 ⇒ 平台把工作项记成了终态(failed)。 */
+      let providerMarkedFailed = false;
+      if (execution.turn.providerError != null) {
+        const failure = execution.turn.providerError;
+        const retries = execution.turn.providerRetries ?? 0;
+        const fromLabel = currentProviderLabel();
+        // ⚠️ **降级的六个条件(全部满足才降级)**:
+        //   ① `retryable` —— `quota` / `auth` 是账号/配置级的,换一家治不了;
+        //   ② 本回合**没干过活** —— 有工具调用就可能已有副作用(写文件 / 发消息 /
+        //      提交),重跑不安全;
+        //   ③ 没超时、没被中断 —— 「自动重跑只是把同一段卡死行为再买一遍」;
+        //   ④ 有可用备用 provider;
+        //   ⑤ 没有别的回合在跑(换 provider 要改进程级 env)。
+        // 分类判据只有一处(`providerFailure.ts`),这里不自己再判「是不是限流」。
+        const degraded =
+          failure.retryable &&
+          execution.turn.toolCalls.length === 0 &&
+          !execution.turn.timedOut &&
+          !aborted
+            ? degradeProvider(
+                `provider 故障(${providerFailureLabel(failure.kind)})`,
+                () => otherTurnRunning(projectId, agentId),
+              )
+            : null;
+        if (degraded !== null) {
+          providerDegraded = true;
+          announceProviderFailover(
+            projectId,
+            fromLabel,
+            `${degraded.provider}/${degraded.modelId}`,
+            providerFailureLabel(failure.kind),
+          );
+          hub.broadcast({
+            type: "error", projectId,
+            error: {
+              code: "provider_error",
+              message: providerFailureMessage(
+                failure,
+                retries,
+                `${degraded.provider}/${degraded.modelId}`,
+                "已切到备用 provider,这条工作项会被重新派发",
+              ),
+            },
+          });
+        } else {
+          // ── 降不了 ⇒ 终态 ─────────────────────────────────────────
+          // 判据照抄 `execution.ts` 的 `disposeTimeout`:已是终态
+          // (done/cancelled/failed)或 `blocked` 的**不覆盖** ——
+          // 那两种状态各有自己的现场,覆盖掉就是把一个已知状态说成另一个。
+          const w = getWork(db, workId);
+          let markedFailed = false;
+          if (w !== null && !isTerminalWorkStatus(w.status) && w.status !== "blocked") {
+            updateWorkStatus(db, workId, "failed", now());
+            markedFailed = true;
+            providerMarkedFailed = true;
+            log.warn(
+              `platform: 工作项 ${workId}「${w.title}」的回合被 provider 拒绝` +
+                `(${providerFailureLabel(failure.kind)}) —— 记为 failed:不再自动重跑,` +
+                `并写一条 work_failed 事件让业务经理向甲方交代`,
+            );
+          }
+          if (markedFailed) hub.emitWorkChanged(projectId, workId, "failed");
+          const nextStep = failure.retryable
+            ? "可以稍后重试,或到「设置」里换一个 provider"
+            : "需要到「设置」里换 provider 或检查账号额度/凭据";
+          hub.broadcast({
+            type: "error", projectId,
+            error: {
+              code: "provider_error",
+              message: providerFailureMessage(failure, retries, null, nextStep),
+            },
+          });
+        }
+      }
       // ── 拒绝执行 ≠ 成功(2026-10-05 补)────────────────────────────
       //
       // `runWorkItem` 的 `checkRunnable` 会拒绝三类工作项(已是终态 / 负责人不存在 /
@@ -1768,7 +2123,10 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
       return {
         workId,
         title: execution.work.title,
-        status: execution.work.status,
+        status:
+          providerDegraded || providerMarkedFailed
+            ? (getWork(db, workId)?.status ?? execution.work.status)
+            : execution.work.status,
         aborted,
         timedOut: execution.turn.timedOut,
         text,
@@ -1778,6 +2136,10 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
         ...(refused
           ? { detail: execution.refusalReason ?? `工作项 ${workId} 被拒绝执行` }
           : {}),
+        // ⚠️ **降级成功这一轮不算失败**:有人接手了(备用 provider)。
+        // dispatcher 见到它会重置这条待办的尝试预算 —— provider 故障不该烧掉
+        // 「叫醒 3 次」那个**给人用**的限流。
+        ...(providerDegraded ? { providerFailed: true } : {}),
       };
     } catch (e) {
       outcomeLabel = aborted ? "被中断" : "失败";
@@ -2059,6 +2421,10 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
             aborted: r.aborted, timedOut: r.timedOut, text: r.text, toolCalls: r.toolCalls,
             failed: r.failed,
             ...(r.failureReason !== undefined ? { detail: r.failureReason } : {}),
+            // ⚠️ **「有人接手了」要与「失败」分开**:降级之后活儿原封不动地等着,
+            // 但这一轮没跑起来 —— 排空器据此**重置尝试预算**(那个 3 次是给人用的
+            // 「叫醒三次」限流,provider 故障不该烧它)。
+            ...(r.providerFailed === true ? { providerFailed: true } : {}),
           };
         });
       },

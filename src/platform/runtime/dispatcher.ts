@@ -126,7 +126,7 @@ import {
 } from "../storage/repo/artifacts.js";
 import {
   bumpAttempt, consumePendingDispatchEvents, listAttempts,
-  listPendingDispatchEvents, markAttemptNotified, pruneAttempts,
+  listPendingDispatchEvents, markAttemptNotified, pruneAttempts, resetAttempt,
   type DispatchEventRow,
 } from "../storage/repo/dispatch.js";
 import {
@@ -2870,6 +2870,20 @@ export interface DrainTurnReport {
    * 7-N:空转的那几次必须事后看得出「当时是什么状况」,而不是只有一行「失败了」。
    */
   readonly detail?: string;
+  /**
+   * 这一轮被 provider 拒绝了(限流 / 断网 / 5xx / 额度),但**有人接手了**:
+   * 平台已切到备用 provider。
+   *
+   * ⚠️ **它与 `failed` 分开**:降级之后活儿原封不动地等着,这一轮**没跑起来**
+   * —— 但它**不该烧掉尝试预算**。那个 3 次(`DEFAULT_MAX_ATTEMPTS`)是
+   * **给人用**的「叫醒三次我就停下来、告诉甲方」限流,它数的是
+   * 「**组织试过了但没进展**」;而 provider 故障是「**外面在拒绝**」,
+   * 三次抖动就能把一条**一次都没真跑过**的活推进 `exhausted`。
+   *
+   * ⚠️ 归类判据只有一处(`runtime/providerFailure.ts`):调用点不许自己再判一次
+   * 「是不是限流」—— 判据漂开 = 「看起来正常的错误答案」。
+   */
+  readonly providerFailed?: boolean;
 }
 
 export interface DrainWorkReport extends DrainTurnReport {
@@ -3188,6 +3202,14 @@ export async function drainProject(deps: DrainDeps): Promise<DrainResult> {
     let failed = false;
     let refused = false;
     let detail: string | null = null;
+    /**
+     * 这一轮是不是「provider 故障但**有人接手了**」。
+     *
+     * ⚠️ **它与 `failed` 分开**:降级成功之后活儿原封不动地等着,
+     * 但这一轮**确实没跑起来** —— 而它**不该烧掉尝试预算**(那个 3 次是给人用的
+     * 「组织试过了没进展」限流,provider 故障是「外面在拒绝」)。
+     */
+    let providerFailed = false;
     try {
       if (todo.kind === "execute_work") {
         if (todo.target === null) {
@@ -3200,12 +3222,14 @@ export async function drainProject(deps: DrainDeps): Promise<DrainResult> {
         aborted = r.aborted;
         failed = r.failed === true;
         refused = r.refused === true;
+        providerFailed = r.providerFailed === true;
         detail = r.detail ?? null;
       } else {
         const r = await deps.runAgentTurn(todo.agentId, renderTask(deps.db, todo), todo.kind);
         aborted = r.aborted;
         failed = r.failed === true;
         refused = r.refused === true;
+        providerFailed = r.providerFailed === true;
         detail = r.detail ?? null;
       }
     } catch (err) {
@@ -3215,6 +3239,24 @@ export async function drainProject(deps: DrainDeps): Promise<DrainResult> {
       detail = err instanceof Error ? err.message : String(err);
       deps.log(
         `dispatcher: ✖ ${todo.agentId} 的「${todo.label}」抛错 —— ${detail}`,
+      );
+    }
+
+    // ── provider 故障但**有人接手了** ⇒ 这条待办的尝试预算归零 ──────────
+    //
+    // ⚠️ **为什么**:那个 3 次预算(`DEFAULT_MAX_ATTEMPTS`)是**给人用**的
+    // 「叫醒三次我就停下来、告诉甲方」限流 —— 它数的是「**组织试过了但没进展**」。
+    // 而 provider 故障(限流 / 断网 / 5xx)是「**外面在拒绝**」:降级之后活儿
+    // 原封不动地等着,却已经白白烧掉一次预算 ⇒ 三次抖动就能把一条活推进
+    // `exhausted`,而它其实一次都没真跑过。
+    //
+    // ⚠️ **只重置「已降级」的那一次**:降不了的那次是**真的没成** ——
+    // 那个预算**就该**被烧掉(烧满三次平台才停下来告诉甲方,这是对的)。
+    if (providerFailed) {
+      resetAttempt(deps.db, deps.projectId, todo.key);
+      deps.log(
+        `dispatcher: 这条待办(${todo.label})刚被 provider 拒绝但**已降级** —— ` +
+          `尝试预算归零(那 3 次是给人用的限流,provider 故障不烧它)`,
       );
     }
 
@@ -3242,7 +3284,11 @@ export async function drainProject(deps: DrainDeps): Promise<DrainResult> {
     //
     // 失败/被中断就不消费,下一次排空重来(at-least-once)。宁可多汇报一次,
     // 不能静默漏掉。
-    if (!aborted && !failed) {
+    //
+    // ⚠️ **`providerFailed`(已降级)也不消费**:那一轮**没跑起来** ——
+    // 它只是把 provider 换了一家,活儿一件没办。消费了就是把「没办」
+    // 说成「办过了」(而 `report_downstream` 消费掉的就是「已向甲方交代」)。
+    if (!aborted && !failed && !providerFailed) {
       if (todo.kind === "review_work") {
         // ⚠️ **021 之后,判据从「回合成功结束」翻成「存在一条 pass 结论」。**
         //

@@ -379,6 +379,33 @@ export function bumpAttempt(
   return attempts;
 }
 
+/**
+ * **重置**一条待办的尝试预算(2026-10-22 provider 故障降级用)。
+ *
+ * ⚠️ **为什么需要它**:那个 3 次预算(`DEFAULT_MAX_ATTEMPTS`)是**给人用**的
+ * 「叫醒三次我就停下来、告诉甲方」限流 —— 它数的是「**组织试过了但没进展**」。
+ * 而一次 provider 故障(限流 / 断网 / 5xx)**不是组织没进展**,是**外面在拒绝**:
+ * 降级成功之后活儿原封不动地等着,却已经白白烧掉了一次预算 ⇒
+ * 三次 provider 抖动就能把一条活推进 `exhausted`,而它其实一次都没真跑过。
+ *
+ * ⚠️ **所以重置的是两样**:`attempts` 归零(下次 `bumpAttempt` 从 1 重新数)与
+ * `notified_at` 清空(`notified_at` 非空 = 「平台真的停在那里并播报过」——
+ * 降级之后平台**没有**停下来,所以那盏灯得灭,否则下一轮它会以为已经播报过了)。
+ *
+ * ⚠️ **`target_state` 不动**:它记的是「目标行的 `updated_at`」,用来判「目标
+ * 真的动了就清零」。降级不改目标 ⇒ 不该在这里伪造目标变化。
+ */
+export function resetAttempt(
+  db: Database.Database,
+  projectId: string,
+  todoKey: string,
+): void {
+  db.prepare(
+    `UPDATE dispatch_attempts SET attempts = 0, notified_at = NULL
+     WHERE project_id = ? AND todo_key = ?`,
+  ).run(projectId, todoKey);
+}
+
 export function markAttemptNotified(
   db: Database.Database,
   projectId: string,
