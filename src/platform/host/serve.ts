@@ -927,8 +927,20 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
     // ⚠️ **用户在界面上改设置 ⇒ 回到他选的那个 provider** —— 降级只是临时借用,
     // 用户显式切换的优先级高于它。
     currentProvider = p;
+    // 用户重新表态了 ⇒ 「哪一家坏过」的判断作废(他可能就是要用刚才坏的那家)。
+    failedProviderIds.clear();
     log.muted(`platform: 模型已重新解析 → ${currentModel !== null ? `${p.provider}/${p.modelId}` : "(失败)"}`);
   }
+
+  /**
+   * **已经故障过的 provider**(降级之后不再回去)。
+   *
+   * ⚠️ **为什么**:候选是「除当前 provider 外的其它 provider」—— 降级到 B 之后,
+   * A 就重新变成候选了 ⇒ 下一轮又切回 A ⇒ **两家来回打**(A 刚限流过)。
+   * 用户在界面上改设置时(`reResolveModel`)这个集合要清空 —— 那是用户
+   * 明确表示「我就是要用 A」。
+   */
+  const failedProviderIds = new Set<string>();
 
   /**
    * **可用的备用 provider**(2026-10-22 provider 故障降级)。
@@ -936,6 +948,8 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
    * 候选 = 除当前 provider 外的其它 provider,只留两条硬条件:
    * ① `apiKey !== ""` —— 没凭据的 provider 连**连接**都建立不了,不是「备用」;
    * ② `resolveModel(...)` 非 null —— 模型不认识的话,切过去也只是换个错。
+   *
+   * ③ **已经故障过的那个不算**(见 `failedProviderIds`)—— 否则两家来回打。
    *
    * ⚠️ **分类判据不在这里**:「这次故障该不该降级」由
    * `providerFailure.ts` 的 `kind` / `retryable` 决定(单一真相),本函数只回答
@@ -947,6 +961,7 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
     const out: ProviderConfig[] = [];
     for (const p of all) {
       if (p.id === currentId) continue;
+      if (failedProviderIds.has(p.id)) continue;
       if (p.apiKey === "") continue;
       if (
         resolveModel({
@@ -999,6 +1014,9 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
     if (backup === undefined) return null;
     failoverCursor = (failoverCursor + 1) % Math.max(candidates.length, 1);
     const from = currentProvider === null ? "(无)" : `${currentProvider.provider}/${currentProvider.modelId}`;
+    // ⚠️ **记下故障过的那一家**:降过去之后它不再是候选(否则下一轮又切回去,
+    // 两家来回打 —— A 刚限流过)。用户在界面上改设置时这个集合会清空。
+    if (currentProvider !== null) failedProviderIds.add(currentProvider.id);
     // 凭据先同步到 env —— 与 bootPlatform / reResolveModel 同一条理由。
     syncActiveProviderApiKeyEnv(backup.provider, backup.apiKey);
     currentProvider = backup;
