@@ -88,13 +88,18 @@
  * 在回合结束时**求和写一行**(表是回合级的,见 `migrations/018`)。
  */
 import type { AgentSession, AgentSessionEvent } from "@earendil-works/pi-coding-agent";
-import { randomUUID } from "node:crypto";
+import type { AssistantMessage } from "@earendil-works/pi-ai";import { randomUUID } from "node:crypto";
 import { log } from "../../shared/log.js";
 import type Database from "better-sqlite3";
 import {
   collectPendingWork, renderPendingWork, summarizePendingWork,
 } from "./pendingWork.js";
 import { renderProjectContext } from "./projectContext.js";
+import {
+  classifyProviderFailure,
+  logProviderFailure,
+  type ProviderFailure,
+} from "./providerFailure.js";
 import { listSessionMessages } from "../storage/repo/sessions.js";
 import { insertTurnUsage, type TurnUsageRow } from "../storage/repo/usage.js";
 
@@ -245,6 +250,30 @@ export interface TurnResult {
    * 看出来,而不用去库里按时间戳猜哪一行是刚才那次跑的。
    */
   readonly usage?: TurnUsageTotal;
+  /**
+   * **这一回合被 provider 拒绝了**(2026-10-22 provider 故障可见性批次)。
+   *
+   * ⚠️ **为什么它必须存在**:pi 把 429 / 断网 / 5xx 变成一条
+   * `stopReason:"error"` 的 assistant 消息(**不抛异常**)⇒ `prompt()` 正常
+   * resolve ⇒ 错误原文既没进日志、也没进库、也没上屏 ⇒ 「失败」这件事在平台
+   * 这一侧**没有形状**。这条字段就是那个形状。
+   *
+   * **分类判据只有一处**(`providerFailure.ts` 的 `classifyProviderFailure`)——
+   * 调用点不许自己再判一次「是不是限流」,判据漂开 = 「看起来正常的错误答案」。
+   *
+   * **可选**:手工构造 `TurnResult` 字面量的地方(测试、`execution.ts` 的
+   * `emptyTurn`)不带它 ⇒ 缺省按「没有 provider 故障」处理。
+   */
+  readonly providerError?: ProviderFailure;
+  /**
+   * **SDK 自己重试了几次**(pi 的 `auto_retry_start` / `auto_retry_end` 事件)。
+   *
+   * 为什么要有它:「限流了」与「限流了、重试 3 次还是限流」对甲方是**两种处境**
+   * —— 后者说明等一会儿就好,前者说明要换一家。少了这个数,告警只能说一半。
+   *
+   * **可选**:没发生过重试时可能没有这个字段(没有它 = 没重试过,不假装有 0 次)。
+   */
+  readonly providerRetries?: number;
 }
 
 /**
@@ -449,6 +478,25 @@ function isToolEnd(
   ev: AgentSessionEvent,
 ): ev is Extract<AgentSessionEvent, { type: "tool_execution_end" }> {
   return ev.type === "tool_execution_end";
+}
+
+/**
+ * 把 `message_end` 里的消息收窄到 **assistant** 消息。
+ *
+ * ⚠️ **为什么需要它**:`message_end.message` 的类型是 `AgentMessage` = 四类消息的并集
+ * (`system` / `user` / `assistant` / `tool_result`)。`stopReason` 与 `errorMessage`
+ * **只存在于 assistant 消息**上 ⇒ 不收窄就读不出来。
+ *
+ * 判据用 `role === "assistant"` —— 那是四类消息各自的判别字段,不是猜的。
+ *
+ * ⚠️ 消息类型**从事件类型推出来**(`Extract<…>["message"]`),不从
+ * `@earendil-works/pi-agent-core` 直接 import —— 那是 pi 的传递依赖,
+ * 三生只依赖 `@earendil-works/pi-coding-agent` 这一个包(AGENTS.md 的依赖纪律)。
+ */
+type MessageEndMessage = Extract<AgentSessionEvent, { type: "message_end" }>["message"];
+
+function isAssistantMessage(msg: MessageEndMessage): msg is AssistantMessage {
+  return msg.role === "assistant";
 }
 /**
  * 收窄到 `message_end`。
@@ -743,6 +791,16 @@ export async function runTurn(opts: RunTurnOptions): Promise<TurnResult> {
    */
   const usageCalls: TurnUsageCall[] = [];
   let settled = false;
+  /**
+   * **provider 故障的现场**(2026-10-22 批次)。
+   *
+   * ⚠️ **只认 `message_end`** —— 它是「事件时刻即终值」的那一条投递。
+   * `turn_end` / `agent_end.messages` 是同一份 assistant 消息的另两次投递,
+   * 三条路逐项相等;重复读一遍会把同一个故障记成三次。
+   */
+  let providerError: ProviderFailure | undefined;
+  /** SDK 自己重试了几次(`auto_retry_start` 一次 = 一次重试)。 */
+  let providerRetries = 0;
 
   // ── 待办注入 ──
   // 接待会话(projectId === null)**不注入**:还没有项目,没有项目内的待办可列;
@@ -819,6 +877,30 @@ export async function runTurn(opts: RunTurnOptions): Promise<TurnResult> {
     if (isMessageEnd(ev)) {
       const snap = usageSnapshotOf(ev.message);
       if (snap !== null) usageCalls.push(snap);
+      // ── provider 故障的**唯一**读点 ────────────────────────────
+      // `stopReason:"error"` + 非空 `errorMessage` = 这一条 assistant 消息
+      // 被 provider 拒绝了。分类判据在 `providerFailure.ts`(纯函数,单一真相),
+      // 这里**不许**自己再判一次「是不是限流」。
+      if (
+        isAssistantMessage(ev.message) &&
+        ev.message.stopReason === "error" &&
+        typeof ev.message.errorMessage === "string" &&
+        ev.message.errorMessage.trim() !== ""
+      ) {
+        providerError = classifyProviderFailure(ev.message.errorMessage);
+        logProviderFailure(`turn: ${opts.agentId} 的回合被 provider 拒绝`, providerError);
+      }
+      return;
+    }
+
+    // SDK 的自动重试:「限流了」与「限流了、重试 N 次还是限流」是**两种处境**。
+    // ⚠️ 一次 `auto_retry_start` = 一次重试开始(重试成功后这一回合不会有
+    // providerError,但次数仍然要报出来 —— 「重试 2 次才好」与「一次就过」不同)。
+    if (ev.type === "auto_retry_start") {
+      providerRetries += 1;
+      return;
+    }
+    if (ev.type === "auto_retry_end") {
       return;
     }
 
@@ -1090,9 +1172,14 @@ export async function runTurn(opts: RunTurnOptions): Promise<TurnResult> {
   //
   // **打断与超时一律不算**:那两条路已经有各自的现场与告警(`timeout` / 中断日志),
   // 在这里再报一次「没下文」等于把一个已知状态说成另一个,反而更难查。
+  //
+  // ⚠️ **provider 故障也不算**(2026-10-22 批次补):限流 / 断网 / 5xx 之后
+  // 模型确实一个字都没说,但那不是「他说完了没有下文」,而是「provider 把他掐了」。
+  // 两个故障叠在一起报 = 报多了就没人看了 ⇒ provider 故障走 `providerError`
+  // 那一条通道,这里判 `null`。
   const turnText = text.join("");
   const unanswered: TurnResult["unanswered"] =
-    abortRequested || timedOut
+    abortRequested || timedOut || providerError !== undefined
       ? null
       : turnText.trim() === ""
         ? {
@@ -1122,6 +1209,8 @@ export async function runTurn(opts: RunTurnOptions): Promise<TurnResult> {
     timedOut,
     ...(timeout !== undefined ? { timeout } : {}),
     ...(recordedUsage !== undefined ? { usage: recordedUsage } : {}),
+    ...(providerError !== undefined ? { providerError } : {}),
+    ...(providerError !== undefined || providerRetries > 0 ? { providerRetries } : {}),
   };
 }
 
@@ -1176,6 +1265,18 @@ export function renderTurnReport(r: TurnResult): string {
         : `⚠️ ${r.unanswered.toolCalls} 次工具结果之后没有正文` +
           `(开场白 ${r.unanswered.textChars} 字符,之后又想了 ${r.unanswered.thinkingChars} 字符)`,
     );
+  }
+  // provider 故障也要出现在**这一份**报告里 —— 它是「他为什么没干活」的第一现场
+  // (真机事故:日志里当时只有一句「回合结束」,错误原文一个字都没有)。
+  if (r.providerError != null) {
+    lines.push(
+      `⚠️ provider 故障:${r.providerError.kind}` +
+        (r.providerError.status !== undefined ? ` · HTTP ${r.providerError.status}` : "") +
+        ` · ${r.providerError.message.slice(0, 200)}`,
+    );
+  }
+  if (r.providerRetries != null && r.providerRetries > 0) {
+    lines.push(`provider 故障前 SDK 自动重试 ${r.providerRetries} 次`);
   }
   if (r.toolCalls.length > 0) {
     lines.push(`工具调用 ${r.toolCalls.length} 次:`);
