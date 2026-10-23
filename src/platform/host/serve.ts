@@ -350,6 +350,73 @@ export interface PlatformHost {
 }
 
 /**
+ * **降级判据的纯函数形态**(2026-10-22)。
+ *
+ * ⚠️ **为什么把它抽出来**:这条判据有**六条**独立的要求(可重试 / 本回合没干过活 /
+ * 没超时 / 没被中断 / 有备用 provider / 没有别的回合在跑),它们会被聊天路径与
+ * 工作路径两处调用 —— 两处各写一遍,迟早在「多一条少一条」上漂开,而漂开的
+ * 表现是「**看起来正常的错误答案**」(例如额度故障被当成限流,于是白换一家)。
+ * 抽成纯函数之后:①**判据只有一处**;②测试能直接对它做正负样本与变异自检,
+ * 不必起整个宿主。
+ *
+ * ⚠️ **分类判据仍然只有一处**(`runtime/providerFailure.ts`):这里读它的
+ * `retryable`,**不自己**再判一次「是不是限流」。
+ */
+export interface FailoverInput {
+  readonly failure: ProviderFailure;
+  /** 本回合已经跑过的工具调用数 —— 大于 0 就可能已有副作用。 */
+  readonly toolCalls: number;
+  readonly timedOut: boolean;
+  readonly aborted: boolean;
+  /** 有没有可用的备用 provider(判据在 `failoverCandidates()` 里)。 */
+  readonly hasBackup: boolean;
+  /** 还有**别的**回合在跑吗(换 provider 要改进程级 env)。 */
+  readonly otherTurnRunning: boolean;
+}
+
+export interface FailoverDecision {
+  readonly degrade: boolean;
+  /** 不降级的原因 —— 进日志与平台通知(失败必须留现场,7-N)。 */
+  readonly reason: string;
+}
+
+/**
+ * 该不该降级。
+ *
+ * 六条纪律,每条都有理由:
+ * ① `failure.retryable` —— **`quota` / `auth` 是账号/配置级的**,换一家治不了
+ *    (额度与凭据不是 provider 的问题,是**你的**账号的问题);
+ * ② `toolCalls === 0` —— 有工具调用就可能已有副作用(写文件 / 发消息 / 提交),
+ *    **重跑不安全**;
+ * ③ 没超时 —— 「自动重跑只是把同一段卡死行为再买一遍」;
+ * ④ 没被中断 —— 中断是**用户**的决定,不是故障;
+ * ⑤ 有备用 provider —— 没得换就只是把「失败」写得啰嗦一点;
+ * ⑥ 没有别的回合在跑 —— 换 provider 要改**进程级环境变量**,在别的回合正跑时改
+ *    会把它们打到 ⇒ **宁可这次失败,不要误伤别的回合**。
+ */
+export function decideFailover(input: FailoverInput): FailoverDecision {
+  if (!input.failure.retryable) {
+    return { degrade: false, reason: `故障不可重试(${input.failure.kind})` };
+  }
+  if (input.toolCalls > 0) {
+    return { degrade: false, reason: "本回合已经干过活,重跑不安全" };
+  }
+  if (input.timedOut) {
+    return { degrade: false, reason: "回合超时(重跑只是再买一遍卡死行为)" };
+  }
+  if (input.aborted) {
+    return { degrade: false, reason: "回合被中断(那是用户的决定,不是故障)" };
+  }
+  if (!input.hasBackup) {
+    return { degrade: false, reason: "没有可用的备用 provider" };
+  }
+  if (input.otherTurnRunning) {
+    return { degrade: false, reason: "还有别的回合在跑(换 provider 会打到它们)" };
+  }
+  return { degrade: true, reason: `provider 故障(${input.failure.kind})` };
+}
+
+/**
  * 装配宿主(不监听)。测试可以直接拿 `app` 打请求,不必占端口。
  */
 export function createPlatformHost(opts: ServeOptions): PlatformHost {
@@ -1793,32 +1860,33 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
         // `currentProvider` 换成备用的,事后拓就拓成新那个了(那就把「换到哪儿」
         // 说成了「从哪儿换」—— 一个看着正常的错误答案)。
         const fromLabel = currentProviderLabel();
-        // 聊天路径的降级条件比工作路径**宽一档**:只多一条「本回合没干过活」
-        // (聊天回合可能已经写文件 / 发了消息 ⇒ 重发不安全),其余一致。
-        // ⚠️ 分类判据只有一处:`providerFailure.ts` 的 kind / retryable。
-        const degraded =
-          failure.retryable &&
-          turn.toolCalls.length === 0 &&
-          !turn.timedOut &&
-          !aborted
-            ? degradeProvider(
-                `provider 故障(${providerFailureLabel(failure.kind)})`,
-                () => otherTurnRunning(projectId, agentId),
-              )
-            : null;
+        // ⚠️ **降级判据只有一处**(`decideFailover`):聊天路径与工作路径共用,
+        // 分类判据在 `providerFailure.ts` —— 这里不自己再判「是不是限流」。
+        const candidates = failoverCandidates();
+        const decision = decideFailover({
+          failure,
+          toolCalls: turn.toolCalls.length,
+          timedOut: turn.timedOut,
+          aborted,
+          hasBackup: candidates.length > 0,
+          otherTurnRunning: otherTurnRunning(projectId, agentId),
+        });
+        const degraded = decision.degrade
+          ? degradeProvider(decision.reason, () => otherTurnRunning(projectId, agentId))
+          : null;
         providerDegraded = degraded !== null;
-        if (degraded !== null && projectId !== null) {
+        if (degraded === null) {
+          // 没人接手 ⇒ 这一轮真的没成(排空器那一条路要靠这个不消费事件、
+          // 并让「叫醒三次」的预算真被烧掉一次 —— 外部在拒绝时烧掉那个
+          // **给人用**的预算才是对的)。
+          providerRejected = true;
+        } else if (projectId !== null) {
           announceProviderFailover(
             projectId,
             fromLabel,
             `${degraded.provider}/${degraded.modelId}`,
             providerFailureLabel(failure.kind),
           );
-        } else if (degraded === null) {
-          // 没人接手 ⇒ 这一轮真的没成(排空器那一条路要靠这个不消费事件、
-          // 并让「叫醒三次」的预算真被烧掉一次 —— 外部在拒绝时烧掉那个
-          // **给人用**的预算才是对的)。
-          providerRejected = true;
         }
         const nextStep =
           degraded !== null
@@ -2036,24 +2104,20 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
         const failure = execution.turn.providerError;
         const retries = execution.turn.providerRetries ?? 0;
         const fromLabel = currentProviderLabel();
-        // ⚠️ **降级的六个条件(全部满足才降级)**:
-        //   ① `retryable` —— `quota` / `auth` 是账号/配置级的,换一家治不了;
-        //   ② 本回合**没干过活** —— 有工具调用就可能已有副作用(写文件 / 发消息 /
-        //      提交),重跑不安全;
-        //   ③ 没超时、没被中断 —— 「自动重跑只是把同一段卡死行为再买一遍」;
-        //   ④ 有可用备用 provider;
-        //   ⑤ 没有别的回合在跑(换 provider 要改进程级 env)。
-        // 分类判据只有一处(`providerFailure.ts`),这里不自己再判「是不是限流」。
-        const degraded =
-          failure.retryable &&
-          execution.turn.toolCalls.length === 0 &&
-          !execution.turn.timedOut &&
-          !aborted
-            ? degradeProvider(
-                `provider 故障(${providerFailureLabel(failure.kind)})`,
-                () => otherTurnRunning(projectId, agentId),
-              )
-            : null;
+        // ⚠️ **降级判据只有一处**(`decideFailover`):聊天路径与工作路径共用。
+        // 分类判据在 `providerFailure.ts` —— 这里不自己再判「是不是限流」。
+        const candidates = failoverCandidates();
+        const decision = decideFailover({
+          failure,
+          toolCalls: execution.turn.toolCalls.length,
+          timedOut: execution.turn.timedOut,
+          aborted,
+          hasBackup: candidates.length > 0,
+          otherTurnRunning: otherTurnRunning(projectId, agentId),
+        });
+        const degraded = decision.degrade
+          ? degradeProvider(decision.reason, () => otherTurnRunning(projectId, agentId))
+          : null;
         if (degraded !== null) {
           providerDegraded = true;
           announceProviderFailover(
