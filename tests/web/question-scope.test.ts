@@ -153,9 +153,16 @@ describe("接线 · 面板真的用了这道筛", () => {
   it("面板把**筛选结果**渲染出去(不是把全局列表整个渲染)", () => {
     const s = dock();
     expect(s).toMatch(/scopeClientQuestions\(/);
-    expect(s).toMatch(/items\.map\(/);
+    // 2026-10-26:`items.map(` 那一行改成了 `DataState` 的 `rows.map(`
+    // (四态收进 `ui/DataState.tsx`)。**判据没变** —— 被渲染的仍必须是
+    // 那道筛的输出,所以这里改成「`items` 是喂给状态的那一份」+「渲染的是它吐出来的 `rows`」,
+    // 两条合起来才等价于原来那一条(单看 `rows.map(` 是恒真的空断言)。
+    expect(s).toMatch(/remoteListOf\(items,/);
+    expect(s).toMatch(/rows\.map\(/);
     // ⚠️ 变异自检:整份 questions 直接 map 出去 ⇒ 这一格当场变红
     expect(s).not.toMatch(/questions\.map\(/);
+    // ⚠️ 变异自检:把 `questions` 喂给 DataState(而不是筛过的 `items`)⇒ 红
+    expect(s).not.toMatch(/remoteListOf\(questions,/);
   });
 
   it("面板**不用**后端那个全局收口计数(它答不对「本项目有几件」)", () => {

@@ -43,6 +43,7 @@ import { ProjectDetailPage } from "./routes/ProjectDetail";
 import { WorksPage } from "./routes/Works";
 import { MembersPage } from "./routes/Members";
 import { MemoryPage } from "./routes/Memory";
+import { AboutPage } from "./routes/About";
 import { useSettingsStore, activeProviderOf } from "./stores/settings";
 import { useChatStore } from "./stores/chat";
 import { initAppSocket } from "./lib/appSocket";
@@ -58,7 +59,10 @@ export type Route =
   | "works"
   | "members"
   | "memory"
-  | "settings";
+  | "settings"
+  /* 「关于」**不是第七个页签**(导航恒 6 项,见 TopBar 的 TABS)—— 它由顶栏末尾
+     那个 `?` 打开:一块说明不该和六个工作区抢位置。 */
+  | "about";
 
 export function App() {
   const [route, setRoute] = useState<Route>("chat");
@@ -161,6 +165,8 @@ export function App() {
         page(<WorksPage />)
       ) : route === "members" ? (
         page(<MembersPage />)
+      ) : route === "about" ? (
+        <AboutPage />
       ) : route === "memory" ? (
         page(<MemoryPage />)
       ) : (

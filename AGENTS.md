@@ -64,7 +64,7 @@
   判据的一部分:同一对节点上两类边**方向一致**时不是环(真机那份数据就是这样),方向相反
   才是环(`mutualPairs` 会点名是哪两条边)。写反会让「交付」跑到最左、并且把一个不存在的
   环报出来(`web/src/lib/workGraph.ts` 的 `collectEdges`)。
-- 基线:**2232 passed / 114 test files** · 两条 typecheck 0 error · `check:design` E1–E14 全绿(5 角色)。
+- 基线:**2269 passed / 117 test files** · 两条 typecheck 0 error · `check:design` E1–E14 全绿(5 角色)。
 - **角色中文名只有一处**:`src/platform/runtime/org.ts` 的 `ORG`(播种 / `roleDisplayName()` /
   `RoleHarnessView.displayName` / **系统提示里的「# 你的角色:X」**全走它);
   前端兜底表 `web/src/lib/vocab.ts` 的 `ROLE_LABEL` 必须逐项相同,由
@@ -505,6 +505,22 @@ dev/prod + CI/CD」,09:54 业务经理只回了一句「我先看下你之前留
   `CodeService.tsx` 里 30–74 字的技术事实必须留着。
 - 哨兵:`tests/web/annotation-budget.test.ts`(11 条:悬停 0 处 · 出处不进 `hint` ·
   同一句话不许抄两遍 · glossary 每条都有读者),3 条变异实测变红。
+- **四态只有一处写法:`web/src/components/ui/DataState.tsx`**(2026-10-26,Wave 0b)。
+  `RemoteState<T>` 是 `loading | error | unavailable | ready` 四处联合,配两个构造器
+  `remoteOf` / `remoteListOf`;**没拿到数据就拿不到 `children` 的参数**,所以「顺手渲染成空」
+  在类型上写不出来。⚠️ **`unavailable` 不许并进 `ready`(会变成「没有」)也不许并进
+  `loading`(会永远转圈)** —— 与 `ProjectLiveView.runtime = "unavailable"` 同一条纪律。
+  已接:`AgentPanel`(详情)/ `AcceptanceDock`(待验收)/ `ClientQuestionDock`(待答)/
+  `Members`(成员);回归 `tests/web/data-state.test.ts`(14 条)。
+- **「关于」页 = 说明书的唯一落点**(2026-10-26):`web/src/routes/About.tsx`,三段
+  (四态含义 / `GLOSSARY` 全表 / **已知不实之处**)。
+  ⚠️ **它不是第七个页签** —— 导航恒 6 项,入口是顶栏末尾那个 `?`(`TopBar` 的 `NavTab label="?"`)。
+  「已知不实之处」的数据在 `lib/glossary.ts` 的 `KNOWN_GAPS`(**每条必须带 `where` 落点**),
+  现在 7 条(语料跨项目全局可读 · 成本无上界 · 进行中依赖 WS · 降级是平台级 · 降级无结构化记录 ·
+  MCP 无界面且连接状态读不到 · 已收口项目的提问不再排队)。回归 `tests/web/about-page.test.ts`(12 条)。
+- 变异自检脚本:`.probe/mutation-wave0b.py`(6 条,全部实测变红)。
+  ⚠️ **它不用 `git checkout --` 复原** —— 新增文件还没入库时会报 `pathspec … did not match`,
+  于是**变异留在盘上**、脚本自己崩。改成按内存里的原文写回 + 断言「复原后与原文逐字相同」。
   设计全文与剩余波次:`docs/DESIGN-FRONTEND-IA.md`。
 
 ## 数据与存储
@@ -1092,7 +1108,7 @@ node -e "console.log(Object.keys(require('./node_modules/@earendil-works/pi-ai/d
 ```
 npx tsc -p tsconfig.server.json --noEmit
 npx tsc -p tsconfig.web.json --noEmit
-npm test                  # 2243 passed / 115 files
+npm test                  # 2269 passed / 117 files
 npm run build
 npm run check:design      # 设计一致性 E1–E14
 ```

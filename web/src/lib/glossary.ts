@@ -144,3 +144,60 @@ export const GLOSSARY: Record<GlossaryId, GlossaryEntry> = {
     source: "GET /api/harness(单元读盘状态、集合文件状态、备份数)",
   },
 };
+
+/**
+ * 已知不实之处 —— 「这块界面现在**说不到**的地方」,由 `routes/About.tsx` 全文列出。
+ *
+ * ⚠️ 它存在的理由与 `runtime: "unavailable"` 那条纪律同源:**读不到就说读不到**。
+ * 界面上一句「暂无」有时候不是「确实没有」,而是「这个读面还不存在」——
+ * 后者必须被写下来,否则下一次读它的人会把缺口当成结论(AGENTS.md「7-E」那一类)。
+ *
+ * 验收:每一条都要有一个**能 grep 到的落点**(`where`),`tests/web/about-page.test.ts`
+ * 会盯住「不许出现空条目」。
+ */
+export interface KnownGap {
+  /** 一句话(≤ 24 字):什么是缺的 / 什么是会骗人的。 */
+  what: string;
+  /** 为什么现在是这样 —— **不是**「以后再说」。 */
+  why: string;
+  /** 证据落点:文件 / 端点 / 迁移。 */
+  where: string;
+}
+
+export const KNOWN_GAPS: readonly KnownGap[] = [
+  {
+    what: "知识语料跨项目全局可读",
+    why: "语料表没有 tainted / 项目隔离列;tier 只是排序权重,不是可见性边界",
+    where: "docs/DESIGN-KNOWLEDGE.md §7 · migrations/030_knowledge_tier.sql",
+  },
+  {
+    what: "成本只有观测,没有上界",
+    why: "用户裁决「先只做 observation」:不拦、不警告、不自动停",
+    where: "GET /api/projects/:id/usage(byAgent / byWork / byDay)",
+  },
+  {
+    what: "「进行中」只在连接着的时候看得见",
+    why: "它来自 WS 在飞轮,不是在库里的第二份真相 —— 断流时这一块会空",
+    where: "web/src/stores/chat.ts 的 inFlight · members/AgentConversations.tsx",
+  },
+  {
+    what: "供应商降级是平台级的",
+    why: "降级改的是进程级 env;换 provider = 这个项目里所有会话一起换,没有 per-session",
+    where: "src/platform/host/serve.ts 的 decideFailover / failoverCandidatesOf",
+  },
+  {
+    what: "降级没有结构化记录",
+    why: "只落一条「⚠️ 供应商」会话消息 —— 一周降级了几次没有表可查",
+    where: "src/platform/host/serve.ts 的 announceProviderFailover",
+  },
+  {
+    what: "MCP 没有界面,连接状态读不到",
+    why: "连接状态在 pi 的 mcp.log 里,平台读不着;connectionState 的类型就是字面量 'unavailable'",
+    where: "src/platform/mcp/piConfig.ts · GET /api/mcp/servers",
+  },
+  {
+    what: "已收口项目上的提问不再排队",
+    why: "排空器只跑 active 项目 ⇒ 那里没有人会被叫醒来处理;事实仍在项目页",
+    where: "src/platform/storage/repo/clientQuestions.ts 的 listAllClientQuestions",
+  },
+];

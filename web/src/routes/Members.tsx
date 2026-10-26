@@ -131,6 +131,7 @@ import {
   Section,
   StatStrip,
 } from "@/components/ui/primitives";
+import { DataState, remoteListOf } from "@/components/ui/DataState";
 import { RoleHarnessSection, roleIssueCount } from "@/components/members/RoleHarness";
 import { AgentConversations } from "@/components/members/AgentConversations";
 import {
@@ -1020,15 +1021,16 @@ export function MembersPage() {
         aside={liveAside}
       />
 
-      {members.error !== null ? (
-        <div className="ss-empty" style={{ color: "var(--cinnabar)" }}>
-          加载失败:{members.error}
-        </div>
-      ) : members.loading && members.data.length === 0 ? (
-        <EmptyState>加载中…</EmptyState>
-      ) : members.data.length === 0 ? (
-        <EmptyState>这个项目还没有成员。</EmptyState>
-      ) : (
+      <DataState
+        what="成员"
+        variant="empty"
+        unavailable="读不到这个项目的成员。"
+        state={remoteListOf(members.data, members.loading, members.error)}
+      >
+        {(rows) =>
+          rows.length === 0 ? (
+            <EmptyState>这个项目还没有成员。</EmptyState>
+          ) : (
         <>
           {/* ── 按成员分栏:一次只看一个人(照 harness 的组织方式)─────
               上一版把成员 KV / 每个人的对话 / 每个角色的能力面同时铺开,
@@ -1037,7 +1039,7 @@ export function MembersPage() {
               那个组件已删 —— 现在由**这一行成员页签**承担(一人一角色),
               断言见 `tests/web/members-activity.test.ts`。 */}
           <MemberRoleTabs
-            members={members.data}
+            members={rows}
             active={selected?.id ?? null}
             onSelect={setActiveId}
             activityOf={activityOf}
@@ -1078,7 +1080,9 @@ export function MembersPage() {
             />
           )}
         </>
-      )}
+          )
+        }
+      </DataState>
 
       {/* ── 不在成员表里的发言 —— **只在真的有人不在成员表里时才渲染** ────
           2026-10-06 用户原话:「(这两段)这个信息不要展示了,我感觉没什么意思」。

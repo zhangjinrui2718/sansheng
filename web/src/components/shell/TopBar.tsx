@@ -90,6 +90,9 @@ export function TopBar({
             onClick={() => onRoute(t.route)}
           />
         ))}
+        {/* 「关于」—— 说明书不占页签位(导航恒 6 项)。它**在导航末尾而不在右上角**:
+            右上角是运行态与成本,那里每一格都在报一个数。 */}
+        <NavTab label="?" active={route === "about"} onClick={() => onRoute("about")} />
       </nav>
 
       <div className="flex items-center gap-3 flex-none ss-meta">

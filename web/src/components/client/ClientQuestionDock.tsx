@@ -72,6 +72,7 @@
  */
 import { ClientQuestionCard } from "./ClientQuestionCard";
 import { Pill } from "@/components/ui/primitives";
+import { DataState, remoteListOf } from "@/components/ui/DataState";
 import { useClientQuestions } from "@/lib/data";
 import { scopeClientQuestions } from "@/lib/questionScope";
 import { useChatStore } from "@/stores/chat";
@@ -108,22 +109,26 @@ export function ClientQuestionDock() {
       </div>
 
       <div className="flex-1 overflow-y-auto p-2 flex flex-col gap-2">
-        {error !== null ? (
-          <div className="ss-meta" style={{ color: "var(--cinnabar)" }}>
-            加载失败:{error}
-          </div>
-        ) : projectId === null ? (
+        {projectId === null && error === null ? (
           <div className="ss-meta">先在左栏选一个项目 —— 这一块只看当前项目的提问。</div>
-        ) : loading && count === 0 ? (
-          /* 「还没查过」与「查过了是空」在 hooks 里已分开(loading 初值 true),
-             走到空态就真的是这个项目没有队列。 */
-          <div className="ss-meta">加载中…</div>
-        ) : count === 0 ? (
-          <div className="ss-meta">
-            没有等你回答的问题 —— 本项目的业务经理没卡在你这里。
-          </div>
         ) : (
-          items.map((q) => <ClientQuestionCard key={q.id} q={q} />)
+          /* 四态归 `DataState`(空态文案仍是这一块自己的领域语言)。 */
+          <DataState
+            what="待答清单"
+            variant="note"
+            unavailable="读不到待答清单。"
+            state={remoteListOf(items, loading, error)}
+          >
+            {(rows) =>
+              rows.length === 0 ? (
+                <div className="ss-meta">
+                  没有等你回答的问题 —— 本项目的业务经理没卡在你这里。
+                </div>
+              ) : (
+                rows.map((q) => <ClientQuestionCard key={q.id} q={q} />)
+              )
+            }
+          </DataState>
         )}
       </div>
 

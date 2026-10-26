@@ -18,6 +18,7 @@
  * 多个 hook 实例会让同一份数据在两块面板里显示**不同的加载态**。
  */
 import { EmptyState, KV, Pill, StatStrip } from "@/components/ui/primitives";
+import { DataState, remoteOf } from "@/components/ui/DataState";
 import type { ProjectDetailState } from "@/lib/data";
 import {
   ROLE_LABEL,
@@ -50,96 +51,96 @@ export function AgentPanel({ state }: { state: ProjectDetailState }) {
       <div className="flex-1 overflow-y-auto p-2 flex flex-col gap-2">
         {!projectId ? (
           <EmptyState>先在左栏选一个项目。</EmptyState>
-        ) : error ? (
-          <div className="ss-empty" style={{ color: "var(--cinnabar)" }}>
-            加载失败:{error}
-          </div>
-        ) : loading && !detail ? (
-          /* 没查过 ≠ 查过了是空:首帧必须走这一档。 */
-          <EmptyState>加载中…</EmptyState>
-        ) : !detail ? (
-          <EmptyState>这个项目读不到详情。</EmptyState>
         ) : (
-          <>
-            <div className="flex flex-col gap-1">
-              <div className="ss-body" style={{ color: "var(--bone)" }}>
-                {detail.name}
-              </div>
-              <div className="ss-note">{detail.client || "未填甲方"}</div>
-            </div>
-
-            <StatStrip
-              items={[
-                { label: "工作项", value: `${detail.counts.openWorks}/${detail.counts.works}` },
-                { label: "工件", value: detail.counts.artifacts },
-                {
-                  label: "待答",
-                  value: detail.counts.pendingQuestions,
-                  tone: detail.counts.pendingQuestions > 0 ? "amber" : undefined,
-                },
-                {
-                  label: "阻塞",
-                  value: detail.counts.openBlockers,
-                  tone: detail.counts.openBlockers > 0 ? "cinnabar" : undefined,
-                },
-              ]}
-            />
-
-            <div className="flex flex-col">
-              <div className="ss-section" style={{ fontSize: 12 }}>
-                成员
-              </div>
-              {detail.members.length === 0 ? (
-                <div className="ss-note">还没有成员。</div>
-              ) : (
-                detail.members.map((m) => (
-                  <KV
-                    key={m.id}
-                    label={ROLE_LABEL[m.role]}
-                    value={m.displayName}
-                    title={m.specialization ?? undefined}
-                  />
-                ))
-              )}
-            </div>
-
-            <div className="flex flex-col">
-              <div className="ss-section" style={{ fontSize: 12 }}>
-                未完成的工作项
-              </div>
-              {openWorks.length === 0 ? (
-                <div className="ss-note">没有未完成的工作项。</div>
-              ) : (
-                <ul className="grid gap-1">
-                  {openWorks.map((w) => (
-                    <li key={w.id} className="flex items-center gap-1.5" title={`${w.title} · ${w.assigneeName}`}>
-                      <span className="flex-none">
-                        <Pill tone={workStatusTone(w.status)}>{workStatusLabel(w.status)}</Pill>
-                      </span>
-                      <span className="truncate ss-body" style={{ color: "var(--bone-dim)" }}>
-                        {excerpt(w.title, 24)}
-                      </span>
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </div>
-
-            {blockers.length > 0 && (
-              <div className="flex flex-col">
-                <div className="ss-section" style={{ fontSize: 12 }}>
-                  阻塞
+          <DataState
+            what="详情"
+            variant="empty"
+            unavailable="这个项目读不到详情。"
+            state={remoteOf(detail, error, loading)}
+          >
+            {(d) => (
+              <>
+                <div className="flex flex-col gap-1">
+                  <div className="ss-body" style={{ color: "var(--bone)" }}>
+                    {d.name}
+                  </div>
+                  <div className="ss-note">{d.client || "未填甲方"}</div>
                 </div>
-                <ul className="grid gap-1">
-                  {blockers.map((b) => (
-                    <li key={b.id} className="ss-note truncate" title={b.detail}>
-                      {excerpt(b.title, 30)}
-                    </li>
-                  ))}
-                </ul>
-              </div>
+
+                <StatStrip
+                  items={[
+                    { label: "工作项", value: `${d.counts.openWorks}/${d.counts.works}` },
+                    { label: "工件", value: d.counts.artifacts },
+                    {
+                      label: "待答",
+                      value: d.counts.pendingQuestions,
+                      tone: d.counts.pendingQuestions > 0 ? "amber" : undefined,
+                    },
+                    {
+                      label: "阻塞",
+                      value: d.counts.openBlockers,
+                      tone: d.counts.openBlockers > 0 ? "cinnabar" : undefined,
+                    },
+                  ]}
+                />
+
+                <div className="flex flex-col">
+                  <div className="ss-section" style={{ fontSize: 12 }}>
+                    成员
+                  </div>
+                  {d.members.length === 0 ? (
+                    <div className="ss-note">还没有成员。</div>
+                  ) : (
+                    d.members.map((m) => (
+                      <KV
+                        key={m.id}
+                        label={ROLE_LABEL[m.role]}
+                        value={m.displayName}
+                        title={m.specialization ?? undefined}
+                      />
+                    ))
+                  )}
+                </div>
+
+                <div className="flex flex-col">
+                  <div className="ss-section" style={{ fontSize: 12 }}>
+                    未完成的工作项
+                  </div>
+                  {openWorks.length === 0 ? (
+                    <div className="ss-note">没有未完成的工作项。</div>
+                  ) : (
+                    <ul className="grid gap-1">
+                      {openWorks.map((w) => (
+                        <li key={w.id} className="flex items-center gap-1.5" title={`${w.title} · ${w.assigneeName}`}>
+                          <span className="flex-none">
+                            <Pill tone={workStatusTone(w.status)}>{workStatusLabel(w.status)}</Pill>
+                          </span>
+                          <span className="truncate ss-body" style={{ color: "var(--bone-dim)" }}>
+                            {excerpt(w.title, 24)}
+                          </span>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+
+                {blockers.length > 0 && (
+                  <div className="flex flex-col">
+                    <div className="ss-section" style={{ fontSize: 12 }}>
+                      阻塞
+                    </div>
+                    <ul className="grid gap-1">
+                      {blockers.map((b) => (
+                        <li key={b.id} className="ss-note truncate" title={b.detail}>
+                          {excerpt(b.title, 30)}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+              </>
             )}
-          </>
+          </DataState>
         )}
       </div>
     </aside>

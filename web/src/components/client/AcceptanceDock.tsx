@@ -35,6 +35,7 @@
 import { useMemo } from "react";
 import { DeliveryVerdictActions } from "@/components/deliverable/DeliveryVerdictActions";
 import { Pill } from "@/components/ui/primitives";
+import { DataState, remoteOf } from "@/components/ui/DataState";
 import { deliverableTypeLabel, deliverableTypeTone, fmtTime } from "@/lib/vocab";
 import type { ProjectDetailState } from "@/lib/data";
 import type { AwaitingAcceptanceView } from "@shared/types/platform";
@@ -80,17 +81,24 @@ export function AcceptanceDock({ state }: { state: ProjectDetailState }) {
       <div className="flex-1 overflow-y-auto p-2 flex flex-col gap-2">
         {projectId === null ? (
           <div className="ss-meta">先在左栏选一个项目。</div>
-        ) : error !== null ? (
-          <div className="ss-meta" style={{ color: "var(--cinnabar)" }}>
-            加载失败:{error}
-          </div>
-        ) : loading && detail === null ? (
-          /* 没查过 ≠ 查过了是空:首帧必须走这一档,否则一次慢请求会被读成「没有」。 */
-          <div className="ss-meta">加载中…</div>
-        ) : count === 0 ? (
-          <div className="ss-meta">没有等你验收的东西 —— 交付出去的都收了。</div>
         ) : (
-          items.map((a) => <DockCard key={a.artifactId} a={a} />)
+          /* 四态由 `DataState` 一处承担 —— 「还没查过 / 读失败 / 查完了读不到」
+             都不许渲染成「没有等你验收的东西」(这条注释原来抄在每一页上,
+             现在判据在类型里:没拿到数据就拿不到 `d`)。 */
+          <DataState
+            what="待验收清单"
+            variant="note"
+            unavailable="读不到待验收清单。"
+            state={remoteOf(detail, error, loading)}
+          >
+            {(d) =>
+              d.awaitingAcceptance.length === 0 ? (
+                <div className="ss-meta">没有等你验收的东西 —— 交付出去的都收了。</div>
+              ) : (
+                d.awaitingAcceptance.map((a) => <DockCard key={a.artifactId} a={a} />)
+              )
+            }
+          </DataState>
         )}
       </div>
 

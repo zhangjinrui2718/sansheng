@@ -293,10 +293,10 @@
 - **删**:`hintTitle`(`hintTitle` 实测是 **27 处**,不是 19 —— 见下面「实施记录」)
   + `Members.tsx` 里那段逐字重复 133 字 + `AcceptanceDock` 的一处 `title="来源:…"`。
 - **换形态**:`ss-note` 里负责「读不到 / 还没查 / 真的是 0」的那些(≥ 26 条)→ `<DataState>`;
-  **判据不变,承载方式变**。(**尚未实施** —— 属于 Wave 0b)
+  **判据不变,承载方式变**。(**已实施四处 —— 见 §8.5;剩下的散点留在 Wave 1 顺手收**)
 - **压缩**:`hint=` 里超 24 字的那 6 条 → **不改**(它们在 `CodeService.tsx`,全是技术事实)。
-- **新增**:`lib/glossary.ts`(18 条)、`ui/Help.tsx`、`annotation-budget` 哨兵。(关于页、
-  `ui/DataState.tsx` 尚未做)
+- **新增**:`lib/glossary.ts`(18 条)、`ui/Help.tsx`、`annotation-budget` 哨兵、
+  `ui/DataState.tsx` 与「关于」页(**见 §8.5,已落地**)。
 - **不动**:§8.2 三条红线、22 条 `Disclosure` 里的 3 条内容容器、任何服务端文件。
 
 ---
@@ -334,3 +334,48 @@ tests/web/annotation-budget.test.ts     ← 新增 11 条
 **变异自检(实测变红)**:① 往 `Memory.tsx` 加回一条 `hintTitle=` ⇒ 判据 ① 红;
 ② 把一个 `hint` 改成另一处已存在的正文 ⇒ 判据 ④(不许抄两遍)红;
 ③ 摘掉 `helpId="harness.card"` ⇒ 判据 ⑤(条目没读者)红。每条都断言「改后文件确实变了」+ 还原校验。
+
+---
+
+### 8.5 实施记录 · Wave 0b(2026-10-26,已落地)
+
+```
+web/src/components/ui/DataState.tsx     ← 新增:四态判别联合 + remoteOf / remoteListOf
+web/src/components/shell/AgentPanel.tsx ← 「详情」四态收进来
+web/src/components/client/AcceptanceDock.tsx  ← 「待验收清单」四态收进来
+web/src/components/client/ClientQuestionDock.tsx ← 「待答清单」四态收进来
+web/src/routes/Members.tsx              ← 「成员」四态收进来
+web/src/routes/About.tsx                ← 新增:四态说明 / 词汇表全表 / 已知不实之处
+web/src/lib/glossary.ts                 ← 新增 `KnownGap` + `KNOWN_GAPS`(7 条,每条带落点)
+web/src/App.tsx                         ← `Route` 加 `"about"` + 分支渲染
+web/src/components/shell/TopBar.tsx     ← 导航末尾一个 `?`(TABS **仍然 6 项**)
+tests/web/data-state.test.ts            ← 新增 14 条(两个构造器 + 四态两两不同)
+tests/web/about-page.test.ts            ← 新增 12 条(逐条渲染 / 无空条目 / 不是第七个页签)
+tests/web/question-scope.test.ts        ← 1 条改判:被渲染的仍是筛选结果(判据没变,落点从
+                                           `items.map(` 换成 `remoteListOf(items,` + `rows.map(`)
+.probe/mutation-wave0b.py               ← 6 条变异自检,全部实测变红
+```
+
+**验证**:`2269 passed / 117 files` · 两条 typecheck 0 error · `npm run build` 绿 ·
+`check:design` E1–E14 全绿。
+
+**四条判据(每条都有能变红的用例)**
+
+1. **四态不许合一**:`RemoteState<T>` 是四处联合;`remoteListOf` 只在 `loading && rows.length === 0`
+   时给 `loading`,查完的空数组才是 `ready` ⇒ 「空」只能在 `children` 里由调用点自己说。
+2. **错误优先于数据**:`error !== null` 时哪怕有数据也走 `error`(M6 变异:吞掉 error ⇒ 红)。
+3. **条目一条不落**:`GLOSSARY` 的键是闭合联合;**少渲染一条不会报错**,只是用户永远读不到
+   ⇒ `about-page.test.ts` 逐条比对(M3 变异:`.slice(0, -1)` ⇒ 红)。
+4. **「关于」不是第七个页签**:导航恒 6 项是 `AGENTS.md` 的既有判据;`TABS` 里出现 `about`
+   当场红(M4 变异),只加 union 不接分支也红(M5 变异)。
+
+**两个真实撞上的问题**
+
+1. **`git checkout --` 复原不了未入库的新文件。** 第一版变异脚本用 `git checkout --` 还原,
+   而 Wave 0b 的 `DataState.tsx` / `About.tsx` 还没 commit ⇒ `pathspec … did not match any file(s)`
+   ⇒ **变异留在盘上**,脚本自己崩了。改成「按内存里的原文写回」+ 断言「复原后与原文逐字相同」。
+   ⚠️ 教训与「`python str.replace` 不匹配静默不执行」同源:**复原这一步也需要断言**。
+2. **一条变异抓不住任何东西时,先怀疑测试没覆盖,而不是代码没 bug。** M1(去掉「还没查过」那一档)
+   最初指向 `acceptance-dock.test.ts`,结果全绿 —— 因为那个面板用的是 `remoteOf`,而那一行在
+   `remoteListOf` 里。⇒ 补了 `tests/web/data-state.test.ts` 直接测两个构造器,M1 随即如实变红。
+   **变异没被抓住有两种可能:判据无效,或者判据指错了地方。** 这次是后者。
