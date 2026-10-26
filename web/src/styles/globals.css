@@ -410,6 +410,61 @@
   .ss-disclosure[open] > summary::before { transform: rotate(90deg); }
   .ss-disclosure > summary:hover { color: var(--bone-dim); }
 
+  /* `?` 词汇表入口(ui/Help.tsx)。**用 button,不用 <details>** —— 这套代码里
+     `<details>` 的约定含义是「可折叠的内容」,两条已有判据按它切「卡片头」。
+     一个 tooltip 借用那个含义会伪造信号。 */
+  .ss-help {
+    position: relative;
+    display: inline-flex;
+    flex: 0 0 auto;
+  }
+  .ss-help-btn {
+    all: unset;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 14px;
+    height: 14px;
+    font-size: 10px;
+    line-height: 14px;
+    border-radius: 999px;
+    border: 1px solid var(--ink-4);
+    color: var(--bone-mute);
+    user-select: none;
+  }
+  .ss-help-btn:hover,
+  .ss-help-btn[aria-expanded="true"] {
+    color: var(--bone);
+    border-color: var(--bone-mute);
+  }
+  .ss-help-btn:focus-visible { outline: 1px solid var(--jade); outline-offset: 1px; }
+  .ss-help-body {
+    position: absolute;
+    z-index: 20;
+    top: 18px;
+    left: 0;
+    width: 320px;
+    max-width: 70vw;
+    display: grid;
+    gap: 4px;
+    padding: 8px 10px;
+    font-size: 11px;
+    line-height: 1.6;
+    color: var(--bone-dim);
+    background: var(--ink-1);
+    border: 1px solid var(--ink-3);
+    border-radius: 6px;
+    box-shadow: 0 6px 20px rgb(0 0 0 / 35%);
+  }
+  .ss-help-line { color: var(--bone); }
+  .ss-help-key {
+    display: inline-block;
+    min-width: 28px;
+    margin-right: 6px;
+    color: var(--bone-mute);
+  }
+
   /* 空态:一句话 + 可选的下一步动作。不再塞三段「这是真实空态,不是没接上」 */
   .ss-empty {
     font-size: 12px;

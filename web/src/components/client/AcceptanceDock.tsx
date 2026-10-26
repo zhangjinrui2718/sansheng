@@ -96,7 +96,7 @@ export function AcceptanceDock({ state }: { state: ProjectDetailState }) {
 
       {/* 这一行是**判据**,不是装饰:模型写在工件上的 `accepted` 是「定稿」,
           收不收由甲方说 —— 两件事分不清就会出现「作者自己批了自己的交付」。 */}
-      <div className="ss-meta px-3 py-1 flex-none" title="来源:ProjectDetail.awaitingAcceptance(029)">
+      <div className="ss-meta px-3 py-1 flex-none">
         这里点了才算数 —— 工件上的「定稿」不是你的验收
       </div>
     </section>

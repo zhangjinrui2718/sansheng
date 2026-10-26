@@ -8,9 +8,13 @@
  * ── 配套的阅读纪律(这一层真正的价值)──────────────────────────────
  *  1. **注解默认不在屏幕上。** 凡是解释「为什么这么算 / 为什么这个字段没接线」的句子,
  *     以前都是整段贴在页面下方(Agents 页四条、Harness 页三处),现在一律:
- *       - 一句话能说清的 → `title=`(鼠标悬停);
- *       - 需要两三句的 → `<Disclosure>`(点开);
+ *       - 一句话能说清的 → 页面上的 `hint`(≤ 24 字,摆得下就不该藏);
+ *       - **出处 / 判据 / 机制** → `<Help id>`(`ui/Help.tsx`,内容全部来自 `lib/glossary.ts`);
+ *       - 需要整段看的正文 → `<Disclosure>`(点开);
  *       - 纯开发者自述 → 回到本文件 / 页面文件头的注释里。
+ *     ⚠️ **`hintTitle=`(渲染成 `title=` 悬停)已删除,不许再加回** —— 触屏不触发、
+ *     不可复制、屏幕阅读器行为不一致,实测攒出过 2465 字「理论上存在、没人读完」的正文。
+ *     判据在 `tests/web/annotation-budget.test.ts`。
  *     **反造假纪律没有放松**:数据从哪来、阈值是估算还是实测,仍然要能查到 —— 只是
  *     把它从「必须逐页读」降级为「想知道时点一下」。
  *  2. **正文默认截断。** 长 body 进 `.ss-clamp-*` + `<Disclosure>`,首屏不再被一整段
@@ -22,6 +26,8 @@
  * --bamboo / --ochre),不新增配色、字体、间距体系;UI 标签一律不用 emoji。
  */
 import type { CSSProperties, ReactNode } from "react";
+import { Help } from "./Help";
+import type { GlossaryId } from "@/lib/glossary";
 
 /** 语气 = 语义色的有限集合(映射在 globals.css 的 `.ss-pill[data-tone]`)。 */
 export type Tone = "bone" | "jade" | "amber" | "cinnabar" | "cyan" | "bamboo" | "mute" | "ochre";
@@ -48,17 +54,18 @@ export function Pill({
 
 /**
  * 页面抬头:标题 + 一行 hint(可省略)+ 右侧计数/操作区。
- * hint 是**一行**的短标;要展开解释的整段话放 `hintTitle`,悬停才出现。
+ * hint 是**一行**的短标;出处 / 判据走 `helpId`(点开看),**不再用悬停正文**。
  */
 export function PageHeader({
   title,
   hint,
-  hintTitle,
+  helpId,
   aside,
 }: {
   title: string;
   hint?: string;
-  hintTitle?: string;
+  /** 出处 / 判据的词汇表条目 —— 渲染成标题旁一个 `?`。 */
+  helpId?: GlossaryId;
   aside?: ReactNode;
 }) {
   return (
@@ -66,10 +73,11 @@ export function PageHeader({
       <div className="flex items-baseline gap-2 min-w-0">
         <h1 className="ss-title">{title}</h1>
         {hint ? (
-          <span className="ss-note truncate" title={hintTitle}>
+          <span className="ss-note truncate" title={helpId ? undefined : hint}>
             {hint}
           </span>
         ) : null}
+        {helpId ? <Help id={helpId} /> : null}
       </div>
       {aside ? <div className="flex items-center gap-2 flex-wrap">{aside}</div> : null}
     </header>
@@ -84,7 +92,7 @@ export function Section({
   title,
   count,
   hint,
-  hintTitle,
+  helpId,
   aside,
   children,
   className,
@@ -92,8 +100,8 @@ export function Section({
   title: string;
   count?: number;
   hint?: string;
-  /** 要展开解释的整段话 —— 悬停才出现。与 `PageHeader` 同一语义。 */
-  hintTitle?: string;
+  /** 出处 / 判据的词汇表条目 —— 渲染成标题旁一个 `?`。与 `PageHeader` 同一语义。 */
+  helpId?: GlossaryId;
   aside?: ReactNode;
   children: ReactNode;
   className?: string;
@@ -105,10 +113,11 @@ export function Section({
           <h2 className="ss-section">{title}</h2>
           {typeof count === "number" ? <span className="ss-meta">{count}</span> : null}
           {hint ? (
-            <span className="ss-note truncate" title={hintTitle ?? hint}>
+            <span className="ss-note truncate" title={helpId ? undefined : hint}>
               {hint}
             </span>
           ) : null}
+          {helpId ? <Help id={helpId} /> : null}
         </div>        {aside ? <div className="flex items-center gap-1.5 flex-wrap">{aside}</div> : null}
       </div>
       {children}

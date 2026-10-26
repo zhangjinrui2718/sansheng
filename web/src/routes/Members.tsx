@@ -86,8 +86,8 @@
  *      工件」中间,它会被读成这个成员的又一项活动。
  *   2. **去处明确** —— 它是**未来角色 harness 配置的唯一落点**(用户原话)。
  *      卡片头一行就摆出「这个角色的 harness 正不正常」(状态摘要 + 告警 Pill),
- *      可编辑的内容默认折叠;`Section` 的 `hintTitle`(悬停)里写清「这里改什么、
- *      什么改不了(ceiling / writeKinds 是代码内常量)」。
+ *      可编辑的内容默认折叠;`Section` 的 `helpId="harness.card"`(一个 `?`)里写清
+ *      「这里改什么、什么改不了(ceiling / writeKinds 是代码内常量)」。
  *   3. `MemberPane` 因此**不再接收任何 harness 相关的 prop** —— 「这个人此刻
  *      怎么样」与「这个角色能干什么」两块各自成立,不再互相拖着一堆参数。
  *
@@ -548,7 +548,6 @@ export function MemberPane({
       // 以前这里是 `member.displayName`,而摘要行里又紧跟一个角色 Pill —— 一人一
       // 角色的组织里那两个词一模一样,屏幕上就成了「工程师 [工程师]」。
       title={ROLE_LABEL[member.role]}
-      hintTitle={`agentId = ${member.id} · role = ${member.role} · agents.display_name = ${member.displayName}`}
       aside={
         <span className="ss-meta font-mono" title="role —— 角色是**属性**,身份是 agentId(摘要行里那个等宽小字)">
           {member.role}
@@ -1007,7 +1006,6 @@ export function MembersPage() {
       <div className="ss-page">
         <PageHeader
           title="成员"
-          hintTitle="本项目成员来自 GET /api/projects/:id/members;运行态来自 GET /api/projects/:id/live(2.5s 轮询);角色 harness 来自 GET /api/harness(每个成员面板里那一块,提示词单元可直接改)。"
         />
         <EmptyState>先在「对话」页的左栏选一个项目。</EmptyState>
       </div>
@@ -1019,7 +1017,6 @@ export function MembersPage() {
       <PageHeader
         title="成员"
         hint={projectName}
-        hintTitle="本项目成员来自 GET /api/projects/:id/members;运行态来自 GET /api/projects/:id/live(2.5s 轮询);角色 harness 来自 GET /api/harness(每个成员面板里那一块,提示词单元可直接改)。"
         aside={liveAside}
       />
 
@@ -1100,7 +1097,6 @@ export function MembersPage() {
           title="不在成员表里的发言"
           count={strangers.length}
           hint="这些发言的作者不在本项目成员表里(可能是历史身份的残留);列出来是为了不静默丢证据"
-          hintTitle="数据来自 GET /api/projects/:id/member-conversations(按 session_messages.agent_id 在 SQL 里 GROUP BY)。与成员面板里的清单是同一个端点、同一套判据,只是发言者不属于本项目成员表 —— 它们**不在**上面那行页签里,所以不会被成员面板渲染出来。"
         >
           <Disclosure summary={`展开查看 · ${strangers.length} 组`}>
             <div className="grid gap-2">

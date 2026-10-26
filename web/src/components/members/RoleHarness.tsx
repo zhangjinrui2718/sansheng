@@ -258,17 +258,11 @@ function toolCountText(role: RoleHarnessView): string {
 }
 
 /**
- * 卡片头上那段「悬停才出现」的解释。**未来 harness 配置的唯一落点**这件事
- * 必须写在这里(用户原话:「未来角色的 harness 配置就放在这个地方」)——
- * 否则用户看到一块可编辑的面板,不知道它是不是所有相关配置都能在这里改。
+ * ⚠️ 卡片头上那段解释**已从悬停改成 `?`**(`helpId="harness.card"`,正文在
+ * `lib/glossary.ts`)。原来那句 `HARNESS_CARD_HINT` 是一整段悬停正文 —— 触屏读不到、
+ * 「未来 harness 配置就放这里」这件事跟着一句没人会触发的话一起消失。
+ * 现在:一行话在 `?` 里,判据指向 `ROLE_SPECS.ceiling` / `harness/write.ts`。
  */
-const HARNESS_CARD_HINT =
-  "未来角色 harness 配置就放在这里:一个角色一块卡,换页签就是换角色。\n\n" +
-  "这里改的是**这个角色**的能力面 —— 提示词单元可以直接编辑、保存(保存后以后端回读值为准)、" +
-  "也可以恢复出厂(两段式确认);而 ceiling(架构上界)与 writeKinds(能写哪几类记录)是 " +
-  "ROLE_SPECS 里的**代码内常量**,界面上改不了 —— 要改就得走代码评审。\n\n" +
-  "工具集合文件(harness/tools/{role}.json)由你直接编辑文件,界面上不提供写面;" +
-  "这里只如实报出它的读盘状态(生效中 / 无文件 / 文件无效)。";
 
 /**
  * 一个角色的 harness 面板。顺序刻意是**「我能不能用 → 我能改什么 → 代码内常量」**:
@@ -509,7 +503,6 @@ export function HarnessRolePane({
     <Section
       title={role.displayName}
       count={role.promptUnits.length}
-      hintTitle={`role = ${role.role}`}
       aside={
         <div className="flex items-center gap-1.5">
           {role.clientFacing && <Pill tone="jade">甲方接口</Pill>}
@@ -595,7 +588,7 @@ export function RoleHarnessDisclosure({
       hint={ROLE_LABEL[role]}
       // 「未来角色的 harness 配置就放在这里」这件事写在悬停里(用户原话),
       // 连「什么能改、什么改不了」一起说清 —— 否则用户会去找一个不存在的开关。
-      hintTitle={HARNESS_CARD_HINT}
+      helpId="harness.card"
       aside={
         issues > 0 ? (
           <Pill

@@ -245,7 +245,7 @@ export function MemoryPage() {
       <PageHeader
         title="记忆"
         hint="用户画像 + 记忆碎片 + 知识语料"
-        hintTitle="三段是**两套东西**:画像 / 碎片来自 GET /api/profile 与 /api/memory/fragments —— 关于**用户**,模型写、会淡忘;知识语料来自 GET /api/knowledge —— 关于**项目 / 组织**,平台索引、agent 只读、不淡忘(设计 docs/DESIGN-KNOWLEDGE.md)。没有条目时是空态,不展示示例。kind 是闭合联合,不扩展。"
+        helpId="memory.sections"
         aside={
           <StatStrip
             items={[
@@ -272,7 +272,6 @@ export function MemoryPage() {
         title="用户画像"
         count={profileKeys.length}
         hint="结构化摘要 · 与碎片互补"
-        hintTitle="来源:GET /api/profile → { entries }。value 是任意 JSON,本页不猜它的结构:字符串按原文渲染,其余按 JSON 渲染。"
       >
         {profileError !== null ? (
           <div className="sansheng-card p-3 text-xs" style={{ color: "var(--cinnabar)" }}>
@@ -365,13 +364,7 @@ export function MemoryPage() {
         title="知识语料"
         count={knowledge !== null && knowledge.runtime === "ok" ? knowledge.chunks : undefined}
         hint="关于项目 / 组织 · 平台索引 · agent 只读"
-        hintTitle={
-          "它**不是记忆**:记忆关于**用户**(偏好 / 事实,模型写、会淡忘),语料关于**项目 / 组织**" +
-          "(工件正文 + 对话正文,平台在回合边界与启动时索引、不淡忘、agent 只读)。" +
-          "这里有三个问题:量级(多少块 / 覆盖多少项目)、时效(上次索引多久前、落后多少)、" +
-          "机制状态(行与 FTS 索引是否一致 / 有没有来源还没进)。明细走下面的检索。" +
-          "来源:GET /api/knowledge 与 GET /api/knowledge/chunks(q 有值 = 检索,没值 = 按时间浏览)。"
-        }
+        helpId="knowledge.corpus"
       >
         {knowledgeError !== null ? (
           <div className="sansheng-card p-3 text-xs" style={{ color: "var(--cinnabar)" }}>

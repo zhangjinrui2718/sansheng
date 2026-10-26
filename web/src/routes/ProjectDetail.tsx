@@ -183,7 +183,6 @@ export function ProjectDetailPage() {
       <PageHeader
         title={detail?.name ?? "项目"}
         hint={detail ? (detail.client ? `甲方 ${detail.client}` : undefined) : undefined}
-        hintTitle="数据来源:GET /api/projects/:id、/blockers、/asks、/changes。"
         aside={
           detail ? (
             <StatStrip
@@ -269,9 +268,9 @@ export function ProjectDetailPage() {
             title="组织推进"
             count={runtime.stops.length}
             hint="平台叫醒的排空在这里异常停下过 · 每条带此刻的状态"
-            hintTitle="来源:GET /api/projects/:id/messages 里 kind = 'system' 且正文以「⚠️ 组织停止推进」开头的行(serve.ts 的 announceDrain 落库)。状态由 lib/orgState.ts 从「此刻」读面(GET /api/projects/:id/live:在跑的回合 / 可执行待办 / 预算用尽的待办 / 等甲方答的问题 / 兜底定时器心跳)与「这条之后又落了几个回合」派生 —— 不是编的。读不到运行态时显示「读不到」,不显示「空闲」。"
+            helpId="notice.stop"
           >
-            <div className="ss-note mb-1.5" title="来源:GET /api/projects/:id/live —— 「此刻」的唯一读面">
+            <div className="ss-note mb-1.5">
               {liveHeadline(live.data)}
               {runtime.attention > 0 && (
                 <span style={{ color: "var(--amber)" }}>
@@ -340,7 +339,7 @@ export function ProjectDetailPage() {
             title="合规记录"
             count={runtime.compliance.length}
             hint="平台叫醒的回合没留工作记录 · 记录,不是待办"
-            hintTitle="来源:GET /api/projects/:id/messages 里 kind = 'system' 且正文以「⚠️ 平台检测」开头的行(serve.ts 的 reportUnannouncedTurn 落库:平台叫醒的回合既没调 tell_client、正文也没有行首 [未播报])。⚠️ 它**没有状态**:那一个回合确实没留痕,平台也不替模型补那行记录 —— 任何「已解决」都是编造现场。能降频的只有机制(提示词 / 检测)。"
+            helpId="notice.compliance"
           >
             {runtime.compliance.length === 0 ? (
               <EmptyState>没有合规告警 —— 平台叫醒的每个回合都留了工作记录。</EmptyState>
@@ -382,7 +381,7 @@ export function ProjectDetailPage() {
               title="其他平台记录"
               count={runtime.others.length}
               hint="认不出类别的平台通知 · 原样保留"
-              hintTitle="分类器认的是正文首行前缀(「⚠️ 组织停止推进」/「⚠️ 平台检测」)。认不出的**不当丢**:它在这里原样显示 —— 分类失手只会退化成「其他」,不会静默消失(见 lib/platformNotices.ts)。"
+              helpId="notice.other"
             >
               <div className="grid gap-1.5">
                 {runtime.others.map((n) => (
@@ -414,7 +413,7 @@ export function ProjectDetailPage() {
             title="工作项"
             count={detail.works.length}
             hint="项目经理把目标拆成的工作项"
-            hintTitle="状态取值来自契约 WorkStatus(open|in_progress|blocked|done|failed|cancelled)。"
+            helpId="work.status"
           >
             {detail.works.length === 0 ? (
               <EmptyState>还没有工作项。</EmptyState>
@@ -454,7 +453,7 @@ export function ProjectDetailPage() {
             title="待你回答"
             count={detail.pendingQuestions.length}
             hint="需要你处理 · 答完落成 decision 工件"
-            hintTitle="来源:ProjectDetail.pendingQuestions(kind = client_question 的工件)。它是持久的 —— 关掉页面下次还看得见。这是**唯一**需要用户动手的提问类数据。"
+            helpId="client-question"
           >
             {detail.pendingQuestions.length === 0 ? (
               <EmptyState>没有等甲方回答的问题。</EmptyState>
@@ -476,7 +475,7 @@ export function ProjectDetailPage() {
             title="内部协作"
             count={asks.length}
             hint="角色之间的提问 · 不用你处理"
-            hintTitle="来源:GET /api/projects/:id/asks(AskView)。契约:「甲方看不到横向沟通,只看发给自己那部分」。这一区只读 —— 角色间的问答由团队自己收敛,越不过去时才升级成「待你回答」的问题。"
+            helpId="ask"
           >
             {asksError !== null ? (
               <div className="sansheng-card p-3 text-xs" style={{ color: "var(--cinnabar)" }}>
@@ -549,7 +548,7 @@ export function ProjectDetailPage() {
             title="变更记录"
             count={changes.length}
             hint="提议 → 评审 → 接受/实施"
-            hintTitle="来源:GET /api/projects/:id/changes(ChangeView)。status 取值来自契约 ChangeStatus(proposed|under_review|accepted|implemented|rejected)。"
+            helpId="change"
           >
             {changesError !== null ? (
               <div className="sansheng-card p-3 text-xs" style={{ color: "var(--cinnabar)" }}>
@@ -587,7 +586,7 @@ export function ProjectDetailPage() {
             title="阻塞"
             count={blockers.length}
             hint="卡住了哪些工作项"
-            hintTitle="来源:GET /api/projects/:id/blockers。severity / status 取值来自契约的 BlockerSeverity / BlockerStatus。"
+            helpId="blocker"
           >
             {blockers.length === 0 ? (
               <EmptyState>没有登记在案的阻塞。</EmptyState>
@@ -640,11 +639,7 @@ export function ProjectDetailPage() {
           <Section
             title="成本"
             hint="只读观测 · 不设上界"
-            hintTitle={
-              "来源:GET /api/projects/:id/usage(窗口默认含今日共 7 个本地日历日;全历史那格不受窗口影响)。" +
-              "⚠️ **现在没有预算闸门**(用户裁决:先只做 observation)—— 平台不会因为花钱多而停下任何事,这个面只负责把账摆清楚。" +
-              "「平台回合」那一桶是不挂在任何工作项上的花费(播报、答复处置、收口判断):它们是真的花了钱,既不许并进某条工作项(假归属),也不许丢掉(丢掉之后分项和与合计对不上)。"
-            }
+            helpId="usage.cost"
           >
             {usageError !== null ? (
               <div className="sansheng-card p-3 text-xs" style={{ color: "var(--cinnabar)" }}>
@@ -737,12 +732,7 @@ export function ProjectDetailPage() {
             title="文件系统"
             count={workspace?.runtime === "ok" ? workspace.counts.entries : undefined}
             hint="只读:盘上有什么 + 正文索引引用了什么"
-            hintTitle={
-              "来源:GET /api/projects/:id/workspace(设计 docs/DESIGN-WORKSPACE.md §4.4,P0)。这条读面**只读** —— 它不建目录、不写文件。" +
-              "扫描深度上限 3 层、条目上限 500;到界或有内容读不出来时 truncated = true(不静默少列)。" +
-              "⚠️ 「正文已索引」的判据是 **artifacts.body_path 里有这条路径** —— 库不存正文,只存落点 + sha + 字节数(027);" +
-              "它**不是**记忆页那段「知识语料」的检索索引(knowledge_chunks + FTS,回答的是「搜得到什么」)。两个「索引」同名不同物。"
-            }
+            helpId="workspace.read"
           >
             {workspaceError !== null ? (
               <div className="sansheng-card p-3 text-xs" style={{ color: "var(--cinnabar)" }}>

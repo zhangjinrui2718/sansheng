@@ -974,16 +974,7 @@ export function ArtifactRelationGraph({
       title="工件关系图"
       count={artifacts.length}
       hint="节点 = 工件,三种边;从左到右读先后"
-      hintTitle={
-        "节点是**工件** —— 你的决策、质检的产出、交付物都在上面,而不挂在任何工作项上的" +
-        "决策与甲方问答**也**在(旧那张「节点 = 环节」的图把它们整个漏掉了)。" +
-        `实线 = ${RELATIONS.depends_on.label}(交付物 → 它的依据),` +
-        `虚线 = ${RELATIONS.answers.label}(提问 → 答复),` +
-        `点线 = ${RELATIONS.parent.label};「质检所审」是派生出来的(库里的边只到工作项粒度)。` +
-        `各边的方向**都是先后**(因 → 果),` +
-        "所以从左到右读就是「先有什么、后有什么」;这条性质是被检查的,反向边不画、只点名。" +
-        ` ${LOGICAL_RELATION_NOTE}`
-      }
+      helpId="artifact.graph"
     >
       {artifacts.length === 0 ? (
         <EmptyState>这个项目还没有工件 —— 关系图要等第一件产出落库才有节点。</EmptyState>
@@ -1152,14 +1143,9 @@ export function DependencyGraph({
       title="依赖关系图"
       count={works.length}
       hint="分层排布,可能较宽"
-      // ⚠️ 这一段是**悬停**才出现的整段解释(不是屏幕上那一行小字):两句必须说的话
-      // 都在这里 —— 两类边各是什么、方向是哪边;以及它为什么排在最上面。
-      hintTitle={
-        "节点 = 工作项,实线 = 拆解(子项 → 父项),虚线 = 前置依赖(前置 → 本条)。" +
-        "两条边的方向都是**先后**(前置 → 本条;子项 → 父项,容器由子项推动),所以从左到右读就是「先做什么、后做什么」。" +
-        "它排在这一页最上面,是因为「谁在等谁」是读这一页的第一问 —— 不知道这个,推进图上的先后只是「发生了些什么」;" +
-        "推进图回答的是「什么时候发生的」,两张图答的是不同的问题,都不许少。"
-      }
+      // ⚠️ 两类边各是什么、方向是哪边、为什么它排在最上面 —— 这几句是**必须说的话**,
+      // 现在在 `helpId="work.deps"` 那个 `?` 里(`lib/glossary.ts`),不再是悬停正文。
+      helpId="work.deps"
     >
       {works.length === 0 ? (
         <EmptyState>
@@ -1404,7 +1390,7 @@ export function WorkNodePanel({
     <Section
       title="选中的环节"
       count={artifacts.length}
-      hintTitle="点推进图上的条,或依赖关系图上的节点,切换环节;再点一次同一个取消选中。"
+      hint="点条选中,再点取消"
       aside={
         <span className="ss-meta font-mono" title="工作项 id">
           {work.id}
@@ -1518,7 +1504,7 @@ export function UnattachedArtifacts({
       title="不挂在任何环节上的工件"
       count={artifacts.length}
       hint="已在图上(按 kind 落在自己那一行)"
-      hintTitle="这些工件的 workId 为 null —— 契约里这是合法状态:它们不由某条工作项产出。⚠️ 它们**不是「没画出来」**:推进图里每一件工件都按自己的 kind 落在一行上(决策 / 会议 / 变更 / 甲方问答各有各的道),这一块只是**同一批工件的清单**(逐条可看详情)。"
+      helpId="artifact.no-work"
     >
       {/* `.ss-dag-orphan`:安静一点,不与主图争注意力(类在 globals.css 里)。 */}
       <div className="ss-dag-orphan">
@@ -1565,7 +1551,8 @@ export function DanglingArtifacts({
     <Section
       title="环节读不到的工件"
       count={total}
-      hintTitle="它们挂着 workId,但本次没有读到那条工作项(通常是被删了)—— 不是它们没有环节。"
+      hint="挂着 workId,但那条工作项读不到"
+      helpId="artifact.dangling"
     >
       <div className="grid gap-3">
         {entries.map(([workId, rows]) => (
@@ -1745,7 +1732,7 @@ export function ArtifactsScreen({
       <Section
         title="推进图"
         hint={`${works.length} 条工作项 · ${artifacts.length} 件工件 · 点一条工作项(绿色条)⇒ 下面显示它挂着的工件`}
-        hintTitle="点一条工作项(绿色条)⇒ 下面(③「选中的环节」)显示它挂着的工件。横轴 = 距项目起点的耗时(T+0 起;x 是线性的,位置不需要解 —— 所以不存在边交叉);上区每条工作项一道(条 = 创建→收口,刻度 = 它产出的工件),下区每种工件一道(点 = 一件工件,含不挂任何环节的决策 / 会议 / 变更 / 甲方问答)。点条选中环节(与下面的面板联动),点圆点看那件工件。上面那张图回答「它们之间是什么关系」,这张回答「什么时候发生的」。"
+        helpId="timeline"
       >
         <ProgressTimeline
           works={works}
@@ -1818,7 +1805,6 @@ export function WorksPage() {
       <PageHeader
         title="工作项"
         hint={`范围:${scopeName}`}
-        hintTitle="本页 = 工作项页(旧的「工件」页已并入这里,不再单开一个 tab)。数据来源:GET /api/projects/:id/works(节点与条)+ /artifacts(点)+ /live(在跑)。契约没有跨项目的 /api/works 与 /api/artifacts —— 工作项与工件总是属于某个项目。kind / status / work_status 都是契约里的闭合集合。"
         aside={
           <div className="flex items-center gap-1.5 flex-wrap">
             <select
