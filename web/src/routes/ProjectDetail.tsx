@@ -37,7 +37,7 @@
  * 关联目标只显示 id —— 契约 `ArtifactView.links` / `AskView.parentAskId` 都只有 id,
  * 没有目标标题,不编一个出来。
  */
-import { useCallback, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { PageHeader, Pill, Section, StatStrip, EmptyState, KV, Flag } from "@/components/ui/primitives";
 import { ClientQuestionCard } from "@/components/client/ClientQuestionCard";
 
@@ -52,10 +52,6 @@ import {
   ROLE_LABEL,
   askStatusLabel,
   askStatusTone,
-  blockerSeverityLabel,
-  blockerSeverityTone,
-  blockerStatusLabel,
-  blockerStatusTone,
   changeStatusLabel,
   changeStatusTone,
   excerpt,
@@ -63,9 +59,9 @@ import {
   fmtTime,
   projectStatusLabel,
   projectStatusTone,
-  workStatusLabel,
-  workStatusTone,
 } from "@/lib/vocab";
+import { blockerMeta, workMeta } from "@/lib/entityMeta";
+import { MetadataStrip } from "@/components/ui/MetadataStrip";
 
 /**
  * 悬停时补一句「这一类意味着什么」。类名本身只有一处
@@ -139,6 +135,14 @@ function CopyPath({ text }: { text: string }) {
 export function ProjectDetailPage() {
   const projectId = useChatStore((s) => s.projectId);
   const { detail, blockers, loading, error } = useProjectDetail(projectId);
+  /**
+   * 工作项 id → 标题。⚠️ 只用来把「地址格」里的 id 翻成人能读的标题 ——
+   * 一个链接钣着 `w_1a2b3c` 也能点,但没人能读。
+   */
+  const workTitles = useMemo(
+    () => new Map((detail?.works ?? []).map((w) => [w.id, w.title] as const)),
+    [detail?.works],
+  );
   const { data: asks, loading: asksLoading, error: asksError } = useProjectAsks(projectId);
   const { data: changes, loading: changesLoading, error: changesError } = useProjectChanges(projectId);
   const {
@@ -422,21 +426,23 @@ export function ProjectDetailPage() {
                 {detail.works.map((w) => (
                   <article key={w.id} className="sansheng-card p-2.5">
                     <div className="flex items-center gap-2 flex-wrap">
-                      <Pill tone={workStatusTone(w.status)}>{workStatusLabel(w.status)}</Pill>
                       <span className="ss-body" style={{ color: "var(--bone)" }}>
                         {w.title}
                       </span>
-                      <span className="ss-meta ml-auto">{w.assigneeName || w.assigneeAgentId}</span>
                     </div>
+                    {/*
+                      身份条 —— 与工作项页那份「选中的环节」面板**同一组事实**
+                      (`lib/entityMeta.ts` 的同一份判据)。「负责人」「父项」是**地址**。
+                    */}
+                    <MetadataStrip items={workMeta(w)} className="mt-1" />
                     {w.goal.length > 0 && w.goal !== w.title && (
                       <div className="ss-note mt-0.5" title={w.goal}>
                         {excerpt(w.goal, 90)}
                       </div>
                     )}
-                    <div className="ss-meta mt-0.5">
-                      {fmtTime(w.createdAt)}
-                      {w.dependsOn.length > 0 && ` · 依赖 ${w.dependsOn.length} 项`}
-                    </div>
+                    {w.dependsOn.length > 0 && (
+                      <div className="ss-meta mt-0.5">依赖 {w.dependsOn.length} 项</div>
+                    )}
                   </article>
                 ))}
               </div>
@@ -595,22 +601,20 @@ export function ProjectDetailPage() {
                 {blockers.map((b) => (
                   <article key={b.id} className="sansheng-card p-2.5">
                     <div className="flex items-center gap-2 flex-wrap">
-                      <Pill tone={blockerSeverityTone(b.severity)}>{blockerSeverityLabel(b.severity)}</Pill>
-                      <Pill tone={blockerStatusTone(b.status)}>{blockerStatusLabel(b.status)}</Pill>
                       <span className="ss-body" style={{ color: "var(--bone)" }}>
                         {b.title}
                       </span>
-                      <span className="ss-meta ml-auto">{b.raisedByName}</span>
                     </div>
+                    {/*
+                      身份条 —— 「卡住」那一格带**地址**:甲方要的答案是
+                      「哪件事被卡住了」,而一个没有地址的答案只能让人自己去搜。
+                    */}
+                    <MetadataStrip items={blockerMeta(b, workTitles)} className="mt-1" />
                     {b.detail.length > 0 && (
                       <div className="ss-note mt-0.5" title={b.detail}>
                         {excerpt(b.detail, 90)}
                       </div>
                     )}
-                    <div className="ss-meta mt-0.5">
-                      {fmtTime(b.createdAt)}
-                      {b.blockedWorkIds.length > 0 && ` · 卡住 ${b.blockedWorkIds.length} 个工作项`}
-                    </div>
                   </article>
                 ))}
               </div>

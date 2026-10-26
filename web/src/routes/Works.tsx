@@ -172,6 +172,8 @@ import {
   workStatusLabel,
   workStatusTone,
 } from "@/lib/vocab";
+import { artifactMeta, authorLabelOf, workMeta } from "@/lib/entityMeta";
+import { MetadataStrip } from "@/components/ui/MetadataStrip";
 import { HtmlReport } from "@/components/deliverable/HtmlReport";
 import { CodeService } from "@/components/deliverable/CodeService";
 import { ContentDriftNote } from "@/components/deliverable/ContentDriftNote";
@@ -1013,7 +1015,7 @@ export function ArtifactRelationGraph({
                     data-artifact-depth={n.depth}
                     data-artifact-isolated={n.inDegree === 0 && n.outDegree === 0}
                     onClick={() => onOpenArtifact(a.id)}
-                    title={`${a.title || "(无标题)"}\n${artifactKindLabel(a.kind)} · ${a.authorName || a.authorAgentId}\n${formatClock(a.createdAt, true)}\n` +
+                    title={`${a.title || "(无标题)"}\n${artifactKindLabel(a.kind)} · ${authorLabelOf(a)}\n${formatClock(a.createdAt, true)}\n` +
                       `入 ${n.inDegree} · 出 ${n.outDegree}` +
                       (n.workTitle !== null ? `\n产出于「${n.workTitle}」` : "\n不挂任何工作项(决策 / 甲方问答)") +
                       (n.unlayered ? "\n⚠️ 先后算不出来(在关系环上或环的下游)" : "")}
@@ -1180,12 +1182,18 @@ const REL_LABEL: Record<string, string> = {
 export function ArtifactRow({
   artifact: a,
   known,
+  works,
   open,
   onToggle,
 }: {
   artifact: ArtifactView;
   /** 本次已加载的工件列表 —— 只用来**顺手**给关联目标显示标题(详情里用) */
   known: readonly ArtifactView[];
+  /**
+   * 本项目的工作项 —— 用来把身份条里「产出于」那一格翻成**标题**
+   * (拿不到就退成 id,见 `lib/entityMeta.ts`)。
+   */
+  works?: readonly WorkView[];
   open: boolean;
   onToggle: () => void;
 }) {
@@ -1194,6 +1202,8 @@ export function ArtifactRow({
   const isCodeService = mode === "code_service";
   // 坐标由**服务端**解析好(`transport/views.ts`),前端不再碰 metadata_json
   const csMeta = isCodeService ? a.codeService : null;
+  const workTitle =
+    a.workId === null ? null : (works?.find((w) => w.id === a.workId)?.title ?? null);
   return (
     <article className="sansheng-card p-2.5" title={a.id}>
       <div className="flex items-center gap-2 flex-wrap">
@@ -1206,9 +1216,6 @@ export function ArtifactRow({
             background: toneColor(artifactKindTone(a.kind)),
           }}
         />
-        <Pill tone={artifactStatusTone(a.status)} title={a.status}>
-          {artifactStatusLabel(a.status)}
-        </Pill>
         {isHtmlReport && (
           <Pill tone={deliverableTypeTone("html_report")} title="deliverable_type">
             {deliverableTypeLabel("html_report")}
@@ -1245,7 +1252,6 @@ export function ArtifactRow({
         <span className="ss-body" style={{ color: "var(--bone)" }}>
           {a.title || "(无标题)"}
         </span>
-        <span className="ss-meta ml-auto">{a.authorName || a.authorAgentId}</span>
         <button
           type="button"
           className="sansheng-button"
@@ -1256,6 +1262,13 @@ export function ArtifactRow({
           {open ? "收起" : "详情"}
         </button>
       </div>
+      {/*
+        身份条(`lib/entityMeta.ts` 的**一份**判据)。⚠️ 卡片上**不再自己**
+        印「类型 / 状态 / 作者 / 时间」—— 那些格子都在这条带子里,
+        而「作者」「产出于」两格是**地址**:从一份工件能一步走到产出它的
+        那个环节、再走到负责人。
+      */}
+      <MetadataStrip items={artifactMeta(a, { workTitle })} className="mt-1" />
       {isHtmlReport ? (
         <div className="ss-meta mt-1">
           一份 HTML 报告 —— 点「详情」在沙箱里渲染。
@@ -1282,9 +1295,7 @@ export function ArtifactRow({
         </div>
       )}
       <div className="ss-meta mt-1">
-        {fmtTime(a.createdAt)}
-        {a.links.length > 0 &&
-          ` · 关联 ${a.links.map((l) => `${l.rel}→${l.targetId}`).join(" · ")}`}
+        {a.links.length > 0 && `关联 ${a.links.map((l) => `${l.rel}→${l.targetId}`).join(" · ")}`}
       </div>
       {/*
         验收动作(029)。**挂在这里是因为甲方就在这一页读正文** —— 让他看完还要
@@ -1309,11 +1320,14 @@ export function ArtifactRow({
 export function ArtifactGroups({
   artifacts,
   known,
+  works,
   openId,
   onToggleDetail,
 }: {
   artifacts: readonly ArtifactView[];
   known: readonly ArtifactView[];
+  /** 本项目的工作项(只用来把「产出于」那一格翻成标题) */
+  works?: readonly WorkView[];
   /** 当前展开了详情的那条工件 id(null = 都收起) */
   openId: string | null;
   onToggleDetail: (artifactId: string) => void;
@@ -1347,6 +1361,7 @@ export function ArtifactGroups({
                 key={a.id}
                 artifact={a}
                 known={known}
+                works={works}
                 open={openId === a.id}
                 onToggle={() => onToggleDetail(a.id)}
               />
@@ -1400,22 +1415,20 @@ export function WorkNodePanel({
     >
       <article className="sansheng-card p-3 flex flex-col gap-2">
         <div className="flex items-center gap-2 flex-wrap">
-          <Pill tone={workStatusTone(work.status)} title={work.status}>
-            {workStatusLabel(work.status)}
-          </Pill>
           <span className="ss-body" style={{ color: "var(--bone)" }}>
             {work.title || "(无标题)"}
           </span>
         </div>
 
+        {/*
+          身份条 —— 与项目页那份「工作项」清单、别处说的都是**同一组事实**
+          (`lib/entityMeta.ts`)。「负责人」与「父项」两格是**地址**。
+        */}
+        <MetadataStrip items={workMeta(work)} />
+
         <div className="flex flex-col">
           {/* ⚠️ `KV` 的 `title` 是**显示在屏幕上的**注解,不是 HTML 属性(见
               primitives.tsx)—— 长解释一律走真 `title=`,否则首屏会多出两行小字。 */}
-          <KV label="负责人" value={work.assigneeName || work.assigneeAgentId} />
-          <KV
-            label="更新"
-            value={<span title="契约 WorkView.updatedAt">{fmtTime(work.updatedAt)}</span>}
-          />
           <KV
             label="前置"
             value={
@@ -1470,6 +1483,7 @@ export function WorkNodePanel({
             <ArtifactGroups
               artifacts={artifacts}
               known={known}
+              works={works}
               openId={openId}
               onToggleDetail={onToggleDetail}
             />
@@ -1952,18 +1966,14 @@ function ArtifactDetail({ id, known }: { id: string; known: readonly ArtifactVie
         <div className="ss-meta">读不到这条工件的详情。</div>
       ) : (
         <div className="flex flex-col gap-1.5">
+          {/*
+            ⚠️ 这里**不再印类型 / 状态 / 作者 / 时间** —— 那一行在上面的
+            工件行里(身份条,`lib/entityMeta.ts` 的同一份判据)。
+            展开区只负责**内容**:正文、关联、原始字段。
+          */}
           <div className="flex items-center gap-1.5 flex-wrap">
-            <Pill tone={artifactKindTone(artifact.kind)} title={artifact.kind}>
-              {artifactKindLabel(artifact.kind)}
-            </Pill>
-            <Pill tone={artifactStatusTone(artifact.status)} title={artifact.status}>
-              {artifactStatusLabel(artifact.status)}
-            </Pill>
             <span className="ss-body" style={{ color: "var(--bone)" }}>
               {artifact.title || "(无标题)"}
-            </span>
-            <span className="ss-meta ml-auto">
-              {artifact.authorName || artifact.authorAgentId} · {fmtTime(artifact.createdAt)}
             </span>
           </div>
 

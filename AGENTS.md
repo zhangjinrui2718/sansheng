@@ -523,6 +523,48 @@ dev/prod + CI/CD」,09:54 业务经理只回了一句「我先看下你之前留
   于是**变异留在盘上**、脚本自己崩。改成按内存里的原文写回 + 断言「复原后与原文逐字相同」。
   设计全文与剩余波次:`docs/DESIGN-FRONTEND-IA.md`。
 
+## 实体脊:一份判据 + 一圈邻居(2026-10-26 · 前端 IA 重构 Wave 1)
+
+**症状**:同一个工件在五个地方被说到,而改版前那五处**各写一遍**「类型 / 状态 / 作者 / 时间」
+⇒ 同一个工件有五种说法,读者没法把两处的话对上。
+
+**两份新文件,职责严格分开**(混在一起就会退化成「第二个事实来源」):
+
+| 文件 | 职责 | 不许长成什么 |
+|---|---|---|
+| `web/src/lib/entityMeta.ts` | **判据**:一份输入 ⇒ 一组事实(`MetaItem` = 标签 / 值 / 邻居地址) | 一个 React 组件(它**不 import React**,纯数据 ⇒ 测试可直接断言) |
+| `web/src/components/ui/MetadataStrip.tsx` | **排版**:把事实渲染成一条带子 | 第二个事实来源(它不许自己决定「作者是谁」) |
+
+构造器:`artifactMeta(a, opts?)` · `workMeta(w)` · `blockerMeta(b, titles?)`;
+地址构造器:`memberLocation` / `workLocation` / `artifactLocation`(页面**不许手拼**地址)。
+
+**四条判据**
+
+1. **标签是契约** —— 同一类实体在任何地方用**同一个词**(「作者」不写成「产出者」)。
+   `tests/web/entity-meta.test.ts` 把三个标签数组**逐字快照**下来。
+2. **邻居必须有地址** —— 「作者」「产出于」「父项」「卡住」指向**真的地址**。
+   ⚠️ **地址由 `lib/route.ts` 的 `toHash` 序列化,断言的是 href 逐字相等** ——
+   拼错了会指向别的东西,而**拼错与拼对在屏幕上长得一样**。
+3. **拿不到就明说,不留空** —— 标题读不到退成 `id`;不由任何环节产出 ⇒「不由工作项产出」;
+   顶层环节 ⇒「顶层环节」;阻塞没登记卡住谁 ⇒「没有登记卡住的工作项」(**不是 "0"**)。
+4. **链接是真 `<a href>`** —— 用 `onClick` 改 hash 的话,「右键复制地址 / 中键开新标签 /
+   浏览器后退」三件全消失,**而页面看起来一模一样**(M6 变红)。
+
+**防腐坏的哨兵**(`tests/web/entity-spine-wiring.test.ts`,源码级):
+① `authorName ||` / `assigneeName ||` / `raisedByName` **只允许出现在 `lib/entityMeta.ts`**
+—— ⚠️ 挑「带兜底的写法」而不是字段名本身:字段名在**原始字段区块**与 SVG `title=` 提示里
+**本来就该出现**,那两处是「原始坐标」不是「身份的说法」;禁掉它们会逼着人把原始字段藏起来,那比重复更糟;
+② 三个页面(`Works` / `ProjectDetail` / `Members`)都用了 `<MetadataStrip`;
+③ **每一处 `<MetadataStrip items={…}` 都必须来自 `entityMeta` 的构造器**(不许手写 `items`);
+④ 页面里不许出现 `"#/members?member="` / `"#/works?work="` 这种手拼地址。
+
+⚠️ **`Works` 的图节点悬浮提示也改用同一份格式化**(`authorLabelOf()`)——
+一处 tooltip 自己写 `authorName || authorAgentId` 就是**多了一个事实来源**。
+
+回归:`tests/web/entity-meta.test.ts`(14)· `tests/web/metadata-strip.test.ts`(6)·
+`tests/web/entity-spine-wiring.test.ts`(5)· 变异 `.probe/mutation-entity-spine.py`(8 条,全部实测变红)。
+**基线 2311 passed / 121 files**。设计全文:`docs/DESIGN-FRONTEND-IA.md` §3.3 / §8.7。
+
 ## 数据与存储
 
 - 迁移在 `migrations/`:**007–010 建平台表**,**011 把旧系统的 7 张表 DROP**(`blackboards` / `conversations` / `messages` / `fragments` / `user_profile` / `agent_states` / `fragments_vec`),**012 接待会话**(重建 `project_sessions` 放宽 `project_id` 可空,已登记进 `INTENTIONAL_REBUILDS`),**013 排空器状态**(`works.review_state` + `dispatch_events` + `dispatch_attempts`,纯加法),**014 产出边**(`artifacts.work_id` + 一条部分索引,纯加法),**015 放宽 `dispatch_events.kind`**(加 `work_cancelled`;闭集**只能靠重建表**放宽,已登记进 `INTENTIONAL_REBUILDS`),**016 交付物 kind**(重建 `artifacts`),**017 交付会话**(`project_sessions.deliverable_artifact_id` + `channel`,纯加法),**018 `turn_usage` 表**(纯加法),**019 会话消息的封套**(`session_messages.origin_source` + `trigger_kind`,纯加法;两列各有自己的 CHECK),**020 `client_questions` 台账**,**021 `review_verdicts`**,**022 `session_messages.todo_kind`**(纯加法、**不建 CHECK** —— 取值域随 `TODO_KINDS` 变,闭集在读写两侧的 TS 里),**023 项目版本链**(`projects.version` + `parent_project_id`,`ON DELETE SET NULL`),**024 对话一等实体**(`project_sessions.kind` + `title`;`kind` **有** CHECK —— 两值闭集,与 022 相反),**025 交付物类型**(`artifacts.deliverable_type` + 一条部分索引,纯加法),**026 执行角色一分为二 + 交付物类型加 `code_service`**(⚠️ **重建两张表**:`agents` 的 role 闭集 4→5 值并改名 + `artifacts` 的 `deliverable_type` 闭集 1→2 值;两张都登记进 `INTENTIONAL_REBUILDS`),**027 工件正文落文件**(⚠️ **重建 `artifacts`**:`body TEXT` → `body_path` / `body_sha256` / `body_bytes` 三列 NOT NULL + `commit_sha` 可空;登记进 `INTENTIONAL_REBUILDS`。**它故意不走「建 _new → 拷 → 改名」**:没有数据要拷(用户明确「老数据全不要」),而改名法会让「`artifacts` 被多个迁移创建」这条登记**当场过期**;数据安全改由一条会响的前置检查承担 —— `CHECK (n = 0)`,非空库上**响亮失败并整体回滚**,而不是静默清空)。

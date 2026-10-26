@@ -427,3 +427,70 @@ tests/web/about-page.test.ts← 1 条改判:判据没变,union 的落点从 App.
 「取消选中」这个动作,而地址只有两态,留着它只会让「它该不该进地址」变成没有答案的问题)。
 `tests/web/app-route.test.ts` 16 → 17 条,`.probe/mutation-wave1.py` 6 → 7 条变异。
 **验证**:`2286 passed / 118 files`。
+
+### 8.7 实施记录 · Wave 1 第二步:实体脊(2026-10-26,已落地)
+
+**目标**:`§3.3` 的那句话 ——「同一个工件在四处各说一套」变成「**一个地址,一圈邻居**」。
+
+**两份新文件,职责严格分开**
+
+| 文件 | 职责 | 不许长成什么 |
+|---|---|---|
+| `web/src/lib/entityMeta.ts` | **判据**:一份输入 ⇒ 一组事实(标签 / 值 / 邻居地址) | 一个 React 组件(它不 import React,纯数据 ⇒ 可在测试里直接断言) |
+| `web/src/components/ui/MetadataStrip.tsx` | **排版**:把事实渲染成一条带子 | 第二个事实来源(它不许自己决定「作者是谁」) |
+
+**事实长什么样**
+
+```ts
+type MetaItem = {
+  label: string;                              // 标签 = 对外的词表
+  value?: string;                             // 没有链接时的文本
+  title?: string;                             // 为什么这么算(判定依据)
+  links?: { label: string; to: RouteTarget }[]; // 邻居 = 真地址
+};
+```
+
+三个构造器:`artifactMeta(a, opts?)` · `workMeta(w)` · `blockerMeta(b, titles?)`,
+外加三个地址构造器:`memberLocation(agentId)` · `workLocation(workId)` · `artifactLocation(artifactId, workId?)`。
+
+**三条设计判据**
+
+1. **标签是契约** —— 同一类实体在任何地方用**同一个词**。
+   「作者」不写成「产出者」,「产出于」不写成「来自」,「登记」不写成「创建」。
+   ⇒ `tests/web/entity-meta.test.ts` 把三个标签数组**逐字快照**下来(M4 改一个词就红)。
+2. **邻居必须有地址** —— 「作者」「产出于」「父项」「卡住」这几格指向**真的地址**,
+   不是拼出来的字符串:拼错了会指向别的东西,而**拼错与拼对在屏幕上长得一样**。
+   ⇒ 地址由 `lib/route.ts` 的 `toHash` 序列化,测试断言的是 **href 逐字相等**。
+3. **拿不到就明说,不留空** —— 标题读不到退成 `id`;工件不由任何环节产出 ⇒
+   「不由工作项产出」;顶层环节 ⇒ 「顶层环节」;阻塞没登记卡住谁 ⇒ 「没有登记卡住的工作项」(**不是 "0"**)。
+   ⇒ 空与「没有」在屏幕上一样,这是 AGENTS.md 里反复出现的那条纪律。
+
+**接线(三处,不多不少)**
+
+- `Works.tsx` —— 工件节点标题旁一条带子;**图节点的悬浮提示也改用同一份格式化**
+  (`authorLabelOf()`):一处 tooltip 自己写 `authorName || authorAgentId` 就是**多了一个事实来源**。
+- `ProjectDetail.tsx` —— 工作项卡一条带子;阻塞卡一条带子(「卡住」那格是**数出来的**:`2 个工作项` + 每条一个地址)。
+- `Members.tsx` —— 成员面板里的工件列表:标题变成地址,下面一条带子。
+
+**防腐坏的哨兵**(`tests/web/entity-spine-wiring.test.ts`,源码级)
+
+- ① `authorName ||` / `assigneeName ||` / `raisedByName` **只允许出现在 `lib/entityMeta.ts`**
+  —— ⚠️ 挑「带兜底的写法」而不是字段名本身:字段名在**原始字段区块**与 SVG `title=` 提示里**本来就该出现**,
+  那两处是「原始坐标」不是「身份的说法」,禁掉它们会逼着人把原始字段藏起来,那比重复更糟。
+- ② 三个页面都用了 `<MetadataStrip`。
+- ③ **每一处 `<MetadataStrip items={…}` 的内容都来自 `entityMeta` 的构造器** ——
+  不许手写 `items={[{ label: "作者", … }]}`(M7 变红)。
+- ④ 页面**不许手拼地址**(`"#/members?member="` / `"#/works?work="` 一律不许出现在页面里)。
+
+**变异自检**:`.probe/mutation-entity-spine.py` **8 条全部实测变红**
+(M1 地址拼错 · M2 标题退成空 · M3 条数写死 · M4 换标签 · M5 谎称有父项 ·
+M6 `<a href>` 改成 `onClick` · M7 页面自己造事实 · M8 页面自己兜底作者名)。
+
+⚠️ **M6 值得单说**:链接如果用 `onClick` 改 hash,「右键复制地址 / 中键开新标签 / 浏览器后退」三件全消失,
+**而页面看起来一模一样**。所以身份带的链接必须是真 `<a href>`。
+
+**验证**:`2311 passed / 121 files` · 两条 typecheck 0 error · build 绿 · `check:design` E1–E14 绿。
+
+**还没做的(Wave 1 后半剩余)**:「项目页降级为仪表盘 + 钻取」(`§3.4`)·
+`RelationsRail`「一圈邻居」的**可视化**(`§3.2` 已有地址,还没有一圈邻居的图形)·
+`§7` 里那三条待裁决(项目页「最要紧一件事」怎么排 / 工件详情走抽屉还是内联 / 「关于」放哪)。

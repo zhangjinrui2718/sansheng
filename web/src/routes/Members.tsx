@@ -122,6 +122,7 @@ import type {
   SessionMessageKind,
   TriggerTodoKind,
   TurnTrigger,
+  WorkView,
 } from "@shared/types/platform";
 import {
   Disclosure,
@@ -132,7 +133,9 @@ import {
   StatStrip,
 } from "@/components/ui/primitives";
 import { DataState, remoteListOf } from "@/components/ui/DataState";
+import { EntityLink, MetadataStrip } from "@/components/ui/MetadataStrip";
 import { useAppLocation, paramOf } from "@/lib/route";
+import { artifactLocation, artifactMeta } from "@/lib/entityMeta";
 import { RoleHarnessSection, roleIssueCount } from "@/components/members/RoleHarness";
 import { AgentConversations } from "@/components/members/AgentConversations";
 import {
@@ -141,15 +144,12 @@ import {
   useMemberConversations,
   useProjectLive,
   useProjectMembers,
+  useWorks,
 } from "@/lib/data";
 import { useChatStore } from "@/stores/chat";
 import {
   ROLE_LABEL,
   MESSAGE_KIND_LABEL,
-  artifactKindLabel,
-  artifactKindTone,
-  artifactStatusLabel,
-  artifactStatusTone,
   excerpt,
   fmtTime,
   workStatusLabel,
@@ -506,6 +506,7 @@ export function MemberPane({
   activity,
   projectId,
   artifacts,
+  works,
   runtime,
   dispatch,
   fetchedAt,
@@ -528,6 +529,11 @@ export function MemberPane({
   projectId: string;
   /** 已按 `authorAgentId === member.id` **过滤好**的工件 —— 过滤在页面层做 */
   artifacts: readonly ArtifactView[];
+  /**
+   * 本项目的工作项 —— 用来把工件身份条里「产出于」那一格翻成**标题**
+   * (拿不到就退成 id,见 `lib/entityMeta.ts`)。
+   */
+  works: readonly WorkView[];
   /** 这份快照的运行期来源;`null` = 还没拿到过快照 */
   runtime: ProjectLiveView["runtime"] | null;
   /** 排空器心跳(项目级)—— `null` = 还没拿到过快照 */
@@ -771,15 +777,29 @@ export function MemberPane({
             <div className="ss-note">他还没有产出的工件。</div>
           ) : (
             artifacts.map((a) => (
-              <div key={a.id} className="flex items-baseline gap-2 flex-wrap" style={{ fontSize: 12 }}>
-                <Pill tone={artifactKindTone(a.kind)}>{artifactKindLabel(a.kind)}</Pill>
-                <Pill tone={artifactStatusTone(a.status)}>{artifactStatusLabel(a.status)}</Pill>
-                <span className="truncate" style={{ color: "var(--bone)" }} title={`${a.title} · ${a.id}`}>
-                  {a.title}
-                </span>
-                <span className="ss-meta" title={`createdAt = ${a.createdAt} · updatedAt = ${a.updatedAt}`}>
-                  {fmtTime(a.createdAt)}
-                </span>
+              <div key={a.id} className="flex flex-col gap-0.5" style={{ fontSize: 12 }}>
+                <EntityLink
+                  to={artifactLocation(a.id, a.workId)}
+                  title={`${a.title} · ${a.id}`}
+                  className="truncate"
+                >
+                  {a.title || "(无标题)"}
+                </EntityLink>
+                {/*
+                  身份条 —— 与工作项页那份工件清单**同一组事实**
+                  (`lib/entityMeta.ts` 的同一份判据)。
+                  ⚠️ `withAuthor: false`:这份清单的**主人就是他本人**,
+                  再写一遍「作者 业务经理」是废话。
+                */}
+                <MetadataStrip
+                  items={artifactMeta(a, {
+                    withAuthor: false,
+                    workTitle:
+                      a.workId === null
+                        ? null
+                        : (works.find((w) => w.id === a.workId)?.title ?? null),
+                  })}
+                />
               </div>
             ))
           )}
@@ -909,6 +929,12 @@ export function MembersPage() {
   const [harnessRevision, setHarnessRevision] = useState(0);
   const harness = useHarnessRoles({ revision: harnessRevision });
   const artifacts = useArtifacts({ projectId });
+  /**
+   * 本项目的工作项 —— 只用来把工件身份条里「产出于」那一格翻成**标题**
+   * (拿不到就退成 id)。⚠️ 这一份**只为标题**而取:没有它,那份清单里的
+   * 「产出于」会是一串 id,而 id 不是人能读的坐标。
+   */
+  const works = useWorks(projectId);
   const live = useProjectLive(projectId);
   /** 本地时钟(1s)—— 让快照里的年龄在两次 2.5s 轮询之间也继续走。 */
   const now = useNow(1000);
@@ -1065,6 +1091,7 @@ export function MembersPage() {
                   projectId={projectId}
                   // 过滤在页面层做:面板是纯展示,不持有「怎么找这个人的工件」的判据。
                   artifacts={artifacts.data.filter((a) => a.authorAgentId === selected.id)}
+                  works={works.data}
                   runtime={runtime}
                   dispatch={live.data?.dispatch ?? null}
                   fetchedAt={live.fetchedAt}

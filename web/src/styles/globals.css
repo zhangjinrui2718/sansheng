@@ -465,6 +465,28 @@
     color: var(--bone-mute);
   }
 
+  /*
+   * 实体链接(身份条里的「另一个实体」)。
+   *
+   * ⚠️ 真 `<a href>` 而不是 `onClick` 改 hash:右键复制地址 / 中键开新标签 /
+   * 浏览器后退键,三件都是白送的。用 onClick 的话这三件全部做不到,
+   * 而它们正是「地址是唯一真相」这个决定的意义所在(见 MetadataStrip.tsx 文件头)。
+   */
+  .ss-link {
+    color: var(--cyan);
+    text-decoration: none;
+    border-bottom: 1px dotted var(--cyan-soft);
+    cursor: pointer;
+  }
+  .ss-link:hover {
+    border-bottom-style: solid;
+    filter: brightness(1.12);
+  }
+  .ss-link:focus-visible {
+    outline: 1px solid var(--jade);
+    outline-offset: 1px;
+  }
+
   /* 空态:一句话 + 可选的下一步动作。不再塞三段「这是真实空态,不是没接上」 */
   .ss-empty {
     font-size: 12px;
