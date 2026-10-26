@@ -216,9 +216,19 @@ const renderTimeline = (over: Partial<TimelineProps> = {}): string =>
   renderToStaticMarkup(createElement(ProgressTimeline, timelineProps(over)));
 
 type ScreenProps = Parameters<typeof ArtifactsScreen>[0];
+/**
+ * 关系上下文(「一圈邻居」)—— 2026-10-26 新增。
+ * 喂的是本页那两份夹具,所以关系栏里出现的标题与正文里出现的是**同一批**。
+ */
+const RELATIONS: NonNullable<ScreenProps["relations"]> = {
+  projectId: "p1",
+  works: { data: WORKS, loading: false, error: null },
+  artifacts: { data: ARTS, loading: false, error: null },
+};
 const screenProps = (over: Partial<ScreenProps> = {}): ScreenProps => ({
   works: WORKS,
   artifacts: ARTS,
+  relations: RELATIONS,
   live: HOST_RUNNING,
   now: NOW,
   picked: undefined,

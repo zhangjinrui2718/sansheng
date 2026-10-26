@@ -134,8 +134,10 @@ import {
 } from "@/components/ui/primitives";
 import { DataState, remoteListOf } from "@/components/ui/DataState";
 import { EntityLink, MetadataStrip } from "@/components/ui/MetadataStrip";
+import { RelationsRail } from "@/components/relations/RelationsRail";
 import { useAppLocation, paramOf } from "@/lib/route";
 import { artifactLocation, artifactMeta } from "@/lib/entityMeta";
+import type { RelationContext } from "@/lib/relations";
 import { RoleHarnessSection, roleIssueCount } from "@/components/members/RoleHarness";
 import { AgentConversations } from "@/components/members/AgentConversations";
 import {
@@ -507,6 +509,7 @@ export function MemberPane({
   projectId,
   artifacts,
   works,
+  relations,
   runtime,
   dispatch,
   fetchedAt,
@@ -534,6 +537,13 @@ export function MemberPane({
    * (拿不到就退成 id,见 `lib/entityMeta.ts`)。
    */
   works: readonly WorkView[];
+  /**
+   * 关系上下文(算「一圈邻居」用,见 `lib/relations.ts`)。
+   *
+   * ⚠️ **带加载态** —— 「他负责的环节」在数据还没到的时候是**不知道**,
+   * 不是「没有」。两者在屏幕上长得一模一样,而这正是这次要治的观感。
+   */
+  relations: RelationContext;
   /** 这份快照的运行期来源;`null` = 还没拿到过快照 */
   runtime: ProjectLiveView["runtime"] | null;
   /** 排空器心跳(项目级)—— `null` = 还没拿到过快照 */
@@ -739,6 +749,16 @@ export function MemberPane({
           )}
         </div>
 
+        {/* ── ② 他负责的环节(「一圈邻居」)────────────────────────── */}
+        {/* ⚠️ 改版前**没有这一面** —— 成员面板只说「他手上正在跑什么」与
+            「他产出了什么工件」,而「他负责哪几条活」(含**已完成的**那些)
+            在别处也查不到。现在它是一条关系栏,每一项都是**能点的地址**。 */}
+        <RelationsRail
+          subject={{ kind: "member", memberId: member.id }}
+          context={relations}
+          title="他负责的环节"
+        />
+
         {/* ── ③ 他说了什么 —— **对话全文**(进行中 + 已完成)────────── */}
         {/* ⚠️ 2026-10-26:这一块从「清单」改成「全文」。原来它接的是
             `member-conversations` 的那一组摘要(每条**截到 90 字**、新的在前、
@@ -935,6 +955,17 @@ export function MembersPage() {
    * 「产出于」会是一串 id,而 id 不是人能读的坐标。
    */
   const works = useWorks(projectId);
+  /**
+   * 关系上下文(算「一圈邻居」用,见 `lib/relations.ts`)。
+   * ⚠️ **带加载态** —— 「他负责的环节」在数据还没到的时候是**不知道**,不是「没有」。
+   */
+  const relations: RelationContext = useMemo(
+    () => ({
+      projectId,
+      works: { data: works.data, loading: works.loading, error: works.error },
+    }),
+    [projectId, works.data, works.loading, works.error],
+  );
   const live = useProjectLive(projectId);
   /** 本地时钟(1s)—— 让快照里的年龄在两次 2.5s 轮询之间也继续走。 */
   const now = useNow(1000);
@@ -1092,6 +1123,7 @@ export function MembersPage() {
                   // 过滤在页面层做:面板是纯展示,不持有「怎么找这个人的工件」的判据。
                   artifacts={artifacts.data.filter((a) => a.authorAgentId === selected.id)}
                   works={works.data}
+                  relations={relations}
                   runtime={runtime}
                   dispatch={live.data?.dispatch ?? null}
                   fetchedAt={live.fetchedAt}

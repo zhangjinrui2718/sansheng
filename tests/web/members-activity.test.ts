@@ -74,7 +74,9 @@ import type {
   PromptUnitView,
   RoleHarnessView,
   SessionMessageView,
+  WorkView,
 } from "@shared/types/platform";
+import type { RelationContext } from "@/lib/relations";
 import {
   MemberPane,
   MemberRoleTabs,
@@ -288,11 +290,30 @@ const renderPane = (over: {
    */
   projectId: string;
   artifacts: readonly ArtifactView[];
+  /**
+   * 本项目的工作项(身份条里「产出于」那一格要翻成标题)。
+   *
+   * ⚠️ **默认给空数组** —— 没有它的话 `works.find(...)` 会当场崩,
+   * 而夹具里恰好没有带 workId 的工件 ⇒ 崩不崩只看夹具,不看代码。
+   */
+  works?: readonly WorkView[];
+  /** 关系上下文(「一圈邻居」)。默认给「空但读得到」= 真的没有。 */
+  relations?: RelationContext;
   runtime: ProjectLiveView["runtime"] | null;
   dispatch: ProjectLiveView["dispatch"] | null;
   fetchedAt: number | null;
   now: number;
-}) => renderToStaticMarkup(createElement(MemberPane, over));
+}) =>
+  renderToStaticMarkup(
+    createElement(MemberPane, {
+      works: [],
+      relations: {
+        projectId: over.projectId,
+        works: { data: [], loading: false, error: null },
+      },
+      ...over,
+    }),
+  );
 
 /** 最常用的那一次渲染:host 快照、无本地漂移(fetchedAt === now)。 */
 const renderWorker = (over: Partial<Parameters<typeof renderPane>[0]> = {}) =>

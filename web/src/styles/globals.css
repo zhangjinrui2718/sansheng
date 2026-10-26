@@ -498,6 +498,42 @@
     border-radius: 8px;
   }
 
+  /* 「一圈邻居」:一条窄带子,列出当前这个东西连着什么。
+   *
+   * ⚠️ 排版上的取舍:关系项**不换行成多行**(那样一条带子会长到半个屏幕),
+   * 而是横向排开、超出部分自己截断 —— 它是导航,不是正文。 */
+  .ss-relations {
+    margin-top: 6px;
+    font-size: 12px;
+    line-height: 1.7;
+  }
+  .ss-relations-title {
+    color: var(--bone-mute);
+    font-size: 11px;
+    letter-spacing: 0.08em;
+    margin-bottom: 2px;
+  }
+  .ss-relations-group {
+    display: flex;
+    align-items: baseline;
+    gap: 6px;
+    flex-wrap: wrap;
+    padding: 1px 0;
+  }
+  .ss-relations-items {
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+    flex-wrap: wrap;
+    min-width: 0;
+  }
+  .ss-relations-item {
+    max-width: 22em;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
   /*
    * ═══════════════════════════════════════════════════════════════════════
    * .ss-md —— 会话正文的 markdown 渲染面(批次 markdown)

@@ -157,6 +157,29 @@ export function useWorks(projectId?: string | null): Loaded<WorkView[]> {
   return { data: r.data?.works ?? [], loading: r.loading, error: r.error };
 }
 
+/**
+ * 本项目的**阻塞**(哪件事被卡住了)。
+ *
+ * ⚠️ **独立取,不搭 `useProjectDetail` 的车** —— 那个 hook 会连项目详情一起拉,
+ * 而「工作项页要显示卡住它的阻塞」只需要这一份。
+ *
+ * ⚠️ **它返回的是 `Loaded<BlockerView[]>`** —— `data` 在没加载时是**空数组**,
+ * 而「空数组」与「没有阻塞」长得一样。所以**用它的页面要拿 `loading`/`error`
+ * 一起判**(关系栏就是这么做的:`loading` ⇒ 「加载中…」,`error` ⇒ 「读不到」,
+ * 两者都**不是**「没有」)。
+ */
+export function useBlockers(projectId?: string | null): Loaded<BlockerView[]> {
+  const revision = useChatStore((s) => s.projectRevision);
+  const r = useLoad(
+    () =>
+      projectId
+        ? api.listBlockers(projectId)
+        : Promise.resolve({ blockers: [] as BlockerView[] }),
+    [projectId, revision],
+  );
+  return { data: r.data?.blockers ?? [], loading: r.loading, error: r.error };
+}
+
 /** 本项目成员(四个固定职能)。 */
 export function useProjectMembers(projectId: string | null): Loaded<MemberView[]> {
   const revision = useChatStore((s) => s.projectRevision);

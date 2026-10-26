@@ -37,7 +37,7 @@
  * 关联目标只显示 id —— 契约 `ArtifactView.links` / `AskView.parentAskId` 都只有 id,
  * 没有目标标题,不编一个出来。
  */
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { PageHeader, Pill, Section, StatStrip, EmptyState, KV, Flag } from "@/components/ui/primitives";
 import { ClientQuestionCard } from "@/components/client/ClientQuestionCard";
 
@@ -62,6 +62,9 @@ import {
 } from "@/lib/vocab";
 import { blockerMeta, workMeta } from "@/lib/entityMeta";
 import { MetadataStrip } from "@/components/ui/MetadataStrip";
+import { RelationsRail } from "@/components/relations/RelationsRail";
+import type { RelationContext } from "@/lib/relations";
+import { useAppLocation, paramOf } from "@/lib/route";
 
 /**
  * 悬停时补一句「这一类意味着什么」。类名本身只有一处
@@ -136,12 +139,49 @@ export function ProjectDetailPage() {
   const projectId = useChatStore((s) => s.projectId);
   const { detail, blockers, loading, error } = useProjectDetail(projectId);
   /**
+   * 地址里选中的那条阻塞(`?blocker=<id>`)。
+   *
+   * ⚠️ **这个参数以前没人读** —— 而 `blockerLocation()` 一直在产出
+   * `#/project?blocker=…`。一个**没有人读的参数** = 一个**指向空气的地址**:
+   * 点得动、跳得过去,但落点没有那条阻塞,读者只能自己找。
+   * ⇒ 现在这一页真的认它:定位 + 高亮。
+   */
+  const { loc } = useAppLocation();
+  const pickedBlocker = paramOf(loc, "blocker");
+  /**
+   * 地址里指定的项目(`?project=<id>`)—— **深链接**。
+   *
+   * ⚠️ 「当前项目」是应用里的一处**全局选择**(store 的 `projectId`),
+   * 而阻塞只存在于**某一个**项目里。所以一条指向阻塞的地址必须**连项目一起点名**,
+   * 否则它只在「你正好在看那个项目」时成立。
+   * ⇒ 这一页认 `?project=`:与当前项目不同时就切过去(`selectProject` = 左栏同一个动作)。
+   */
+  const wantedProject = paramOf(loc, "project");
+  const selectProject = useChatStore((s) => s.selectProject);
+  useEffect(() => {
+    if (wantedProject === null || wantedProject === projectId) return;
+    void selectProject(wantedProject);
+  }, [wantedProject, projectId, selectProject]);
+  /**
    * 工作项 id → 标题。⚠️ 只用来把「地址格」里的 id 翻成人能读的标题 ——
    * 一个链接钣着 `w_1a2b3c` 也能点,但没人能读。
    */
   const workTitles = useMemo(
     () => new Map((detail?.works ?? []).map((w) => [w.id, w.title] as const)),
     [detail?.works],
+  );
+  /**
+   * 关系上下文(算「一圈邻居」用,见 `lib/relations.ts`)。
+   *
+   * ⚠️ **带加载态** —— 「卡住它的阻塞」在数据还没到的时候是**不知道**,不是「没有」。
+   */
+  const relations: RelationContext = useMemo(
+    () => ({
+      projectId,
+      works: { data: detail?.works ?? [], loading, error },
+      blockers: { data: blockers, loading, error },
+    }),
+    [projectId, detail?.works, blockers, loading, error],
   );
   const { data: asks, loading: asksLoading, error: asksError } = useProjectAsks(projectId);
   const { data: changes, loading: changesLoading, error: changesError } = useProjectChanges(projectId);
@@ -443,6 +483,17 @@ export function ProjectDetailPage() {
                     {w.dependsOn.length > 0 && (
                       <div className="ss-meta mt-0.5">依赖 {w.dependsOn.length} 项</div>
                     )}
+                    {/*
+                      关系栏(摘要模式:只渲染**算出来**且非空的组)。
+                      ⚠️ 上面那行「依赖 N 项」是**计数**,关系栏是**地址** ——
+                      两者不是同一件事(一个是「有几条」,一个是「是哪几条」),
+                      所以都留着;但「子项 / 卡住它的阻塞」此前**这一页根本没有**。
+                    */}
+                    <RelationsRail
+                      subject={{ kind: "work", work: w }}
+                      context={relations}
+                      compact
+                    />
                   </article>
                 ))}
               </div>
@@ -599,7 +650,19 @@ export function ProjectDetailPage() {
             ) : (
               <div className="grid gap-1.5">
                 {blockers.map((b) => (
-                  <article key={b.id} className="sansheng-card p-2.5">
+                  <article
+                    key={b.id}
+                    className="sansheng-card p-2.5"
+                    data-blocker-id={b.id}
+                    data-picked={pickedBlocker === b.id ? "true" : undefined}
+                    ref={
+                      pickedBlocker === b.id
+                        ? (el) => {
+                            el?.scrollIntoView({ block: "center" });
+                          }
+                        : undefined
+                    }
+                  >
                     <div className="flex items-center gap-2 flex-wrap">
                       <span className="ss-body" style={{ color: "var(--bone)" }}>
                         {b.title}

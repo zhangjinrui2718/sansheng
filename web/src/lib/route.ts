@@ -118,6 +118,32 @@ export function paramOf(loc: AppLocation, key: string): string | null {
   return v === undefined ? null : v;
 }
 
+/** 「地址里的选中态」是否还成立 —— 页面用它判断**该不该清参数**。 */
+export interface ProjectChangeState {
+  /** 组件是否已经渲染过至少一次(`false` = 首帧)。 */
+  mounted: boolean;
+  /** 上一次见到的项目 id。 */
+  projectId: string | null;
+}
+
+/**
+ * 「换项目 ⇒ 地址里那两个指向旧项目的参数要清掉」这条判断。
+ *
+ * ⚠️ **首帧不清** —— 这是修一个真 bug:改版前页面挂载时就跑一遍
+ * `setPicked(undefined)` / `setOpenId(null)`,于是 **`#/works?work=w_1`
+ * 一打开就被抹掉**。深链接(发给别人 / F5 回来)是这一整层改动的**目的**,
+ * 而症状是「页面就是没选中」—— 看着像用户自己点错了,不像 bug。
+ *
+ * ⚠️ **项目没变也不清** —— 只有真的换了项目,旧 id 才不再成立。
+ */
+export function shouldClearSelection(
+  state: ProjectChangeState,
+  nextProjectId: string | null,
+): boolean {
+  if (!state.mounted) return false;
+  return state.projectId !== nextProjectId;
+}
+
 /** 改一个参数(`null` = 删掉它)。返回新对象,不改入参。 */
 export function withParam(loc: AppLocation, key: string, value: string | null): AppLocation {
   const params: Record<string, string> = { ...loc.params };

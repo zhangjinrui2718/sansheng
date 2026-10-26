@@ -138,10 +138,24 @@ const unavailableLive: DagLive = { runtime: "unavailable", agents: [] };
 type BodyProps = Parameters<typeof ArtifactsBody>[0];
 type GraphProps = Parameters<typeof DependencyGraph>[0];
 
+/**
+ * 关系上下文(「一圈邻居」)。
+ *
+ * ⚠️ **2026-10-26 新增** —— 关系栏要算「它连着什么」,就得有一份**别的实体**
+ * 当上下文(前置、子项、阻塞、相关工件)。这里喂的就是本页那两份夹具,
+ * 所以关系栏里出现的标题与正文里出现的是**同一批**。
+ */
+const RELATIONS: NonNullable<BodyProps["relations"]> = {
+  projectId: "p1",
+  works: { data: WORKS, loading: false, error: null },
+  artifacts: { data: ARTS, loading: false, error: null },
+};
+
 function bodyProps(over: Partial<BodyProps> = {}): BodyProps {
   return {
     works: WORKS,
     artifacts: ARTS,
+    relations: RELATIONS,
     picked: undefined,
     onPick: vi.fn(),
     openId: null,
@@ -233,6 +247,7 @@ describe("① 节点只挂自己的工件(不许把整个项目的工件塞进�
         works: WORKS,
         artifacts: split.byWork.get("w1") ?? [],
         known: ARTS,
+        relations: RELATIONS,
         openId: null,
         onToggleDetail: vi.fn(),
       }),
@@ -265,6 +280,7 @@ describe("② 不挂在任何环节上的工件(workId: null)单独一块", () =
       createElement(UnattachedArtifacts, {
         artifacts: [D1],
         known: ARTS,
+        relations: RELATIONS,
         openId: null,
         onToggleDetail: vi.fn(),
       }),
@@ -280,6 +296,7 @@ describe("② 不挂在任何环节上的工件(workId: null)单独一块", () =
       createElement(UnattachedArtifacts, {
         artifacts: split.noWork,
         known: ARTS,
+        relations: RELATIONS,
         openId: null,
         onToggleDetail: vi.fn(),
       }),
@@ -455,6 +472,7 @@ describe("⑧ 环节读不到的工件(workId 指向本次没读到的工作项)
       createElement(DanglingArtifacts, {
         dangling: split.dangling,
         known: ARTS,
+        relations: RELATIONS,
         openId: null,
         onToggleDetail: vi.fn(),
       }),

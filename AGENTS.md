@@ -565,6 +565,50 @@ dev/prod + CI/CD」,09:54 业务经理只回了一句「我先看下你之前留
 `tests/web/entity-spine-wiring.test.ts`(5)· 变异 `.probe/mutation-entity-spine.py`(8 条,全部实测变红)。
 **基线 2311 passed / 121 files**。设计全文:`docs/DESIGN-FRONTEND-IA.md` §3.3 / §8.7。
 
+## 「一圈邻居」:关系也收成一份判据(2026-10-26 · Wave 1 第三步)
+
+**症状**:「**它连着什么**」这件事**三处各写各的,而且没有一处能点** ——
+工件卡片印 `关联 parent→art_x`(原始 id + 英文关系词)、工件详情一节「关联(N)」
+(标题能读懂但**不是链接**)、工作项面板的「前置」是**纯文本**、成员面板**根本没有这一面**。
+
+**两份新文件,职责与实体脊严格同构**:`web/src/lib/relations.ts`(判据,纯数据不 import React)·
+`web/src/components/relations/RelationsRail.tsx`(排版)。
+
+| | 身份条(`lib/entityMeta.ts`) | 关系栏(`lib/relations.ts`) |
+|---|---|---|
+| 答 | 这是什么 | 它连着什么 |
+| 拥有 | 作者 / 产出于 / 负责人 / 父项 | 相关工件 / 子项 / 前置 / 阻塞 / 负责的环节 |
+
+⚠️ **两者的关系类互斥** —— 同一个事实两处说 = 读者没法把两处的话对上。
+
+**四条判据**
+
+1. **组有三态**:`ready`(算出来了,**可能 0 条** = 「没有」这个事实)· `loading`(还在拉)·
+   `unavailable`(拉失败 / **没接这份数据**)。⚠️ **后两者都不是「没有」** ——
+   与 `DataState` 四态、`ProjectLiveView.runtime = "unavailable"` 同一条纪律。
+   ⇒ 上下文里**没接**的那份数据(这一页没取阻塞列表)⇒ `unavailable`,不是「空」。
+2. **地址是地址本身** —— 真 `<a href>`;**阻塞的地址必须带项目 id**
+   (`blockerLocation(b.id, projectId)`)—— 阻塞只存在于**某一个**项目里,
+   而「当前项目」是**全局选择** ⇒ 不带项目 id 的地址是**半个地址**
+   (只在「你正好在看那个项目」时成立,而链接的用处恰恰是从别处跳过来)。
+3. **拿不到就退成 id,不留空**;**不适用的组整组不出现**(那是事实,不是故障)。
+4. **接线必须有哨兵** —— 判据写得再好看,页面上没有 `<RelationsRail` 就是**零读者**
+   (M11 / M12 两条变异把两页的关系栏删掉 ⇒ 变红)。
+
+### 顺带修掉的两个真 bug + 一个「两个真相」
+
+| | 原来 | 现在 |
+|---|---|---|
+| `?blocker=` / `?project=` | **没人读** ⇒ 「指向空气的地址」:点得动、跳得过去、落点没有那条东西 | `ProjectDetail.tsx` 真的认(定位 + 高亮 + 深链接切项目) |
+| 深链接 | `WorksPage` 挂载时 `setPicked(undefined)` ⇒ **`#/works?work=w_1` 一打开就被抹掉** | 判据在 `lib/route.ts` 的 `shouldClearSelection`:**首帧不清**、项目没变也不清 |
+| 「当前项目」 | 工作项页有一个**页面私有**的 `scope` ⇒ 同一应用里**两个**当前项目 | 只有 store 那一个 ⇒ **从这里发出的链接不会落在别的项目里** |
+
+⚠️ **「没人读的参数」是「指向空气的地址」** —— 症状是「点得动、跳得过去、就是找不到」,
+而链接本身**看起来完全正常**。⇒ **凡是产出地址参数的地方,都要有一处真的读它**(哨兵钉住)。
+
+**回归**:`tests/web/relations.test.ts`(23)· `tests/web/relations-wiring.test.ts`(12)·
+变异 `.probe/mutation-relations.py`(**12 条全部实测变红**)。**基线 2346 passed / 123 files**。
+
 ## 数据与存储
 
 - 迁移在 `migrations/`:**007–010 建平台表**,**011 把旧系统的 7 张表 DROP**(`blackboards` / `conversations` / `messages` / `fragments` / `user_profile` / `agent_states` / `fragments_vec`),**012 接待会话**(重建 `project_sessions` 放宽 `project_id` 可空,已登记进 `INTENTIONAL_REBUILDS`),**013 排空器状态**(`works.review_state` + `dispatch_events` + `dispatch_attempts`,纯加法),**014 产出边**(`artifacts.work_id` + 一条部分索引,纯加法),**015 放宽 `dispatch_events.kind`**(加 `work_cancelled`;闭集**只能靠重建表**放宽,已登记进 `INTENTIONAL_REBUILDS`),**016 交付物 kind**(重建 `artifacts`),**017 交付会话**(`project_sessions.deliverable_artifact_id` + `channel`,纯加法),**018 `turn_usage` 表**(纯加法),**019 会话消息的封套**(`session_messages.origin_source` + `trigger_kind`,纯加法;两列各有自己的 CHECK),**020 `client_questions` 台账**,**021 `review_verdicts`**,**022 `session_messages.todo_kind`**(纯加法、**不建 CHECK** —— 取值域随 `TODO_KINDS` 变,闭集在读写两侧的 TS 里),**023 项目版本链**(`projects.version` + `parent_project_id`,`ON DELETE SET NULL`),**024 对话一等实体**(`project_sessions.kind` + `title`;`kind` **有** CHECK —— 两值闭集,与 022 相反),**025 交付物类型**(`artifacts.deliverable_type` + 一条部分索引,纯加法),**026 执行角色一分为二 + 交付物类型加 `code_service`**(⚠️ **重建两张表**:`agents` 的 role 闭集 4→5 值并改名 + `artifacts` 的 `deliverable_type` 闭集 1→2 值;两张都登记进 `INTENTIONAL_REBUILDS`),**027 工件正文落文件**(⚠️ **重建 `artifacts`**:`body TEXT` → `body_path` / `body_sha256` / `body_bytes` 三列 NOT NULL + `commit_sha` 可空;登记进 `INTENTIONAL_REBUILDS`。**它故意不走「建 _new → 拷 → 改名」**:没有数据要拷(用户明确「老数据全不要」),而改名法会让「`artifacts` 被多个迁移创建」这条登记**当场过期**;数据安全改由一条会响的前置检查承担 —— `CHECK (n = 0)`,非空库上**响亮失败并整体回滚**,而不是静默清空)。

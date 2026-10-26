@@ -114,7 +114,7 @@
  * 「详情」保持原行为:**按 id 单独拉一次** `GET /api/artifacts/:id`,不拿列表里
  * 那条凑 —— 契约给了 `/:id` 这条端点,它的存在意义就是「列表里的字段可能不是全量」。
  */
-import { useCallback, useEffect, useMemo, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import type { ArtifactKind, ArtifactView, WorkView } from "@shared/types/platform";
 import {
   Clamp,
@@ -127,8 +127,8 @@ import {
   StatStrip,
   toneColor,
 } from "@/components/ui/primitives";
-import { useArtifactContent, useArtifacts, useProjectLive, useWorks } from "@/lib/data";
-import { useAppLocation, paramOf } from "@/lib/route";
+import { useArtifactContent, useArtifacts, useBlockers, useProjectLive, useWorks } from "@/lib/data";
+import { useAppLocation, paramOf, shouldClearSelection, type ProjectChangeState } from "@/lib/route";
 import { useChatStore } from "@/stores/chat";
 import { errorMessage, getArtifact } from "@/lib/api";
 import {
@@ -173,6 +173,8 @@ import {
   workStatusTone,
 } from "@/lib/vocab";
 import { artifactMeta, authorLabelOf, workMeta } from "@/lib/entityMeta";
+import type { RelationContext } from "@/lib/relations";
+import { RelationsRail } from "@/components/relations/RelationsRail";
 import { MetadataStrip } from "@/components/ui/MetadataStrip";
 import { HtmlReport } from "@/components/deliverable/HtmlReport";
 import { CodeService } from "@/components/deliverable/CodeService";
@@ -1165,12 +1167,15 @@ export function DependencyGraph({
 
 // ── 工件行 / 工件分组(③ 与 ② 共用同一套渲染代码)──────────────────
 
-/** links 的 rel 是契约里的闭合联合(parent | depends_on | answers);未知值原样透出。 */
-const REL_LABEL: Record<string, string> = {
-  parent: "父工件",
-  depends_on: "依赖",
-  answers: "答复",
-};
+/**
+ * ⚠️ **工件之间的关系词只有一张表** —— 在 `lib/relations.ts` 的
+ * `ARTIFACT_REL_WORDS`。
+ *
+ * 改版前这里还挂着一张 `REL_LABEL`(parent / depends_on / answers),
+ * 而工件详情那一节用的是**另一套词**(answers 写成「答复」)——
+ * 两套词并排出现在同一份工件上,而读者没法把它们对上。
+ * ⇒ 关系栏接管了「关联」那一面,这张表随之删除。
+ */
 
 /**
  * 一条工件的摘要行(kind 色点 / status Pill / 标题 / 作者 / 时间 / body 截断),
@@ -1183,6 +1188,7 @@ export function ArtifactRow({
   artifact: a,
   known,
   works,
+  relations,
   open,
   onToggle,
 }: {
@@ -1194,6 +1200,8 @@ export function ArtifactRow({
    * (拿不到就退成 id,见 `lib/entityMeta.ts`)。
    */
   works?: readonly WorkView[];
+  /** 关系上下文(算「一圈邻居」用,见 `lib/relations.ts`)。 */
+  relations: RelationContext;
   open: boolean;
   onToggle: () => void;
 }) {
@@ -1294,9 +1302,18 @@ export function ArtifactRow({
             : "这条工件没有正文。"}
         </div>
       )}
-      <div className="ss-meta mt-1">
-        {a.links.length > 0 && `关联 ${a.links.map((l) => `${l.rel}→${l.targetId}`).join(" · ")}`}
-      </div>
+      {/*
+        关系栏(紧凑):只说「相关工件」,而且每一项都是**能点的地址**。
+        ⚠️ 改版前这里印的是 `关联 parent→art_x` —— **原始 id 与英文关系词**,
+        读者既看不懂也不知道点哪儿;而「同一件事在两处说法不同」正是这次重构
+        要治的病。现在它走 `lib/relations.ts` 的**一份**判据。
+      */}
+      <RelationsRail
+        subject={{ kind: "artifact", artifact: a }}
+        context={relations}
+        compact
+        groups={["related"]}
+      />
       {/*
         验收动作(029)。**挂在这里是因为甲方就在这一页读正文** —— 让他看完还要
         跳到项目页去表态,等于把「有事等你」藏起来。
@@ -1306,7 +1323,7 @@ export function ArtifactRow({
       {a.acceptance !== null && (
         <DeliveryVerdictActions artifactId={a.id} title={a.title} acceptance={a.acceptance} />
       )}
-      {open && <ArtifactDetail id={a.id} known={known} />}
+      {open && <ArtifactDetail id={a.id} known={known} relations={relations} />}
     </article>
   );
 }
@@ -1321,6 +1338,7 @@ export function ArtifactGroups({
   artifacts,
   known,
   works,
+  relations,
   openId,
   onToggleDetail,
 }: {
@@ -1328,6 +1346,8 @@ export function ArtifactGroups({
   known: readonly ArtifactView[];
   /** 本项目的工作项(只用来把「产出于」那一格翻成标题) */
   works?: readonly WorkView[];
+  /** 关系上下文(算「一圈邻居」用,见 `lib/relations.ts`)。 */
+  relations: RelationContext;
   /** 当前展开了详情的那条工件 id(null = 都收起) */
   openId: string | null;
   onToggleDetail: (artifactId: string) => void;
@@ -1362,6 +1382,7 @@ export function ArtifactGroups({
                 artifact={a}
                 known={known}
                 works={works}
+                relations={relations}
                 open={openId === a.id}
                 onToggle={() => onToggleDetail(a.id)}
               />
@@ -1389,6 +1410,7 @@ export function WorkNodePanel({
   works,
   artifacts,
   known,
+  relations,
   openId,
   onToggleDetail,
 }: {
@@ -1398,10 +1420,11 @@ export function WorkNodePanel({
   /** **这个环节**挂着的工件(已按 workId 分好) */
   artifacts: readonly ArtifactView[];
   known: readonly ArtifactView[];
+  /** 关系上下文(算「一圈邻居」用,见 `lib/relations.ts`)。 */
+  relations: RelationContext;
   openId: string | null;
   onToggleDetail: (artifactId: string) => void;
 }) {
-  const deps = work.dependsOn;
   return (
     <Section
       title="选中的环节"
@@ -1426,41 +1449,13 @@ export function WorkNodePanel({
         */}
         <MetadataStrip items={workMeta(work)} />
 
-        <div className="flex flex-col">
-          {/* ⚠️ `KV` 的 `title` 是**显示在屏幕上的**注解,不是 HTML 属性(见
-              primitives.tsx)—— 长解释一律走真 `title=`,否则首屏会多出两行小字。 */}
-          <KV
-            label="前置"
-            value={
-              deps.length === 0 ? (
-                <span title="契约 WorkView.dependsOn 为空:这条环节不依赖别的工作项">
-                  没有前置依赖
-                </span>
-              ) : (
-                <span
-                  className="flex items-center gap-1.5 flex-wrap"
-                  title="契约 WorkView.dependsOn:本环节依赖哪些工作项(它们是 DAG 上的虚线入边)"
-                >
-                  {deps.map((id, i) => {
-                    const dep = works.find((w) => w.id === id);
-                    return (
-                      <span key={id} className="flex items-center gap-1.5">
-                        {i > 0 && <span>·</span>}
-                        {dep !== undefined ? (
-                          <span title={`工作项 id:${id}`}>{dep.title || id}</span>
-                        ) : (
-                          <span className="ss-meta" title={`工作项 id:${id}`}>
-                            {id}(本次列表里没有这条工作项)
-                          </span>
-                        )}
-                      </span>
-                    );
-                  })}
-                </span>
-              )
-            }
-          />
-        </div>
+        {/*
+          关系栏:「子项 / 前置 / 卡住它的阻塞」。
+          ⚠️ **「前置」原来的那一行纯文本被删了** —— 同一个事实出现在两处
+          (这里一串不可点的标题、那边一个可点的地址),而两处一旦漂开,
+          读者没法知道该信哪个。现在**关系只住在关系栏里**。
+        */}
+        <RelationsRail subject={{ kind: "work", work }} context={relations} />
 
         {work.goal.length === 0 ? (
           <div className="ss-note">这条工作项没有写目标(goal 为空)。</div>
@@ -1484,6 +1479,7 @@ export function WorkNodePanel({
               artifacts={artifacts}
               known={known}
               works={works}
+              relations={relations}
               openId={openId}
               onToggleDetail={onToggleDetail}
             />
@@ -1506,11 +1502,13 @@ export function WorkNodePanel({
 export function UnattachedArtifacts({
   artifacts,
   known,
+  relations,
   openId,
   onToggleDetail,
 }: {
   artifacts: readonly ArtifactView[];
   known: readonly ArtifactView[];
+  relations: RelationContext;
   openId: string | null;
   onToggleDetail: (artifactId: string) => void;
 }) {
@@ -1533,6 +1531,7 @@ export function UnattachedArtifacts({
           <ArtifactGroups
             artifacts={artifacts}
             known={known}
+            relations={relations}
             openId={openId}
             onToggleDetail={onToggleDetail}
           />
@@ -1552,11 +1551,13 @@ export function UnattachedArtifacts({
 export function DanglingArtifacts({
   dangling,
   known,
+  relations,
   openId,
   onToggleDetail,
 }: {
   dangling: ReadonlyMap<string, ArtifactView[]>;
   known: readonly ArtifactView[];
+  relations: RelationContext;
   openId: string | null;
   onToggleDetail: (artifactId: string) => void;
 }) {
@@ -1578,6 +1579,7 @@ export function DanglingArtifacts({
             <ArtifactGroups
               artifacts={rows}
               known={known}
+              relations={relations}
               openId={openId}
               onToggleDetail={onToggleDetail}
             />
@@ -1637,6 +1639,7 @@ export function resolveSelectedWorkId(
 export function ArtifactsBody({
   works,
   artifacts,
+  relations,
   picked,
   onPick,
   openId,
@@ -1644,6 +1647,8 @@ export function ArtifactsBody({
 }: {
   works: readonly WorkView[];
   artifacts: readonly ArtifactView[];
+  /** 关系上下文(算「一圈邻居」用,见 `lib/relations.ts`)。 */
+  relations: RelationContext;
   picked: string | null | undefined;
   onPick: (workId: string | null) => void;
   openId: string | null;
@@ -1665,6 +1670,7 @@ export function ArtifactsBody({
             works={works}
             artifacts={split.byWork.get(selectedWork.id) ?? []}
             known={artifacts}
+            relations={relations}
             openId={openId}
             onToggleDetail={onToggleDetail}
           />
@@ -1675,6 +1681,7 @@ export function ArtifactsBody({
         <UnattachedArtifacts
           artifacts={split.noWork}
           known={artifacts}
+          relations={relations}
           openId={openId}
           onToggleDetail={onToggleDetail}
         />
@@ -1684,6 +1691,7 @@ export function ArtifactsBody({
         <DanglingArtifacts
           dangling={split.dangling}
           known={artifacts}
+          relations={relations}
           openId={openId}
           onToggleDetail={onToggleDetail}
         />
@@ -1714,6 +1722,7 @@ export function ArtifactsBody({
 export function ArtifactsScreen({
   works,
   artifacts,
+  relations,
   live,
   now,
   picked,
@@ -1723,6 +1732,8 @@ export function ArtifactsScreen({
 }: {
   works: readonly WorkView[];
   artifacts: readonly ArtifactView[];
+  /** 关系上下文(算「一圈邻居」用,见 `lib/relations.ts`)。 */
+  relations: RelationContext;
   live: DagLive | null;
   /** 页面这一刻的本地时钟(见文件头:入场参数,不是判断依据) */
   now: number;
@@ -1763,6 +1774,7 @@ export function ArtifactsScreen({
       <ArtifactsBody
         works={works}
         artifacts={artifacts}
+        relations={relations}
         picked={picked}
         onPick={onPick}
         openId={openId}
@@ -1776,8 +1788,20 @@ export function ArtifactsScreen({
 
 export function WorksPage() {
   const projects = useChatStore((s) => s.projects);
-  const activeProjectId = useChatStore((s) => s.projectId);
-  const [scope, setScope] = useState<string | null>(activeProjectId);
+  const selectProject = useChatStore((s) => s.selectProject);
+  const startIntake = useChatStore((s) => s.startIntake);
+  /**
+   * 范围 = **当前项目**(store 的 `projectId`),不再有页面私有的 `scope`。
+   *
+   * ⚠️ 改版前这一页有一个**私有的** `scope` 下拉。于是同一个应用里出现了
+   * **两个**「当前项目」:左栏 / 对话 / 项目 / 成员页用 store 的那个,
+   * 工作项页用它自己那个。两处一旦不同,**从这里发出的链接就落在别的项目里**
+   * (「点这条前置 → 跳过去却不是那条前置」),而读者看不出为什么 ——
+   * 链接没坏,是**上下文**换了。
+   * ⇒ 现在只有一个当前项目:这个下拉就是「切到那个项目」,与左栏是同一个动作
+   * (`selectProject`)。
+   */
+  const scope = useChatStore((s) => s.projectId);
   /**
    * 两个交互态都**住在地址里**(`#/works?work=w_1&artifact=a_2`):
    * 「把这条工作项/这份工件发给别人」与「F5 之后还在原地」靠的就是这一手。
@@ -1804,17 +1828,31 @@ export function WorksPage() {
     [loc, setParam],
   );
 
+  /**
+   * 换项目时清掉两个交互态(它们指向旧项目的 id)。
+   *
+   * ⚠️ **首帧不清** —— 改版前这里在挂载时就跑一遍 `setPicked(undefined)`,
+   * 于是 `#/works?work=w_1` **一打开就被抹掉**:深链接(发给别人 / F5 回来)
+   * 落地时选中项已经没了,而症状是「页面就是没选中」—— 看着像用户自己点错了。
+   * ⇒ 判断本身在 `lib/route.ts` 的 `shouldClearSelection`(可单测)。
+   */
+  const selState = useRef<ProjectChangeState>({ mounted: false, projectId: scope });
   useEffect(() => {
-    // 用户在对话页切了项目 → 本页跟着切(不然会对着旧项目的工作项发呆),
-    // 同时把两个交互态清掉:选中项与详情都指向旧项目的 id。
-    setScope(activeProjectId);
+    const prev = selState.current;
+    selState.current = { mounted: true, projectId: scope };
+    if (!shouldClearSelection(prev, scope)) return;
     setPicked(undefined);
     setOpenId(null);
-  }, [activeProjectId]);
+  }, [scope, setPicked, setOpenId]);
 
   const worksLoad = useWorks(scope);
   const artifactsLoad = useArtifacts({ projectId: scope });
   const liveLoad = useProjectLive(scope);
+  /**
+   * 阻塞列表 —— **只为「一圈邻居」而取**。
+   * ⚠️ 不搭 `useProjectDetail` 的车:那个 hook 会连项目详情一起拉。
+   */
+  const blockersLoad = useBlockers(scope);
 
   const works = worksLoad.data;
   const artifacts = artifactsLoad.data;
@@ -1825,6 +1863,33 @@ export function WorksPage() {
    * (`workRunningState(work, null)` 给 `unknown: true`,界面据此不点亮节点)。
    */
   const live: DagLive | null = liveLoad.error === null ? liveLoad.data : null;
+
+  /**
+   * 关系上下文(算「一圈邻居」用)。
+   *
+   * ⚠️ **每一份都带自己的加载态** —— 因为「还没加载完」与「真的没有」在屏幕上
+   * 长得一模一样,而把一次读失败说成「没有阻塞」是这套界面反复吃过的亏。
+   * ⇒ 关系栏据此分 `ready` / `loading` / `unavailable` 三态(见 `lib/relations.ts`)。
+   */
+  const relations: RelationContext = useMemo(
+    () => ({
+      projectId: scope,
+      works: { data: works, loading: worksLoad.loading, error: worksLoad.error },
+      artifacts: { data: artifacts, loading: artifactsLoad.loading, error: artifactsLoad.error },
+      blockers: { data: blockersLoad.data, loading: blockersLoad.loading, error: blockersLoad.error },
+    }),
+    [
+      works,
+      artifacts,
+      blockersLoad.data,
+      worksLoad.loading,
+      worksLoad.error,
+      artifactsLoad.loading,
+      artifactsLoad.error,
+      blockersLoad.loading,
+      blockersLoad.error,
+    ],
+  );
 
   const unattachedCount = useMemo(
     () => splitArtifactsByWork(artifacts, works).noWork.length,
@@ -1845,7 +1910,16 @@ export function WorksPage() {
           <div className="flex items-center gap-1.5 flex-wrap">
             <select
               value={scope ?? ""}
-              onChange={(e) => setScope(e.target.value === "" ? null : e.target.value)}
+              onChange={(e) => {
+                const next = e.target.value;
+                // ⚠️ 选「(空)」= 回到**接待会话**(不选项目)——
+                // `selectProject` 只接受一个真项目 id,所以这一档不走它。
+                if (next === "") {
+                  void startIntake();
+                  return;
+                }
+                void selectProject(next);
+              }}
               style={{
                 background: "var(--ink-1)",
                 border: "1px solid var(--ink-3)",
@@ -1896,6 +1970,7 @@ export function WorksPage() {
         <ArtifactsScreen
           works={works}
           artifacts={artifacts}
+          relations={relations}
           live={live}
           // 「此刻」= 渲染这一刻的本地时钟。**不额外起定时器**:`useProjectLive`
           // 每 2.5s 轮询一次,重渲染就会带来新的 now(见文件头「可测性」)。
@@ -1921,7 +1996,16 @@ export function WorksPage() {
  * **详情单独拉一次,不拿列表里那条凑**:契约给了 `/:id` 这条端点,它的存在意义
  * 就是「列表里的字段可能不是全量」;用列表项假装详情,等于把那条端点变成死代码。
  */
-function ArtifactDetail({ id, known }: { id: string; known: readonly ArtifactView[] }) {
+function ArtifactDetail({
+  id,
+  known,
+  relations,
+}: {
+  id: string;
+  known: readonly ArtifactView[];
+  /** 关系上下文(算「一圈邻居」用,见 `lib/relations.ts`)。 */
+  relations: RelationContext;
+}) {
   const [artifact, setArtifact] = useState<ArtifactView | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -1946,9 +2030,6 @@ function ArtifactDetail({ id, known }: { id: string; known: readonly ArtifactVie
       cancelled = true;
     };
   }, [id]);
-
-  const titleOf = (targetId: string): string | null =>
-    known.find((k) => k.id === targetId)?.title ?? null;
 
   return (
     <div
@@ -2000,28 +2081,15 @@ function ArtifactDetail({ id, known }: { id: string; known: readonly ArtifactVie
             <TextArtifactBody artifactId={artifact.id} />
           )}
 
-          <div>
-            <div className="ss-section" style={{ fontSize: 12 }}>
-              关联({artifact.links.length})
-            </div>
-            {artifact.links.length === 0 ? (
-              <div className="ss-note">没有出边 —— 这条工件不挂在别的工件上。</div>
-            ) : (
-              <div className="flex flex-col">
-                {artifact.links.map((l) => {
-                  const t = titleOf(l.targetId);
-                  return (
-                    <KV
-                      key={`${l.rel}:${l.targetId}`}
-                      label={REL_LABEL[l.rel] ?? l.rel}
-                      value={t ?? l.targetId}
-                      title={t !== null ? l.targetId : "该目标不在本次列表里,只显示 id"}
-                    />
-                  );
-                })}
-              </div>
-            )}
-          </div>
+          {/*
+            「关联」那一节 → **关系栏**。
+            ⚠️ 改版前这里是一节 `KV` 列表:标题能读懂(REL_LABEL),但**不是链接**,
+            跳不过去;而卡片上那一行印的又是 `parent→art_x`。两处各说各的。
+            ⇒ 现在两处走**同一份**判据(`lib/relations.ts`),而且每一项都是能点的地址。
+            ⚠️ **「它所属环节的阻塞」是新的一格** —— 一份工件被卡住时,
+            以前要跳到项目页的阻塞段才看得见。
+          */}
+          <RelationsRail subject={{ kind: "artifact", artifact }} context={relations} />
 
           <Disclosure summary="原始字段">
             <div className="flex flex-col gap-0.5">

@@ -259,6 +259,11 @@ describe("成员页 · 成员面板里那一块的位置与归属", () => {
         activity,
         projectId: "p-1",
         artifacts: [],
+        works: [],
+        relations: {
+          projectId: "p-1",
+          works: { data: [], loading: false, error: null },
+        },
         runtime: "host",
         dispatch: null,
         fetchedAt: 1_700_000_000_000,

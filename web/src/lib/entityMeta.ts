@@ -98,6 +98,23 @@ export const artifactLocation = (artifactId: string, workId?: string | null): Ap
   params: workId ? { work: workId, artifact: artifactId } : { artifact: artifactId },
 });
 
+/**
+ * 某条阻塞的地址(项目页定位到它)。
+ *
+ * ⚠️ **它指向的是项目页而不是工作项页** —— 阻塞是**项目级**的实体
+ * (它卡住若干条环节,但不属于任何一条),所以它没有自己的「工作项页地址」。
+ * 项目页是它唯一有地址的地方。
+ *
+ * ⚠️ **`projectId` 给了就一起带上** —— 阻塞只存在于**某一个**项目里,
+ * 而「当前项目」是应用里的一处**全局选择**(store 的 `projectId`)。
+ * 不带项目 id 的地址是**半个地址**:它只在「你正好在看那个项目」时成立,
+ * 而链接的用处恰恰是**从别处跳过来**。⇒ 带项目 id 的地址才落得到点上。
+ */
+export const blockerLocation = (blockerId: string, projectId?: string | null): AppLocation => ({
+  route: "project",
+  params: projectId ? { project: projectId, blocker: blockerId } : { blocker: blockerId },
+});
+
 // ── 三类实体的身份 ────────────────────────────────────────────────
 
 /**
