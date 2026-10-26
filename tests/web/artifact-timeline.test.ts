@@ -291,7 +291,10 @@ describe("① 工件 = 点:20 件恰好 20 个,6 件不挂环节的也在图上"
     // 与事实相反的话,而看起来完全正常」)。所以钉成一条负样本。
     const full = renderScreen();
     expect(full, "页面还在说无环节的工件没画出来").not.toContain("不出现在上面的流程图上");
-    expect(full, "改成了「已经在图上」就该看得见这句话").toContain("已经在上面那张图上");
+    expect(full, "改成了「已经在图上」就该看得见这句话").toContain("已在上面那张图上");
+    // ⚠️ 2026-10-26(Wave 2b):断言的字面从「已经在上面那张图上」改成「已在上面那张图上」——
+    // **判据没变**(页面必须说「它们在图上」),变的是措辞:那一段被改成了人话,
+    // 而它原来还是 markdown 体(带 `**`,JSX 不渲染 ⇒ 屏上多两个星号)。
     // 正样本:同一批工件既有图上的点,也有清单里的一行(两处都对得上,不是二选一)
     const ids = tagsWith(full, "data-mark-id").map((t) => attrOf(t, "data-mark-id")!);
     for (const d of DECISION_IDS) expect(ids).toContain(d);

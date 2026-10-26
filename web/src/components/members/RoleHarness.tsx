@@ -342,7 +342,7 @@ export function HarnessRolePane({
           ) : (
             <span
               style={{ color: "var(--cinnabar)" }}
-              title="库里没有这个角色的 agent 行(组织还没播种,或刚被重置)—— 工具面求解不了。它**不是**「0 个工具」。"
+              title="库里没有这个角色的 agent 行(组织还没播种,或刚被重置)—— 工具面求解不了。它不是「0 个工具」。"
             >
               实得工具 求解不了(组织未播种)
             </span>
@@ -880,7 +880,7 @@ function PromptUnitEditor({
         {sharedWith.length > 1 && (
           <Pill
             tone="cyan"
-            title={`这是**同一个文件**,被 ${sharedWith.length} 个角色声明:${sharedWith.join(" · ")}。改它会影响这几个角色。`}
+            title={`这是同一个文件,被 ${sharedWith.length} 个角色声明:${sharedWith.join(" · ")}。改它会影响这几个角色。`}
           >
             共用于 {sharedWith.length} 个角色
           </Pill>

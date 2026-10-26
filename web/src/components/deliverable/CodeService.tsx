@@ -195,7 +195,7 @@ function CommitList({ artifactId }: { artifactId: string }) {
         style={{ color: "var(--cinnabar, #b4483c)" }}
         data-commits-runtime={data.runtime}
       >
-        **{commitsRuntimeLabel(data.runtime)}**仓库提交 —— {data.problem ?? "原因未说明"}。
+        {commitsRuntimeLabel(data.runtime)}仓库提交 —— {data.problem ?? "原因未说明"}。
         (这不是「没有提交」,是这次读不到。)
       </div>
     );
@@ -241,7 +241,7 @@ function ServiceBody({ artifactId, at }: { artifactId: string; at?: string }) {
   if (data.runtime !== "ok") {
     return (
       <div className="ss-note" style={{ color: "var(--cinnabar, #b4483c)" }} data-content-runtime="unavailable">
-        **读不到**说明正文 —— {data.problem ?? "原因未说明"}。
+        读不到说明正文 —— {data.problem ?? "原因未说明"}。
         (这不是「没有说明」,是这次读不到。正文落点:{data.path})
       </div>
     );
@@ -303,13 +303,13 @@ export const CodeService = memo(function CodeService({ artifactId, at, service }
               : `${delivered}${meta.deliverableSubject !== null ? ` ${meta.deliverableSubject}` : ""}`
           }
           mono
-          hint="最后触及服务目录的提交 = 这版交付物。与 HEAD 不是一回事:平台每回合写工件都会让 HEAD 动,而交付物可能没变。"
+          hint="最后触及服务目录的提交(这版交付物是什么)。"
         />
         <Row
           label="HEAD"
           value={head === null ? null : `${head}${meta.headSubject !== null ? ` ${meta.headSubject}` : ""}`}
           mono
-          hint="交付那一刻的仓库现场(模型照抄 git rev-parse HEAD,写入时核对过)。"
+          hint="模型照抄 git rev-parse HEAD,写入时核对过。"
         />
         <Row
           label="交付提交数"
@@ -320,8 +320,15 @@ export const CodeService = memo(function CodeService({ artifactId, at, service }
         <Row label="仓库" value={meta.repoPath} mono hint="项目仓的根 —— 交付物是它里面的一个目录。" />
       </div>
 
+      {/*
+        这一段是**两块坐标之间**的关系(单看任何一行都读不出来),
+        所以它留在屏上而不是某一行悬停里。
+
+        ⚠️ 2026-10-26:原先两行的 `hint` 也各说了这一段一遍 ⇒ 同一件事三处。
+        ⇒ 那两处的悬停现在**只留自己那一行独有的事实**。
+      */}
       <div className="ss-note">
-        「交付版本」= 最后触及**服务目录**的提交(这版交付物是什么);「HEAD」= 交付那一刻的
+        「交付版本」= 最后触及服务目录的提交(这版交付物是什么);「HEAD」= 交付那一刻的
         仓库现场。两者不同是正常的 —— 平台每回合都写工件正文并提交,HEAD 一直在动。
       </div>
 
@@ -337,7 +344,7 @@ export const CodeService = memo(function CodeService({ artifactId, at, service }
           style={{ borderLeft: "2px solid var(--amber)", paddingLeft: 8 }}
           title="交付物 = 被 git 跟踪的文件。这些被 .gitignore 忽略,甲方 clone 不到 —— 正常的(node_modules / 构建产物)也在其中,所以这是告警不是错误。"
         >
-          ⚠️ 交付物**会缺**这 {meta.ignoredFiles.length} 项(被 `.gitignore` 忽略,甲方 clone 不到):
+          ⚠️ 交付物会缺这 {meta.ignoredFiles.length} 项(被 `.gitignore` 忽略,甲方 clone 不到):
           <div
             className="ss-body"
             style={{ fontSize: 12, color: "var(--bone-dim)", wordBreak: "break-all", marginTop: 2 }}
@@ -349,7 +356,7 @@ export const CodeService = memo(function CodeService({ artifactId, at, service }
 
       {cmds === null ? (
         <div className="ss-meta" style={{ color: "var(--cinnabar, #b4483c)" }}>
-          服务名、端口或服务目录读不到,所以**不生成部署命令** —— 编一个默认值会让你照着一条错的
+          服务名、端口或服务目录读不到,所以不生成部署命令 —— 编一个默认值会让你照着一条错的
           命令去部署(构建上下文写错时,镜像里会混进内部工作区)。
         </div>
       ) : (
@@ -358,7 +365,7 @@ export const CodeService = memo(function CodeService({ artifactId, at, service }
           <Command text={cmds.build} />
           <Command text={cmds.run} />
           <div className="ss-meta">
-            这两条命令由**核实过的坐标**生成(端口与服务目录来自交付物本身),不是模型手写的。
+            这两条命令由核实过的坐标生成(端口与服务目录来自交付物本身),不是模型手写的。
           </div>
         </div>
       )}

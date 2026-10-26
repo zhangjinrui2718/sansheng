@@ -356,7 +356,6 @@ export function ProjectDetailPage() {
           <Section
             title="组织推进"
             count={runtime.stops.length}
-            hint="平台叫醒的排空在这里异常停下过 · 每条带此刻的状态"
             helpId="notice.stop"
           >
             <div className="ss-note mb-1.5">
@@ -364,7 +363,7 @@ export function ProjectDetailPage() {
               {runtime.attention > 0 && (
                 <span style={{ color: "var(--amber)" }}>
                   {" · "}
-                  有 {runtime.attention} 条停下来的原因**不是自己会过去**的
+                  有 {runtime.attention} 条停下来的原因不是自己会过去的
                 </span>
               )}
             </div>
@@ -427,7 +426,6 @@ export function ProjectDetailPage() {
           <Section
             title="合规记录"
             count={runtime.compliance.length}
-            hint="平台叫醒的回合没留工作记录 · 记录,不是待办"
             helpId="notice.compliance"
           >
             {runtime.compliance.length === 0 ? (
@@ -469,7 +467,6 @@ export function ProjectDetailPage() {
             <Section
               title="其他平台记录"
               count={runtime.others.length}
-              hint="认不出类别的平台通知 · 原样保留"
               helpId="notice.other"
             >
               <div className="grid gap-1.5">
@@ -512,7 +509,7 @@ export function ProjectDetailPage() {
           <Section
             title="待你回答"
             count={detail.pendingQuestions.length}
-            hint="需要你处理 · 答完落成 decision 工件"
+            hint="需要你处理"
             helpId="client-question"
           >
             {detail.pendingQuestions.length === 0 ? (
@@ -534,7 +531,7 @@ export function ProjectDetailPage() {
           <Section
             title="内部协作"
             count={asks.length}
-            hint="角色之间的提问 · 不用你处理"
+            hint="不用你处理"
             helpId="ask"
           >
             {asksError !== null ? (
@@ -607,7 +604,6 @@ export function ProjectDetailPage() {
           <Section
             title="变更记录"
             count={changes.length}
-            hint="提议 → 评审 → 接受/实施"
             helpId="change"
           >
             {changesError !== null ? (
@@ -645,7 +641,6 @@ export function ProjectDetailPage() {
           <Section
             title="阻塞"
             count={blockers.length}
-            hint="卡住了哪些工作项"
             helpId="blocker"
           >
             {blockers.length === 0 ? (
@@ -720,7 +715,6 @@ export function ProjectDetailPage() {
           */}
           <Section
             title="成本"
-            hint="只读观测 · 不设上界"
             helpId="usage.cost"
           >
             {usageError !== null ? (
@@ -813,7 +807,6 @@ export function ProjectDetailPage() {
           <Section
             title="文件系统"
             count={workspace?.runtime === "ok" ? workspace.counts.entries : undefined}
-            hint="只读:盘上有什么 + 正文索引引用了什么"
             helpId="workspace.read"
           >
             {workspaceError !== null ? (
@@ -836,7 +829,7 @@ export function ProjectDetailPage() {
                   <>
                     <div className="flex items-center gap-2 flex-wrap ss-meta">
                       <span>条目 {workspace.counts.entries}</span>
-                      <span title="artifacts.body_path 里有这条路径 —— 这是**正文落点索引**(库不存正文,只记落点 + sha + 字节数),与记忆页的**知识语料**(检索索引)是两回事">
+                      <span title="artifacts.body_path 里有这条路径 —— 这是正文落点索引(库不存正文,只记落点 + sha + 字节数),与记忆页的知识语料(检索索引)是两回事">
                         正文已索引 {workspace.counts.indexed}
                       </span>
                       <span>孤儿文件 {workspace.counts.orphanFile}</span>
@@ -873,7 +866,7 @@ export function ProjectDetailPage() {
                             {e.indexed && (
                               <Pill
                                 tone="cyan"
-                                title="artifacts.body_path 里有这条路径 —— 这是**正文落点索引**,与记忆页的**知识语料**(检索索引)不是一回事"
+                                title="artifacts.body_path 里有这条路径 —— 这是正文落点索引,与记忆页的知识语料(检索索引)不是一回事"
                               >
                                 正文已索引
                               </Pill>

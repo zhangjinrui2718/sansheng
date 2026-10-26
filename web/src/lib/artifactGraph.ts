@@ -126,17 +126,17 @@ export const RELATIONS: Readonly<Record<ArtifactRelation, RelationSpec>> = {
   review_about: {
     label: "质检所审",
     why:
-      "**派生,库里没有这一条边。** 来源是 migration 014 的 `work_id` 的第二个语义" +
+      "派生,库里没有这一条边。来源是 migration 014 的 `work_id` 的第二个语义" +
       "(「关于」:质检把 review_finding 挂到被审的那条工作项上)。" +
-      "⚠️ 这是**集合**关系:一条工作项有几份产出,就画几条边 —— 每一条都成立," +
-      "但**没有一条能说「它审的就是这一份」**,因为库里没记这一层。",
+      "⚠️ 这是集合关系:一条工作项有几份产出,就画几条边 —— 每一条都成立," +
+      "但没有一条能说「它审的就是这一份」,因为库里没记这一层。",
     dash: "1 3",
     reversed: false,
   },
   parent: {
     label: "父工件",
     why:
-      "契约闭集里的第三个取值,但**全仓零写入侧、真机 0 行** —— 画出来会是永远空着的一类。" +
+      "契约闭集里的第三个取值,但全仓零写入侧、真机 0 行 —— 画出来会是永远空着的一类。" +
       "这里如实留着并报 0,不假装它是个正常关系(与 `REL_STATS` 里的说明同源)。",
     dash: "2 3",
     reversed: false,
@@ -149,7 +149,7 @@ export const RELATIONS: Readonly<Record<ArtifactRelation, RelationSpec>> = {
  * 与本文件的注释必须同源,分两处写迟早漂。
  */
 export const LOGICAL_RELATION_NOTE =
-  "逻辑关系(「这条决策是因为那条质检发现」)—— **当前 0 条**。" +
+  "逻辑关系(「这条决策是因为那条质检发现」)—— 当前 0 条。" +
   "库里没有这一列事实,而「按时间先后推一条出来」是编造关系,所以不画。" +
   "要它变成非 0 需要一次写入侧改动。";
 

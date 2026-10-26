@@ -38,7 +38,7 @@ const STATE_ROWS: ReadonlyArray<{ kind: string; mean: string; wrong: string }> =
   },
   {
     kind: "读失败",
-    mean: "请求回了错。界面上把**错误原文**印出来,不吞。",
+    mean: "请求回了错。界面上把错误原文印出来,不吞。",
     wrong: "静默落进空态 ⇒ 现场消失,事后查不出当时发生了什么(7-N)。",
   },
   {
@@ -60,7 +60,7 @@ export function AboutPage() {
     <div className="ss-page">
       <PageHeader
         title="关于"
-        hint="这页是这块界面的说明书,不是设置"
+        hint="说明书,不是设置"
       />
 
       <Section title="四态:这个数字到底什么意思">
@@ -103,7 +103,7 @@ export function AboutPage() {
       <Section title="已知不实之处" count={KNOWN_GAPS.length}>
         <div className="flex flex-col gap-2">
           <div className="ss-note">
-            下面是这块界面**现在说不到**的地方。它们不是待办清单,是「读到这里别以为你知道了」。
+            下面是这块界面现在说不到的地方。它们不是待办清单,是「读到这里别以为你知道了」。
           </div>
           {KNOWN_GAPS.map((g) => (
             <div key={g.what} className="flex flex-col gap-0.5">

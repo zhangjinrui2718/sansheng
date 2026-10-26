@@ -503,8 +503,15 @@ dev/prod + CI/CD」,09:54 业务经理只回了一句「我先看下你之前留
   第一版用 `<details>` 当场弄红 7 条已有判据 —— **该改的是实现,不是仪器**。
 - ⚠️ **`hint` 的长短不是判据**。`hint="…GET /api…"` 这种「出处冒充一行话」才是错的;
   `CodeService.tsx` 里 30–74 字的技术事实必须留着。
-- 哨兵:`tests/web/annotation-budget.test.ts`(11 条:悬停 0 处 · 出处不进 `hint` ·
-  同一句话不许抄两遍 · glossary 每条都有读者),3 条变异实测变红。
+- 哨兵:`tests/web/annotation-budget.test.ts`(15 条:悬停 0 处 · 出处不进 `hint` ·
+  同一句话不许抄两遍 · glossary 每条都有读者)Wave 2b 又加四条判据(**①** `hint=` 逐文件记账
+  只许减不许增 —— 现值 **14 处**;**②** `hint` 一行话 ≤ 40 字,`CodeService.tsx` 的技术事实例外;
+  **③** 剥注释后**不许有裸 `**`**(JSX 不渲染 markdown 粗体,用户读到的是星号;唯一例外是
+  `web/src/lib/ws.ts` 的幂运算 `2 ** n`);**④** 长悬停(`title="…"` > 40 字)只许减不许增,
+  现值 33 条 —— 这是**还没还的债**)。变异:`.probe/mutation-wave2b.py` 4 条实测变红。
+  ⚠️ **变异绿了有两种可能**:判据没生效,**或者改得不够坏**(⑥ 第一次就是后者:预算 3 允许
+  `Works` 2→3)⇒ 必须分开查。⚠️ **批量正则清理先算清「这个词还有别的含义」**:清裸 `**` 时
+  整篇替换把 `Math.min(1000 * 2 ** n, 8000)` 的幂运算符也删了,而脚本退出码 0、35 行「都处理了」。
 - **四态只有一处写法:`web/src/components/ui/DataState.tsx`**(2026-10-26,Wave 0b)。
   `RemoteState<T>` 是 `loading | error | unavailable | ready` 四处联合,配两个构造器
   `remoteOf` / `remoteListOf`;**没拿到数据就拿不到 `children` 的参数**,所以「顺手渲染成空」

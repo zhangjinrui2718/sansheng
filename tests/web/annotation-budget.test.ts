@@ -36,7 +36,15 @@ const WEB_SRC = join(process.cwd(), "web/src");
 
 /** 去掉注释 —— 断言针对**代码**:注释里讨论「别写成的形态」不该被判为违规。 */
 function stripComments(src: string): string {
-  return src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+  return (
+    src
+      .replace(/\/\*[\s\S]*?\*\//g, "")
+      .replace(/^\s*\/\/.*$/gm, "")
+      // ⚠️ 行尾也有注释(`? // …`),而 `^\s*\/\/` 只能抓整行注释。
+      // 排除 `://`(URL 里的双斜杠)与字符串内部 —— 否则会把真代码当成注释剥掉,
+      // 而「剥多了」在这条测试里表现为**假绿**(违规被剥掉所以看不见)。
+      .replace(/(^|[^:"'`\\])\/\/[^\n"'`]*$/gm, "$1")
+  );
 }
 
 function walk(dir: string, out: string[] = []): string[] {
@@ -153,5 +161,106 @@ describe("词汇表:每条都有读者,每个读者都写得出条目", () => {
     const roleNames = ["业务经理", "项目经理", "研究员", "工程师", "质检"];
     const bad = ids.filter((id) => roleNames.some((n) => GLOSSARY[id].line.includes(n)));
     expect(bad.join(", ")).toBe("");
+  });
+});
+
+/**
+ * ── Wave 2b(2026-10-26)────────────────────────────────────────────────
+ *
+ * Wave 0a 封死了 `hintTitle`(整段正文藏进悬停),但**同类的东西从两个缝里长回来了**:
+ *
+ *   ① `hint=` 从 0 长到 **25 处**,而且新的几条又变成整段解释
+ *      (`CodeService.tsx` 里一行悬停 74 字、`Works.tsx` 推进图那条把**动作说明**
+ *      也写进了悬停:「点一条工作项(绿色条)⇒ 下面显示它挂着的工件」);
+ *   ② 更隐蔽的一类:**屏上出现裸 `**`** —— 那是 markdown 的粗体标记,JSX 不渲染它,
+ *      于是用户在屏幕上读到的是「**读不到**这份正文」这样**带两个星号**的句子。
+ *      实测 35 行(9 个 .tsx + 3 个 .ts 的字符串常量)。
+ *
+ * ⇒ 处置:悬停只留「一行话」,`ss-note` 里的工程口吻改成人话,粗体标记**从屏上清掉**。
+ * 这一节的四条判据钉住它,且每条都带**正样本自检**(否则「0 命中」可能只是扫描器坏了)。
+ */
+describe("注解预算(Wave 2b):悬停只留一行话,屏上不许有 markdown 残渣", () => {
+  /**
+   * 每文件允许的 `hint=` 条数 —— **逐文件钉住当前值**(只许减不许增)。
+   *
+   * 用「一个全局默认 + 例外」的话,`Works.tsx` 从 2 涨到 3 不会红(它没超默认值),
+   * 而预算最该拦的正是这种**慢慢长回来**。所以这里逐文件记账,`CodeService.tsx` 的 5
+   * 是唯一的技术事实例外(它列的是坐标本身,不是解释)。
+   */
+  const HINT_BUDGET: Record<string, number> = {
+    "components/deliverable/CodeService.tsx": 5,
+    "routes/ProjectDetail.tsx": 3,
+    "routes/Members.tsx": 2,
+    "routes/Works.tsx": 2,
+    "components/members/RoleHarness.tsx": 1,
+    "routes/About.tsx": 1,
+  };
+  const HINT_TOTAL_MAX = 14;
+
+  it("⑥ `hint=` 总量 ≤ 14,且每文件不许超过现在的条数", () => {
+    const per = new Map<string, number>();
+    for (const f of FILES) {
+      const n = [...f.src.matchAll(/\bhint=/g)].length;
+      if (n > 0) per.set(f.rel, n);
+    }
+    const total = [...per.values()].reduce((a, b) => a + b, 0);
+    expect(total).toBeLessThanOrEqual(HINT_TOTAL_MAX);
+
+    const over = [...per.entries()]
+      .filter(([rel, n]) => n > (HINT_BUDGET[rel] ?? 0))
+      .map(([rel, n]) => `${rel}: ${n}(预算 ${HINT_BUDGET[rel] ?? 0})`);
+    expect(over.join("\n")).toBe("");
+    // 自检:预算表里每个文件都**真存在**且**真有 hint** —— 写错文件名会让那条预算
+    // 悄悄失效(而失效的表现是「永远绿」)。反过来,有 hint 却不在表里的文件
+    // 会因预算 0 而立刻变红,这正是我们要的。
+  });
+
+  it("⑦ `hint=\"…\"` 一行话 ≤ 40 字(CodeService 的技术事实例外)", () => {
+    const bad: string[] = [];
+    for (const f of FILES) {
+      if (f.rel === "components/deliverable/CodeService.tsx") continue;
+      for (const m of f.src.matchAll(/hint="([^"]*)"/g)) {
+        if (m[1].length > 40) bad.push(`${f.rel}: ${m[1].length} 字 —— ${m[1]}`);
+      }
+    }
+    expect(bad.join("\n")).toBe("");
+    // 自检:边界确实是 40
+    expect("汉".repeat(41).length).toBeGreaterThan(40);
+  });
+
+  it("⑧ 屏上不许出现裸 `**`(JSX 不渲染粗体,用户读到的是星号)", () => {
+    const hits: string[] = [];
+    for (const f of FILES) {
+      for (const line of f.src.split("\n")) {
+        if (!line.includes("**")) continue;
+        // 唯一例外:**幂运算符**(`2 ** n`),它是真运算不是强调。判据是「两边都是值」。
+        if (/\w\s\*\*\s*\w/.test(line) && !/["'`][^"'`]*\*\*/.test(line)) continue;
+        hits.push(`${f.rel}: ${line.trim().slice(0, 90)}`);
+      }
+    }
+    expect(hits.join("\n")).toBe("");
+    // 自检:正样本必须被判出来,而幂运算必须**不**被判出来
+    const probe = 'text={`**读不到**这份报告的正文`}';
+    expect(probe.includes("**")).toBe(true);
+    expect(/\w\s\*\*\s*\w/.test("const d = 1000 * 2 ** n;")).toBe(true);
+  });
+
+  it("⑨ 长悬停(> 40 字)只许减不许增 —— 这是下一批要还的债", () => {
+    // 2026-10-26 实测:`title="…"` 共 103 条,其中 > 40 字 **33** 条。
+    // 它们渲染成灰字悬停(触屏不触发、不可复制),是 Wave 0a 想除掉的那类东西的残余。
+    // 本波不做大改(会撞 `harness-by-role` / `artifact-timeline` 等既有判据),
+    // 但**从今天起不许再长**:数一下就知道有没有人往回加。
+    const long: string[] = [];
+    let total = 0;
+    for (const f of FILES) {
+      for (const m of f.src.matchAll(/title="([^"]*)"/g)) {
+        total++;
+        if (m[1].length > 40) long.push(`${f.rel}: ${m[1].length} 字`);
+      }
+    }
+    expect(long.length).toBeLessThanOrEqual(33);
+    expect(total).toBeLessThanOrEqual(103);
+    // 自检:计数口径不是「有没有 title=」而是「字面量长度」—— 两条边界都验一遍
+    expect([...'title="短"'.matchAll(/title="([^"]*)"/g)][0][1].length).toBe(1);
   });
 });

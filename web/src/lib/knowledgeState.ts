@@ -38,7 +38,7 @@ export function corpusStatus(v: KnowledgeOverviewView): CorpusStatus {
       level: "unavailable",
       label: "读不到语料",
       detail:
-        `${v.problem ?? "语料表读不到"} —— 这是**读不到**,不是「语料是空的」。` +
+        `${v.problem ?? "语料表读不到"} —— 这是读不到,不是「语料是空的」。` +
         "重启一次 `platform-serve` 会把迁移 028 应用上。",
     };
   }
@@ -57,7 +57,7 @@ export function corpusStatus(v: KnowledgeOverviewView): CorpusStatus {
       label: "还没有语料",
       detail:
         "项目里还没有可索引的来源(工件正文 / 对话正文),或者宿主刚起来还没扫。" +
-        "索引由平台在**回合边界**与**启动时**自动做,不需要人手动触发。",
+        "索引由平台在回合边界与启动时自动做,不需要人手动触发。",
     };
   }
   const pending = pendingTotal(v);
@@ -68,7 +68,7 @@ export function corpusStatus(v: KnowledgeOverviewView): CorpusStatus {
       label: pending > 0 ? `${pending} 条来源还没进语料` : "语料落后于来源",
       detail:
         `上次索引 ${v.lastIndexedAt === null ? "未知" : fmtSpan(v.at - v.lastIndexedAt)}前` +
-        `(落后 ${lag})。这不是故障:索引只在**回合边界**与**启动时**跑,` +
+        `(落后 ${lag})。这不是故障:索引只在回合边界与启动时跑,` +
         "下一个回合结束或重启一次就会补上;持续不降才说明机制没在跑。",
     };
   }

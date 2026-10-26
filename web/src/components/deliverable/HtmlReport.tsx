@@ -166,7 +166,7 @@ export const HtmlReport = memo(function HtmlReport({ artifactId, at, fileName }:
     return (
       <div className="flex flex-col gap-1" data-deliverable-type="html_report">
         <ContentProblem
-          text={`**读不到**这份报告的正文 —— ${data.problem ?? "原因未说明"}。`}
+          text={`读不到这份报告的正文 —— ${data.problem ?? "原因未说明"}。`}
           detail={`(这不是「报告是空的」,是这一次读不到。正文落点:${data.path})`}
           runtime="unavailable"
         />

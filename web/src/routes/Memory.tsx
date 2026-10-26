@@ -244,7 +244,6 @@ export function MemoryPage() {
     <div className="ss-page">
       <PageHeader
         title="记忆"
-        hint="用户画像 + 记忆碎片 + 知识语料"
         helpId="memory.sections"
         aside={
           <StatStrip
@@ -268,11 +267,9 @@ export function MemoryPage() {
         </div>
       ) : null}
 
-      <Section
-        title="用户画像"
-        count={profileKeys.length}
-        hint="结构化摘要 · 与碎片互补"
-      >
+      {/* 「结构化摘要 · 与碎片互补」删了(2026-10-26):它解释的是**这一页的布局**,
+          而两块的标题已经说完了(「用户画像」/「碎片」)。**标题说得清的,不要再解释一遍**。 */}
+      <Section title="用户画像" count={profileKeys.length}>
         {profileError !== null ? (
           <div className="sansheng-card p-3 text-xs" style={{ color: "var(--cinnabar)" }}>
             加载失败:{profileError}
@@ -318,7 +315,7 @@ export function MemoryPage() {
         )}
       </Section>
 
-      <Section title="碎片" count={fragments.length} hint="流水式记录">
+      <Section title="碎片" count={fragments.length}>
         {loading ? (
           <EmptyState>加载中…</EmptyState>
         ) : fragments.length === 0 ? (
@@ -363,7 +360,6 @@ export function MemoryPage() {
       <Section
         title="知识语料"
         count={knowledge !== null && knowledge.runtime === "ok" ? knowledge.chunks : undefined}
-        hint="关于项目 / 组织 · 平台索引 · agent 只读"
         helpId="knowledge.corpus"
       >
         {knowledgeError !== null ? (
@@ -388,7 +384,7 @@ export function MemoryPage() {
                   {
                     label: "来源",
                     value: `${knowledge.sourcesIndexed.artifacts} 工件 + ${knowledge.sourcesIndexed.messages} 消息`,
-                    title: "已进语料的**来源条数**(不是块数:一份工件会被切成多块)",
+                    title: "已进语料的来源条数(不是块数:一份工件会被切成多块)",
                   },
                   {
                     label: "待索引",

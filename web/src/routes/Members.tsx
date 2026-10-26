@@ -567,7 +567,7 @@ export function MemberPane({
       // 角色的组织里那两个词一模一样,屏幕上就成了「工程师 [工程师]」。
       title={ROLE_LABEL[member.role]}
       aside={
-        <span className="ss-meta font-mono" title="role —— 角色是**属性**,身份是 agentId(摘要行里那个等宽小字)">
+        <span className="ss-meta font-mono" title="role —— 角色是属性,身份是 agentId(摘要行里那个等宽小字)">
           {member.role}
         </span>
       }
@@ -603,7 +603,7 @@ export function MemberPane({
             {fetchedAt !== null && (
               <span
                 className="ss-meta"
-                title="这份运行态快照是本地什么时候收到的(useProjectLive 自带 2.5s 轮询)。这个数一直变大 = 轮询没有在成功回来 —— 下面的「在跑」是**收到那一刻**的事实,不是此刻的。"
+                title="这份运行态快照是本地什么时候收到的(useProjectLive 自带 2.5s 轮询)。这个数一直变大 = 轮询没有在成功回来 —— 下面的「在跑」是收到那一刻的事实,不是此刻的。"
               >
                 快照 {formatAge(elapsedSinceFetch(fetchedAt, now))} 前收到
               </span>
@@ -614,7 +614,7 @@ export function MemberPane({
             // ⚠️ `live.data === null`:**不许**渲染成「手上没有进行中的工作项」
             // —— 那是把「还不知道」显示成「一切正常」,与这次要修的是同一类谎。
             <div className="ss-note">
-              正在读取运行态…(还没有拿到过一份运行态快照。这一块**不代表**他手上没事,只是还不知道)
+              正在读取运行态…(还没有拿到过一份运行态快照。这一块不代表他手上没事,只是还不知道)
             </div>
           ) : (
             <>
@@ -770,7 +770,7 @@ export function MemberPane({
         <div className="flex flex-col gap-1.5" style={{ borderTop: "1px solid var(--ink-3)", paddingTop: 8 }}>
           <span
             className="ss-meta"
-            title="这一块是**只读**的:它不写任何东西、不发任何指令。它答的是「这个人具体说了什么」—— 逐条对话线 + 全文(旧 → 新)。"
+            title="这一块是只读的:它不写任何东西、不发任何指令。它答的是「这个人具体说了什么」—— 逐条对话线 + 全文(旧 → 新)。"
           >
             他说了什么
           </span>
@@ -1167,7 +1167,7 @@ export function MembersPage() {
         <Section
           title="不在成员表里的发言"
           count={strangers.length}
-          hint="这些发言的作者不在本项目成员表里(可能是历史身份的残留);列出来是为了不静默丢证据"
+          hint="作者不在成员表里 · 留着不静默丢证据"
         >
           <Disclosure summary={`展开查看 · ${strangers.length} 组`}>
             <div className="grid gap-2">

@@ -978,7 +978,6 @@ export function ArtifactRelationGraph({
     <Section
       title="工件关系图"
       count={artifacts.length}
-      hint="节点 = 工件,三种边;从左到右读先后"
       helpId="artifact.graph"
     >
       {artifacts.length === 0 ? (
@@ -1093,8 +1092,8 @@ export function ArtifactRelationLegend({ layout }: { layout: ArtifactGraphLayout
         ))}
       </div>
       <div style={{ marginTop: 3 }}>
-        {`「质检所审」是**派生**关系(库里没有这一条边,来自 014 的 work_id 的「关于」语义):` +
-          `它是**集合**关系 —— 一条工作项有几份产出就画几条,每条都成立,但没有一条能说` +
+        {`「质检所审」是派生关系(库里没有这一条边,来自 014 的 work_id 的「关于」语义):` +
+          `它是集合关系 —— 一条工作项有几份产出就画几条,每条都成立,但没有一条能说` +
           `「它审的就是这一份」。${layout.multiTargetReviews > 0
             ? `本图里有 ${layout.multiTargetReviews} 件审查产出指向了不止一件产出。`
             : "本图里没有一件审查产出指向多份(所以每条边都是一对一)。"}`}
@@ -1102,13 +1101,13 @@ export function ArtifactRelationLegend({ layout }: { layout: ArtifactGraphLayout
       <div style={{ marginTop: 3 }}>{LOGICAL_RELATION_NOTE}</div>
       {isIsolated(layout) && (
         <div style={{ marginTop: 3, color: "var(--amber)" }}>
-          {"这一版一件工件都没有连线 —— 卡片仍在,只是它们之间没有**已记录**的关系。" +
+          {"这一版一件工件都没有连线 —— 卡片仍在,只是它们之间没有已记录的关系。" +
             "这是数据没记,不是图画不出来。"}
         </div>
       )}
       {layout.backwardEdges.length > 0 && (
         <div style={{ marginTop: 3, color: "var(--amber)" }}>
-          {`⚠️ 有 ${layout.backwardEdges.length} 条边的因果方向反了(源比目标晚),已**不画**:` +
+          {`⚠️ 有 ${layout.backwardEdges.length} 条边的因果方向反了(源比目标晚),已不画:` +
             "「从左到右读先后」这句话在有它们时不成立,所以宁可少画也不画错。"}
         </div>
       )}
@@ -1147,9 +1146,8 @@ export function DependencyGraph({
     <Section
       title="依赖关系图"
       count={works.length}
-      hint="分层排布,可能较宽"
-      // ⚠️ 两类边各是什么、方向是哪边、为什么它排在最上面 —— 这几句是**必须说的话**,
-      // 现在在 `helpId="work.deps"` 那个 `?` 里(`lib/glossary.ts`),不再是悬停正文。
+      // ⚠️ 「分层排布,可能较宽」这句**没有进词汇表**:它是当前这一次渲染的**状态**
+      // (图宽不宽、塌没塌),而词汇表装的是**不随时间变的解释**。两种东西不进同一张表。
       helpId="work.deps"
     >
       {works.length === 0 ? (
@@ -1374,7 +1372,7 @@ export function ArtifactGroups({
   return (
     <div className={artifacts.length > 0 ? "grid gap-4" : undefined}>
       {groups.map(({ kind, rows }) => (
-        <Section key={kind} title={artifactKindLabel(kind)} count={rows.length} hint={kind}>
+        <Section key={kind} title={artifactKindLabel(kind)} count={rows.length}>
           <div className="grid gap-1.5">
             {rows.map((a) => (
               <ArtifactRow
@@ -1429,7 +1427,8 @@ export function WorkNodePanel({
     <Section
       title="选中的环节"
       count={artifacts.length}
-      hint="点条选中,再点取消"
+      // ⚠️ 「点条选中,再点取消」删了(2026-10-26):**动作说明不是事实** ——
+      // 选中/取消是页面上最直白的交互(条本身可点),再写一行是把读者当初学者。
       // ⚠️ `work.status` 的读者从**项目页**搬到了这里(2026-10-26)——
       // 工作项现在**只住在工作项页**,而「状态取值是契约的闭合集合」这句话
       // 正是这一页要说的。(它在项目页曾经是「工作项」那一段的 `?`。)
@@ -1520,15 +1519,15 @@ export function UnattachedArtifacts({
     <Section
       title="不挂在任何环节上的工件"
       count={artifacts.length}
-      hint="已在图上(按 kind 落在自己那一行)"
+      // 「已在图上(按 kind 落在自己那一行)」删了 —— 下面那段正文里说了同一件事,
+      // 而且说得更清楚(它还要解释「为什么默认收起」)。**一句话只说一遍**。
       helpId="artifact.no-work"
     >
       {/* `.ss-dag-orphan`:安静一点,不与主图争注意力(类在 globals.css 里)。 */}
       <div className="ss-dag-orphan">
         <div className="ss-note" style={{ marginBottom: 6 }}>
-          {"这些是决策 / 会议记录 / 变更记录 / 甲方问答 —— 它们本来就不由某条工作项产出" +
-            "(契约里 ArtifactView.workId 为 null 是合法状态,不是「还没归位」)。" +
-            "⚠️ **它们已经在上面那张图上**(按 kind 落在自己那一行),所以这里默认收起:" +
+          {"这些是决策 / 会议记录 / 变更记录 / 甲方问答 —— 本来就不由某条工作项产出。" +
+            "它们已在上面那张图上(按 kind 落在自己那一行),所以这里默认收起:" +
             "点开是为了逐条看详情 / 抄 id,不是因为图上没画。"}
         </div>
         <Disclosure summary={`展开清单(${artifacts.length} 条 · 可逐条看详情)`}>
@@ -1571,7 +1570,6 @@ export function DanglingArtifacts({
     <Section
       title="环节读不到的工件"
       count={total}
-      hint="挂着 workId,但那条工作项读不到"
       helpId="artifact.dangling"
     >
       <div className="grid gap-3">
@@ -1761,7 +1759,7 @@ export function ArtifactsScreen({
 
       <Section
         title="推进图"
-        hint={`${works.length} 条工作项 · ${artifacts.length} 件工件 · 点一条工作项(绿色条)⇒ 下面显示它挂着的工件`}
+        hint={`${works.length} 条工作项 · ${artifacts.length} 件工件`}
         helpId="timeline"
       >
         <ProgressTimeline
@@ -1949,8 +1947,8 @@ export function WorksPage() {
                   label: "无环节",
                   value: unattachedCount,
                   title:
-                    "workId 为 null 的工件数 —— 它们不由某条工作项产出,但**已经画在图上**" +
-                    "(按 kind 落在自己那一行)。页面下方那一块只是**同一批工件的清单**(可逐条看详情)。",
+                    "workId 为 null 的工件数 —— 它们不由某条工作项产出,但已经画在图上" +
+                    "(按 kind 落在自己那一行)。页面下方那一块只是同一批工件的清单(可逐条看详情)。",
                 },
               ]}
             />
@@ -2157,7 +2155,7 @@ function TextArtifactBody({ artifactId }: { artifactId: string }) {
         style={{ color: "var(--cinnabar)" }}
         data-content-runtime="unavailable"
       >
-        **读不到**这份正文 —— {data.problem ?? "原因未说明"}。
+        读不到这份正文 —— {data.problem ?? "原因未说明"}。
         (这不是「这条工件没有正文」,是这一次读不到。落点:{data.path})
       </div>
     );
