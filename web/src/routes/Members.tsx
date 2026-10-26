@@ -132,6 +132,7 @@ import {
   StatStrip,
 } from "@/components/ui/primitives";
 import { DataState, remoteListOf } from "@/components/ui/DataState";
+import { useAppLocation, paramOf } from "@/lib/route";
 import { RoleHarnessSection, roleIssueCount } from "@/components/members/RoleHarness";
 import { AgentConversations } from "@/components/members/AgentConversations";
 import {
@@ -911,8 +912,15 @@ export function MembersPage() {
   const live = useProjectLive(projectId);
   /** 本地时钟(1s)—— 让快照里的年龄在两次 2.5s 轮询之间也继续走。 */
   const now = useNow(1000);
-  /** 当前选中的成员(`agentId`)。`null` = 还没选(取第一个成员)。 */
-  const [activeId, setActiveId] = useState<string | null>(null);
+  /**
+   * 当前选中的成员(`agentId`)。**住在地址里**(`#/members?member=a_9`),不是页面 state:
+   * 这样「把某个成员的对话发给别人」「F5 之后还在同一个人身上」才成立,而
+   * 交付物 / 工作项 / 邻居面板也才有东西可指(那是 Wave 1 实体脊的前置条件)。
+   * `null` = 地址里没写 ⇒ 取第一个成员(老行为)。
+   */
+  const { loc, setParam } = useAppLocation();
+  const activeId = paramOf(loc, "member");
+  const setActiveId = useCallback((id: string | null) => setParam("member", id), [setParam]);
 
   const projectName = projects.find((p) => p.id === projectId)?.name;
   /** 这份快照的运行期来源;`null` = 还没拿到过快照。 */

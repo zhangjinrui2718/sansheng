@@ -133,9 +133,12 @@ describe("接线 · 「关于」是 `?`,不是第七个页签", () => {
     expect((mutated.match(/\{ route: "/g) ?? []).length).toBe(7);
   });
 
-  it("App 里 `about` 是一条真的路由(不是只在 union 里声明)", () => {
+  it("`about` 是一条真的路由(union 在 lib/route.ts 里,由 App 接到分支)", () => {
     const app = source("App.tsx");
-    expect(app).toMatch(/\| "about"/);
+    // 判据没变:**必须在闭合集合里**,且**真的接到一条分支**。
+    // ⚠️ 落点从 App.tsx 换到了 lib/route.ts(2026-10-26,路由搬进地址) ——
+    //    这不意味着 App 不再声明路由,而是「声明」与「分支」分居两个文件。
+    expect(source("lib/route.ts")).toMatch(/\| "about"/);
     expect(app).toContain('import { AboutPage } from "./routes/About"');
     expect(app).toContain('<AboutPage />');
     // 变异自检:只加 union 不接分支 ⇒ 这一格必须能抓到

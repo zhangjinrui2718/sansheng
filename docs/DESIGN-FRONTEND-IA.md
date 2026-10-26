@@ -379,3 +379,45 @@ tests/web/question-scope.test.ts        ← 1 条改判:被渲染的仍是筛选
    最初指向 `acceptance-dock.test.ts`,结果全绿 —— 因为那个面板用的是 `remoteOf`,而那一行在
    `remoteListOf` 里。⇒ 补了 `tests/web/data-state.test.ts` 直接测两个构造器,M1 随即如实变红。
    **变异没被抓住有两种可能:判据无效,或者判据指错了地方。** 这次是后者。
+
+### 8.6 实施记录 · Wave 1 第一步:地址承载 UI 状态(2026-10-26,已落地)
+
+> Wave 1 有两半:**先有地址**,再有实体脊。这一节是前半 —— 它是后半的前置条件,
+> 因为「一圈邻居」里的每一条边都得**指向一个可以被打开的地方**。
+
+```
+web/src/lib/route.ts        ← 新增:`Route` / `parseHash` / `toHash` / `paramOf` / `withParam`
+                              / `toRoute` / `useAppLocation`
+web/src/App.tsx             ← 页面读 `location.hash`;`export type { Route }` 只 re-export
+                              (union 不再有第二份);`go(r)` 换掉 `setRoute`
+web/src/routes/Members.tsx  ← 选中的成员 = 地址里的 `member`(`#/members?member=a_9`)
+tests/web/app-route.test.ts ← 新增 16 条(解析 / 序列化 / 往返 / 坏地址 / 接线)
+tests/web/about-page.test.ts← 1 条改判:判据没变,union 的落点从 App.tsx 换到 lib/route.ts
+.probe/mutation-wave1.py    ← 6 条变异自检,全部实测变红
+```
+
+**语法**:`#/works?work=w_123` · `#/members?member=a_9` · 其余页签不带参数。
+
+**四条判据**
+
+1. **未知路由 ⇒ `chat`,并且丢弃陌生参数**(M1:保留参数 ⇒ 红)。地址是外来的(手打 / 旧收藏 / 别人贴的),
+   白屏与「应用坏了」在屏幕上一样;而把 `?x=1` 留在别的页面上是另一种谎。
+2. **同一份状态只有一个地址字符串**(M2:不排序 ⇒ 红)。键按字典序,空值不写进地址
+   —— 否则「`member=` 空串」与「没选」会是两个地址,而它们语义相同。
+3. **`chat` 故意不带 `project=`**。「当前项目」是跨页面的选择(对话 / 项目 / 工作项 / 成员 / 记忆都看它),
+   钉在一条路由的查询串里会让「在工作项页换项目」丢状态。它是 store 的 `activeProjectId`。
+4. **接线是可验的**:`App` 不再有 `useState<Route>`(M4)、成员选中项不再有私有 state(M5)
+   —— 一个没人调用的 `lib/route.ts` 与「它能用」在界面上完全一样。
+
+**两个真实撞上的问题**
+
+1. **`noUncheckedIndexedAccess` 下 `params[key]` 是 `string | undefined`**,不是 `string`。
+   第一版 `Object.keys(...).map(k => loc.params[k])` 与 `hasOwnProperty ? loc.params[key] : null`
+   两条都过不了 typecheck ⇒ 改成 `Object.entries` 与显式 `undefined` 判定。
+   ⚠️ 这不是「加个 `!`」的问题:`JSON.parse` 出来的对象上,**「键存在但值是 undefined」是可能的**。
+2. **改判要写清「判据没变、落点变了」**。`about-page.test.ts` 那条断言的是「`about` 是一条真路由」,
+   它原来 grep `App.tsx` 里的 `| "about"` —— union 搬家后它红了,**而它要守的东西一条没变**。
+   ⇒ 改成 `source("lib/route.ts")` 仍断言同一件事,并在测试里写明为什么换落点。
+
+**下一步(Wave 1 后半)**:`Works` 的 `work=` / `Artifact` 的 `artifact=` 同样搬进地址,
+然后每个实体一张 `MetadataStrip` —— 目标是「同一个工件在四处各说一套」变成「一个地址,一圈邻居」。

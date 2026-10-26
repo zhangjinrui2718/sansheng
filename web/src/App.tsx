@@ -48,24 +48,21 @@ import { useSettingsStore, activeProviderOf } from "./stores/settings";
 import { useChatStore } from "./stores/chat";
 import { initAppSocket } from "./lib/appSocket";
 import { getConfig, getHealth } from "./lib/api";
+import { useAppLocation, toRoute } from "./lib/route";
+import type { Route } from "./lib/route";
 
 /**
- * 路由态。单一来源 —— TopBar 的 NavTab 与 App 的分支渲染共用这个 union,
- * 避免两处各写一份字面量后悄悄漂移。
+ * 路由态在 `lib/route.ts`(**地址是唯一真相**,不是组件 state)。
+ * 这里 re-export 一次,好让 `TopBar` 继续 `import type { Route }`;
+ * 新增路由只改那个文件,不会出现「两处各写一份字面量然后悄悄漂移」。
  */
-export type Route =
-  | "chat"
-  | "project"
-  | "works"
-  | "members"
-  | "memory"
-  | "settings"
-  /* 「关于」**不是第七个页签**(导航恒 6 项,见 TopBar 的 TABS)—— 它由顶栏末尾
-     那个 `?` 打开:一块说明不该和六个工作区抢位置。 */
-  | "about";
+export type { Route } from "./lib/route";
 
 export function App() {
-  const [route, setRoute] = useState<Route>("chat");
+  const { loc, navigate } = useAppLocation();
+  /** 当前页面 —— 读的是 `location.hash`,所以 F5 / 分享链接落回同一页。 */
+  const route = loc.route;
+  const go = (r: Route) => navigate(toRoute(r));
   const [cfg, setCfg] = useState<AppConfigResponse | null>(null);
   const [health, setHealth] = useState<HealthResponse | null>(null);
   const loadSettings = useSettingsStore((s) => s.loadSettings);
@@ -143,7 +140,7 @@ export function App() {
         config={cfg}
         health={health}
         route={route}
-        onRoute={setRoute}
+        onRoute={go}
         currentUsage={currentUsage}
         totalUsage={totalUsage}
         status={status}
@@ -151,7 +148,7 @@ export function App() {
       {route === "chat" ? (
         <main className="grid grid-cols-app gap-3 px-4 pb-4" style={{ minHeight: 0 }}>
           <HistoryRail />
-          {needsSetup ? <SetupHint onGo={() => setRoute("settings")} /> : <ChatSurface />}
+          {needsSetup ? <SetupHint onGo={() => go("settings")} /> : <ChatSurface />}
           {/* 右栏 = 三块上下并列:**「本项目」(现在怎么样)+「待你验收」(等你
               点头)+「待答」(等你回答)。后两块都是「需要甲方动手」的事,所以挨着
               放。⚠️ 三块共用**同一个**项目详情实例(hook 落在 `ChatRightRail` 里)
