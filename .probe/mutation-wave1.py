@@ -51,6 +51,13 @@ CASES = [
         ["tests/web/app-route.test.ts"],
     ),
     (
+        "M7 工作项选中项退回页面 state(地址不可分享)",
+        "web/src/routes/Works.tsx",
+        '  const picked: string | null | undefined = paramOf(loc, "work") ?? undefined;',
+        "  const picked: string | null | undefined = useState<string | null | undefined>(undefined)[0];",
+        ["tests/web/app-route.test.ts"],
+    ),
+    (
         "M6 toRoute 保留旧参数(跨页噪音)",
         "web/src/lib/route.ts",
         "export function toRoute(route: Route, params: Record<string, string> = {}): AppLocation {",

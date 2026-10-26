@@ -114,7 +114,7 @@
  * 「详情」保持原行为:**按 id 单独拉一次** `GET /api/artifacts/:id`,不拿列表里
  * 那条凑 —— 契约给了 `/:id` 这条端点,它的存在意义就是「列表里的字段可能不是全量」。
  */
-import { useEffect, useMemo, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
+import { useCallback, useEffect, useMemo, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import type { ArtifactKind, ArtifactView, WorkView } from "@shared/types/platform";
 import {
   Clamp,
@@ -128,6 +128,7 @@ import {
   toneColor,
 } from "@/components/ui/primitives";
 import { useArtifactContent, useArtifacts, useProjectLive, useWorks } from "@/lib/data";
+import { useAppLocation, paramOf } from "@/lib/route";
 import { useChatStore } from "@/stores/chat";
 import { errorMessage, getArtifact } from "@/lib/api";
 import {
@@ -1763,10 +1764,31 @@ export function WorksPage() {
   const projects = useChatStore((s) => s.projects);
   const activeProjectId = useChatStore((s) => s.projectId);
   const [scope, setScope] = useState<string | null>(activeProjectId);
-  /** 用户手动选中的环节(见 `ArtifactsBody` 的三态说明)。 */
-  const [picked, setPicked] = useState<string | null | undefined>(undefined);
-  /** 展开了详情的那条工件 id(null = 都收起)。 */
-  const [openId, setOpenId] = useState<string | null>(null);
+  /**
+   * 两个交互态都**住在地址里**(`#/works?work=w_1&artifact=a_2`):
+   * 「把这条工作项/这份工件发给别人」与「F5 之后还在原地」靠的就是这一手。
+   *
+   * ⚠️ `picked` 原来是三态(`undefined` = 没选 / `null` = 明确不选 / id),
+   * 而**地址只有两态**:参数在就是 id,不在就是「没选」。这是有意收窄的 ——
+   * 界面里没有「取消选中」这个动作(`onPick` 只传 id),所以 `null` 这一档
+   * 从来没有入口;留着它只会让「它到底该不该进地址」变成一个没有答案的问题。
+   */
+  const { loc, setParam } = useAppLocation();
+  const picked: string | null | undefined = paramOf(loc, "work") ?? undefined;
+  const setPicked = useCallback(
+    (id: string | null | undefined) => setParam("work", id ?? null),
+    [setParam],
+  );
+  /** 展开了详情的那条工件 id(地址里的 `artifact`,`null` = 都收起)。 */
+  const openId = paramOf(loc, "artifact");
+  const setOpenId = useCallback(
+    (id: string | null | ((cur: string | null) => string | null)) =>
+      setParam(
+        "artifact",
+        typeof id === "function" ? id(paramOf(loc, "artifact")) : id,
+      ),
+    [loc, setParam],
+  );
 
   useEffect(() => {
     // 用户在对话页切了项目 → 本页跟着切(不然会对着旧项目的工作项发呆),

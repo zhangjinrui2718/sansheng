@@ -421,3 +421,9 @@ tests/web/about-page.test.ts← 1 条改判:判据没变,union 的落点从 App.
 
 **下一步(Wave 1 后半)**:`Works` 的 `work=` / `Artifact` 的 `artifact=` 同样搬进地址,
 然后每个实体一张 `MetadataStrip` —— 目标是「同一个工件在四处各说一套」变成「一个地址,一圈邻居」。
+
+**补记(同日,第二步落地)**:`Works` 的两个交互态也搬进了地址 ——
+`#/works?work=w_1&artifact=a_2`(`picked` 三态里的 `null` 被有意收窄:界面里没有
+「取消选中」这个动作,而地址只有两态,留着它只会让「它该不该进地址」变成没有答案的问题)。
+`tests/web/app-route.test.ts` 16 → 17 条,`.probe/mutation-wave1.py` 6 → 7 条变异。
+**验证**:`2286 passed / 118 files`。

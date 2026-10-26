@@ -125,6 +125,15 @@ describe("接线:这一层真的有人在用", () => {
     expect(members).not.toContain('useState<string | null>(null);\n  const harness');
   });
 
+  it("工作项页的两个交互态也在地址里(`work=` / `artifact=`)", () => {
+    const works = source("routes/Works.tsx");
+    expect(works).toContain('paramOf(loc, "work")');
+    expect(works).toContain('paramOf(loc, "artifact")');
+    // 变异自检:退回页面私有 state ⇒ 刷新即回默认项、工件详情展不开在链接里
+    expect(works).not.toContain("const [picked, setPicked] = useState");
+    expect(works).not.toContain("const [openId, setOpenId] = useState");
+  });
+
   it("路由 union 只有一处声明(App re-export,不复制一份)", () => {
     const routes = source("lib/route.ts");
     expect(routes).toContain("export type Route =");
