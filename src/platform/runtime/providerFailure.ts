@@ -21,7 +21,7 @@
  * ⚠️ **`quota` / `auth` 必须排在 `rate_limit` 前面**:429 的原文常常长这样
  * —— `429 insufficient_quota`(额度耗尽恰好也回 429)。先判 429 会把它
  * 归成「可重试的限流」⇒ 平台换一家 provider 重试 ⇒ 换一家也一样(额度是账号级的)
- * ⇒ **无限重试一��永远好不了**。
+ * ⇒ **无限重试一家永远好不了**。
  *
  * `quota` / `auth` 的 `retryable` 是 **false**,就是这条推理的机器形式。
  */
@@ -176,7 +176,16 @@ const TYPE_KINDS: Readonly<Record<string, ProviderFailureKind>> = {
  *
  * 剥不开(不是 JSON / 形状不认识)⇒ 原样返回,一个字都不改。
  */
-function unwrapEnvelope(raw: string): { text: string; errorType?: string } {
+/**
+ * 剥掉 provider 的 JSON 信封,取里层那句人话。
+ *
+ * ⚠️ **外层的状态码不能丢**(2026-10-22 复核补的):网关的形状常常是
+ * `{"type":"error","code":429,"error":{"type":"api_error","message":"service temporarily unavailable"}}`
+ * —— 外层 429 是**网关限流**,内层是服务端措辞。剥掉外层 ⇒ 内层没有状态码
+ * ⇒ 分类退化成 `unknown`(不可重试)⇒ **不会降级** ⇒ 一次本可以换家的
+ * 限流被当成「归不了类」而让活儿直接死掉。
+ */
+function unwrapEnvelope(raw: string): { text: string; errorType?: string; outerStatus?: number } {
   const trimmed = raw.trim();
   if (!trimmed.startsWith("{")) return { text: trimmed };
   let parsed: unknown;
@@ -187,6 +196,7 @@ function unwrapEnvelope(raw: string): { text: string; errorType?: string } {
   }
   if (typeof parsed !== "object" || parsed === null) return { text: trimmed };
   const obj = parsed as Record<string, unknown>;
+  const outerStatus = envelopeStatusOf(obj);
   const inner = obj.error;
   if (typeof inner === "object" && inner !== null) {
     const e = inner as Record<string, unknown>;
@@ -196,13 +206,35 @@ function unwrapEnvelope(raw: string): { text: string; errorType?: string } {
       return {
         text: message ?? trimmed,
         ...(type !== undefined ? { errorType: type } : {}),
+        ...(outerStatus !== undefined ? { outerStatus } : {}),
       };
     }
   }
   if (typeof obj.message === "string" && typeof obj.type === "string") {
-    return { text: obj.message, errorType: obj.type };
+    return {
+      text: obj.message,
+      errorType: obj.type,
+      ...(outerStatus !== undefined ? { outerStatus } : {}),
+    };
   }
-  return { text: trimmed };
+  return { text: trimmed, ...(outerStatus !== undefined ? { outerStatus } : {}) };
+}
+
+/**
+ * 信封**外层**的状态码。
+ *
+ * ⚠️ 只认**数字型**的 4xx/5xx:OpenAI 那种 `code: "insufficient_quota"` 是
+ * **字符串**,那是错误**类型**不是状态码 ⇒ 已经在 `errorType` 那条路上,
+ * 放到状态码这里会变成 `NaN`。
+ */
+function envelopeStatusOf(obj: Record<string, unknown>): number | undefined {
+  for (const key of ["code", "status", "statusCode"]) {
+    const v = obj[key];
+    if (typeof v === "number" && Number.isInteger(v) && v >= 400 && v <= 599) {
+      return v;
+    }
+  }
+  return undefined;
 }
 
 /** 状态码 → 类别。**只覆盖真会出现的错误码** —— 3xx 不是故障。 */
@@ -321,9 +353,11 @@ export function classifyProviderFailure(message: string): ProviderFailure {
   if (trimmed === "") {
     return { kind: "unknown", retryable: false, message: "" };
   }
-  const { text, errorType } = unwrapEnvelope(trimmed);
+  const { text, errorType, outerStatus } = unwrapEnvelope(trimmed);
   const lower = text.toLowerCase();
-  const status = parseStatus(lower);
+  // ⚠️ 内层没有状态码时**看外层**:剥信封会把网关的 429 丢掉(见
+  // `unwrapEnvelope` 的注释)。内层有就以内层为准(它更具体)。
+  const status = parseStatus(lower) ?? outerStatus;
   const kind = pickKind(lower, status, errorType);
   return {
     kind,

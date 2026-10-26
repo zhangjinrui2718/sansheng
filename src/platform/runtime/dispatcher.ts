@@ -2883,7 +2883,7 @@ export interface DrainTurnReport {
    * ⚠️ 归类判据只有一处(`runtime/providerFailure.ts`):调用点不许自己再判一次
    * 「是不是限流」—— 判据漂开 = 「看起来正常的错误答案」。
    */
-  readonly providerFailed?: boolean;
+  readonly failoverApplied?: boolean;
 }
 
 export interface DrainWorkReport extends DrainTurnReport {
@@ -3209,7 +3209,7 @@ export async function drainProject(deps: DrainDeps): Promise<DrainResult> {
      * 但这一轮**确实没跑起来** —— 而它**不该烧掉尝试预算**(那个 3 次是给人用的
      * 「组织试过了没进展」限流,provider 故障是「外面在拒绝」)。
      */
-    let providerFailed = false;
+    let failoverApplied = false;
     try {
       if (todo.kind === "execute_work") {
         if (todo.target === null) {
@@ -3222,14 +3222,14 @@ export async function drainProject(deps: DrainDeps): Promise<DrainResult> {
         aborted = r.aborted;
         failed = r.failed === true;
         refused = r.refused === true;
-        providerFailed = r.providerFailed === true;
+        failoverApplied = r.failoverApplied === true;
         detail = r.detail ?? null;
       } else {
         const r = await deps.runAgentTurn(todo.agentId, renderTask(deps.db, todo), todo.kind);
         aborted = r.aborted;
         failed = r.failed === true;
         refused = r.refused === true;
-        providerFailed = r.providerFailed === true;
+        failoverApplied = r.failoverApplied === true;
         detail = r.detail ?? null;
       }
     } catch (err) {
@@ -3252,7 +3252,7 @@ export async function drainProject(deps: DrainDeps): Promise<DrainResult> {
     //
     // ⚠️ **只重置「已降级」的那一次**:降不了的那次是**真的没成** ——
     // 那个预算**就该**被烧掉(烧满三次平台才停下来告诉甲方,这是对的)。
-    if (providerFailed) {
+    if (failoverApplied) {
       resetAttempt(deps.db, deps.projectId, todo.key);
       deps.log(
         `dispatcher: 这条待办(${todo.label})刚被 provider 拒绝但**已降级** —— ` +
@@ -3285,10 +3285,10 @@ export async function drainProject(deps: DrainDeps): Promise<DrainResult> {
     // 失败/被中断就不消费,下一次排空重来(at-least-once)。宁可多汇报一次,
     // 不能静默漏掉。
     //
-    // ⚠️ **`providerFailed`(已降级)也不消费**:那一轮**没跑起来** ——
+    // ⚠️ **`failoverApplied`(已降级)也不消费**:那一轮**没跑起来** ——
     // 它只是把 provider 换了一家,活儿一件没办。消费了就是把「没办」
     // 说成「办过了」(而 `report_downstream` 消费掉的就是「已向甲方交代」)。
-    if (!aborted && !failed && !providerFailed) {
+    if (!aborted && !failed && !failoverApplied) {
       if (todo.kind === "review_work") {
         // ⚠️ **021 之后,判据从「回合成功结束」翻成「存在一条 pass 结论」。**
         //

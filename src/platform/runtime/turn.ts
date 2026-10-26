@@ -88,7 +88,8 @@
  * 在回合结束时**求和写一行**(表是回合级的,见 `migrations/018`)。
  */
 import type { AgentSession, AgentSessionEvent } from "@earendil-works/pi-coding-agent";
-import type { AssistantMessage } from "@earendil-works/pi-ai";import { randomUUID } from "node:crypto";
+import type { AssistantMessage } from "@earendil-works/pi-ai";
+import { randomUUID } from "node:crypto";
 import { log } from "../../shared/log.js";
 import type Database from "better-sqlite3";
 import {
@@ -490,8 +491,10 @@ function isToolEnd(
  * 判据用 `role === "assistant"` —— 那是四类消息各自的判别字段,不是猜的。
  *
  * ⚠️ 消息类型**从事件类型推出来**(`Extract<…>["message"]`),不从
- * `@earendil-works/pi-agent-core` 直接 import —— 那是 pi 的传递依赖,
- * 三生只依赖 `@earendil-works/pi-coding-agent` 这一个包(AGENTS.md 的依赖纪律)。
+ * `@earendil-works/pi-agent-core` 直接 import —— 那是 pi 的**传递依赖**,
+ * 直接 import 它会把一个**没在 package.json 里声明**的包拉进依赖图。
+ * (`@earendil-works/pi-ai` 不一样:它是三生的**直接依赖**,package.json 里
+ * 列着,所以上面那行 `import type { AssistantMessage }` 是合法的。)
  */
 type MessageEndMessage = Extract<AgentSessionEvent, { type: "message_end" }>["message"];
 

@@ -74,7 +74,12 @@ import type { WorkspacePort } from "../workspace/port.js";
 import { log } from "../../shared/log.js";
 import { applySettingsPatch, toPublicSettings } from "../infra/settingsApply.js";
 import type { ProviderConfig } from "../infra/settings.js";
-import { listProviders, resolveModel, syncActiveProviderApiKeyEnv } from "../infra/providers.js";
+import {
+  listProviders,
+  providerEnvKey,
+  resolveModel,
+  syncActiveProviderApiKeyEnv,
+} from "../infra/providers.js";
 import {
   classifyProviderFailure,
   describeProviderFailure,
@@ -414,6 +419,53 @@ export function decideFailover(input: FailoverInput): FailoverDecision {
     return { degrade: false, reason: "还有别的回合在跑(换 provider 会打到它们)" };
   }
   return { degrade: true, reason: `provider 故障(${input.failure.kind})` };
+}
+
+/**
+ * 降级候选 —— **纯函数**(2026-10-22 复核时从宿主里抽出来的)。
+ *
+ * ⚠️ **为什么必须是纯函数**:这五条判据每一条都决定「这一轮会不会被降级」,
+ * 也就是「一条活会不会死」⇒ 它们必须**能被单独断言**,而不是只能从宿主里
+ * 绕一圈(起 HTTP + 假会话 + 轮询)才看得出。抽出来之后,「一个没有凭据
+ * 通道的 provider 不会被选中」这条有了**一条纯断言**。
+ *
+ * 五条判据:
+ * ① **不是当前那家** —— 换到自己等于没换;
+ * ② **不是刚故障过的那家**(`failedProviderIds`)—— 否则两家来回打;
+ * ③ **有 apiKey**;
+ * ④ **有凭据通道**(`providerEnvKey` 有映射)——
+ *    ⚠️ **这一条是 2026-10-22 复核补上的**:三生的凭据**只**经 env 通道进 SDK
+ *    (`syncActiveProviderApiKeyEnv`),`agentDir/auth.json` 三生从不写
+ *    ⇒ 没有 env 映射的 provider 切过去**必然也拿不到 key**(它只有
+ *    `log.warn`,不报错)⇒ 那次降级是白降:故障照旧,而且这一家被记进
+ *    `failedProviderIds` ⇒ 后面**再也不会**选它 ⇒ 一台本来能用的 provider
+ *    被一次无谓的降级废掉了。
+ * ⑤ **模型解析得出来**(`resolveModel` 非 null)—— 模型不认识,切过去只是换个错。
+ */
+export function failoverCandidatesOf(
+  providers: readonly ProviderConfig[],
+  currentId: string | undefined,
+  failedProviderIds: ReadonlySet<string>,
+): ProviderConfig[] {
+  const out: ProviderConfig[] = [];
+  for (const p of providers) {
+    if (currentId !== undefined && p.id === currentId) continue;
+    if (failedProviderIds.has(p.id)) continue;
+    if (p.apiKey === "") continue;
+    if (providerEnvKey(p.provider) === undefined) continue;
+    if (
+      resolveModel({
+        provider: p.provider,
+        modelId: p.modelId,
+        apiKey: p.apiKey,
+        baseUrl: p.baseUrl ?? null,
+      }) === null
+    ) {
+      continue;
+    }
+    out.push(p);
+  }
+  return out;
 }
 
 /**
@@ -956,26 +1008,11 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
    * 「有谁可以换」。
    */
   function failoverCandidates(): ProviderConfig[] {
-    const all = booted.settingsStore.load().providers;
-    const currentId = currentProvider?.id;
-    const out: ProviderConfig[] = [];
-    for (const p of all) {
-      if (p.id === currentId) continue;
-      if (failedProviderIds.has(p.id)) continue;
-      if (p.apiKey === "") continue;
-      if (
-        resolveModel({
-          provider: p.provider,
-          modelId: p.modelId,
-          apiKey: p.apiKey,
-          baseUrl: p.baseUrl ?? null,
-        }) === null
-      ) {
-        continue;
-      }
-      out.push(p);
-    }
-    return out;
+    return failoverCandidatesOf(
+      booted.settingsStore.load().providers,
+      currentProvider?.id,
+      failedProviderIds,
+    );
   }
 
   /**
@@ -1643,7 +1680,7 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
      * —— 但它**不该烧掉尝试预算**(那个 3 次是**给人用**的限流,
      * 见 `dispatcher.ts` 的 `resetAttempt`)。
      */
-    readonly providerFailed?: boolean;
+    readonly failoverApplied?: boolean;
   }
 
   /**
@@ -1948,7 +1985,7 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
         // 消费那一支就不该走(证据还在,下一轮重来)。
         failed: providerRejected,
         ...(turn.providerError !== undefined ? { providerError: turn.providerError } : {}),
-        ...(providerDegraded ? { providerFailed: true } : {}),
+        ...(providerDegraded ? { failoverApplied: true } : {}),
       };
     } catch (e) {
       // **中断不是故障。** 把一次「停止」报成 `turn_failed` 会让用户以为出了错,
@@ -2164,14 +2201,36 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
           const w = getWork(db, workId);
           let markedFailed = false;
           if (w !== null && !isTerminalWorkStatus(w.status) && w.status !== "blocked") {
-            updateWorkStatus(db, workId, "failed", now());
-            markedFailed = true;
-            providerMarkedFailed = true;
-            log.warn(
-              `platform: 工作项 ${workId}「${w.title}」的回合被 provider 拒绝` +
-                `(${providerFailureLabel(failure.kind)}) —— 记为 failed:不再自动重跑,` +
-                `并写一条 work_failed 事件让业务经理向甲方交代`,
-            );
+            const r = updateWorkStatus(db, workId, "failed", now());
+            // ⚠️ **「写了一条 work_failed 事件」这句话只有在真的写了时才成立。**
+            // `updateWorkStatus` 有两种「没写」:①迁移不合法(根本没改);
+            // ②事件 kind 没在 schema 里开(进了 `deferred`)。旧写法把返回值
+            // 丢掉,于是日志**每次**都断言「并写一条 work_failed 事件」——
+            // 那是一条**自信的假话**(它说业务经理会知道,而业务经理不会)。
+            if (!r.ok) {
+              log.warn(
+                `platform: 工作项 ${workId}「${w.title}」的回合被 provider 拒绝` +
+                  `(${providerFailureLabel(failure.kind)}) —— **没能**记成 failed` +
+                  `(${r.reason}):${r.message}`,
+              );
+            } else {
+              markedFailed = r.changed;
+              providerMarkedFailed = markedFailed;
+              if (r.deferred.length > 0) {
+                log.warn(
+                  `platform: 工作项 ${workId}「${w.title}」的回合被 provider 拒绝` +
+                    `(${providerFailureLabel(failure.kind)}) —— 记为 failed:不再自动重跑。` +
+                    `⚠️ 但 work_failed 事件**没写出来**` +
+                    `(${r.deferred.map((d) => d.kind).join(",")}) —— 业务经理不会自动知道这条活死了`,
+                );
+              } else {
+                log.warn(
+                  `platform: 工作项 ${workId}「${w.title}」的回合被 provider 拒绝` +
+                    `(${providerFailureLabel(failure.kind)}) —— 记为 failed:不再自动重跑,` +
+                    `并写了一条 work_failed 事件让业务经理向甲方交代`,
+                );
+              }
+            }
           }
           if (markedFailed) hub.emitWorkChanged(projectId, workId, "failed");
           const nextStep = failure.retryable
@@ -2221,7 +2280,7 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
         // ⚠️ **降级成功这一轮不算失败**:有人接手了(备用 provider)。
         // dispatcher 见到它会重置这条待办的尝试预算 —— provider 故障不该烧掉
         // 「叫醒 3 次」那个**给人用**的限流。
-        ...(providerDegraded ? { providerFailed: true } : {}),
+        ...(providerDegraded ? { failoverApplied: true } : {}),
       };
     } catch (e) {
       outcomeLabel = aborted ? "被中断" : "失败";
@@ -2506,7 +2565,7 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
             // ⚠️ **「有人接手了」要与「失败」分开**:降级之后活儿原封不动地等着,
             // 但这一轮没跑起来 —— 排空器据此**重置尝试预算**(那个 3 次是给人用的
             // 「叫醒三次」限流,provider 故障不该烧它)。
-            ...(r.providerFailed === true ? { providerFailed: true } : {}),
+            ...(r.failoverApplied === true ? { failoverApplied: true } : {}),
           };
         });
       },

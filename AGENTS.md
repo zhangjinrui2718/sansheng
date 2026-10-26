@@ -45,12 +45,14 @@
   读不到 ⇒ 判据在 `web/src/lib/orgState.ts`,事实来自 `GET /live` 与 `GET /messages`);
   **「合规记录」**= 不派生状态 —— 那一个回合确实没留工作记录,平台也不替模型补,
   **任何「已解决」都是编造现场**,它只能说「记录 · 不需要你动作」+ 计数。
-  `session_messages` 里 `kind='system'` 的行**有三个生产者**,都在
+  `session_messages` 里 `kind='system'` 的行**有四个生产者**,都在
   `src/platform/host/serve.ts`:`announceDrain`(停止推进,项目级)、
-  `reportUnannouncedTurn`(合规告警,回合级)与
+  `reportUnannouncedTurn`(合规告警,回合级)、
   `reportWorkspaceProblem`(**工作区告警**,项目级;首行前缀 `⚠️ 工作区`,
   只在「提交失败 / 有文件没进版本库」时发声,**同一条只播一次** —— 每回合重来一次
-  会把「组织运行态」淹掉),都落项目的**内部会话**,`agent_id` 为 NULL;
+  会把「组织运行态」淹掉)与
+  `announceProviderFailover`(**provider 降级**,项目级;首行前缀 `⚠️ 供应商`,
+  2026-10-22 加 —— 见下面「provider 故障」一节),都落项目的**内部会话**,`agent_id` 为 NULL;
   分类只认**正文首行前缀**(`web/src/lib/platformNotices.ts`)。
   **对话页一个字都不留**(既不是气泡,也不再是一条「系统带」):`partitionTurns` 把它们摘成
   `notices` 计数,屏幕上只剩 `channelNoteText` 那一行「另有 N 条平台通知 —— 到「项目」页
@@ -60,7 +62,7 @@
   判据的一部分:同一对节点上两类边**方向一致**时不是环(真机那份数据就是这样),方向相反
   才是环(`mutualPairs` 会点名是哪两条边)。写反会让「交付」跑到最左、并且把一个不存在的
   环报出来(`web/src/lib/workGraph.ts` 的 `collectEdges`)。
-- 基线:**2156 passed / 110 test files** · 两条 typecheck 0 error · `check:design` E1–E14 全绿(5 角色)。
+- 基线:**2208 passed / 112 test files** · 两条 typecheck 0 error · `check:design` E1–E14 全绿(5 角色)。
 - **角色中文名只有一处**:`src/platform/runtime/org.ts` 的 `ORG`(播种 / `roleDisplayName()` /
   `RoleHarnessView.displayName` / **系统提示里的「# 你的角色:X」**全走它);
   前端兜底表 `web/src/lib/vocab.ts` 的 `ROLE_LABEL` 必须逐项相同,由
@@ -401,6 +403,87 @@ dev/prod + CI/CD」,09:54 业务经理只回了一句「我先看下你之前留
 > 业务经理提示词(`business_manager.core.md`「最后一步」那一节)配套讲清
 > **最终交付物是什么** —— 真机上「11 条全 done 而甲方要的那一份并不存在」过一次。
 
+
+## provider 故障:看得见 + 自动降级(2026-10-22 · 批次 30)
+
+> **用户原话**:「sansheng 有时候会遇到断网、token 限流的问题,导致正在干活的角色失败」。
+
+### 之前:三层都不管 provider,故障是**静默的**
+
+| 层 | 之前是什么 |
+|---|---|
+| 重试 | **在 pi SDK 内部**(`dist/core/agent-session.js` 的 `_prepareRetry()`),判据是**错误文本正则**(`isRetryableAssistantError`),默认 `maxRetries=3, baseDelayMs=2000`(退避 2s/4s/8s),配置在 `<dataDir>/agent/settings.json` 的 `retry` 段(三生从不写它)⇒ **同一家重试,不换家**;错误文案不匹配正则时**直接失败不重试** |
+| 平台 | **零** provider 故障处理。`src/platform/` 全仓无 retry / failover |
+| 故障落地 | pi 把 429/网络错变成一条 `stopReason:"error"` 的 assistant 消息(**不抛异常**),`session.prompt()` 正常 resolve;而 `runtime/turn.ts` 的 `message_end` 分支**只读 `role/usage/model`**(`usageSnapshotOf`)⇒ **错误原文既不进日志、不进库、不上屏**。工作项因此永远停在 `in_progress` 装忙;聊天回合则被报成 `unanswered_turn`(「这一回合没有给出任何答复」)—— **把限流说成了「模型没说话」** |
+
+⇒ 「代码里写了逻辑 ≠ 它有读者」的又一次:**故障是静默的**,而排空器的尝试预算(3 次)会在 45 秒内烧光,三次全打在同一个限流窗口里。
+
+### 现在:三件事
+
+**① 看得见 —— 分类器 `runtime/providerFailure.ts`**
+
+`classifyProviderFailure(message)` ⇒ `{kind, retryable, message, status?, errorType?}`,`kind ∈ rate_limit | quota | auth | network | server | unknown`。
+
+⚠️ **顺序是判据的一部分**:`quota` / `auth` 必须**先于** `rate_limit` 判 —— 否则 `429 insufficient_quota` 会被判成「可重试的限流」,于是平台去换一家 provider(而额度是账户级的,换家没用)。`quota` / `auth` 的 `retryable` 是 **false**。
+
+⚠️ **原文是 JSON 信封,必须先剥**(`unwrapEnvelope`):真机原文 =
+`{"type":"error","error":{"type":"rate_limit_error","message":"已达到 Token Plan 用量上限：请升级 Token Plan 套餐或购买积分补充用量。 (2056)"}}`
+—— 剥开后:**内层 message 的语义说了算**,内层 `type` 另存为 `errorType`(它可能与语义不一致 —— 只是线索,不是判据)。
+⚠️ **剥信封不能把外层状态码丢掉**:网关的形状是 `{"type":"error","code":429,"error":{…}}` —— 外层 429 是**网关限流**,内层是服务端措辞;丢掉外层 ⇒ 内层没有状态码 ⇒ 退化成 `unknown`(不可重试)⇒ **不会降级** ⇒ 一次本可以换家的限流把活儿直接判死。⇒ `unwrapEnvelope` 现在返回 `outerStatus`,`status = parseStatus(lower) ?? outerStatus`。
+⚠️ **`code` 是字符串时不是状态码**(OpenAI 的 `code: "insufficient_quota"` 是错误**类型**)⇒ 只认数字型的 4xx/5xx。
+
+⚠️ **中文限额词必须进词表**:`用量上限` / `已达上限` / `积分不足` / `购买积分` —— 真机那条 429 里**一个英文额度词都没有**,只按英文词表判就会漏。
+
+> 💡 **这条分类器的第一个真机样本,就是本批次自己的 worker 被打死的那一条**(2026-10-22):它烧掉 1.16M input / 223K output token 后撞上这条 429,`exit 0` 但只交出 1 个文件。⇒ **「provider 故障」不是假想需求 —— 它是在写这个机制的过程中当场发生的。**
+
+`turn.ts` 的 `TurnResult` 加了两个**可选**字段 `providerError?` / `providerRetries?`;错误在 `message_end` 分支接住(⚠️ 只认 `message_end` —— 那是「事件时刻即终值」的那一条),并**不再判 `unanswered`**(同一个故障报两次 = 报多了就没人看了)。`providerRetries` 数的是 pi SDK 自己的 `auto_retry_start` 事件 —— 那一层重试原先**完全不可见**(界面上那句话会让人以为是「一次就挂」)。
+
+**② 降级 —— 平台级换 provider**
+
+`settings.providers[]` 本来就支持多 provider(`infra/settings.ts` 的 `ProviderConfig` / `activeProvider()`),但 `runtime/boot.ts` 只取 `activeProviderId` 那一个 ⇒ 限流时不会切。降级链是**平台级**的,不是 per-session:
+
+- 候选 = `failoverCandidatesOf(providers, currentId, failedProviderIds)`(**纯函数**,`host/serve.ts`):除当前外的 provider,只留 `apiKey !== ""`、**有 env 凭据通道**(`providerEnvKey` 有映射)、`resolveModel()` 非 null 的,**轮转**(避免每次都打同一家);
+  ⚠️ **「有 env 凭据通道」这一条是复核补上的**:三生的凭据**只**经 env 通道进 SDK(`syncActiveProviderApiKeyEnv`),`agentDir/auth.json` 三生从不写 ⇒ 没有 env 映射的 provider(`amazon-bedrock` / `azure` / `github-copilot` / `huggingface` / `openai-codex` / `typesafe`)切过去**必然也拿不到 key**(它只有 `log.warn`,不报错)⇒ 那次降级是白降,而且这一家被记进 `failedProviderIds` ⇒ **后面再也不会选它** ⇒ 一台本来能用的 provider 被一次无谓的降级废掉了;
+- ⚠️ **忙闩检查**:`hub.runningTurns()` 里还有别的回合 ⇒ **不降级**。理由:`syncActiveProviderApiKeyEnv` 改的是**进程级 env**,在别的回合正跑时改会把它们打到 ⇒ **宁可这次失败,不要误伤别的回合**;
+- 降级后 `disposeAllSessions()` —— 旧会话绑的是旧模型,继续用会把请求发到已经限流的那家;
+- 降级**只发生在本回合没干过活时**(`turn.toolCalls.length === 0`):有工具调用就可能已有副作用(写文件、发消息、提交),**重跑不安全**;
+- `quota` / `auth` / 回合超时 / 回合被中断 ⇒ **一律不降级**(超时那条纪律:「自动重跑只是把同一段卡死行为再买一遍」);
+- 降级成功 ⇒ 工作项**不**记 `failed`,由排空器下一轮重新派发(工作项仍 `in_progress` ⇒ 仍在 `board.runnable` 里);
+- 降级成功那一轮**不算失败**(`DrainTurnReport.failoverApplied` —— ⚠️ **别叫它 `providerFailed`**:那个名字挨着 `failed:false` 读起来像「provider 失败了」,而事实是「provider 故障了、但**有人接手了**」),且**重置这条待办的尝试预算**(`repo/dispatch.ts` 的 `resetAttempt`)—— provider 故障**不该烧掉**「叫醒 3 次」那个**给人用**的限流预算。
+  ⚠️ `resetAttempt` 必须把 `notified_at` **一起清空**:灯亮着 = 这条待办已被判定为「叫不醒」(`escalate_abandoned_todo` 会据此把活儿换手给 PM)⇒ provider 故障降级成功之后那条活**仍然该由执行者接着干**。
+
+**③ 有终态 —— 不再装忙**
+
+不能降级时(没有备用 provider / 有副作用 / 鉴权或额度问题)⇒ 工作项经 `updateWorkStatus`(唯一写口)记 **`failed`**,自动写出 `work_failed` outbox 事件 ⇒ 业务经理向甲方交代,与墙钟超时那条路同一条纪律。
+⚠️ **`updateWorkStatus` 的返回值不许丢**:它有三种「没成」(`ok:false` / `changed:false` / `deferred` 非空 = 事件 kind 没在 schema 里开)⇒ 日志断言「并写了一条 work_failed 事件」只在真的写了时才成立,否则那是一条**自信的假话**。
+
+### 测试判据:变异自检要**真的**改坏一遍
+
+分类器与接线测试(`tests/platform/provider-failure-classify.test.ts` 20 条 + `tests/platform/provider-failure.test.ts` 32 条)写完后**当场做了真变异**并实测变红:① `quota` 改成可重试 ⇒ 红;② 额度词排到状态码之后 ⇒ 红;③ 不剥 JSON 信封 ⇒ `errorType` 红;④ 剥信封丢掉外层状态码 ⇒ 红;⑤ `decideFailover` 三条纪律各去掉一条 ⇒ 红;⑥ 忙闩自我排除两个方向 ⇒ 红;⑦ 降级后不 `disposeAllSessions` ⇒ 红;⑧ 不记失败过的那家 ⇒ 红;⑨ 不过滤无凭据通道的 provider ⇒ 红;⑩ 不计 SDK 重试次数 ⇒ 红。
+
+⚠️ **两次栽在同一件事上**(2026-10-22 复核):
+- **「在语句前面加个注释」不是变异** —— `/*MUT*/ disposeAllSessions(...)` 里的注释**不会让语句失效**,调用照常发生 ⇒ 「改坏了却全绿」是假的,其实是「**根本没改坏**」。⇒ 变异必须**真的移除/改写**语句。
+- **「assert 一下变异点找得到」不是可选的** —— `python str.replace` 不匹配时**静默不执行**、退出码 0、一个字节都没改(AGENTS.md 第 2 类静默失败)。⇒ 每次变异都要断言「改后那一行确实变了」。
+⇒ 「测试是绿的」这句话在**变异实测过**之前不算数(第 3 类静默失败:一个坏掉的检查返回一个看起来正常的答案)。
+
+⚠️ **夹具也会让断言失效**:夹具原来挑的备用 provider 是 `amazon-bedrock`(**无 env 映射**)⇒ 它被凭据通道判据排除 ⇒ 「切不回去」那条行为**根本不可能发生** ⇒ 断言它等于什么都没断言。⇒ 夹具挑 provider 时必须挑**真实可用**的那些。
+
+### 前端零改动(两个「已有读者」的坐标)
+
+- `error` 事件:`web/src/stores/chat.ts` 的 `case "error"` ⇒ `MessageList.tsx` 渲染 `error.code` / `error.message` ⇒ 新错误码 `provider_error` 自动上屏;
+- 平台通知:`web/src/lib/platformNotices.ts` 的 `classifyPlatformNotice` 对不认识的前缀归 `other` 档、**正文原样渲染** ⇒ 新前缀 `⚠️ 供应商` 自动进项目页「组织运行态」。
+
+⇒ **不许在前端加常量**(那会多一个没有读者的声明)。
+
+### 还没做的(如实记)
+
+- **限流全局刹车**:连续 429 时暂停排空器(而不是烧预算)—— 下一批的第一件事;
+- **per-session provider**:降级是平台级的,一个项目里的所有会话一起换;
+- **降级的 env 竞态**:忙闩检查覆盖了「别的回合在跑」这个窗口;`syncActiveProviderApiKeyEnv` 改的是进程级 env,理论上还有一个「回合刚开始、还没进 `runningTurns`」的窗口;
+- **额度/鉴权不降级**:这是刻意的(额度是账户级的),但如果用户配了**另一个账户**的 provider,这条就不对了 —— 判据现在只看错误分类,不看 provider 归属;
+- **降级落库可观测**:降级事实目前只落在 `session_messages`(一条 `⚠️ 供应商` 通知),**没有**结构化表 ⇒ 「这一周降级了几次、切了几家」无从统计(要读面就得 migration);
+- **自动切回原 provider**:不做(要么靠健康探测、要么靠墙钟启发式,本项目两条都拒绝);
+- **运行期证据**:`auto_retry_start` 只证到**源码级**(`agent-session.d.ts` 的事件定义 + `agent-session.js` 的发射点),**没做过一次真机 429**。
 
 ## 数据与存储
 
@@ -925,7 +1008,7 @@ node -e "console.log(Object.keys(require('./node_modules/@earendil-works/pi-ai/d
 ```
 npx tsc -p tsconfig.server.json --noEmit
 npx tsc -p tsconfig.web.json --noEmit
-npm test                  # 2156 passed / 110 files
+npm test                  # 2208 passed / 112 files
 npm run build
 npm run check:design      # 设计一致性 E1–E14
 ```
@@ -981,9 +1064,11 @@ npm run check:design      # 设计一致性 E1–E14
      ⚠️ 这条与机器有关:本机 `grep (BSD grep, GNU compatible) 2.6.0-FreeBSD` 实测**支持** `\|` 交替 —— 所以「换个环境跑同一条命令」也不能作为自检。
    - **模式写错**:第二次换了模式,依然返回自信的 0 命中(已复现:对已知含 `ROLE_SPECS` 的文件,把模式写成 `ROLE_SPECSX` 就得到 0,且没有任何错误)。
    - **静默不改**:`python str.replace` 找不到目标串时不报错、不写改动 → 你以为改了,文件其实没变。
+   - **装饰性变异**(2026-10-22 新增,provider 故障批次复核时栽了两次):在语句**前面**加个注释(`/*MUT*/ disposeAllSessions(...)`)—— **注释不会让语句失效** ⇒ 调用照常发生 ⇒ 「改坏了却全绿」是假的,其实是「**根本没改坏**」;而且 `str.replace` 不匹配时**静默不执行** ⇒ 两者叠加 = 一条**从未生效**的变异被当成「测过了」。⇒ **变异必须真的移除/改写语句,且必须断言「改后那一行确实变了」。**
 
    **做法:每个诊断先拿一个已知答案的样本自检 —— 一个必须命中的正样本 + 一个必须不命中的负样本。两个都对上,才用它去看别的。**
    判据不是「跑完了没报错」,是「它对已知样本给出了正确答案」。
+   ⇒ **推论:「测试是绿的」在变异实测过之前不算数。**
 
 ## 明确不存在的东西(别再找)
 

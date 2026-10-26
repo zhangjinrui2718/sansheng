@@ -28,14 +28,14 @@ import { tmpdir } from "node:os";
 import { createServer, type Server } from "node:http";
 import { WebSocketServer, WebSocket } from "ws";
 import type { AgentSession, AgentSessionEvent } from "@earendil-works/pi-coding-agent";
-import { createPlatformHost, decideFailover, type PlatformHost } from "../../src/platform/host/serve.js";
+import { createPlatformHost, decideFailover, failoverCandidatesOf, type PlatformHost } from "../../src/platform/host/serve.js";
 import { attachHub } from "../../src/platform/transport/hub.js";
-import { listProviders } from "../../src/platform/infra/providers.js";
+import { listProviders, providerEnvKey } from "../../src/platform/infra/providers.js";
 import { ensureOrg, ensureProjectOrg } from "../../src/platform/runtime/org.js";
 import { insertProject } from "../../src/platform/storage/repo/projects.js";
 import { getWork, insertWork } from "../../src/platform/storage/repo/works.js";
 import { listSessions, listSessionMessages } from "../../src/platform/storage/repo/sessions.js";
-import { listAttempts } from "../../src/platform/storage/repo/dispatch.js";
+import { listAttempts, bumpAttempt, markAttemptNotified, resetAttempt } from "../../src/platform/storage/repo/dispatch.js";
 import { runTurn, type TurnResult } from "../../src/platform/runtime/turn.js";
 import { openPlatformMemoryDb } from "../../src/platform/storage/index.js";
 import { insertAgent } from "../../src/platform/storage/repo/agents.js";
@@ -150,6 +150,28 @@ describe("① runTurn · provider 故障要留下现场", () => {
     expect(r.providerError?.retryable).toBe(false);
   });
 
+  it("SDK 自动重试了几次 ⇒ `providerRetries` 记下来(重试了但没人知道 = 白重试)", async () => {
+    // pi SDK 自己的那层重试(`auto_retry_start`)是**看不见**的 ——
+    // 平台原先只看得见「最终失败了」,看不见「已经重试过 2 次」⇒
+    // 界面上那句话会让人以为是「一次就挂」。
+    const r = await turn((emit) => {
+      emit({
+        type: "auto_retry_start", attempt: 1, maxAttempts: 3, delayMs: 2000, errorMessage: "429",
+      } as unknown as AgentSessionEvent);
+      emit({
+        type: "auto_retry_start", attempt: 2, maxAttempts: 3, delayMs: 4000, errorMessage: "429",
+      } as unknown as AgentSessionEvent);
+      emit(providerErrorMessage(RATE_LIMIT_TEXT));
+    });
+    expect(r.providerRetries, "重试次数要能被看见").toBe(2);
+    expect(r.providerError?.kind).toBe("rate_limit");
+  });
+
+  it("负样本:没有重试 ⇒ `providerRetries` 缺席(不是「永远有值」)", async () => {
+    const r = await turn((emit) => { emit(textDelta("答复。")); });
+    expect(r.providerRetries).toBeUndefined();
+  });
+
   it("有 provider 故障时**不**判「没下文」(同一个故障报两次 = 报多了就没人看)", async () => {
     // 没有正文 + provider 拒了 —— 两条判据都成立。
     // ⚠️ 这里断言的是**抑制**:provider 故障走 `provider_error` 那条通道。
@@ -224,6 +246,13 @@ describe("② decideFailover · 降级判据的六条纪律", () => {
 interface Harness {
   /** 每一轮(按 prompt 解析出来的身份)。 */
   readonly turns: Array<{ projectId: string | null; role: string | null; workId: string | null }>;
+  /**
+   * 每次**新建**会话时用的模型(`provider/model`)。
+   *
+   * ⚠️ 它是「旧会话有没有被丢弃」的唯一可观察面:会话池里还留着旧会话时,
+   * 下一轮**复用**它 ⇒ 不会新建 ⇒ 这个数组不会长。
+   */
+  readonly models: string[];
   /** 这一轮 provider 原文 —— 夹具可换(限流 / 额度)。 */
   errorText: string;
   /** 这一轮要不要先跑一次工具(模拟「已经干过活」)。 */
@@ -236,11 +265,14 @@ const ROLE_RE = /你是:.*?\(`([a-z_]+)`\)/;
 const WORK_ID_RE = /^# 工作项 (\S+)/m;
 
 function makeHarness(): Harness {
-  return { turns: [], errorText: RATE_LIMIT_TEXT, useTool: false, db: null };
+  return { turns: [], models: [], errorText: RATE_LIMIT_TEXT, useTool: false, db: null };
 }
 
 function makeCreateSession(h: Harness): CreateSessionFn {
-  return async () => {
+  return async (opts) => {
+    if (opts.model !== undefined) {
+      h.models.push(`${opts.model.provider}/${opts.model.id}`);
+    }
     const listeners = new Set<(ev: AgentSessionEvent) => void>();
     const emit = (ev: AgentSessionEvent): void => {
       for (const l of [...listeners]) l(ev);
@@ -294,11 +326,27 @@ let ws: WebSocket | undefined;
 let h: Harness;
 let events: Array<Record<string, unknown>>;
 
+/** 夹具里「备用 provider」用的模型(`provider/model`)。 */
+function backupModelLabel(): string {
+  const ps = listProviders().filter((p) => p.models.length > 0 && providerEnvKey(p.id) !== undefined);
+  const a = ps[0];
+  const b = ps.find((p) => p.id !== a?.id);
+  if (b === undefined || b.models[0] === undefined) {
+    throw new Error("内建 provider catalog 造不出「备用 provider」");
+  }
+  return `${b.id}/${b.models[0].id}`;
+}
+
 /** 写一份 settings:一个或两个 provider。 */
 function writeSettings(opts: { backup: boolean }): void {
-  const ps = listProviders();
-  const a = ps.find((p) => p.models.length > 0);
-  const b = ps.find((p) => p.id !== a?.id && p.models.length > 0);
+  // ⚠️ **只挑有 env 映射的 provider**(2026-10-22 复核补的):三生的凭据**只**经
+  // env 通道进 SDK(`syncActiveProviderApiKeyEnv`),`agentDir/auth.json` 三生从不写
+  // ⇒ 没有映射的 provider **根本拿不到 key**。夹具原来挑的是 `amazon-bedrock`
+  // (无映射)⇒ 它被降级候选的凭据通道判据排除 ⇒ 「切不回去」那条行为根本
+  // 不可能发生 ⇒ 断言它等于什么都没断言。
+  const ps = listProviders().filter((p) => p.models.length > 0 && providerEnvKey(p.id) !== undefined);
+  const a = ps[0];
+  const b = ps.find((p) => p.id !== a?.id);
   if (a === undefined || a.models[0] === undefined) {
     throw new Error("内建 provider catalog 是空的 —— 夹具造不出「已配置 provider」的现场");
   }
@@ -530,7 +578,7 @@ describe("⑤ dispatcher · 降级成功 ⇒ 尝试预算归零", () => {
 
   const okTurn: DrainTurnReport = { aborted: false, timedOut: false, text: "好了", toolCalls: [] };
 
-  /** 「整合」这条待办的 `targetState` 不动 ⇒ 预算真的会���烧掉。 */
+  /** 「整合」这条待办的 `targetState` 不动 ⇒ 预算真的会烧掉。 */
   const integrateTodo = (): boolean =>
     collectTodos({ db, projectId: "p1", now: T0 }).runnable.some((t) => t.kind === "integrate");
 
@@ -539,7 +587,7 @@ describe("⑤ dispatcher · 降级成功 ⇒ 尝试预算归零", () => {
     const deps = {
       db, projectId: "p1", now: () => T0, log: () => {}, maxAttemptsPerTodo: 1, reportBatchSize: 1,
       maxRounds: 3,
-      runAgentTurn: async () => ({ ...okTurn, providerFailed: true }),
+      runAgentTurn: async () => ({ ...okTurn, failoverApplied: true }),
       runWork: async () => { throw new Error("这一串里没有工作项要执行"); },
     };
     const first = await drainProject(deps);
@@ -685,5 +733,96 @@ describe("⑥ 变异自检 · 判据没有静默失效", () => {
       [/if \(input\.otherTurnRunning\) \{/, "if (false) {"],
     ]);
     expect(broken({ failure: rateLimit, ...base, otherTurnRunning: true }).degrade).toBe(true);
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════
+// ⑦ 复核补钉:四条**没有断言**的行为(2026-10-22 复核)
+// ══════════════════════════════════════════════════════════════════
+
+/**
+ * ⚠️ 这一节是**复核阶段补的**,不是写实现时写的。
+ *
+ * 查法:把实现逐条改坏(变异),看有没有测试变红。**改坏了却全绿** ⇒ 那条
+ * 行为**没有断言** —— 代码是对的,但没有钉住它,下次有人改坏它时没人会知道。
+ *
+ * ⚠️ 其中一条查出来是**假结论**:reviewer 报「去掉 `disposeAllSessions` 之后
+ * 42 条全绿」,但它自己的变异**根本没生效**(改的不是承重的那一行)⇒
+ * 「全绿」是假的。**所以「没牙」这个结论必须自己重跑一遍、并且先确认变异
+ * 真的生效** —— 变异没生效的「全绿」与「真的没牙」长得一模一样。
+ */
+describe("⑦ 复核补钉:四条没有断言的行为", () => {
+  it("M2:provider 故障后重置预算 ⇒ 连「已经播报过」的灯也要灭", () => {
+    const db = openPlatformMemoryDb();
+    // `dispatch_attempts.project_id` 有外键 ⇒ 先有项目。
+    insertProject(db, {
+      id: "p1", name: "p1", client: "甲方", goal: "g", status: "active", createdAt: 1,
+    });
+    bumpAttempt(db, { projectId: "p1", todoKey: "k", targetState: 1, at: 1 });
+    // 点亮灯:预算用尽时平台会播报一次(`markAttemptNotified`)。
+    markAttemptNotified(db, "p1", "k", 2);
+    expect(listAttempts(db, "p1").get("k")?.notifiedAt).toBe(2);
+    resetAttempt(db, "p1", "k");
+    expect(listAttempts(db, "p1").get("k")?.attempts, "次数归零").toBe(0);
+    expect(
+      listAttempts(db, "p1").get("k")?.notifiedAt,
+      "灯也要灭:灯亮着 = 这条待办已被判定为「叫不醒」⇒ 不会再被派发," +
+        "而 `escalate_abandoned_todo` 会据此把活儿换手给 PM",
+    ).toBeNull();
+    db.close();
+  });
+
+  it("M9:降级 ⇒ **旧会话被丢弃**(旧会话绑的是旧模型,继续用就是把请求发到已经限流的那家)", async () => {
+    await startHost({ backup: true, maxCascadeRounds: 1 });
+    seedProject("w1");
+    await host!.dispatchTimer.runNow();
+    await until(() => failoverNotices().length > 0);
+    const before = h.models.length;
+    // 降级之后的下一轮 ⇒ 必须**新建**会话(旧的已被丢弃)⇒ 模型是备用那家的。
+    await host!.dispatchTimer.runNow();
+    const grew = await until(() => h.models.length > before, 8000);
+    expect(
+      h.models[h.models.length - 1],
+      "降级后新建的会话必须用**新** provider 的模型",
+    ).toBe(backupModelLabel());
+  });
+
+  it("M10:连续两次 provider 故障 ⇒ **不**切回刚故障过的那家(否则两家来回打)", async () => {
+    await startHost({ backup: true, maxCascadeRounds: 1 });
+    seedProject("w1");
+    await host!.dispatchTimer.runNow();
+    await until(() => failoverNotices().length > 0);
+    // 第二轮:刚切过去的那家也坏了 ⇒ 没有别的候选 ⇒ 工作项记 failed。
+    await host!.dispatchTimer.runNow();
+    await until(() => getWork(h.db!, "w1")?.status === "failed", 8000);
+    expect(
+      failoverNotices().length,
+      "只降级一次:第二家也坏 ⇒ 没有别的候选 ⇒ 记 failed(**不是**切回第一家)",
+    ).toBe(1);
+  });
+
+  it("降级候选:没有凭据通道的 provider **不**被选中(切过去必然也拿不到 key)", () => {
+    const ps = listProviders();
+    const noEnv = ps.find((p) => p.models.length > 0 && providerEnvKey(p.id) === undefined);
+    const withEnv = ps.find((p) => p.models.length > 0 && providerEnvKey(p.id) !== undefined);
+    if (
+      noEnv === undefined || withEnv === undefined ||
+      noEnv.models[0] === undefined || withEnv.models[0] === undefined
+    ) {
+      throw new Error("内建 catalog 造不出「有/无凭据通道」这一对现场");
+    }
+    const cfg = (id: string, p: typeof noEnv): import("../../src/platform/infra/settings.js").ProviderConfig => ({
+      id, label: id, provider: p.id, modelId: p.models[0]!.id,
+      apiKey: "key-not-used", thinkingLevel: "off",
+    });
+    const cands = failoverCandidatesOf(
+      [cfg("prov_no_env", noEnv), cfg("prov_with_env", withEnv)],
+      undefined,
+      new Set<string>(),
+    );
+    expect(
+      cands.map((c) => c.id),
+      "没有 env 映射的 provider 切过去拿不到 key(凭据只经 env 通道进 SDK)",
+    ).toEqual(["prov_with_env"]);
   });
 });

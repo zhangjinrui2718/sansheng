@@ -20,12 +20,16 @@
  *   "message":"已达到 Token Plan 用量上限：请升级 Token Plan 套餐或购买积分补充用量。 (2056)"}}`
  *
  * 它同时踩了三个坑,每一条都有断言:
- *   ① **JSON 信封** —— 在整段 JSON 上做词匹配会命中 JSON 里的 `rate_limit`;
+ *   ① **JSON 信封** —— 剥开才能拿到内层 `errorType` 与**外层状态码**
+ *      (不剥就拿不到;⚠️ 但**kind** 不受它影响 —— 真机这条的 kind 是**额度词**
+ *      定的,两种剥法都是 quota。别把「剥信封」的作用说成「改判类别」);
  *   ② **中文额度语义** —— 「用量上限」不是英文额度词;
  *   ③ **type 与语义不一致** —— provider 自报 `rate_limit_error`,真实语义是
  *      「账户级额度耗尽」⇒ 判成可重试的限流就会去换 provider,而换一家也一样。
  */
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import { readFileSync, writeFileSync, rmSync } from "node:fs";
+import { join } from "node:path";
 import {
   classifyProviderFailure,
   describeProviderFailure,
@@ -36,6 +40,36 @@ import {
 /** 真机原文(逐字,不做改动 —— 改了就测不到真机那一形态)。 */
 const REAL_429 =
   '{"type":"error","error":{"type":"rate_limit_error","message":"已达到 Token Plan 用量上限：请升级 Token Plan 套餐或购买积分补充用量。 (2056)"}}';
+
+const MUTANT_DIR = join(import.meta.dirname, "../../src/platform/runtime");
+let mutantSeq = 0;
+
+/**
+ * 把分类器源码按 `mutations` **改坏**,写成副本,重新 import 拿回来。
+ *
+ * ⚠️ **每次用不同的文件名**:模块加载器按路径缓存,同一个路径的第二次
+ * import 拿到的可能是**上一次**那份 ⇒ 「变异 ② 拿到变异 ① 的代码」,
+ * 而那条断言「恰好」红着 —— 一个看起来很真的假信号。
+ */
+async function mutatedClassifier(
+  mutations: Array<[RegExp, string]>,
+): Promise<typeof import("../../src/platform/runtime/providerFailure.js").classifyProviderFailure> {
+  let src = readFileSync(join(MUTANT_DIR, "providerFailure.ts"), "utf8");
+  for (const [re, to] of mutations) {
+    expect(src, `变异点没找到(源码已经变了):${re}`).toMatch(re);
+    src = src.replace(re, to);
+  }
+  const file = join(MUTANT_DIR, `providerFailure.__mutant__${++mutantSeq}__.ts`);
+  writeFileSync(file, src, "utf8");
+  try {
+    vi.resetModules();
+    const mod = (await import(file)) as
+      typeof import("../../src/platform/runtime/providerFailure.js");
+    return mod.classifyProviderFailure;
+  } finally {
+    rmSync(file, { force: true });
+  }
+}
 
 describe("provider 故障分类", () => {
   it("限流:429 与 'too many requests' ⇒ rate_limit 且可重试", () => {
@@ -66,6 +100,33 @@ describe("provider 故障分类", () => {
     expect(f.message).not.toContain("request_id");
     // provider 自报的类型另存一份(它可能与语义不一致,所以只是线索)。
     expect(f.errorType).toBe("rate_limit_error");
+  });
+
+  it("外层 429 + 内层服务端措辞 ⇒ 判成**限流**(剥信封不能把网关的状态码丢掉)", () => {
+    // 网关的形状:外层 `code:429`,内层是服务端的措辞。
+    // ⚠️ 剥信封时把**外层**丢掉 ⇒ 内层没有状态码 ⇒ 分类退化成 `unknown`
+    // (不可重试)⇒ **不会降级** ⇒ 一次本可以换家的限流直接把活儿判死。
+    const raw = '{"type":"error","code":429,"error":{"type":"api_error","message":"service temporarily unavailable"}}';
+    const f = classifyProviderFailure(raw);
+    expect(f.kind).toBe("rate_limit");
+    expect(f.retryable, "可重试才谈得上「换一家再试」").toBe(true);
+    expect(f.status, "外层 429 不能被剥掉").toBe(429);
+  });
+
+  it("负样本:信封里**没有**状态码 ⇒ 不许从别处编一个出来", () => {
+    const raw = '{"type":"error","error":{"type":"api_error","message":"service temporarily unavailable"}}';
+    const f = classifyProviderFailure(raw);
+    expect(f.status).toBeUndefined();
+    // 没有状态码 ⇒ 只能靠内层措辞 ⇒ 服务端错误(可重试)。
+    expect(f.kind).toBe("server");
+  });
+
+  it("负样本:`code` 是**字符串**时不是状态码(那是错误**类型**)", () => {
+    // OpenAI 那种 `code: "insufficient_quota"` 是字符串 ⇒ 放进状态码会变 NaN。
+    const raw = '{"type":"error","code":"insufficient_quota","message":"quota exceeded"}';
+    const f = classifyProviderFailure(raw);
+    expect(f.status).toBeUndefined();
+    expect(f.kind).toBe("quota");
   });
 
   it("鉴权:invalid api key / 401 ⇒ auth 且不可重试", () => {
@@ -161,10 +222,37 @@ describe("分类判据的变异自检", () => {
     expect(statusFirst).toBe("rate_limit");
   });
 
-  it("变异 ③:不剥 JSON 信封 ⇒ 真机 429 会红(整段 JSON 带出 rate_limit)", () => {
-    // 不剥信封时,整段 JSON 里含 `rate_limit` ⇒ 词表命中限流。
-    expect(REAL_429.toLowerCase()).toContain("rate_limit");
-    // 而剥开之后,内层语义是额度。
-    expect(classifyProviderFailure(REAL_429).kind).toBe("quota");
+  it("变异 ③:不剥 JSON 信封 ⇒ 拿不到 `errorType` 与外层状态码", async () => {
+    // ⚠️ **这一条曾经写错过**:原注释说「不剥信封 ⇒ 整段 JSON 命中 rate_limit
+    // ⇒ 把额度耗尽判成可重试限流」—— **那件事不会发生**:额度词在词表里
+    // **先**判,所以两种剥法的 `kind` 都是 quota。把一个不成立的机制写成
+    // 「变异自检」= 一条**装饰性的自检**(它看上去在保护判据,其实什么也没改)。
+    // 剥信封真正负责的是 ①**内层 `errorType`** ②**外层状态码**。
+    const broken = await mutatedClassifier([
+      [
+        /const \{ text, errorType, outerStatus \} = unwrapEnvelope\(trimmed\);/,
+        "const { text, errorType, outerStatus } = " +
+          "{ text: trimmed, errorType: undefined, outerStatus: undefined };",
+      ],
+    ]);
+    expect(broken(REAL_429).kind, "kind 仍然是 quota(额度词先判)").toBe("quota");
+    expect(broken(REAL_429).errorType, "但 errorType 没了 —— 那是剥信封的真正作用").toBeUndefined();
+    expect(classifyProviderFailure(REAL_429).errorType, "真代码拿得到").toBe("rate_limit_error");
+  });
+
+  it("变异 ④:剥信封时丢掉外层状态码 ⇒ 网关 429 退化成 unknown(不可重试 ⇒ 不会降级)", async () => {
+    const raw = '{"type":"error","code":429,"error":{"type":"api_error","message":"service temporarily unavailable"}}';
+    expect(classifyProviderFailure(raw).kind, "真代码:外层 429 ⇒ 限流").toBe("rate_limit");
+    const broken = await mutatedClassifier([
+      [
+        /const status = parseStatus\(lower\) \?\? outerStatus;/,
+        "const status = parseStatus(lower);",
+      ],
+    ]);
+    expect(
+      broken(raw).kind,
+      "改坏后:外层 429 没了 ⇒ 内层措辞判成服务端错误(可重试,但不是限流)",
+    ).toBe("server");
+    expect(broken(raw).status, "外层状态码确实没了").toBeUndefined();
   });
 });
