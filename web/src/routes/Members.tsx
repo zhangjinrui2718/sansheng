@@ -132,6 +132,7 @@ import {
   StatStrip,
 } from "@/components/ui/primitives";
 import { RoleHarnessSection, roleIssueCount } from "@/components/members/RoleHarness";
+import { AgentConversations } from "@/components/members/AgentConversations";
 import {
   useArtifacts,
   useHarnessRoles,
@@ -142,6 +143,7 @@ import {
 import { useChatStore } from "@/stores/chat";
 import {
   ROLE_LABEL,
+  MESSAGE_KIND_LABEL,
   artifactKindLabel,
   artifactKindTone,
   artifactStatusLabel,
@@ -152,15 +154,13 @@ import {
   workStatusTone,
 } from "@/lib/vocab";
 
-/** `session_messages.kind` 的中文读法。**只在这一屏用** —— 它标的是「这条是什么」。 */
-const KIND_LABEL: Record<SessionMessageKind, string> = {
-  user: "甲方",
-  assistant: "发言",
-  thinking: "思考",
-  tool: "工具",
-  system: "系统",
-};
-
+/**
+ * ⚠️ **这一屏原来自己写了一张 `session_messages.kind` 的中文读法表**
+ * (`KIND_LABEL`),注释写着「只在这一屏用」—— 而 2026-10-26 之后
+ * 「成员页的对话全文」(`components/members/AgentConversations.tsx`)也要用它。
+ * 两处各写一张表,它们就会当场漂开 ⇒ **已搬进 `lib/vocab.ts`**
+ * (`MESSAGE_KIND_LABEL`),本文件与新组件都从那里取。
+ */
 const OTHER_KINDS: readonly SessionMessageKind[] = ["assistant", "thinking", "tool"];
 
 /**
@@ -502,8 +502,7 @@ function turnStatusNode(
 export function MemberPane({
   member,
   activity,
-  conversation,
-  conversationError,
+  projectId,
   artifacts,
   runtime,
   dispatch,
@@ -513,15 +512,18 @@ export function MemberPane({
   member: MemberView;
   /** 这个人在这份运行态快照里的那一条;`null` = 还没拿到快照(或快照里没有他) */
   activity: MemberActivityView | null;
-  conversation: MemberConversationView | null;
   /**
-   * `GET /api/projects/:id/member-conversations` 的错误。
+   * 本项目的 id —— 「他说了什么」那块要自己取数(它有自己的端点与自己的窗口)。
    *
-   * ⚠️ **「读不到」不许显示成「没有发言」**:两者在屏幕上都是「0 条 + 一句空态」,
-   * 而前者是「这次请求失败了」—— 用户会据此以为这个人一句话都没说过(2026-10-06
-   * 合并 harness 时把页面上仅有的那个错误落点删掉了,于是这条变得看得见)。
+   * ⚠️ **2026-10-26:这一块从「清单」改成「全文」** —— 原来它接的是
+   * `GET /api/projects/:id/member-conversations` 的那一组摘要(每条截到 90 字、
+   * 新的在前、默认折叠),而用户要的是「**具体的对话内容**」。于是:
+   *   · `conversation` / `conversationError` 两个 prop **删掉了** —— 它们的读者
+   *     (那块摘要列表)已经不在了;留着就是「没有调用方的参数」(死分支)。
+   *   · 条数与「读不到」现在由**新组件自己**从新端点拿(同一套纪律:
+   *     「读不到」不许显示成「0 条」)。
    */
-  conversationError: string | null;
+  projectId: string;
   /** 已按 `authorAgentId === member.id` **过滤好**的工件 —— 过滤在页面层做 */
   artifacts: readonly ArtifactView[];
   /** 这份快照的运行期来源;`null` = 还没拿到过快照 */
@@ -690,7 +692,7 @@ export function MemberPane({
               >
                 {activity.lastMessage !== null ? (
                   <>
-                    最后一次动:{KIND_LABEL[activity.lastMessage.kind]}{" "}
+                    最后一次动:{MESSAGE_KIND_LABEL[activity.lastMessage.kind]}{" "}
                     {excerpt(activity.lastMessage.excerpt, 60)} · {age(activity.lastMessage.ageMs)}
                   </>
                 ) : (
@@ -730,31 +732,31 @@ export function MemberPane({
           )}
         </div>
 
-        {/* ── ③ 他产生了什么对话 —— **默认折叠**,标题写清条数 ─────── */}
-        {/* `conversation === null` 就是真的 0:端点会把有消息的组都返回,没有这个组
-            = 库里确实没有它的行(见 `ConversationCard` 的注释)。 */}
-        <Disclosure
-          summary={
-            conversationError !== null
-              ? "他产生了什么对话 · 读不到"
-              : `他产生了什么对话 · ${conversation?.total ?? 0} 条`
-          }
-        >
-          {conversationError !== null && (
-            <div className="ss-note" style={{ color: "var(--cinnabar)" }}>
-              {`对话记录读不到:${conversationError} —— 这一次请求失败了,`}
-              {"所以「0 条」不代表他没说过话(端点会重试)。"}
-            </div>
-          )}
-          <ConversationCard
-            title={member.displayName}
-            role={ROLE_LABEL[member.role]}
+        {/* ── ③ 他说了什么 —— **对话全文**(进行中 + 已完成)────────── */}
+        {/* ⚠️ 2026-10-26:这一块从「清单」改成「全文」。原来它接的是
+            `member-conversations` 的那一组摘要(每条**截到 90 字**、新的在前、
+            默认折叠)—— 那不是「对话内容」。现在它自己取数
+            (`GET /api/projects/:id/agents/:agentId/conversations`),
+            逐条对话线 + **全文**,并把「正在流的」那一段单独摆出来。
+            ⚠️ **两块不许并存**:摘要列表与全文是同一份数据的两种读法,
+            成员页再抄一份就是重复(与「甲方(你)/平台通知」那张卡被删同一条理由)。 */}
+        <div className="flex flex-col gap-1.5" style={{ borderTop: "1px solid var(--ink-3)", paddingTop: 8 }}>
+          <span
+            className="ss-meta"
+            title="这一块是**只读**的:它不写任何东西、不发任何指令。它答的是「这个人具体说了什么」—— 逐条对话线 + 全文(旧 → 新)。"
+          >
+            他说了什么
+          </span>
+          <AgentConversations
+            // ⚠️ `key` = 换人时重置「选中哪条线」:上一个成员选的那条线对
+            // 新成员多半没有意义(它不在他的线里),留着会让新面板一开始
+            // 指向一条不属于他的线。
+            key={member.id}
+            projectId={projectId}
             agentId={member.id}
-            group={conversation}
-            kinds={OTHER_KINDS}
-            emptyText="还没有发言。"
+            agentName={ROLE_LABEL[member.role]}
           />
-        </Disclosure>
+        </div>
 
         {/* ── ④ 他产出了什么工件(成员页 × 工件页的那条连线)──────── */}
         <div className="flex flex-col">
@@ -861,7 +863,7 @@ export function ConversationCard({
           {messages.map((m) => (
             <li key={m.id} className="flex gap-2 items-baseline" style={{ fontSize: 12 }}>
               <span className="ss-meta flex-none font-mono">{fmtTime(m.createdAt)}</span>
-              <span className="ss-meta flex-none">{KIND_LABEL[m.kind]}</span>
+              <span className="ss-meta flex-none">{MESSAGE_KIND_LABEL[m.kind]}</span>
               <span
                 className="truncate"
                 style={{ color: "var(--bone)" }}
@@ -887,7 +889,7 @@ function kindSummary(group: MemberConversationView, kinds: readonly SessionMessa
   return kinds
     .map((k) => ({ k, n: group.byKind[k] ?? 0 }))
     .filter((x) => x.n > 0)
-    .map((x) => `${KIND_LABEL[x.k]} ${x.n}`)
+    .map((x) => `${MESSAGE_KIND_LABEL[x.k]} ${x.n}`)
     .join(" · ");
 }
 
@@ -921,14 +923,14 @@ export function MembersPage() {
     [live.data],
   );
 
-  /** agentId(`null` = 没有角色作者)→ 那一组。 */
-  const groupOf = useMemo(() => {
-    const m = new Map<string | null, MemberConversationView>();
-    for (const g of conversations.data) m.set(g.agentId, g);
-    return m;
-  }, [conversations.data]);
-
-  /** 成员之外的发言者(理论上不该有;有就**如实列出来**,不静默丢)。 */
+  /**
+   * 成员之外的发言者(理论上不该有;有就**如实列出来**,不静默丢)。
+   *
+   * ⚠️ 2026-10-26:成员面板里那块「他产生了什么对话」从「清单」改成「全文」
+   *    (见 `AgentConversations`),所以 `member-conversations` 这一份数据的
+   *    **成员部分**读者没了 —— 只剩这里(`strangers`)。**端点还在**(它给
+   *    「不在成员表里的发言」这一段),但**别再把它当成员面板的数据源**。
+   */
   const strangers = useMemo(
     () => conversations.data.filter((g) => g.agentId !== null && !members.data.some((m) => m.id === g.agentId)),
     [conversations.data, members.data],
@@ -1052,16 +1054,14 @@ export function MembersPage() {
                 <MemberPane
                   member={selected}
                   activity={activityOf(selected.id)}
-                  conversation={groupOf.get(selected.id) ?? null}
+                  // 「他说了什么」那块自己取数(它有自己的端点与窗口)。
+                  projectId={projectId}
                   // 过滤在页面层做:面板是纯展示,不持有「怎么找这个人的工件」的判据。
                   artifacts={artifacts.data.filter((a) => a.authorAgentId === selected.id)}
                   runtime={runtime}
                   dispatch={live.data?.dispatch ?? null}
                   fetchedAt={live.fetchedAt}
                   now={now}
-                  // 「读不到对话记录」不是「没有发言」—— 两者在屏幕上长得一样,所以
-                  // 必须把错误本身传下去(见 `MemberPane` 里那一处分支)。
-                  conversationError={conversations.error}
                 />
               }
               // ── 角色 harness:**单独一张卡**,在成员面板**之下** ──────────

@@ -37,7 +37,9 @@
   推进图是时间轴泳道(`web/src/lib/timeline.ts`,纯函数:x = 时间,一条工作项一道、一种工件
   kind 一道;点绿色条 ⇒ 下面显示那条工作项挂着的工件),依赖图是分层 DAG
   (`web/src/lib/workGraph.ts`)。**成员页一个成员一块面板**(按角色页签切换):面板里有
-  「正在做什么」(`GET /api/projects/:id/live`)与他产出的工件;面板**之下另起一张独立的
+  「正在做什么」(`GET /api/projects/:id/live`)、**「他说了什么」**(对话全文,进行中 +
+  已完成;`GET /api/projects/:id/agents/:agentId/conversations`,见下专节)与他产出的工件;
+  面板**之下另起一张独立的
   「角色 harness」卡片**(`Section` + 常显的状态摘要行 + 默认折叠的配置)—— 提示词单元的
   编辑 / 恢复出厂 / 备份数都在那里,写面四条规矩与后端一致。**未来角色 harness 的配置就放这张卡**。
 - **平台记录的落点 = 项目页两段,按主体分家**(`web/src/routes/ProjectDetail.tsx`)。
@@ -62,7 +64,7 @@
   判据的一部分:同一对节点上两类边**方向一致**时不是环(真机那份数据就是这样),方向相反
   才是环(`mutualPairs` 会点名是哪两条边)。写反会让「交付」跑到最左、并且把一个不存在的
   环报出来(`web/src/lib/workGraph.ts` 的 `collectEdges`)。
-- 基线:**2208 passed / 112 test files** · 两条 typecheck 0 error · `check:design` E1–E14 全绿(5 角色)。
+- 基线:**2232 passed / 114 test files** · 两条 typecheck 0 error · `check:design` E1–E14 全绿(5 角色)。
 - **角色中文名只有一处**:`src/platform/runtime/org.ts` 的 `ORG`(播种 / `roleDisplayName()` /
   `RoleHarnessView.displayName` / **系统提示里的「# 你的角色:X」**全走它);
   前端兜底表 `web/src/lib/vocab.ts` 的 `ROLE_LABEL` 必须逐项相同,由
@@ -634,6 +636,68 @@ dev/prod + CI/CD」,09:54 业务经理只回了一句「我先看下你之前留
 >   `tests/platform/client-question-closed-project.test.ts`(12 条,含「排空器只跑 active」
 >   那条源码 grep,带正负样本自检)。
 
+### 成员页「他说了什么」:按 agent 看**对话全文**(2026-10-26)
+
+**用户原话**:「我想看看每一个agent 进行中、已完成的具体的对话内容,只读就好了,
+在成员的这个页面中新增这项功能」。
+
+改之前,成员面板里那块叫「他产生了什么对话」,接的是
+`GET /api/projects/:id/member-conversations` 的一组**摘要**:每条**截到 90 字**、
+**新的在前**、默认折叠。那是**清单**(谁说过几条),不是**内容**。
+
+现在那一块叫「他说了什么」,长在成员面板的第③块
+(`web/src/components/members/AgentConversations.tsx`)。
+
+| 两个读面 | 谁用 | 答什么问题 |
+|---|---|---|
+| `GET /api/projects/:id/member-conversations` | 只剩页面底部「不在成员表里的发言」(`strangers`)+ 页签角标 | **谁**说过话、各说了几条 |
+| `GET /api/projects/:id/agents/:agentId/conversations?sessionId=&limit=` | 成员面板 | **这个人具体说了什么**(逐条对话线 + 选中那条线的**全文**) |
+
+⚠️ **`MemberPane` 的 `conversation` / `conversationError` 两个 prop 已删** ——
+读者(那块摘要列表)不在了;留着就是死参数。`ConversationCard` 与
+`useMemberConversations` **保留**:`strangers` 那一段还在用它们。
+
+**后端两条判据**(都在 `src/platform/transport/http.ts` 的 `agentConversations`):
+
+- **`messages` 只有两类**:① 他自己的发言;② **甲方在同一线上的话**。
+  别的角色的话不在(那在它们自己的面板里),**平台通知(`kind='system'`)也不在**
+  (那在项目页「组织运行态」)。⚠️ 甲方的话与平台通知在库里都是 `agent_id IS NULL`
+  ⇒ **必须靠 `kind` 分开**;只按 `agent_id` 过滤会把平台通知端上来。
+- **条数是 SQL `GROUP BY` 的真值**(`countAgentSessionLines`),`messages` 是一**页**
+  (默认 200 / 上限 500)。两者混在一起的那一版会在消息一多时**静默少数** ——
+  而少数的那一版和正确的那一版在屏幕上长得一模一样(与 `memberConversations` 同一纪律)。
+  截断标志用 **`limit + 1` 多取一条**判:`rows.length === limit` 会把「**恰好** limit 条」
+  误报成被截断,而「这一页里还含甲方的话」也会让它与线头的 `messageCount` 对不上。
+
+⚠️ **窗口取的是最近 N 条,交回去必须倒回正序**(旧 → 新)。切尾巴要从**末尾**切
+(`slice(len - limit)`):仓储层交回来的已经是正序,`slice(0, limit)` 会把窗口变成
+「最早 N 条」—— 这条是本次实现的第一个 bug,回归钉住了它(正负样本各一)。
+
+**「进行中」的数据源 = 前端 WS 的**在飞轮**(
+`web/src/stores/chat.ts` 的 `inFlight`,按 `projectId + agentId` 过滤)。
+**没有**用忙闩(`hub.runningTurns()`):它答的是「**有没有回合在跑**」,不带
+`sessionId` 也不带内容 —— 用它只能显示一个「在跑」的灯,给不了「他在说什么」。
+⇒ **代价要说清**:WS 断流时那一块会空,界面如实写「进行中的内容只在它正在跑的时候
+看得见」,而**已完成的那部分照常显示**(它来自库,与 WS 无关)。
+
+⚠️ **「读不到」与「还没查过」都不许长成「共 0 条」** —— 三态在界面上必须不同:
+`读不到` / `正在读取…` / `共 N 条`。这三支由 `AgentConversationBody` 的 `known`
+判据承担,**同一个不变式在两处被断言**:行为副作用在
+`tests/web/members-conversations.test.ts`,源码级接线在
+`tests/web/c10-dead-code.test.ts`(那条「错误要传下去」的断言 2026-10-26 换了落点,
+判据一个字没改)。
+
+⚠️ **落库的只有回合的最终正文**:工具调用与思考**不进 `session_messages`**
+(库里只有 `user` / `assistant` / `system` 三种 kind)。所以「已完成」看到的是
+**那个回合说了什么**,不是全过程流水;「进行中」才看得到思考块与工具名。
+界面上这两件事分开显示(`liveTurnParts`),与 7-I「`thinking` 与 `text` 是两条流」同源。
+
+回归:`tests/platform/agent-conversations.test.ts`(12 条)·
+`tests/web/members-conversations.test.ts`(14 条)·
+`tests/web/members-activity.test.ts`(适配新 prop,40 条) ·
+变异自检 10 条全部实测变红(`.probe/mutation-agent-conversations.py`,每条都断言
+「改后那一行确实变了」)。
+
 ### 交付物**类型**(2026-10-07 / 2026-10-08,migration 025 / 026)
 
 用户原话(2026-10-07):「定义一下交付物都有哪些类型,先实现一个最简单的,html 的报告(技术方案、
@@ -1008,7 +1072,7 @@ node -e "console.log(Object.keys(require('./node_modules/@earendil-works/pi-ai/d
 ```
 npx tsc -p tsconfig.server.json --noEmit
 npx tsc -p tsconfig.web.json --noEmit
-npm test                  # 2208 passed / 112 files
+npm test                  # 2232 passed / 114 files
 npm run build
 npm run check:design      # 设计一致性 E1–E14
 ```

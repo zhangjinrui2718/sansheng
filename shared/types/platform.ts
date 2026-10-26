@@ -1236,6 +1236,53 @@ export interface MemberConversationsResponse {
   groups: MemberConversationView[];
 }
 
+/**
+ * 一个 agent 在**一条对话线**上的行踪(成员页「他说了什么」的线头)。
+ *
+ * ⚠️ **`messageCount` 是「他在这条线上说了几条」,不是「这条线上共有几条」** ——
+ * 后者含别人的发言与平台通知。两者在界面上长得不一样,所以这一列只数他的。
+ */
+export interface AgentConversationLineView {
+  /** 这条对话线(`project_sessions.id`) */
+  sessionId: string;
+  /** 这条线叫什么。`null` = 甲方没起名(读面显示「对话」,不编一个出来) */
+  title: string | null;
+  /** `main` = 主对话;`thread` = 甲方另开的线 */
+  kind: "main" | "thread";
+  /** `internal` = 项目内部会话;`client` = 交付对话 */
+  channel: "internal" | "client";
+  /** 他在这条线上的消息条数(SQL `GROUP BY` 的真值) */
+  messageCount: number;
+  /** 他在这条线上的最后一条消息的时刻 */
+  lastMessageAt: number;
+}
+
+/**
+ * `GET /api/projects/:id/agents/:agentId/conversations` —— **某一个成员的对话全文**。
+ *
+ * ── 它与 `MemberConversationsResponse` 的分工 ──────────────────────
+ *
+ * 那一条回答「**这个项目里谁说过话、各说了几条**」(按 agent 分组,每组一页摘要);
+ * 这一条回答「**某个人具体说了什么**」(逐条对话线 + 那一线的**全文**)。
+ * 成员页要的是后者 —— 前者每条只给 90 字的摘要,那不是「对话内容」。
+ *
+ * ⚠️ **`messages` 里只有两类**:① 他自己的发言;② **甲方在同一线上的话**
+ * (那是他说这些话的上下文)。**别的角色说的话不在这里** —— 那在它们自己的
+ * 面板里;**平台通知(`kind='system'`)也不在这里** —— 那在项目页「组织运行态」。
+ */
+export interface AgentConversationsResponse {
+  projectId: string;
+  agentId: string;
+  /** 他有消息的对话线(主对话在前,其余按最近活跃度) */
+  lines: AgentConversationLineView[];
+  /** 当前展开的那条线;`null` = 还没选(前端自动选第一条) */
+  sessionId: string | null;
+  /** 那条线上的消息,**按时间正序**(旧 → 新),全文不截断 */
+  messages: SessionMessageView[];
+  /** `messages` 被窗口截断了(只看得到最近 N 条) */
+  truncated: boolean;
+}
+
 // ── 用量(回合烧了多少 token;migration 018 的 `turn_usage`)────────
 //
 // ⚠️ **只报 token 数,不报金额** —— SDK 的 `Usage` 上有 `cost`,但用户已定
@@ -1948,6 +1995,13 @@ export function eventProjectId(ev: ServerEvent): string | null {
 //                                                「谁产生了什么对话」:按 agent_id
 //                                                **在 SQL 里** GROUP BY(条数是真值,
 //                                                不是「返回了多少条」)。
+//   GET    /api/projects/:id/agents/:agentId/conversations → AgentConversationsResponse
+//                                                「**某个人具体说了什么**」:逐条对话线
+//                                                + 选中那条线的**全文**(旧 → 新)。
+//                                                `?sessionId=` 选线;`?limit=` 调窗口。
+//                                                `messages` 里只有他自己的话 + 甲方在
+//                                                同一线上的话(别人的发言与平台通知
+//                                                不在这里)。
 //   GET    /api/projects/:id/asks             → { asks: AskView[] }
 //   GET    /api/projects/:id/blockers         → { blockers: BlockerView[] }
 //   GET    /api/projects/:id/changes          → { changes: ChangeView[] }

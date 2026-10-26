@@ -576,40 +576,129 @@ export function listSessionMessages(
     )
     .all(sessionId, n) as RawMessage[];
   // 降序取尾巴、升序交回去 —— 两件事分开写,免得下次有人把 DESC 当成返回顺序
-  return rows.reverse().map((r) => {
-    if (!isSessionMessageKind(r.kind)) {
-      throw new Error(`session_messages 表里出现未定义 kind「${r.kind}」(id=${r.id})`);
-    }
-    // 封套那两列**逐列验闭集**(与 kind 同一条纪律:表里的未定义值是数据错误,
-    // 不是「跳过它」)。`null` 是合法值 —— 它表示「不属于任何封套」(系统通知 /
-    // 019 之前的存量行),由 `views.ts` 合成 `{ source: "unknown" }`。
-    // **两列的组合**不在这里判:那是写口(`appendSessionMessage`)的责任,
-    // 读侧只管如实交出。
-    if (r.origin_source !== null && !isSessionMessageSource(r.origin_source)) {
-      throw new Error(
-        `session_messages 表里出现未定义 origin_source「${r.origin_source}」(id=${r.id})`,
-      );
-    }
-    if (r.trigger_kind !== null && !isSessionMessageTriggerKind(r.trigger_kind)) {
-      throw new Error(
-        `session_messages 表里出现未定义 trigger_kind「${r.trigger_kind}」(id=${r.id})`,
-      );
-    }
-    if (r.todo_kind !== null && !isSessionMessageTodoKind(r.todo_kind)) {
-      throw new Error(
-        `session_messages 表里出现非法的 todo_kind「${r.todo_kind}」(id=${r.id})`,
-      );
-    }
-    return {
-      id: r.id,
-      sessionId: r.session_id,
-      agentId: r.agent_id,
-      kind: r.kind,
-      content: r.content,
-      createdAt: r.created_at,
-      originSource: r.origin_source,
-      triggerKind: r.trigger_kind,
-      todoKind: r.todo_kind,
-    };
-  });
+  return rows.reverse().map(toSessionMessageRow);
+}
+
+/**
+ * 一行原始消息 → {@link SessionMessageRow}(**闭集校验只写一处**)。
+ *
+ * ⚠️ `kind` 与封套那两列**逐列验闭集**(与写口同一条纪律:表里的未定义值是
+ * 数据错误,不是「跳过它」)。`null` 是合法值 —— 它表示「不属于任何封套」
+ * (平台通知 / 019 之前的存量行),由 `views.ts` 合成 `{ source: "unknown" }`。
+ * **两列的组合**不在这里判:那是写口(`appendSessionMessage`)的责任,读侧只管
+ * 如实交出。
+ */
+function toSessionMessageRow(r: RawMessage): SessionMessageRow {
+  if (!isSessionMessageKind(r.kind)) {
+    throw new Error(`session_messages 表里出现未定义 kind「${r.kind}」(id=${r.id})`);
+  }
+  if (r.origin_source !== null && !isSessionMessageSource(r.origin_source)) {
+    throw new Error(
+      `session_messages 表里出现未定义 origin_source「${r.origin_source}」(id=${r.id})`,
+    );
+  }
+  if (r.trigger_kind !== null && !isSessionMessageTriggerKind(r.trigger_kind)) {
+    throw new Error(
+      `session_messages 表里出现未定义 trigger_kind「${r.trigger_kind}」(id=${r.id})`,
+    );
+  }
+  if (r.todo_kind !== null && !isSessionMessageTodoKind(r.todo_kind)) {
+    throw new Error(
+      `session_messages 表里出现非法的 todo_kind「${r.todo_kind}」(id=${r.id})`,
+    );
+  }
+  return {
+    id: r.id,
+    sessionId: r.session_id,
+    agentId: r.agent_id,
+    kind: r.kind,
+    content: r.content,
+    createdAt: r.created_at,
+    originSource: r.origin_source,
+    triggerKind: r.trigger_kind,
+    todoKind: r.todo_kind,
+  };
+}
+
+/**
+ * **一个 agent 在一个项目的哪些对话线上说过话**,每条线一个计数。
+ *
+ * ── 为什么计数必须来自 SQL `GROUP BY` ────────────────────────────
+ *
+ * 与 `memberConversations` 同一条纪律:条数是**真值**,而「返回了多少条」是
+ * 分页。两者混在一起的那一版,会在消息一多时**静默少数** —— 而少数的那一版和
+ * 正确的那一版在屏幕上长得一模一样。
+ *
+ * ⚠️ **只数他自己**(`agent_id = ?`):平台通知与甲方的话都是 `agent_id IS NULL`,
+ * 不该被算成「他说了几句」。
+ */
+export interface AgentSessionLineCount {
+  sessionId: string;
+  messageCount: number;
+  /** 他在这条线上的最后一条消息的时刻 */
+  lastMessageAt: number;
+}
+
+export function countAgentSessionLines(
+  db: Database.Database,
+  projectId: string,
+  agentId: string,
+): AgentSessionLineCount[] {
+  const rows = db
+    .prepare(
+      `SELECT m.session_id AS sessionId,
+              COUNT(*) AS n,
+              MAX(m.created_at) AS lastAt
+         FROM session_messages m
+         JOIN project_sessions s ON s.id = m.session_id
+        WHERE s.project_id = ? AND m.agent_id = ?
+        GROUP BY m.session_id`,
+    )
+    .all(projectId, agentId) as Array<{
+      sessionId: string;
+      n: number;
+      lastAt: number;
+    }>;
+  return rows.map((r) => ({
+    sessionId: r.sessionId,
+    messageCount: r.n,
+    lastMessageAt: r.lastAt,
+  }));
+}
+
+/**
+ * **某个 agent 在一条对话线上的消息** —— 他自己的话 **+ 甲方在同一线上的话**。
+ *
+ * ── 为什么带上甲方的话 ────────────────────────────────────────────
+ *
+ * 他说的每一句都是**回**某一句话的。没有甲方那一句,屏幕上就是一串没有对象的
+ * 回答;而「他为什么说这句」在库里**只有那一条**记录(别的角色的话不在这里,
+ * 平台通知也不在这里)。
+ *
+ * ⚠️ **甲方的话与平台通知必须靠 `kind` 分开** —— 两者在库里都是
+ * `agent_id IS NULL`(见 `memberConversations` 的同名判据):只按 `agent_id`
+ * 过滤会把 `kind='system'` 的平台通知也端上来,那是**平台**的记录,不是对话。
+ *
+ * ⚠️ **顺序与窗口**:最新 `limit` 条,再倒回**正序**(旧 → 新)交回去 ——
+ * 与 {@link listSessionMessages} 同一把尺(`created_at DESC, id DESC` 取尾巴、
+ * 升序交回),所以同一毫秒的次序在整个仓储层是一致的。
+ */
+export function listAgentSessionMessages(
+  db: Database.Database,
+  sessionId: string,
+  agentId: string,
+  limit = 200,
+): SessionMessageRow[] {
+  const n = normalizeMessageLimit(limit);
+  if (n === 0) return [];
+  const rows = db
+    .prepare(
+      `SELECT * FROM session_messages
+        WHERE session_id = ?
+          AND (agent_id = ? OR (agent_id IS NULL AND kind = 'user'))
+        ORDER BY created_at DESC, id DESC
+        LIMIT ?`,
+    )
+    .all(sessionId, agentId, n) as RawMessage[];
+  return rows.reverse().map(toSessionMessageRow);
 }

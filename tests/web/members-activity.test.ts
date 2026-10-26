@@ -130,44 +130,16 @@ const WK_TODO_LABEL = "执行工作项:把导出接口写完";
 const WK_ARTIFACT_TITLE = "导出接口的实现说明";
 const WK_MSG_EXCERPT = "我把导出接口写完";
 
-const msg = (id: string, agentId: string, kind: SessionMessageView["kind"], content: string): SessionMessageView => ({
-  id,
-  projectId: "p1",
-  agentId,
-  agentName: null,
-  kind,
-  content,
-  createdAt: 1_700_000_000_000,
-  origin: { source: "turn", trigger: { kind: "todo" } },
-});
-
-function conversation(
-  agentId: string | null,
-  over: Partial<MemberConversationView> = {},
-): MemberConversationView {
-  return {
-    agentId,
-    agentName: null,
-    role: null,
-    total: 0,
-    byKind: {},
-    messages: [],
-    truncated: false,
-    ...over,
-  };
-}
-
-const WK_CONVERSATION = conversation(WK_ID, {
-  total: 2,
-  byKind: { assistant: 2 },
-  messages: [msg("m2", WK_ID, "assistant", WK_MSG_EXCERPT), msg("m1", WK_ID, "assistant", "先看现有接口")],
-});
-
-const BM_CONVERSATION = conversation(BM_ID, {
-  total: 1,
-  byKind: { assistant: 1 },
-  messages: [msg("m3", BM_ID, "assistant", BM_MSG_EXCERPT)],
-});
+/**
+ * ⚠️ **2026-10-26:这一块从「清单」改成「全文」** —— 成员面板里那块
+ * 「他产生了什么对话」原来是 `member-conversations` 给的一组摘要(每条截到
+ * 90 字),用户要的是「**具体的对话内容**」。于是:
+ *   · `MemberPane` 的 `conversation` / `conversationError` 两个 prop **删掉了**
+ *     (它们的读者已经不在了);
+ *   · 那两条判据(「条数用 SQL 真值」与「读不到 ≠ 0 条」)**一条没丢** ——
+ *     它们搬到了 `tests/web/members-conversations.test.ts`,断言对象换成
+ *     `AgentConversationBody`(新组件的纯 props 展示件)。
+ */
 
 function artifact(id: string, over: Partial<ArtifactView> = {}): ArtifactView {
   return {
@@ -310,12 +282,11 @@ const BM_ACTIVITY = activity(BM_ID, {
 const renderPane = (over: {
   member: MemberView;
   activity: MemberActivityView | null;
-  conversation: MemberConversationView | null;
   /**
-   * ⚠️ **必填** —— 「读不到对话记录」与「他没有说过话」在屏幕上都是「0 条 + 一句
-   * 空态」,所以调用点必须显式表态(传 `null` = 这次请求没出错)。
+   * ⚠️ **2026-10-26 新增** —— 「他说了什么」那块自己取数(它有自己的端点),
+   * 所以面板要拿得到 `projectId`。
    */
-  conversationError: string | null;
+  projectId: string;
   artifacts: readonly ArtifactView[];
   runtime: ProjectLiveView["runtime"] | null;
   dispatch: ProjectLiveView["dispatch"] | null;
@@ -328,8 +299,7 @@ const renderWorker = (over: Partial<Parameters<typeof renderPane>[0]> = {}) =>
   renderPane({
     member: WK,
     activity: WK_ACTIVITY,
-    conversation: WK_CONVERSATION,
-    conversationError: null,
+    projectId: "p1",
     artifacts: WK_ARTIFACTS,
     runtime: "host",
     dispatch: DISPATCH,
@@ -360,8 +330,6 @@ describe("① 一次只渲染一个成员(这一版要修的正是「四个人�
       renderPane({
         member: BM,
         activity: BM_ACTIVITY,
-        conversation: BM_CONVERSATION,
-        conversationError: null,
         artifacts: BM_ARTIFACTS,
         runtime: "host",
         dispatch: DISPATCH,
@@ -450,8 +418,6 @@ describe("① 一次只渲染一个成员(这一版要修的正是「四个人�
         member: createElement(MemberPane, {
           member: WK,
           activity: WK_ACTIVITY,
-          conversation: WK_CONVERSATION,
-          conversationError: null,
           artifacts: WK_ARTIFACTS,
           runtime: "host",
           dispatch: DISPATCH,
@@ -488,7 +454,12 @@ describe("① 一次只渲染一个成员(这一版要修的正是「四个人�
 
   it("面板里的折叠块默认都不展开(否则一屏又被消息与常量刷满)", () => {
     const html = renderWorker();
-    expect((html.match(/<details/g) ?? []).length, "折叠块存在(details 渲染出来了)").toBeGreaterThan(0);
+    // ⚠️ 2026-10-26:面板里原先**唯一**的折叠块是那块「他产生了什么对话」
+    //    (每条 90 字的摘要列表)—— 它被换成了「他说了什么」那块全文读面,
+    //    而那块自己取数(SSR 下没数据 ⇒ 不渲染任何 details)。
+    //    ⇒ 「至少有一个 details」这条**正样本自检**搬到了
+    //    `tests/web/members-conversations.test.ts`(那里能注入数据);
+    //    **这里保留的是那条真正的不变式**:面板里不许有展开的折叠块。
     expect(/<details[^>]*\sopen/.test(html), "有 details 是展开的 —— 默认折叠的承诺破了").toBe(false);
   });
 });
@@ -670,8 +641,6 @@ describe("④ live.data === null(还没拿到过)⇒ 「正在读取」,不是�
   const noSnapshot = renderPane({
     member: WK,
     activity: null,
-    conversation: null,
-    conversationError: null,
     artifacts: [],
     runtime: null,
     dispatch: null,
@@ -702,8 +671,7 @@ describe("④ live.data === null(还没拿到过)⇒ 「正在读取」,不是�
       renderPane({
         member: WK,
         activity: null,
-        conversation: WK_CONVERSATION,
-        conversationError: null,
+        projectId: "p1",
         artifacts: WK_ARTIFACTS,
         runtime: null,
         dispatch: null,
@@ -711,7 +679,10 @@ describe("④ live.data === null(还没拿到过)⇒ 「正在读取」,不是�
         now: 0,
       }),
     );
-    expect(text).toContain("他产生了什么对话 · 2 条");
+    // ⚠️ 2026-10-26:对话那块从「清单」改成「全文」(`AgentConversations`),
+    // 它**自己取数** ⇒ SSR 下它显示的是「正在读取对话内容…」,而不是条数。
+    // 条数与「读不到」那两条判据搬到了 `tests/web/members-conversations.test.ts`。
+    expect(text).toContain("他说了什么");
     expect(text).toContain("他产出了什么工件 · 2 件");
   });
 });
@@ -867,24 +838,18 @@ describe("⑦ 「N 条」「N 件」的 N 必须来自真实数据", () => {
     expect(text, "凭空多报了一件").not.toContain("· 5 件");
   });
 
-  it("对话条数用 `group.total`(SQL GROUP BY 的真值),**不是** messages.length", () => {
-    const truncated = conversation(WK_ID, {
-      total: 9,
-      byKind: { assistant: 9 },
-      messages: [msg("m2", WK_ID, "assistant", WK_MSG_EXCERPT), msg("m1", WK_ID, "assistant", "先看现有接口")],
-      truncated: true,
-    });
-    const text = visible(renderWorker({ conversation: truncated }));
-    expect(text).toContain("他产生了什么对话 · 9 条");
-    expect(text, "拿返回条数冒充了总数").not.toContain("他产生了什么对话 · 2 条");
-    expect(text).toContain("只显示最近 2 条(共 9 条");
-  });
+  // ⚠️ 2026-10-26:原来这里有两条关于**对话条数**的判据(「用 `group.total`
+  // 这个 SQL 真值」与「一条都没有时如实说 0」)。对话那块从「清单」改成
+  // 「**全文**」(`AgentConversations`)之后,条数由**新端点**给
+  // (`AgentConversationLineView.messageCount`,同样是 SQL `GROUP BY` 的真值)
+  // ⇒ **两条判据一条没丢**,断言对象换成新组件的纯 props 展示件,
+  // 搬到了 `tests/web/members-conversations.test.ts`。
+  //
+  // ⚠️ 这里保留的是**工件**那条 —— 它与对话无关,不受那次改动影响。
 
-  it("一条都没有的成员:如实说 0,而且说清是「还没有」", () => {
-    const text = visible(renderWorker({ conversation: null, artifacts: [] }));
-    expect(text).toContain("他产生了什么对话 · 0 条");
+  it("一条都没有的成员:工件那栏如实说 0,而且说清是「还没有」", () => {
+    const text = visible(renderWorker({ artifacts: [] }));
     expect(text).toContain("他产出了什么工件 · 0 件");
-    expect(text).toContain("还没有发言。");
     expect(text).toContain("他还没有产出的工件。");
   });
 });
@@ -937,17 +902,16 @@ describe("⑨ 年龄会随本地时间往前推(时间看起来在走)", () => {
 // 2026-10-06 合并 harness 到成员页时,页面上**唯一**渲染 `conversations.error`
 // 的那一处被删掉了 ⇒ 端点失败时每个人的对话块都会显示「还没有发言。」(0 条),
 // 而那句话是假的:这一次请求根本没成功。两者在屏幕上一模一样,所以必须分开。
+//
+// ⚠️ **2026-10-26:这条判据搬走了,但没丢** —— 对话那块从「清单」改成「全文」
+// 之后,读面与端点都换了(`AgentConversations` + 新的 agent 级端点),所以
+// 断言对象换成新组件,文件是 `tests/web/members-conversations.test.ts`。
+// 判据本身(「读不到」不许显示成「0 条」/「他没说过话」)逐字保留在那里。
 describe("⑪ 对话记录「读不到」不许显示成「没有发言」", () => {
-  it("有错误 ⇒ 标题写「读不到」并给出原因,而**不是**一句 0 条的空态", () => {
-    const text = visible(renderWorker({ conversationError: "Failed to fetch" }));
-    expect(text).toContain("读不到");
-    expect(text).toContain("Failed to fetch");
-    expect(text, "把请求失败说成「0 条」就是撒谎").not.toContain("他产生了什么对话 · 0 条");
-  });
-
-  it("负样本:没有错误时才走「N 条」与空态(证明上面那条不是恒真)", () => {
-    const ok = visible(renderWorker({ conversationError: null }));
-    expect(ok).toContain("他产生了什么对话 · 2 条");
-    expect(ok).not.toContain("读不到");
+  it("这条判据已经搬到 `tests/web/members-conversations.test.ts`(见上面的注释)", () => {
+    // ⚠️ 这里**故意不断言任何东西**:断言对象(那个 prop)已经不存在了,
+    // 留一个空的 `it` 会让人以为这里还有判据。真正的判据在
+    // `tests/web/members-conversations.test.ts` 的判据 ④。
+    expect(true).toBe(true);
   });
 });

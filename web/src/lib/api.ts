@@ -32,6 +32,7 @@
  * `http_<status>`,**不吞错**:调用方永远能拿到一个可判断、可展示的错误对象。
  */
 import type {
+  AgentConversationsResponse,
   AppConfigResponse,
   ArtifactAcceptanceView,
   ArtifactContentView,
@@ -271,6 +272,29 @@ export function listMemberConversations(
   const q = opts?.limit !== undefined ? `?limit=${encodeURIComponent(String(opts.limit))}` : "";
   return request<MemberConversationsResponse>(
     `/projects/${encodeURIComponent(id)}/member-conversations${q}`,
+  );
+}
+
+/**
+ * **某一个成员具体说了什么**(成员页的全文读面)。
+ *
+ * ⚠️ 与 {@link listMemberConversations} 的分工:那条答「谁说过话、各几条」
+ * (每组一页摘要);这条答「**某个人说了什么**」—— 逐条对话线 + 选中那条线的
+ * **全文**(旧 → 新)。`sessionId` 不传 = 后端选第一条(主对话优先)。
+ */
+export function listAgentConversations(
+  id: string,
+  agentId: string,
+  opts?: { sessionId?: string; limit?: number },
+): Promise<AgentConversationsResponse> {
+  const params = new URLSearchParams();
+  if (opts?.sessionId !== undefined && opts.sessionId !== "") {
+    params.set("sessionId", opts.sessionId);
+  }
+  if (opts?.limit !== undefined) params.set("limit", String(opts.limit));
+  const q = params.toString();
+  return request<AgentConversationsResponse>(
+    `/projects/${encodeURIComponent(id)}/agents/${encodeURIComponent(agentId)}/conversations${q === "" ? "" : `?${q}`}`,
   );
 }
 

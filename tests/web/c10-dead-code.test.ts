@@ -90,15 +90,40 @@ describe("C10 · ChatComposer 的「Esc 中断」要么接线要么不承诺", (
 // 断言的是「接线在不在」,不是「渲染出来长什么样」(后者由各自页面的 SSR 测试管)。
 describe("C10 追加 · 两处诚实接线不许被顺手删掉", () => {
   const members = readFileSync(join(WEB_SRC, "routes/Members.tsx"), "utf8");
+  /**
+   * ⚠️ **2026-10-26:①的落点变了,判据没变。**
+   *
+   * 成员面板里那块「他产生了什么对话」从「清单」改成了「全文」——
+   * 它**自己取数**(`GET /api/projects/:id/agents/:agentId/conversations`),
+   * 所以 `conversationError={conversations.error}` 这条接线**搬到了新组件里**。
+   * 判据本身一个字没改:**「读不到」不许显示成「没有发言/0 条」**。
+   *
+   * ⇒ 断言从「Members.tsx 把 error 传给面板」改成「新组件把 error 传下去、
+   *    并且拿到 error 时**不说 0 条**」,再加一条「成员页真的在用新组件」
+   *    (否则上面两条会变成对一个**没有任何读者的文件**的断言 —— 恒真的假检查)。
+   */
+  const agentConv = readFileSync(
+    join(WEB_SRC, "components/members/AgentConversations.tsx"),
+    "utf8",
+  );
 
   it("① 成员页把对话端点的错误传进面板(「读不到」≠「没有发言」)", () => {
     expect(
-      /conversationError=\{conversations\.error\}/.test(members),
-      "Members.tsx 必须把 conversations.error 传给 MemberPane —— 删掉它,端点失败时" +
-        "每个人的对话块都会显示「还没有发言。」(0 条),而那句话是假的",
+      /<AgentConversations/.test(stripComments(members)),
+      "成员页必须真的渲染 AgentConversations —— 否则下两条是在断言一个没有读者的文件",
     ).toBe(true);
-    // 正样本自检:同一条正则对一个**必然不匹配**的串要给 false(防止这条断言恒真)
-    expect(/conversationError=\{conversations\.error\}/.test("conversationError={null}")).toBe(false);
+    expect(
+      /error=\{conv\.error\}/.test(agentConv),
+      "AgentConversations 必须把取数错误传给展示件 —— 删掉它,端点失败时" +
+        "每个人的对话块都会显示「共 0 条」,而那句话是假的",
+    ).toBe(true);
+    expect(
+      /error !== null \? "读不到"/.test(agentConv),
+      "拿到 error 时必须走「读不到」那一支(而不是拿 total 冒充)",
+    ).toBe(true);
+    // 正样本自检:这两条正则对**必然不匹配**的串要给 false(防止断言恒真)
+    expect(/error=\{conv\.error\}/.test("error={null}")).toBe(false);
+    expect(/<AgentConversations/.test("<MemberPane")).toBe(false);
   });
 
   it("② 面板里保存 harness 之后,页签角标那一份必须重取(revision 要接上)", () => {

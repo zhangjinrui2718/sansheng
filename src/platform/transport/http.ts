@@ -71,11 +71,13 @@ import {
 import { ensureSession } from "../transport/hub.js";
 import {
   getSession, insertSession, listAllSessions, listSessions, listSessionMessages,
+  countAgentSessionLines, listAgentSessionMessages,
   isSessionMessageKind, isSessionMessageSource, isSessionMessageTodoKind, isSessionMessageTriggerKind,
 } from "../storage/repo/sessions.js";
 import type { SessionMessageKind, SessionMessageRow, SessionRow } from "../storage/repo/sessions.js";
 import type {
   ArtifactContentView,
+  AgentConversationLineView, AgentConversationsResponse,
   HarnessView, MemberConversationView, MemberConversationsResponse,
   KnowledgeChunkView,
   PromptUnitView, RepoCommitsView, RoleHarnessView, SessionIndexEntry,
@@ -693,6 +695,30 @@ export function createPlatformApp(deps: HttpDeps): Hono {
       ? Math.min(Math.floor(raw), MEMBER_GROUP_LIMIT_MAX)
       : MEMBER_GROUP_LIMIT;
     return c.json(memberConversations(db, id, limit));
+  });
+
+  /**
+   * 「**某一个成员具体说了什么**」—— 成员页的**全文**读面。
+   *
+   * ⚠️ **与上面那条 `/member-conversations` 的分工**:那条答「谁说过话、各几条」
+   * (清单,每组一页摘要);这条答「**某个人说了什么**」(逐条对话线 + 全文)。
+   * 用户要看的是后者 —— 每条 90 字的摘要不是「对话内容」。
+   *
+   * `?sessionId=` 选哪条线(不传 = 第一条,主对话优先);`?limit=` 调窗口。
+   * 选了**他真没有消息的线**时端点不报错 —— 那个 id 对他没意义,端点会退回
+   * 第一条线并在 `sessionId` 里说清它选了哪条(界面照着显示,不静默换一个)。
+   */
+  app.get("/api/projects/:id/agents/:agentId/conversations", (c) => {
+    const id = c.req.param("id");
+    if (getProjectRow(db, id) === null) return c.json(err("not_found", "项目不存在", 404).body, 404);
+    const raw = Number(c.req.query("limit"));
+    const limit = Number.isFinite(raw) && raw > 0
+      ? Math.min(Math.floor(raw), AGENT_CONVERSATION_LIMIT_MAX)
+      : AGENT_CONVERSATION_LIMIT;
+    const sessionId = c.req.query("sessionId");
+    return c.json(
+      agentConversations(db, id, c.req.param("agentId"), sessionId ?? null, limit),
+    );
   });
 
   // ── 接待会话(第一个项目之前)──────────────────────────────────
@@ -1927,4 +1953,90 @@ export function memberConversations(
   }
 
   return { projectId, limit, groups };
+}
+
+/**
+ * 成员页「**他具体说了什么**」的全文读面 —— `agentConversations`。
+ *
+ * ── 它与 `memberConversations` 的分工(两条端点,两个问题)─────────
+ *
+ *   · `memberConversations` 答「**这个项目里谁说过话、各说了几条**」(按 agent
+ *     分组,每组一页 200 条摘要)—— 那是**清单**。
+ *   · `agentConversations` 答「**某个人具体说了什么**」(逐条对话线 + 选中那条线
+ *     的**全文**)—— 那是**内容**。
+ *
+ * ⚠️ **为什么不能拿 `memberConversations` 的那一页充数**:那一页是
+ * `ORDER BY created_at DESC LIMIT n` 的**最近 n 条**,而用户要看的是
+ * 「从头到尾说过什么」—— 顺序还必须是**正序**(旧 → 新),不然读起来像倒放。
+ *
+ * ⚠️ **条数与正文分开取**:线头上的 `messageCount` 来自 SQL `GROUP BY`
+ * (真值),`messages` 是一**页**(窗口)。两者混在一起的那一版会在消息一多时
+ * **静默少数** —— 而少数的那一版和正确的那一版在屏幕上长得一模一样
+ * (与 `memberConversations` 同一条纪律)。
+ */
+const AGENT_CONVERSATION_LIMIT = 200;
+const AGENT_CONVERSATION_LIMIT_MAX = 500;
+
+export function agentConversations(
+  db: Database.Database,
+  projectId: string,
+  agentId: string,
+  sessionId: string | null,
+  limit: number,
+): AgentConversationsResponse {
+  // ── ① 线头:哪些线上有他的话、每条线几条(SQL `GROUP BY` 的真值)────
+  const counts = countAgentSessionLines(db, projectId, agentId);
+  // ── ② 线名:**复用 `sessionSummariesOf`**(与 `/sessions`、`/api/sessions`
+  //    同一个来源)—— 线的名字(尤其是交付会话的名字 = 交付物标题)**不许**
+  //    在三处各写一份,它们会当场漂开(见那个函数的注释)。
+  const summaries = new Map(
+    sessionSummariesOf(db, listSessions(db, projectId)).map((s) => [s.id, s] as const),
+  );
+  const lines: AgentConversationLineView[] = counts
+    .map((c) => {
+      const s = summaries.get(c.sessionId);
+      return {
+        sessionId: c.sessionId,
+        // `null` = 这条线没有名字 —— 读面显示「对话」,**不编一个出来**。
+        title: s?.title ?? null,
+        kind: s?.kind ?? "thread",
+        channel: s?.channel ?? "internal",
+        messageCount: c.messageCount,
+        lastMessageAt: c.lastMessageAt,
+      };
+    })
+    // 次序与 `sessionSummariesOf` 同一把尺:主对话在前,其余按最近活跃度。
+    .sort((a, b) =>
+      (a.kind === "main" ? 0 : 1) - (b.kind === "main" ? 0 : 1) || b.lastMessageAt - a.lastMessageAt,
+    );
+
+  // ── ③ 选中哪条线 ────────────────────────────────────────────────
+  // 显式指定的那条**必须是他真有消息的线** —— 否则会端出一条「他没说过话」的
+  // 线(客户端传错 id 与「他没发言」在屏幕上长得一样)。
+  const picked =
+    sessionId !== null && lines.some((l) => l.sessionId === sessionId)
+      ? sessionId
+      : (lines[0]?.sessionId ?? null);
+
+  // ── ④ 正文:那条线上「他的话 + 甲方的话」,**正序**(旧 → 新)──────
+  const agent = getAgent(db, agentId);
+  const nameOf = (): string => (agent !== null ? agent.displayName : agentId);
+  // ⚠️ **多取一条**(`limit + 1`)用来判「被截断了」—— 拿 `rows.length === limit`
+  //    判会把「**恰好** limit 条」误报成被截断(而那不是截断,是刚好取完)。
+  const fetched = picked === null
+    ? []
+    : listAgentSessionMessages(db, picked, agentId, limit + 1);
+  const truncated = fetched.length > limit;
+  // ⚠️ **从尾巴切**(不是从头切):`listAgentSessionMessages` 交回来的是
+  //    **正序**(旧 → 新),所以「最近 limit 条」是**末尾**那 limit 条 ——
+  //    从头切会切掉**最早**的那些(交出去一段旧历史,窗口变成了「最早 N 条」)。
+  const rows = truncated ? fetched.slice(fetched.length - limit) : fetched;
+  const messages: SessionMessageView[] = rows.map((row) => toMessageView(row, nameOf, projectId));
+
+  // ⚠️ 截断标志**不能**拿 `messages.length` 与线头的 `messageCount` 比大小:
+  //    这一页里还含**甲方的话**,而 `messageCount` 只数**他**的话 ⇒ 两个不是
+  //    同一个集合,那种比较会把「这一页里有甲方的话」误报成「被截断了」。
+  //    `limit + 1` 那一条是**唯一**可靠的判据(它问的是「库里还有没有」)。
+
+  return { projectId, agentId, lines, sessionId: picked, messages, truncated };
 }

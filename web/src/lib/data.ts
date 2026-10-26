@@ -28,6 +28,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { todoKindReachesClient } from "@shared/types/platform";
 import type {
+  AgentConversationsResponse,
   ArtifactContentView,
   ArtifactView,
   AskView,
@@ -425,6 +426,36 @@ export function useMemberConversations(projectId: string | null): Loaded<MemberC
     [projectId, revision],
   );
   return { data: r.data?.groups ?? [], loading: r.loading, error: r.error };
+}
+
+/**
+ * **某一个成员的对话全文**(`GET /api/projects/:id/agents/:agentId/conversations`)。
+ *
+ * ⚠️ **与 `useMemberConversations()` 不是一回事**:那条给的是「每人一条清单」
+ * (每条 90 字的摘要 + 一个总数);这条给的是「**某个人具体说了什么**」——
+ * 逐条对话线 + 选中那条线的**全文**。成员页要展示「对话内容」时用这条。
+ *
+ * ⚠️ **`data` 可能是 `null`**(而不是 `[]`):「还没查过」与「查过了,是空」是
+ * 两件事,前者不许渲染成「他一句话都没说过」(与 `useProjectUsage` 的同一条
+ * 纪律)。调用方只在 `loading === false && error === null` 时把 `data` 当数据。
+ *
+ * ⚠️ **刷新靠 `projectRevision`** —— WS 的 `agent_end` / `work_changed` 等事件
+ * 递增它,页面据此回查**权威值**。事件会丢(断流),库不会。
+ */
+export function useAgentConversations(
+  projectId: string | null,
+  agentId: string | null,
+  sessionId?: string | null,
+): Loaded<AgentConversationsResponse | null> {
+  const revision = useChatStore((s) => s.projectRevision);
+  const r = useLoad(
+    () =>
+      projectId !== null && agentId !== null
+        ? api.listAgentConversations(projectId, agentId, { sessionId: sessionId ?? undefined })
+        : Promise.resolve(null),
+    [projectId, agentId, sessionId ?? null, revision],
+  );
+  return { data: r.data, loading: r.loading, error: r.error };
 }
 
 /**

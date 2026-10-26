@@ -27,6 +27,7 @@ import type {
   ProjectLifecycleStatus,
   ProjectRole,
   ProjectStatus,
+  SessionMessageKind,
   WorkStatus,
 } from "@shared/types/platform";
 import type { Tone } from "@/components/ui/primitives";
@@ -174,6 +175,26 @@ export const ARTIFACT_STATUS_TONE: Record<ArtifactStatus, Tone> = {
   accepted: "bamboo",
   rejected: "cinnabar",
   superseded: "mute",
+};
+
+// ── 会话消息 ────────────────────────────────────────────────────
+
+/**
+ * `session_messages.kind` 的中文读法 —— 它标的是「**这条是什么**」。
+ *
+ * ⚠️ **2026-10-26 从 `routes/Members.tsx` 搬到这里**:那一处原先写着
+ * 「只在这一屏用」,而现在「成员页的对话全文」也要用它 —— 两处各写一张表,
+ * 它们就会当场漂开(与本文件开头的理由同源)。
+ *
+ * ⚠️ `system` 读作「系统」而不是「平台通知」:它落的是**平台的记录**
+ * (排空停下、工作区告警、供应商降级),不是任何角色说的话。
+ */
+export const MESSAGE_KIND_LABEL: Record<SessionMessageKind, string> = {
+  user: "甲方",
+  assistant: "发言",
+  thinking: "思考",
+  tool: "工具",
+  system: "系统",
 };
 
 // ── 提问 / 阻塞 / 变更 ──────────────────────────────────────────
