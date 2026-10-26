@@ -487,6 +487,26 @@ dev/prod + CI/CD」,09:54 业务经理只回了一句「我先看下你之前留
 - **自动切回原 provider**:不做(要么靠健康探测、要么靠墙钟启发式,本项目两条都拒绝);
 - **运行期证据**:`auto_retry_start` 只证到**源码级**(`agent-session.d.ts` 的事件定义 + `agent-session.js` 的发射点),**没做过一次真机 429**。
 
+## 页面注解:出处进词汇表,不进悬停(2026-10-26)
+
+用户要求「去除页面上面过多的注释」。处置与判据:
+
+- **`hintTitle=` 这个 prop 已从 `web/src/components/ui/primitives.tsx` 删掉**
+  (`Section` / `PageHeader` 现在收 `helpId?: GlossaryId`)。写 `hintTitle=` 会 typecheck 失败
+  —— 判据是类型,不是约定。实施前实测 27 处,全部渲染成 `title=` 悬停(触屏不触发、不可复制),
+  其中 13 条是「数据来源:GET …」= **出处**。
+- **出处 / 判据只有一处**:`web/src/lib/glossary.ts`(18 条:`line` ≤ 24 字 + `basis` 判据落点
+  + `source` 端点/表),由 `components/ui/Help.tsx` 的 `?` 呈现(button + 受控浮层)。
+- ⚠️ **`?` 用 `button`,不许改用 `<details>`**:这套代码里 `<details>` 的约定含义是
+  「可折叠的**内容**」,`tests/web/harness-by-role.test.ts` 用「第一个 `<details>` 之前」切
+  卡片头、`artifact-timeline.test.ts` 用「这块里有没有 `<details>`」判「画布有没有默认收起」。
+  第一版用 `<details>` 当场弄红 7 条已有判据 —— **该改的是实现,不是仪器**。
+- ⚠️ **`hint` 的长短不是判据**。`hint="…GET /api…"` 这种「出处冒充一行话」才是错的;
+  `CodeService.tsx` 里 30–74 字的技术事实必须留着。
+- 哨兵:`tests/web/annotation-budget.test.ts`(11 条:悬停 0 处 · 出处不进 `hint` ·
+  同一句话不许抄两遍 · glossary 每条都有读者),3 条变异实测变红。
+  设计全文与剩余波次:`docs/DESIGN-FRONTEND-IA.md`。
+
 ## 数据与存储
 
 - 迁移在 `migrations/`:**007–010 建平台表**,**011 把旧系统的 7 张表 DROP**(`blackboards` / `conversations` / `messages` / `fragments` / `user_profile` / `agent_states` / `fragments_vec`),**012 接待会话**(重建 `project_sessions` 放宽 `project_id` 可空,已登记进 `INTENTIONAL_REBUILDS`),**013 排空器状态**(`works.review_state` + `dispatch_events` + `dispatch_attempts`,纯加法),**014 产出边**(`artifacts.work_id` + 一条部分索引,纯加法),**015 放宽 `dispatch_events.kind`**(加 `work_cancelled`;闭集**只能靠重建表**放宽,已登记进 `INTENTIONAL_REBUILDS`),**016 交付物 kind**(重建 `artifacts`),**017 交付会话**(`project_sessions.deliverable_artifact_id` + `channel`,纯加法),**018 `turn_usage` 表**(纯加法),**019 会话消息的封套**(`session_messages.origin_source` + `trigger_kind`,纯加法;两列各有自己的 CHECK),**020 `client_questions` 台账**,**021 `review_verdicts`**,**022 `session_messages.todo_kind`**(纯加法、**不建 CHECK** —— 取值域随 `TODO_KINDS` 变,闭集在读写两侧的 TS 里),**023 项目版本链**(`projects.version` + `parent_project_id`,`ON DELETE SET NULL`),**024 对话一等实体**(`project_sessions.kind` + `title`;`kind` **有** CHECK —— 两值闭集,与 022 相反),**025 交付物类型**(`artifacts.deliverable_type` + 一条部分索引,纯加法),**026 执行角色一分为二 + 交付物类型加 `code_service`**(⚠️ **重建两张表**:`agents` 的 role 闭集 4→5 值并改名 + `artifacts` 的 `deliverable_type` 闭集 1→2 值;两张都登记进 `INTENTIONAL_REBUILDS`),**027 工件正文落文件**(⚠️ **重建 `artifacts`**:`body TEXT` → `body_path` / `body_sha256` / `body_bytes` 三列 NOT NULL + `commit_sha` 可空;登记进 `INTENTIONAL_REBUILDS`。**它故意不走「建 _new → 拷 → 改名」**:没有数据要拷(用户明确「老数据全不要」),而改名法会让「`artifacts` 被多个迁移创建」这条登记**当场过期**;数据安全改由一条会响的前置检查承担 —— `CHECK (n = 0)`,非空库上**响亮失败并整体回滚**,而不是静默清空)。
@@ -1072,7 +1092,7 @@ node -e "console.log(Object.keys(require('./node_modules/@earendil-works/pi-ai/d
 ```
 npx tsc -p tsconfig.server.json --noEmit
 npx tsc -p tsconfig.web.json --noEmit
-npm test                  # 2232 passed / 114 files
+npm test                  # 2243 passed / 115 files
 npm run build
 npm run check:design      # 设计一致性 E1–E14
 ```
