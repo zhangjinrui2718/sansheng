@@ -76,6 +76,7 @@ export interface Loadable<T> {
 export type RelationSubject =
   | { kind: "artifact"; artifact: ArtifactView }
   | { kind: "work"; work: WorkView }
+  | { kind: "blocker"; blocker: BlockerView }
   | { kind: "member"; memberId: string };
 
 /**
@@ -309,6 +310,25 @@ const GROUPS: Readonly<Record<RelationSubject["kind"], readonly GroupSpec[]>> = 
             to: workLocation(w.id),
             title: "工作项 id:" + w.id,
           }));
+      },
+    },
+  ],
+  blocker: [
+    {
+      key: "blocked_works",
+      title: "它卡住的环节",
+      needs: ["works"],
+      compute: (subject, data) => {
+        if (subject.kind !== "blocker") return [];
+        return subject.blocker.blockedWorkIds.map((id) => {
+          const w = findWork(data, id);
+          return {
+            rel: "",
+            label: titleOfWork(w) ?? id,
+            to: workLocation(id),
+            title: w === undefined ? "本次列表里没有这条工作项" : "工作项 id:" + id,
+          };
+        });
       },
     },
   ],

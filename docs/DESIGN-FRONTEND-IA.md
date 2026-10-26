@@ -168,6 +168,24 @@
 **判据:** `tests/web/project-dashboard.test.ts` —— ① 项目页**不再**包含工作项列表行(负样本);
 ② 计数卡点击 ⇒ selection 被写入;③ `useProjectDetail(` 在四个文件里仍只出现**一次**(既有哨兵不许破坏)。
 
+**实施(2026-10-26)**
+- 新增 `web/src/lib/dashboard.ts`(**判据**,纯数据):`nextThing(facts)` ⇒ 七个档位之一 +
+  判据 + 要不要你动作 + 地址;`countCards(facts, projectId)` ⇒ 六张计数卡。
+- 新增 `web/src/components/dashboard/DashboardCards.tsx`(**排版**):计数卡是真 `<a href>`。
+- 项目页**删掉「工作项」那一段**;工作项现在**只住在工作项页**。
+  ⇒ 项目页在删掉清单之后**唯一**的「活儿」视图是**阻塞卡里的关系栏**(「它卡住的环节」)。
+- ⚠️ **档位名带 `next_` 前缀** —— `orgState.ts` 的派生状态里已经有 `waiting_client` /
+  `unreadable` 两个同名键(那是「组织运行态」那一套)。两套**不同的**状态机用同一批词
+  ⇒ grep 一次出来两个意思 ⇒ 前缀把它们隔开。
+- ⚠️ **数字读 `detail.counts`(服务端算好的)**,不许自己数一遍 —— 自己数会与左栏徽标漂开,
+  而「两个地方显示不同的数字」是最难查的一类病。
+- ⚠️ **读不到 ≠ 没事**:运行态读不到时第一档是 `next_unreadable`,**不是** `next_none`。
+- ⚠️ **两条既有判据改了写法**(落点变了,判据没变,已在测试里写明):
+  `acceptance-dock.test.ts` 的「待验收计数留着」从 `detail.counts.…` 改成认 `detail?.counts.…`;
+  `annotation-budget.test.ts` 的 `work.status` 词汇条的读者从**项目页**搬到**工作项页**
+  (工作项现在只住在工作项页)。
+- 变异自检 `.probe/mutation-dashboard.py`(**10 条,全部实测变红**)。
+
 ### 3.5 两张图还是三张图
 
 **保留两张**(分工是真问题):DAG 答「它们之间是什么关系」,时间泳道答「什么时候发生的」。
@@ -575,5 +593,25 @@ M10 页面私有 scope 复活 · M11 项目页的关系栏消失 · M12 成员�
 
 **验证**:`2346 passed / 123 files` · 两条 typecheck 0 error · build 绿 · `check:design` E1–E14 绿。
 
-**还没做的**:`§3.4`(项目页降级为「仪表盘 + 钻取」)· `§3.5`(两张图还是三张图)·
-`§7` 三条待裁决。
+**还没做的**:`§3.5`(两张图还是三张图)· `§7` 三条待裁决。
+
+---
+
+## 2026-10-26 · §3.4 项目页降级为仪表盘(已落地)
+
+**交付**:`web/src/lib/dashboard.ts`(判据)· `web/src/components/dashboard/DashboardCards.tsx`(排版)·
+`tests/web/project-dashboard.test.ts`(20 条)· `.probe/mutation-dashboard.py`(10 条,全部实测变红)。
+
+**基线**:`2366 passed / 124 files` · 两条 typecheck 0 error · build 绿 · `check:design` E1–E14 绿。
+
+**三条新教训(#lesson)**
+1. **档位名会撞车** —— `orgState.ts` 的派生状态里已经有 `waiting_client` / `unreadable`,
+   而仪表盘的档位也想叫这两个名字。⇒ 两套**不同的**状态机用同一批词,
+   grep 一次出来两个意思 ⇒ **加 `next_` 前缀**隔开。
+2. **改判要写清「判据没变、落点变了」** —— `acceptance-dock.test.ts` 那条
+   「待验收计数留着」原来 grep `detail.counts.pendingAcceptance`,
+   落点搬到仪表盘后写法变成 `detail?.counts.…`(因为 `useMemo` 跑在空值守卫之前)。
+   ⇒ 判据改成正则认两种写法,并在测试里写明**为什么改**。
+3. **词汇表条目会因「搬走一整段」变成孤儿** —— `work.status` 那条 `?` 的读者
+   原本在项目页的「工作项」段;删掉那一段后它**没人读了**(7-E 的复发)。
+   ⇒ 读者搬到**工作项页**(工作项现在只住在那儿),而不是删条目。

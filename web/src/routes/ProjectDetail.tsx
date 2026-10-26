@@ -60,9 +60,11 @@ import {
   projectStatusLabel,
   projectStatusTone,
 } from "@/lib/vocab";
-import { blockerMeta, workMeta } from "@/lib/entityMeta";
+import { blockerMeta } from "@/lib/entityMeta";
 import { MetadataStrip } from "@/components/ui/MetadataStrip";
 import { RelationsRail } from "@/components/relations/RelationsRail";
+import { DashboardCards } from "@/components/dashboard/DashboardCards";
+import { countCards, nextThing } from "@/lib/dashboard";
 import type { RelationContext } from "@/lib/relations";
 import { useAppLocation, paramOf } from "@/lib/route";
 
@@ -212,6 +214,53 @@ export function ProjectDetailPage() {
   // 两类平台记录的**分类**(platformNotices.ts)与**状态派生**(orgState.ts)都是纯函数 ——
   // 页面只渲染结果,不自己认字符串、也不自己编状态。
   const runtime = orgRuntime({ messages, live: live.data });
+  /**
+   * 仪表盘的事实(判据在 `lib/dashboard.ts`)。
+   *
+   * ⚠️ **每一份都带自己的加载态** —— 「还没查到」与「查过了是 0」在屏幕上长得一样,
+   * 而把一次读失败说成「此刻没有待办」是**自信的假话**。
+   */
+  const dashboardFacts = useMemo(
+    () => ({
+      projectId,
+      works: { data: detail?.works ?? [], loading, error },
+      blockers: { data: blockers, loading, error },
+      pendingQuestions: {
+        count: detail?.pendingQuestions.length ?? 0,
+        loading,
+        error,
+      },
+      pendingAcceptance: {
+        count: detail?.awaitingAcceptance.length ?? 0,
+        loading,
+        error,
+      },
+      live: live.data,
+      liveState: { loading: live.loading, error: live.error },
+    }),
+    [detail?.works, detail?.pendingQuestions, detail?.awaitingAcceptance, blockers, loading, error, live.data, live.loading, live.error, projectId],
+  );
+  /** 「现在最要紧的一件事」—— **排序**,不是评价(判据全在 dashboard.ts)。 */
+  const next = useMemo(() => nextThing(dashboardFacts), [dashboardFacts]);
+  /**
+   * 计数卡 —— **数字读服务端算好的 `detail.counts`**(自己数一遍会与左栏徽标漂开),
+   * 地址由 `dashboard.countCards` 统一给(页面不许手拼地址)。
+   */
+  const cards = useMemo(
+    () =>
+      countCards(
+        {
+          works: detail?.counts.works ?? 0,
+          openWorks: detail?.counts.openWorks ?? 0,
+          artifacts: detail?.counts.artifacts ?? 0,
+          pendingQuestions: detail?.counts.pendingQuestions ?? 0,
+          openBlockers: detail?.counts.openBlockers ?? 0,
+          pendingAcceptance: detail?.counts.pendingAcceptance ?? 0,
+        },
+        projectId,
+      ),
+    [detail?.counts, projectId],
+  );
 
   if (!projectId) {
     return (
@@ -232,22 +281,6 @@ export function ProjectDetailPage() {
             <StatStrip
               items={[
                 { label: "状态", value: projectStatusLabel(detail.status), tone: projectStatusTone(detail.status) },
-                { label: "工作项", value: `${detail.counts.openWorks}/${detail.counts.works}` },
-                { label: "工件", value: detail.counts.artifacts },
-                {
-                  label: "待答",
-                  value: detail.counts.pendingQuestions,
-                  tone: detail.counts.pendingQuestions > 0 ? "amber" : undefined,
-                  title: "等你回答的问题(来自 /api/client-questions 的同一批工件)",
-                },
-                {
-                  label: "待验收",
-                  value: detail.counts.pendingAcceptance,
-                  tone: detail.counts.pendingAcceptance > 0 ? "amber" : undefined,
-                  title:
-                    "已经交付给你、而还没表态的交付物(029)。清单在**对话页右栏「本项目」下面**" +
-                    "——这一页只留计数。判据与收口门同源 —— 它们不清零,项目就收不了口。",
-                },
                 {
                   label: "内部提问",
                   value: asks.length,
@@ -259,6 +292,18 @@ export function ProjectDetailPage() {
           ) : undefined
         }
       />
+
+      {/*
+        仪表盘(2026-10-26)—— **计数卡 + 「现在最要紧的一件事」**。
+
+        ⚠️ **「工作项」那一段从这一页删掉了** —— 它与工作项页**各渲染一遍同一个实体**,
+        而两处各渲染一遍的地方,**关联必然丢**(你在 A 处点中它,B 处不知道)。
+        工作项现在**只住在工作项页**(那边有图、有依赖、有推进图),
+        这一页只留**计数**与**一条要紧的事**。
+        ⇒ 「待答」「待验收」「内部提问」「变更」**都留着** —— 它们是**这一页独有的**
+        (别处没有「本项目的全部提问」这一面),删掉才是真的丢信息。
+      */}
+      {detail && <DashboardCards cards={cards} next={next} />}
 
       {error !== null ? (
         <div className="sansheng-card p-3 text-xs" style={{ color: "var(--cinnabar)" }}>
@@ -453,52 +498,10 @@ export function ProjectDetailPage() {
             </Section>
           )}
 
-          <Section
-            title="工作项"
-            count={detail.works.length}
-            hint="项目经理把目标拆成的工作项"
-            helpId="work.status"
-          >
-            {detail.works.length === 0 ? (
-              <EmptyState>还没有工作项。</EmptyState>
-            ) : (
-              <div className="grid gap-1.5">
-                {detail.works.map((w) => (
-                  <article key={w.id} className="sansheng-card p-2.5">
-                    <div className="flex items-center gap-2 flex-wrap">
-                      <span className="ss-body" style={{ color: "var(--bone)" }}>
-                        {w.title}
-                      </span>
-                    </div>
-                    {/*
-                      身份条 —— 与工作项页那份「选中的环节」面板**同一组事实**
-                      (`lib/entityMeta.ts` 的同一份判据)。「负责人」「父项」是**地址**。
-                    */}
-                    <MetadataStrip items={workMeta(w)} className="mt-1" />
-                    {w.goal.length > 0 && w.goal !== w.title && (
-                      <div className="ss-note mt-0.5" title={w.goal}>
-                        {excerpt(w.goal, 90)}
-                      </div>
-                    )}
-                    {w.dependsOn.length > 0 && (
-                      <div className="ss-meta mt-0.5">依赖 {w.dependsOn.length} 项</div>
-                    )}
-                    {/*
-                      关系栏(摘要模式:只渲染**算出来**且非空的组)。
-                      ⚠️ 上面那行「依赖 N 项」是**计数**,关系栏是**地址** ——
-                      两者不是同一件事(一个是「有几条」,一个是「是哪几条」),
-                      所以都留着;但「子项 / 卡住它的阻塞」此前**这一页根本没有**。
-                    */}
-                    <RelationsRail
-                      subject={{ kind: "work", work: w }}
-                      context={relations}
-                      compact
-                    />
-                  </article>
-                ))}
-              </div>
-            )}
-          </Section>
+          {/* ⚠️ **「工作项」这一段被删掉了**(2026-10-26,仪表盘那一刀)——
+              它与工作项页各渲染一遍同一个实体,而两处各渲染一遍的地方,
+              **关联必然丢**。工作项现在**只住在工作项页**。
+              这里的「计数」在上面的仪表盘卡里,「哪几条」在 `#/works?work=…`。 */}
 
           {/* ⚠️ **「待你验收」不在这一页了**(2026-10-12,用户裁决)。它原来长在
             「工作项」与「待你回答」之间,现在搬到**对话页右栏的「本项目」下面**
@@ -673,6 +676,18 @@ export function ProjectDetailPage() {
                       「哪件事被卡住了」,而一个没有地址的答案只能让人自己去搜。
                     */}
                     <MetadataStrip items={blockerMeta(b, workTitles)} className="mt-1" />
+                    {/*
+                      关系栏 —— **「它卡住的环节」**(带地址)。
+                      ⚠️ 身份条上那一格是**计数**「卡住 2 个工作项」,
+                      这里是把**是哪两条**列出来 —— 两者不是同一件事,都要。
+                      这也是项目页在**删掉工作项列表**之后**唯一**的「活儿」视图:
+                      甲方从这里跳到被卡住的那条环节。
+                    */}
+                    <RelationsRail
+                      subject={{ kind: "blocker", blocker: b }}
+                      context={relations}
+                      compact
+                    />
                     {b.detail.length > 0 && (
                       <div className="ss-note mt-0.5" title={b.detail}>
                         {excerpt(b.detail, 90)}

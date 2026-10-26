@@ -534,6 +534,74 @@
     white-space: nowrap;
   }
 
+  /* 仪表盘(项目页):一排**能点的计数卡** + 一张「现在最要紧的一件事」。
+   *
+   * ⚠️ 计数卡用 `<a>` 而不是 `<button>` —— 右键复制地址 / 中键开新标签 /
+   * 浏览器后退这三件全靠它,而 `onClick` 改 hash 会让它们全部消失,
+   * **而页面看起来一模一样**。 */
+  .ss-dashboard {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+  .ss-dashboard-cards {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+  .ss-dashboard-card {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    min-width: 5.5em;
+    padding: 6px 10px;
+    border: 1px solid var(--ink-3);
+    border-radius: 4px;
+    background: var(--ink-1);
+    text-decoration: none;
+    color: inherit;
+  }
+  a.ss-dashboard-card:hover {
+    border-color: var(--ink-4);
+    background: var(--ink-2);
+  }
+  .ss-dashboard-card-value {
+    font-size: 18px;
+    line-height: 1.2;
+    color: var(--bone);
+    font-variant-numeric: tabular-nums;
+  }
+  .ss-dashboard-card-label {
+    font-size: 11px;
+    color: var(--bone-mute);
+  }
+  .ss-dashboard-next {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding: 10px 12px;
+    border: 1px solid var(--ink-3);
+    border-left: 2px solid var(--ink-4);
+    border-radius: 4px;
+    background: var(--ink-1);
+  }
+  /* 「要你动作」的档位 —— 左边那条线染成琥珀色,其余不染。
+   * ⚠️ 判据是**属性**(`data-next-key`)而不是文案:文案会改,属性不会。 */
+  .ss-dashboard-next[data-next-key="next_high_blocker"],
+  .ss-dashboard-next[data-next-key="next_waiting_client"],
+  .ss-dashboard-next[data-next-key="next_waiting_acceptance"] {
+    border-left-color: var(--amber);
+  }
+  .ss-dashboard-next-label {
+    font-size: 11px;
+    letter-spacing: 0.08em;
+    color: var(--bone-mute);
+  }
+  .ss-dashboard-next-title {
+    font-size: 14px;
+    color: var(--bone);
+  }
+
   /*
    * ═══════════════════════════════════════════════════════════════════════
    * .ss-md —— 会话正文的 markdown 渲染面(批次 markdown)

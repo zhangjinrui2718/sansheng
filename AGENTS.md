@@ -609,6 +609,48 @@ dev/prod + CI/CD」,09:54 业务经理只回了一句「我先看下你之前留
 **回归**:`tests/web/relations.test.ts`(23)· `tests/web/relations-wiring.test.ts`(12)·
 变异 `.probe/mutation-relations.py`(**12 条全部实测变红**)。**基线 2346 passed / 123 files**。
 
+## 项目页降级为「仪表盘」(2026-10-26 · §3.4)
+
+**症状**:项目页**重复列**了工作项、提问、变更、阻塞 —— 与工作项页、成员页是**三份渲染、三份加载态、三份空态措辞**。
+更要命的是「**最要紧的那件事**」这件事**没人判** —— 四段清单平铺,读者要自己比。
+而平台手里明明有全部结构化事实(哪些阻塞是高危的、哪些问题在等甲方、哪些交付物还没验收)。
+
+**两份新文件**:`web/src/lib/dashboard.ts`(判据,纯数据)· `web/src/components/dashboard/DashboardCards.tsx`(排版)。
+
+**五条判据**
+
+1. **「最要紧」是排序,不是评价** —— 档位顺序**写死一处**(`PRIORITY`):
+   `next_unreadable` → `next_high_blocker` → `next_waiting_client` → `next_waiting_acceptance`
+   → `next_stalled_work` → `next_running` → `next_none`。
+   判据**全部来自库里读到的状态**,一条也不来自模型。
+2. **读不到 ≠ 没事** —— 运行态读不到时第一档是 `next_unreadable`,**不是** `next_none`。
+   症状最轻的写法是「此刻没有待办」—— 那是一句**自信的假话**
+   (与 `ProjectLiveView.runtime = "unavailable"`、`DataState` 四态同源)。
+3. **计数不许自己数** —— 数字读服务端算好的 `detail.counts`。
+   自己数一遍会与左栏的徽标**漂开**,而「两个地方显示不同的数字」是最难查的一类病。
+4. **一个实体只渲染一处** —— 项目页**删掉「工作项」那一段**;工作项**只住在工作项页**
+   (那边有图、有依赖、有推进图)。⇒ 项目页在删掉清单之后**唯一**的「活儿」视图是
+   **阻塞卡里的关系栏**(`subject={{ kind: "blocker", blocker: b }}` ⇒ 「它卡住的环节」)。
+5. **每一张卡都是地址** —— 真 `<a href>`(右键复制 / 中键 / 后退三件全靠它);
+   阻塞那张卡**必须带项目 id**(`projectLocation`),否则那是**半个地址**。
+
+⚠️ **档位名带 `next_` 前缀是有意的** —— `web/src/lib/orgState.ts` 的派生状态里
+**已经有** `waiting_client` / `unreadable` 两个同名键(那是「组织运行态」那一套)。
+两套**不同的**状态机用同一批词 ⇒ grep 一次出来两个意思 ⇒ 前缀把它们隔开。
+
+⚠️ **搬走一整段会有两个副作用**(两处都改了判据,不是仪器):
+① `acceptance-dock.test.ts` 的「待验收计数留着」原来 grep `detail.counts.pendingAcceptance`,
+   落点搬进仪表盘后写法变成 `detail?.counts.…`(因为 `useMemo` 跑在空值守卫**之前**)
+   ⇒ 判据改成正则认两种写法,并在测试里写明**为什么改**;
+② `annotation-budget.test.ts` 的 `work.status` 词汇条**没人读了**(7-E 的复发:搬走一整段 ⇒ 读者也走了)
+   ⇒ 读者**搬到工作项页**(工作项现在只住在那儿),而不是删条目。
+
+**回归**:`tests/web/project-dashboard.test.ts`(20 条)· 变异 `.probe/mutation-dashboard.py`
+(**10 条全部实测变红**:M1 读不到当没事 · M2 严重度判据去掉 · M3 已解决也算未解决 ·
+M4 地址丢项目 id · M5 档位顺序换 · M6 「没有」编一件充数 · M7 计数自己数 ·
+M8 工作项列表复活 · M9 页面自己判档位 · M10 卡片不是链接)。
+**基线 2366 passed / 124 files**。
+
 ## 数据与存储
 
 - 迁移在 `migrations/`:**007–010 建平台表**,**011 把旧系统的 7 张表 DROP**(`blackboards` / `conversations` / `messages` / `fragments` / `user_profile` / `agent_states` / `fragments_vec`),**012 接待会话**(重建 `project_sessions` 放宽 `project_id` 可空,已登记进 `INTENTIONAL_REBUILDS`),**013 排空器状态**(`works.review_state` + `dispatch_events` + `dispatch_attempts`,纯加法),**014 产出边**(`artifacts.work_id` + 一条部分索引,纯加法),**015 放宽 `dispatch_events.kind`**(加 `work_cancelled`;闭集**只能靠重建表**放宽,已登记进 `INTENTIONAL_REBUILDS`),**016 交付物 kind**(重建 `artifacts`),**017 交付会话**(`project_sessions.deliverable_artifact_id` + `channel`,纯加法),**018 `turn_usage` 表**(纯加法),**019 会话消息的封套**(`session_messages.origin_source` + `trigger_kind`,纯加法;两列各有自己的 CHECK),**020 `client_questions` 台账**,**021 `review_verdicts`**,**022 `session_messages.todo_kind`**(纯加法、**不建 CHECK** —— 取值域随 `TODO_KINDS` 变,闭集在读写两侧的 TS 里),**023 项目版本链**(`projects.version` + `parent_project_id`,`ON DELETE SET NULL`),**024 对话一等实体**(`project_sessions.kind` + `title`;`kind` **有** CHECK —— 两值闭集,与 022 相反),**025 交付物类型**(`artifacts.deliverable_type` + 一条部分索引,纯加法),**026 执行角色一分为二 + 交付物类型加 `code_service`**(⚠️ **重建两张表**:`agents` 的 role 闭集 4→5 值并改名 + `artifacts` 的 `deliverable_type` 闭集 1→2 值;两张都登记进 `INTENTIONAL_REBUILDS`),**027 工件正文落文件**(⚠️ **重建 `artifacts`**:`body TEXT` → `body_path` / `body_sha256` / `body_bytes` 三列 NOT NULL + `commit_sha` 可空;登记进 `INTENTIONAL_REBUILDS`。**它故意不走「建 _new → 拷 → 改名」**:没有数据要拷(用户明确「老数据全不要」),而改名法会让「`artifacts` 被多个迁移创建」这条登记**当场过期**;数据安全改由一条会响的前置检查承担 —— `CHECK (n = 0)`,非空库上**响亮失败并整体回滚**,而不是静默清空)。

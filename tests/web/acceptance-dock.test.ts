@@ -151,7 +151,12 @@ describe("落点 · 项目页已经交出去了", () => {
 
   it("项目页的 `待验收` **计数留着** —— 删掉它等于「有事在等你」在这一页没人知道", () => {
     // 搬走清单 ≠ 搬走事实。这条计数与 `counts.pendingAcceptance` 同源,收口门读的就是它。
-    expect(source("routes/ProjectDetail.tsx")).toContain("detail.counts.pendingAcceptance");
+    //
+    // ⚠️ **落点变了**:2026-10-26 项目页降级为「仪表盘」后,这条计数从顶栏的
+    // `StatStrip` 搬到了仪表盘的**计数卡**里;因为仪表盘的 `useMemo` 跑在
+    // 「detail 为空」的守卫**之前**,写法从 `detail.counts.x` 变成 `detail?.counts.x`。
+    // ⇒ 判据没变(**计数还在这一页**),变的是写法 ⇒ 判据跟着改成认这两种写法。
+    expect(source("routes/ProjectDetail.tsx")).toMatch(/detail\??\.counts\.pendingAcceptance/);
   });
 
   it("负样本对照:`Works.tsx` 那**另一个**挂载点还留着(甲方在工件页读正文时就地表态)", () => {

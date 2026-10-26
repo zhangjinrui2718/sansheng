@@ -1430,6 +1430,10 @@ export function WorkNodePanel({
       title="选中的环节"
       count={artifacts.length}
       hint="点条选中,再点取消"
+      // ⚠️ `work.status` 的读者从**项目页**搬到了这里(2026-10-26)——
+      // 工作项现在**只住在工作项页**,而「状态取值是契约的闭合集合」这句话
+      // 正是这一页要说的。(它在项目页曾经是「工作项」那一段的 `?`。)
+      helpId="work.status"
       aside={
         <span className="ss-meta font-mono" title="工作项 id">
           {work.id}

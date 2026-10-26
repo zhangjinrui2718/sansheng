@@ -115,6 +115,18 @@ export const blockerLocation = (blockerId: string, projectId?: string | null): A
   params: projectId ? { project: projectId, blocker: blockerId } : { blocker: blockerId },
 });
 
+/**
+ * 项目自己的地址。
+ *
+ * ⚠️ **带项目 id** —— 「当前项目」是应用里的一处**全局选择**(store 的 `projectId`),
+ * 不带 id 的地址是**半个地址**:它只在「你正好在看那个项目」时成立,
+ * 而链接的用处恰恰是**从别处跳过来**。
+ */
+export const projectLocation = (projectId: string | null | undefined): AppLocation => ({
+  route: "project",
+  params: projectId ? { project: projectId } : {},
+});
+
 // ── 三类实体的身份 ────────────────────────────────────────────────
 
 /**
