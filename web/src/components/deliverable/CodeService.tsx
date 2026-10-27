@@ -41,6 +41,7 @@
  * **构建上下文是 `servicePath`**(交付物边界),不是仓库根 —— 见 `lib/deliverable.ts`。
  */
 import { memo, useCallback, useEffect, useState } from "react";
+import { Help } from "@/components/ui/Help";
 import { errorMessage, getRepoCommits } from "@/lib/api";
 import type { RepoCommitsView } from "@shared/types/platform";
 import type { CodeServiceView } from "@shared/types/platform";
@@ -345,6 +346,7 @@ export const CodeService = memo(function CodeService({ artifactId, at, service }
           title="这些被 .gitignore 忽略,甲方 clone 不到 · 告警不是错误"
         >
           ⚠️ 交付物会缺这 {meta.ignoredFiles.length} 项(被 `.gitignore` 忽略,甲方 clone 不到):
+          <Help id="code-service.ignored" />
           <div
             className="ss-body"
             style={{ fontSize: 12, color: "var(--bone-dim)", wordBreak: "break-all", marginTop: 2 }}

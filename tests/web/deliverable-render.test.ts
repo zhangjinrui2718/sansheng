@@ -238,10 +238,20 @@ describe("HTML 报告 · 沙箱渲染判据(srcDoc + sandbox=\"\",且没有同�
 
   it("正文走现读:**没有一处代码再读 `artifact.body` / `a.body`**", () => {
     const works = stripComments(readWebSrc("routes/Works.tsx"));
-    expect(works, "正文是文件,`ArtifactView` 上已经没有 `body` 这个字段了").not.toMatch(/\bartifact\.body\b/);
-    expect(works).not.toMatch(/\ba\.body\b/);
+    // ⚠️ 2026-10-26(Wave 2d):正则加了 `(?!-)`。
+    // **判据没变**(仍然禁止读 `artifact.body` / `a.body` 这个字段),变的是**它能匹配的形状**:
+    // 原来的 `/\bartifact\.body\b/` 会把**词汇表条目 id**`artifact.body-index` 一并匹配上
+    // (`body` 后面是 `-`,`-` 是非词字符 ⇒ `\b` 成立)⇒ 一条**注释 id**被当成了字段读取。
+    // ⚠️ 这就是 AGENTS.md 记的那种「仪器比判据宽」—— 而**宽出来的那个匹配会让人改代码**:
+    // 有人会去改 id 或删掉真读者,而不是修仪器。
+    // `(?!-)` 的含义:**后面不是连字符**才算字段读取(`artifact.body.length` / `artifact.body)` 都仍被匹配)。
+    expect(works, "正文是文件,`ArtifactView` 上已经没有 `body` 这个字段了").not.toMatch(/\bartifact\.body\b(?!-)/);
+    expect(works).not.toMatch(/\ba\.body\b(?!-)/);
     // 正样本自检:这条正则对一个**必然含它**的串要给 true(防止断言恒真)
-    expect(/\bartifact\.body\b/.test("const x = artifact.body.length;")).toBe(true);
+    expect(/\bartifact\.body\b(?!-)/.test("const x = artifact.body.length;")).toBe(true);
+    // ⚠️ 负样本自检:它**不该**匹配一个带连字符的标识符(词汇表 id 的形状)——
+    // 否则下一次有人加 id 时,又要来改这条正则。
+    expect(/\bartifact\.body\b(?!-)/.test('<Help id="artifact.body-index" />')).toBe(false);
     // 现读的入口必须真的被接上(HtmlReport / 普通正文两处)
     expect(stripComments(readWebSrc("components/deliverable/HtmlReport.tsx"))).toContain("useArtifactContent(");
   });

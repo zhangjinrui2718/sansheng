@@ -130,6 +130,7 @@ import {
   Section,
 } from "@/components/ui/primitives";
 import { ToolTable } from "@/components/members/ToolTable";
+import { Help } from "@/components/ui/Help";
 import {
   ApiError,
   errorMessage,
@@ -453,7 +454,9 @@ export function HarnessRolePane({
             label="实得工具"
             value={toolCountText(role)}
             title="已过三道门 · 下表逐条给出类型 / 名称 / 作用"
-          />
+          >
+            <Help id="harness.gates" />
+          </KV>
           {/* ── 工具表(类型 / 名称 / 作用)────────────────────────────
               用户的原话:「工具 做一个表格,按照类型、名称、作用来,现在搞一对英文
               名称的 list,完全不知道都有些啥」。所以 `tools` 那一串英文名不再直接

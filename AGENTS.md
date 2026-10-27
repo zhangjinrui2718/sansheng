@@ -495,8 +495,12 @@ dev/prod + CI/CD」,09:54 业务经理只回了一句「我先看下你之前留
   (`Section` / `PageHeader` 现在收 `helpId?: GlossaryId`)。写 `hintTitle=` 会 typecheck 失败
   —— 判据是类型,不是约定。实施前实测 27 处,全部渲染成 `title=` 悬停(触屏不触发、不可复制),
   其中 13 条是「数据来源:GET …」= **出处**。
-- **出处 / 判据只有一处**:`web/src/lib/glossary.ts`(18 条:`line` ≤ 24 字 + `basis` 判据落点
-  + `source` 端点/表),由 `components/ui/Help.tsx` 的 `?` 呈现(button + 受控浮层)。
+- **出处 / 判据只有一处**:`web/src/lib/glossary.ts`(**29 条**:18 + Wave 2d 的 11 条;
+  `line` ≤ 24 字 + `basis` 判据落点 + `source` 端点/表),由 `components/ui/Help.tsx` 的 `?` 呈现
+  (button + 受控浮层)。
+  ⚠️ **读者有两种写法**(2026-10-26,Wave 2d):`helpId="x"`(`Section`/`PageHeader` 的 prop)
+  与 `<Help id="x" />`(正文里直接嵌)。扫描器**两种都要看得见** —— 只认一种时另一种的条目
+  会被报成「声明了没人用」,而那个结论**会让人把真的读者删掉**(自信的假话)。
 - ⚠️ **`?` 用 `button`,不许改用 `<details>`**:这套代码里 `<details>` 的约定含义是
   「可折叠的**内容**」,`tests/web/harness-by-role.test.ts` 用「第一个 `<details>` 之前」切
   卡片头、`artifact-timeline.test.ts` 用「这块里有没有 `<details>`」判「画布有没有默认收起」。
@@ -514,6 +518,14 @@ dev/prod + CI/CD」,09:54 业务经理只回了一句「我先看下你之前留
   ⚠️ **变异绿了有两种可能**:判据没生效,**或者改得不够坏**(⑥ 第一次就是后者:预算 3 允许
   `Works` 2→3)⇒ 必须分开查。⚠️ **批量正则清理先算清「这个词还有别的含义」**:清裸 `**` 时
   整篇替换把 `Math.min(1000 * 2 ** n, 8000)` 的幂运算符也删了,而脚本退出码 0、35 行「都处理了」。
+- **Wave 2d:压短的悬停里那些「判据」搬回来看得见的地方**(2026-10-26):词汇表 18 → **29 条**,
+  每条**有读者**(`?` 点得开、触屏可用、可复制)。⚠️ **仪器比判据宽 ⇒ 会让人改代码**:
+  `deliverable-render.test.ts` 的「没有一处读 `artifact.body`」正则原先把**词汇表 id**
+  `artifact.body-index` 也匹配上(`body` 后是 `-`,`-` 是非词字符 ⇒ `\b` 成立)⇒ 一条**注释 id**
+  被当成字段读取 ⇒ **判据没变、仪器加宽**,已改正则加 `(?!-)` + **负样本自检**。
+  ⚠️ **变异脚本的 runner 也会「只看一处」**:`.probe/mutation-wave2d.py` 第一版只跑
+  `annotation-budget.test.ts`,而 M5 的判据在 `deliverable-render.test.ts` ⇒ 变异「改坏了却是绿的」。
+  ⇒ runner 必须覆盖**本波所有判据所在的文件**。变异 5 条全部实测变红。
 - **四态只有一处写法:`web/src/components/ui/DataState.tsx`**(2026-10-26,Wave 0b)。
   `RemoteState<T>` 是 `loading | error | unavailable | ready` 四处联合,配两个构造器
   `remoteOf` / `remoteListOf`;**没拿到数据就拿不到 `children` 的参数**,所以「顺手渲染成空」

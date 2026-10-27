@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { Help } from "@/components/ui/Help";
 import { useSettingsStore } from "@/stores/settings";
 import { resetData } from "@/lib/api";
 import { invalidateHarnessCache } from "@/lib/data";
@@ -296,6 +297,7 @@ export function SettingsPanel() {
             title="命令与文件的根 · 换成新路径要你先自己建好它"
           >
             agent 跑命令、读写文件的根。默认 <code>~/sansheng-workspace</code>(自动创建)。
+            <Help id="settings.workdir" />
           </p>
         </div>
       </section>

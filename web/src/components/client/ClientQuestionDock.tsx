@@ -73,6 +73,7 @@
 import { ClientQuestionCard } from "./ClientQuestionCard";
 import { Pill } from "@/components/ui/primitives";
 import { DataState, remoteListOf } from "@/components/ui/DataState";
+import { Help } from "@/components/ui/Help";
 import { useClientQuestions } from "@/lib/data";
 import { scopeClientQuestions } from "@/lib/questionScope";
 import { useChatStore } from "@/stores/chat";
@@ -145,12 +146,13 @@ export function ClientQuestionDock() {
       */}
       {closedCount > 0 && (
         <div
-          className="ss-meta px-3 py-1 flex-none"
+          className="ss-meta px-3 py-1 flex-none flex items-center gap-1"
           style={{ borderTop: "1px solid var(--ink-3)", color: "var(--ochre)" }}
           data-from-closed-projects={closedCount}
           title="项目已收口 · 不会再有人来处理,事实仍在项目页"
         >
-          另有 {closedCount} 件来自已收口,不再等回复(项目页里还看得见)
+          <span>另有 {closedCount} 件来自已收口,不再等回复(项目页里还看得见)</span>
+          <Help id="client-question.closed" />
         </div>
       )}
     </section>

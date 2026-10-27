@@ -176,6 +176,7 @@ import { artifactMeta, authorLabelOf, workMeta } from "@/lib/entityMeta";
 import type { RelationContext } from "@/lib/relations";
 import { RelationsRail } from "@/components/relations/RelationsRail";
 import { MetadataStrip } from "@/components/ui/MetadataStrip";
+import { Help } from "@/components/ui/Help";
 import { HtmlReport } from "@/components/deliverable/HtmlReport";
 import { CodeService } from "@/components/deliverable/CodeService";
 import { ContentDriftNote } from "@/components/deliverable/ContentDriftNote";
@@ -1474,6 +1475,7 @@ export function WorkNodePanel({
         <div>
           <div className="ss-section" style={{ fontSize: 12 }}>
             它挂着的工件({artifacts.length})
+            <Help id="work.artifacts" />
           </div>
           {artifacts.length === 0 ? (
             <div className="ss-note">这条工作项还没有产出工件。</div>
@@ -2103,7 +2105,10 @@ function ArtifactDetail({
               <span>作者名(authorName):{artifact.authorName}</span>
               <span>产出它的环节(workId):{artifact.workId ?? "null(不由工作项产出)"}</span>
               {/* 正文的**落点**,不是内容(2026-10-08):内容由上面的正文区现读。 */}
-              <span>正文落点(bodyPath):{artifact.bodyPath}</span>
+              <span>
+                正文落点(bodyPath):{artifact.bodyPath}
+                <Help id="artifact.body-index" />
+              </span>
               <span>正文字节数(bodyBytes,写入时的快照):{artifact.bodyBytes}</span>
               <span>引入正文的提交(commitSha):{artifact.commitSha ?? "null(还没提交)"}</span>
               <span>

@@ -41,7 +41,21 @@ export type GlossaryId =
   | "artifact.graph"
   | "work.deps"
   | "knowledge.corpus"
-  | "harness.card";
+  | "harness.card"
+  // ── Wave 2d(2026-10-26):把 Wave 2c 压短的判据**搬回来看得见的地方** ──
+  // 悬停压到 40 字以内之后,那些解释不是被删了,而是**换了个容器**:
+  // 从「鼠标悬停才出现的灰字」搬到「点得开的 `?`」—— 后者触屏可用、可复制、常显。
+  | "member.runtime"
+  | "member.todos"
+  | "member.conversations"
+  | "agent.busy"
+  | "artifact.body-index"
+  | "artifact.drift"
+  | "work.artifacts"
+  | "harness.gates"
+  | "client-question.closed"
+  | "settings.workdir"
+  | "code-service.ignored";
 
 export interface GlossaryEntry {
   /** 一句话(≤ 24 字)—— 页面上唯一可见的那部分。 */
@@ -142,6 +156,63 @@ export const GLOSSARY: Record<GlossaryId, GlossaryEntry> = {
     line: "改得了提示词,改不了 ceiling",
     basis: "ROLE_SPECS.ceiling / writeKinds 是代码内常量;工具集合文件由人直接编辑,界面不提供写面",
     source: "GET /api/harness(单元读盘状态、集合文件状态、备份数)",
+  },
+
+  // ── Wave 2d:成员页 / 交付物 / 设置那几处判据 ──────────────────────
+  "member.runtime": {
+    line: "在跑 ≠ 欠着活,两回事",
+    basis: "transport/views.ts 的 memberActivity 视图(忙闩与工作项两路合读)",
+    source: "GET /api/projects/:id/live 与 GET /api/projects/:id 的 memberActivity",
+  },
+  "member.todos": {
+    line: "待办三种:能跑 / 还没 / 不再叫醒",
+    basis: "runtime/pendingWork.ts 与 runtime/dispatcher.ts 的 collectTodos",
+    source: "GET /api/projects/:id 的 memberActivity.todos 与 exhaustedTodos",
+  },
+  "member.conversations": {
+    line: "他说了什么:只读的对话全文",
+    basis: "transport/http.ts 的 agentConversations(只取本人发言与甲方的话)",
+    source: "GET /api/projects/:id/agents/:agentId/conversations",
+  },
+  "agent.busy": {
+    line: "在跑是内存忙闩,不是工作项状态",
+    basis: "transport/hub.ts 的 runningTurns(宿主内存,重启清零)对照 works 表",
+    source: "GET /api/projects/:id/live 的 runningTurns",
+  },
+  "artifact.body-index": {
+    line: "库不存正文,只记落点",
+    basis: "storage/repo/artifacts.ts 的 body_path / body_sha256 / body_bytes 三列",
+    source: "GET /api/artifacts/:id/content?at=<sha>(现读)",
+  },
+  "artifact.drift": {
+    line: "索引漂移:正文被手改过",
+    basis: "workspace/git.ts 的 housekeepingCommit(回合边界重算 sha 与字节数)",
+    source: "GET /api/artifacts/:id/content 与 artifacts.body_sha256",
+  },
+  "work.artifacts": {
+    line: "这条环节上的产出件数",
+    basis: "runtime/execution.ts 的产出判据(work_id + 作者 + kind 不在「关于」那一类里)",
+    source: "artifacts 表按 work_id 关联",
+  },
+  "harness.gates": {
+    line: "三道门,只减不增",
+    basis: "harness/authorize.ts 的 solveToolset(求解期)与 authorizeCall(调用期)",
+    source: "ROLE_SPECS[].ceiling ∧ harness/tools/{role}.json ∧ 执行点",
+  },
+  "client-question.closed": {
+    line: "已收口项目的提问,不再等",
+    basis: "storage/repo/clientQuestions.ts 的 listAllClientQuestions(终态项目被排除)",
+    source: "GET /api/client-questions 的 fromClosedProjects",
+  },
+  "settings.workdir": {
+    line: "命令与文件都从这里出发",
+    basis: "workspace/root.ts 的 sessionCwd(项目根无条件返回)",
+    source: "settings.json 的 workspace 段",
+  },
+  "code-service.ignored": {
+    line: "被 gitignore 吃掉的文件",
+    basis: "codeservice/git.ts 的现场核对(ignoredFiles 按 servicePath 算)",
+    source: "artifacts.metadata_json 的 ignoredFiles",
   },
 };
 

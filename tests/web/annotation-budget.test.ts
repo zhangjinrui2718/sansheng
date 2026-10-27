@@ -122,13 +122,23 @@ describe("注解预算:悬停正文这条路已经封死", () => {
 describe("词汇表:每条都有读者,每个读者都写得出条目", () => {
   const ids = Object.keys(GLOSSARY) as GlossaryId[];
 
-  /** 全站 `helpId="x"` 的取值 → 出现在哪些文件。 */
+  /**
+   * 全站**两种读者形态**的取值 → 出现在哪些文件。
+   *
+   * ⚠️ 2026-10-26(Wave 2d):读者有两种写法,扫描器**两种都要看得见** ——
+   *   ① `helpId="x"`  = `Section` / `PageHeader` 的 prop(标题旁边的 `?`);
+   *   ② `<Help id="x" />` = 直接嵌在正文里的 `?`(字段旁、提示行末)。
+   * 只认 ① 的时候,② 里的条目会被报成「声明了没人用」——
+   * 而「没人用」这个判断**会让人把真的读者删掉**(那是一条**自信的假话**)。
+   */
   const readers = new Map<string, string[]>();
   for (const f of FILES) {
-    for (const m of f.src.matchAll(/helpId="([^"]+)"/g)) {
-      const list = readers.get(m[1]) ?? [];
+    for (const m of f.src.matchAll(/helpId="([^"]+)"|<Help id="([^"]+)"/g)) {
+      const id = m[1] ?? m[2];
+      if (id === undefined) continue;
+      const list = readers.get(id) ?? [];
       list.push(f.rel);
-      readers.set(m[1], list);
+      readers.set(id, list);
     }
   }
 
@@ -137,10 +147,15 @@ describe("词汇表:每条都有读者,每个读者都写得出条目", () => {
     expect(orphans.join(", ")).toBe("");
   });
 
-  it("⑤ 没有写不出来的条目名(扫描器自检:它确实看得见 helpId)", () => {
+  it("⑤ 没有写不出来的条目名(扫描器自检:两种读者形态它都看得见)", () => {
     expect(readers.size).toBeGreaterThan(10);
     const unknown = [...readers.keys()].filter((k) => !(k in GLOSSARY));
     expect(unknown.join(", ")).toBe("");
+    // ⚠️ 扫描器自检:两种写法**各至少有一个**读者 —— 只认一种的扫描器
+    // 会把另一种的条目全报成「没人用」(⇒ 人把真的读者删掉)。
+    const viaProp = FILES.some((f) => /helpId="[^"]+"/.test(f.src));
+    const viaHelp = FILES.some((f) => /<Help id="[^"]+"/.test(f.src));
+    expect({ viaProp, viaHelp }).toEqual({ viaProp: true, viaHelp: true });
   });
 
   it("一条一行话:`line` ≤ 24 字(摆得下就不该藏)", () => {

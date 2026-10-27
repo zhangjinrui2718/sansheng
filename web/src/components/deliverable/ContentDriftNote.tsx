@@ -20,6 +20,8 @@
  * 免得三份文案各自长歪(`data-content-drifted` 是给 SSR 判据用的判别键)。
  */
 
+import { Help } from "@/components/ui/Help";
+
 /**
  * 漂移提示的文案;**不漂移返回 `null`**(那时不该渲染任何东西 ——
  * 一句「一切正常」会把一条每次都出现的噪音变成用户要读的东西)。
@@ -41,6 +43,7 @@ export function ContentDriftNote({ drifted }: { drifted: boolean }) {
       title="盘上这份被手改过 · 下一次提交会收回一致"
     >
       {text}
+      <Help id="artifact.drift" />
     </div>
   );
 }

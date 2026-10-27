@@ -133,6 +133,7 @@ import {
   StatStrip,
 } from "@/components/ui/primitives";
 import { DataState, remoteListOf } from "@/components/ui/DataState";
+import { Help } from "@/components/ui/Help";
 import { EntityLink, MetadataStrip } from "@/components/ui/MetadataStrip";
 import { RelationsRail } from "@/components/relations/RelationsRail";
 import { useAppLocation, paramOf } from "@/lib/route";
@@ -459,10 +460,11 @@ function turnStatusNode(
         <span
           className="ss-meta"
           style={{ color: "var(--amber)" }}
-          title="读不到运行态,不是「它停着」· 库里的活照常显示"
+          title="读不到运行态,不是「它停着」"
         >
           运行态读不到(该进程没接上运行期快照)
         </span>
+        <Help id="member.runtime" />
       </>
     );
   }
@@ -620,11 +622,9 @@ export function MemberPane({
             <>
               {/* 库里的真状态(重启后照样成立) */}
               <div className="flex flex-col">
-                <span
-                  className="ss-meta"
-                  title="库里的真状态(重启后照样成立)· 不等于内存忙闩"
-                >
-                  手上的活
+                <span className="ss-meta flex items-center gap-1">
+                  <span>手上的活</span>
+                  <Help id="agent.busy" />
                 </span>
                 {activity.currentWorks.length === 0 ? (
                   <div className="ss-note">手上没有进行中的工作项</div>
@@ -647,11 +647,9 @@ export function MemberPane({
 
               {/* 欠着什么:只有 > 0 的项才出现,数量为 0 的不许占版面 */}
               {facts.length > 0 && (
-                <div
-                  className="ss-meta"
-                  title="ready 前置已满 · waiting 还没 · exhausted 不再叫醒"
-                >
-                  {facts.join(" · ")}
+                <div className="ss-meta flex items-center gap-1">
+                  <span>{facts.join(" · ")}</span>
+                  <Help id="member.todos" />
                 </div>
               )}
 
@@ -769,10 +767,11 @@ export function MemberPane({
             成员页再抄一份就是重复(与「甲方(你)/平台通知」那张卡被删同一条理由)。 */}
         <div className="flex flex-col gap-1.5" style={{ borderTop: "1px solid var(--ink-3)", paddingTop: 8 }}>
           <span
-            className="ss-meta"
-            title="只读 · 逐条对话线 + 选中那条线的全文(旧 → 新)"
+            className="ss-meta flex items-center gap-1"
+            title="逐条对话线 + 选中那条线的全文(旧 → 新)"
           >
             他说了什么
+            <Help id="member.conversations" />
           </span>
           <AgentConversations
             // ⚠️ `key` = 换人时重置「选中哪条线」:上一个成员选的那条线对
