@@ -718,6 +718,42 @@
   .ss-flag[data-tone="amber"] { border-left-color: var(--amber); }
   .ss-flag[data-tone="cinnabar"] { border-left-color: var(--cinnabar); }
   .ss-flag[data-tone="jade"] { border-left-color: var(--jade); }
+
+  /* 实体抽屉(右侧)。⚠️ **overlay 与面板分两个元素**:点面板**不许**关抽屉
+     (读一半就被关掉是最烦的一种交互),所以遮罩自己收点击。 */
+  .ss-inspector-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 40;
+    background: rgba(11, 15, 20, 0.55);
+    display: flex;
+    justify-content: flex-end;
+  }
+  .ss-inspector {
+    width: min(480px, 94vw);
+    height: 100%;
+    overflow-y: auto;
+    background: var(--ink-1);
+    border-left: 1px solid var(--ink-3);
+    box-shadow: var(--shadow-ink-lg);
+    padding: 12px 14px 24px;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+  }
+  .ss-inspector-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    border-bottom: 1px solid var(--ink-3);
+    padding-bottom: 8px;
+  }
+  .ss-inspector-section {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
 }
 
 @layer utilities {

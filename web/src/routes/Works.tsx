@@ -176,6 +176,7 @@ import { artifactMeta, authorLabelOf, workMeta } from "@/lib/entityMeta";
 import type { RelationContext } from "@/lib/relations";
 import { RelationsRail } from "@/components/relations/RelationsRail";
 import { MetadataStrip } from "@/components/ui/MetadataStrip";
+import { EntityInspector } from "@/components/shell/EntityInspector";
 import { Help } from "@/components/ui/Help";
 import { HtmlReport } from "@/components/deliverable/HtmlReport";
 import { CodeService } from "@/components/deliverable/CodeService";
@@ -1185,15 +1186,12 @@ export function DependencyGraph({
  */
 export function ArtifactRow({
   artifact: a,
-  known,
   works,
   relations,
   open,
   onToggle,
 }: {
   artifact: ArtifactView;
-  /** 本次已加载的工件列表 —— 只用来**顺手**给关联目标显示标题(详情里用) */
-  known: readonly ArtifactView[];
   /**
    * 本项目的工作项 —— 用来把身份条里「产出于」那一格翻成**标题**
    * (拿不到就退成 id,见 `lib/entityMeta.ts`)。
@@ -1322,7 +1320,12 @@ export function ArtifactRow({
       {a.acceptance !== null && (
         <DeliveryVerdictActions artifactId={a.id} title={a.title} acceptance={a.acceptance} />
       )}
-      {open && <ArtifactDetail id={a.id} known={known} relations={relations} />}
+      {/*
+        ⚠️ **工件详情现在住在右侧抽屉里**(`components/shell/EntityInspector`),
+        不再在这里内联展开 —— 内联展开会把下面的清单顶走,而「关联」这件事
+        要求切换实体时**详情保持在场**(设计 §7 第 2 条)。
+        ⇒ 这一行**只留按钮**:它改的是地址里的 `artifact=`(深链接仍成立)。
+      */}
     </article>
   );
 }
@@ -1335,14 +1338,12 @@ export function ArtifactRow({
  */
 export function ArtifactGroups({
   artifacts,
-  known,
   works,
   relations,
   openId,
   onToggleDetail,
 }: {
   artifacts: readonly ArtifactView[];
-  known: readonly ArtifactView[];
   /** 本项目的工作项(只用来把「产出于」那一格翻成标题) */
   works?: readonly WorkView[];
   /** 关系上下文(算「一圈邻居」用,见 `lib/relations.ts`)。 */
@@ -1379,7 +1380,6 @@ export function ArtifactGroups({
               <ArtifactRow
                 key={a.id}
                 artifact={a}
-                known={known}
                 works={works}
                 relations={relations}
                 open={openId === a.id}
@@ -1408,7 +1408,6 @@ export function WorkNodePanel({
   work,
   works,
   artifacts,
-  known,
   relations,
   openId,
   onToggleDetail,
@@ -1418,7 +1417,6 @@ export function WorkNodePanel({
   works: readonly WorkView[];
   /** **这个环节**挂着的工件(已按 workId 分好) */
   artifacts: readonly ArtifactView[];
-  known: readonly ArtifactView[];
   /** 关系上下文(算「一圈邻居」用,见 `lib/relations.ts`)。 */
   relations: RelationContext;
   openId: string | null;
@@ -1482,7 +1480,6 @@ export function WorkNodePanel({
           ) : (
             <ArtifactGroups
               artifacts={artifacts}
-              known={known}
               works={works}
               relations={relations}
               openId={openId}
@@ -1506,13 +1503,11 @@ export function WorkNodePanel({
  */
 export function UnattachedArtifacts({
   artifacts,
-  known,
   relations,
   openId,
   onToggleDetail,
 }: {
   artifacts: readonly ArtifactView[];
-  known: readonly ArtifactView[];
   relations: RelationContext;
   openId: string | null;
   onToggleDetail: (artifactId: string) => void;
@@ -1535,7 +1530,6 @@ export function UnattachedArtifacts({
         <Disclosure summary={`展开清单(${artifacts.length} 条 · 可逐条看详情)`}>
           <ArtifactGroups
             artifacts={artifacts}
-            known={known}
             relations={relations}
             openId={openId}
             onToggleDetail={onToggleDetail}
@@ -1555,13 +1549,11 @@ export function UnattachedArtifacts({
  */
 export function DanglingArtifacts({
   dangling,
-  known,
   relations,
   openId,
   onToggleDetail,
 }: {
   dangling: ReadonlyMap<string, ArtifactView[]>;
-  known: readonly ArtifactView[];
   relations: RelationContext;
   openId: string | null;
   onToggleDetail: (artifactId: string) => void;
@@ -1582,7 +1574,6 @@ export function DanglingArtifacts({
             </div>
             <ArtifactGroups
               artifacts={rows}
-              known={known}
               relations={relations}
               openId={openId}
               onToggleDetail={onToggleDetail}
@@ -1673,7 +1664,6 @@ export function ArtifactsBody({
             work={selectedWork}
             works={works}
             artifacts={split.byWork.get(selectedWork.id) ?? []}
-            known={artifacts}
             relations={relations}
             openId={openId}
             onToggleDetail={onToggleDetail}
@@ -1684,7 +1674,6 @@ export function ArtifactsBody({
       {split.noWork.length > 0 && (
         <UnattachedArtifacts
           artifacts={split.noWork}
-          known={artifacts}
           relations={relations}
           openId={openId}
           onToggleDetail={onToggleDetail}
@@ -1694,7 +1683,6 @@ export function ArtifactsBody({
       {split.dangling.size > 0 && (
         <DanglingArtifacts
           dangling={split.dangling}
-          known={artifacts}
           relations={relations}
           openId={openId}
           onToggleDetail={onToggleDetail}
@@ -1747,6 +1735,14 @@ export function ArtifactsScreen({
   onToggleDetail: (artifactId: string) => void;
 }) {
   const selectedId = resolveSelectedWorkId(layoutWorkDag(works, artifacts), picked);
+  /**
+   * 抽屉里那份工件 —— **从本次列表里找**,找不到就**不给事实条**。
+   *
+   * ⚠️ **拿不到就明说,不留空**:列表里没有它时(深链接指向一个不在本次列表里的
+   * 工件)抽屉只显示正文,事实与关系两段**整段不出现** ——
+   * 而不是显示一份「空的」事实条(那与「事实是空的」长得一样)。
+   */
+  const inspected = openId !== null ? artifacts.find((a) => a.id === openId) ?? null : null;
   return (
     <div className="grid gap-4">
       {/* ① 工件关系图 —— **第一块,而且是展开的**。
@@ -1784,6 +1780,35 @@ export function ArtifactsScreen({
         openId={openId}
         onToggleDetail={onToggleDetail}
       />
+
+      {/*
+        ⚠️ **工件详情 = 右侧抽屉**(`components/shell/EntityInspector`)。
+        2026-10-26 的裁决(设计 §7 第 2 条):内联展开会把清单顶走,
+        而「关联」要求切换实体时**详情保持在场**。
+        ⇒ 抽屉是**唯一**的工件详情渲染面(行里不再内联展开):
+        同一实体全站只有一种渲染方式,是「系统性」的硬前提。
+        ⚠️ **开关仍然是地址里的 `artifact=`** ⇒ 深链接照旧成立。
+      */}
+      {openId !== null && (
+        <EntityInspector
+          title={inspected?.title || openId}
+          items={
+            inspected === null
+              ? []
+              : artifactMeta(inspected, {
+                  workTitle:
+                    inspected.workId === null
+                      ? null
+                      : (works.find((w) => w.id === inspected.workId)?.title ?? null),
+                })
+          }
+          subject={inspected === null ? null : { kind: "artifact", artifact: inspected }}
+          context={relations}
+          onClose={() => onToggleDetail(openId)}
+        >
+          <ArtifactBodySection id={openId} />
+        </EntityInspector>
+      )}
     </div>
   );
 }
@@ -1996,27 +2021,19 @@ export function WorksPage() {
   );
 }
 
-// ── 工件详情(有状态:按 id 单独拉一次)──────────────────────────
+// ── 工件正文(现读;住在抽屉里)─────────────────────────────────
 
 /**
- * 工件详情。展开时按 id 拉一次 `GET /api/artifacts/:id`。
- *
- * `known` 只用来**顺手**把关联目标的标题显示出来(目标恰好在本次列表里时),
- * 不做二次请求 —— 目标不在列表里就只显示 id,不编一个标题出来。
+ * 工件的**正文**(住在右侧抽屉里)。
  *
  * **详情单独拉一次,不拿列表里那条凑**:契约给了 `/:id` 这条端点,它的存在意义
  * 就是「列表里的字段可能不是全量」;用列表项假装详情,等于把那条端点变成死代码。
+ *
+ * ⚠️ **这里只负责「内容」** —— 标题在抽屉头、事实条与关系栏在抽屉的前两段。
+ * 三处各写一遍同一份事实就是「同一实体在几处有几种说法」,而这一层改动的
+ * 整个目的就是消掉它。
  */
-function ArtifactDetail({
-  id,
-  known,
-  relations,
-}: {
-  id: string;
-  known: readonly ArtifactView[];
-  /** 关系上下文(算「一圈邻居」用,见 `lib/relations.ts`)。 */
-  relations: RelationContext;
-}) {
+function ArtifactBodySection({ id }: { id: string }) {
   const [artifact, setArtifact] = useState<ArtifactView | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -2043,11 +2060,15 @@ function ArtifactDetail({
   }, [id]);
 
   return (
-    <div
-      className="mt-2"
-      style={{ borderTop: "1px solid var(--ink-3)", paddingTop: 6 }}
-      title="GET /api/artifacts/:id"
-    >
+    <div className="flex flex-col gap-1.5">
+      {/*
+        ⚠️ **出处不进悬停**(页面注解纪律):「这条正文是按 id 现读的」
+        进词汇表(`artifact.detail`),由 `?` 摆出来。
+      */}
+      <span className="ss-meta flex items-center gap-1">
+        按 id 现读的正文
+        <Help id="artifact.detail" />
+      </span>
       {error !== null ? (
         <div className="text-xs" style={{ color: "var(--cinnabar)" }}>
           详情加载失败:{error}
@@ -2059,15 +2080,11 @@ function ArtifactDetail({
       ) : (
         <div className="flex flex-col gap-1.5">
           {/*
-            ⚠️ 这里**不再印类型 / 状态 / 作者 / 时间** —— 那一行在上面的
-            工件行里(身份条,`lib/entityMeta.ts` 的同一份判据)。
-            展开区只负责**内容**:正文、关联、原始字段。
+            ⚠️ 这里**不再印标题 / 类型 / 状态 / 作者 / 时间 / 关系** ——
+            标题在抽屉头,事实条与关系栏在抽屉的前两段(同一份判据:
+            `lib/entityMeta.ts` 与 `lib/relations.ts`)。
+            重复渲染同一份事实就是「同一实体在几处有几种说法」。
           */}
-          <div className="flex items-center gap-1.5 flex-wrap">
-            <span className="ss-body" style={{ color: "var(--bone)" }}>
-              {artifact.title || "(无标题)"}
-            </span>
-          </div>
 
           {bodyMode(artifact) === "html_report" ? (
             <>
@@ -2093,14 +2110,10 @@ function ArtifactDetail({
           )}
 
           {/*
-            「关联」那一节 → **关系栏**。
-            ⚠️ 改版前这里是一节 `KV` 列表:标题能读懂(REL_LABEL),但**不是链接**,
-            跳不过去;而卡片上那一行印的又是 `parent→art_x`。两处各说各的。
-            ⇒ 现在两处走**同一份**判据(`lib/relations.ts`),而且每一项都是能点的地址。
-            ⚠️ **「它所属环节的阻塞」是新的一格** —— 一份工件被卡住时,
-            以前要跳到项目页的阻塞段才看得见。
+            ⚠️ **「关联」那一节搬进抽屉的第二段**(`RelationsRail`,同一份判据)。
+            原来它在这里、卡片上还另有一行 `parent→art_x` —— 两处各说各的。
+            ⇒ 现在全站只有**一处**关系栏,而每一项都是能点的地址。
           */}
-          <RelationsRail subject={{ kind: "artifact", artifact }} context={relations} />
 
           <Disclosure summary="原始字段">
             <div className="flex flex-col gap-0.5">

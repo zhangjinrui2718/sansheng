@@ -55,7 +55,9 @@ export type GlossaryId =
   | "harness.gates"
   | "client-question.closed"
   | "settings.workdir"
-  | "code-service.ignored";
+  | "code-service.ignored"
+  // ── Wave 3(2026-10-26):工件详情搬进抽屉后,「正文是按 id 现读的」有了落点 ──
+  | "artifact.detail";
 
 export interface GlossaryEntry {
   /** 一句话(≤ 24 字)—— 页面上唯一可见的那部分。 */
@@ -178,6 +180,11 @@ export const GLOSSARY: Record<GlossaryId, GlossaryEntry> = {
     line: "在跑是内存忙闩,不是工作项状态",
     basis: "transport/hub.ts 的 runningTurns(宿主内存,重启清零)对照 works 表",
     source: "GET /api/projects/:id/live 的 runningTurns",
+  },
+  "artifact.detail": {
+    line: "正文按 id 现读,不拿列表那条凑",
+    basis: "transport/http.ts 的 GET /api/artifacts/:id(列表字段可能不是全量)",
+    source: "GET /api/artifacts/:id",
   },
   "artifact.body-index": {
     line: "库不存正文,只记落点",
