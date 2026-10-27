@@ -790,7 +790,7 @@ export function WorkDagCanvas({
                 </span>
                 <span aria-hidden="true">·</span>
                 <span
-                  title="挂在这个环节上的工件数(= artifactCount)。契约里 work_id 一条边两个语义(产出 ∪ 关于),所以质检挂在被审那条上的 review_finding 也算在这里。"
+                  title="挂在这条环节上的工件数 · 质检挂在它上面的也算"
                   style={{ whiteSpace: "nowrap" }}
                 >
                   工件{" "}

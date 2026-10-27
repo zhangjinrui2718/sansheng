@@ -328,7 +328,7 @@ export function HarnessRolePane({
             **不许显示「0 个」** —— 那是「算不出来」,不是「一个都没有」。 */}
         <span
           className="ss-meta"
-          title="能力 = ceiling 的条目数(代码内常量);实得工具 = 工具名个数 —— 一条能力可展开成多个工具,所以工具数常大于能力数,两者不是分数关系"
+          title="工具不是能力的分数:一条能力可展开成多个工具"
         >
           能力 <span style={{ color: "var(--bone-dim)" }}>{role.ceiling.length}</span> 项 ·{" "}
           {/* ⚠️ 判据是 **`=== false`**,不是 `!toolsSolved` —— 字段缺失(前端比后端新,
@@ -342,7 +342,7 @@ export function HarnessRolePane({
           ) : (
             <span
               style={{ color: "var(--cinnabar)" }}
-              title="库里没有这个角色的 agent 行(组织还没播种,或刚被重置)—— 工具面求解不了。它不是「0 个工具」。"
+              title="组织还没播种或刚被重置 · 不是「0 个工具」"
             >
               实得工具 求解不了(组织未播种)
             </span>
@@ -437,12 +437,12 @@ export function HarnessRolePane({
           <KV
             label="能力"
             value={`${role.ceiling.length} 项 · 代码内常量,改不了`}
-            title="ceiling 来自 ROLE_SPECS,是架构上界;集合文件与界面都突破不了它。要改得走代码评审。"
+            title="架构上界 · 集合文件与界面都突破不了它"
           />
           <KV
             label="可写"
             value={`${role.writeKinds.join(" · ") || "不可写"} · 代码内常量,改不了`}
-            title="writeKinds 同样来自 ROLE_SPECS(代码内常量),不是可编辑文件 —— 这里只提供提示词单元的编辑。"
+            title="代码内常量,不是可编辑文件 · 这里只能改提示词"
           />
           <KV
             label="边界拒"
@@ -452,7 +452,7 @@ export function HarnessRolePane({
           <KV
             label="实得工具"
             value={toolCountText(role)}
-            title="已过三重门控:ROLE_SPECS[].ceiling(代码内常量)∧ 集合文件 harness/tools/{role}.json ∧ 执行点。下表逐条给出类型 / 名称 / 作用。"
+            title="已过三道门 · 下表逐条给出类型 / 名称 / 作用"
           />
           {/* ── 工具表(类型 / 名称 / 作用)────────────────────────────
               用户的原话:「工具 做一个表格,按照类型、名称、作用来,现在搞一对英文
@@ -469,7 +469,7 @@ export function HarnessRolePane({
             <KV
               label="工具名单"
               value={role.tools.join(" · ")}
-              title="这一份 harness 视图没带工具说明(toolBriefs 字段缺席,通常是后端比前端旧)—— 所以这里只能给出名字。重启服务后刷新会变成三列表格。"
+              title="视图没带工具说明(后端比前端旧)· 只能给出名字"
             />
           ) : null}
           <KV
@@ -614,7 +614,7 @@ export function RoleHarnessDisclosure({
             <span
               className="ss-meta"
               style={{ color: summaryBad ? "var(--cinnabar)" : "var(--bone-dim)" }}
-              title="卡片头状态摘要:单元 = 角色声明的提示词单元里盘上真的有文件的比例;能力 = ceiling 条目数(代码内常量);实得工具 = 过完三道门后的工具名个数(一条能力可展开成多个工具,与能力不是分数关系);集合文件 = harness/tools/{role}.json 的读盘状态。"
+              title="口径见展开后的各节 · 工具数不是能力的分数"
             >
               {harnessStatusText(found)}
             </span>
@@ -891,7 +891,7 @@ function PromptUnitEditor({
         </span>
         <span
           className="ss-meta"
-          title="该单元的历史备份份数(GET /api/harness/units/:id/backups,后端留最近 10 份)"
+          title="历史备份份数 · 后端只留最近 10 份"
         >
           备份 {backups === undefined ? "…" : backups < 0 ? "—" : backups}
         </span>
@@ -1127,7 +1127,7 @@ export function PromptUnitEditForm({
             className="sansheng-button"
             style={{ padding: "4px 12px", fontSize: 12 }}
             disabled={busy}
-            title="写回出厂副本的字节。不是删文件 —— 删文件会让这个单元变成「未装载」,agent 从此不知道这条规矩。"
+            title="写回出厂副本 · 不是删文件(删了单元会「未装载」)"
             onClick={onConfirmReset}
           >
             恢复出厂

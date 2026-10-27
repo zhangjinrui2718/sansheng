@@ -459,7 +459,7 @@ function turnStatusNode(
         <span
           className="ss-meta"
           style={{ color: "var(--amber)" }}
-          title="这一份快照的 runtime = unavailable:该进程没接上运行期快照(例如只挂 HTTP 的装配)。⚠️「读不到」与「它真的停着」是两件事 —— 所以这一格不下任何关于回合的结论。库里的那部分(手上的活 / 待办 / 最近活动)照常显示。"
+          title="读不到运行态,不是「它停着」· 库里的活照常显示"
         >
           运行态读不到(该进程没接上运行期快照)
         </span>
@@ -480,7 +480,7 @@ function turnStatusNode(
   // 只有 host 快照 + turn === null 才允许说这一句。措辞是「没有回合在跑」而不是
   // 「空闲」:后者还要看手上有没有活、排空器有没有待办。
   return (
-    <span className="ss-meta" title="快照说此刻没有回合登记在它身上。这不等于「它没事」—— 往下的手上的活与待办才是欠不欠活的答案。">
+    <span className="ss-meta" title="没有回合在跑 ≠ 它没事 · 看下面的活与待办">
       此刻没有回合在跑
     </span>
   );
@@ -603,7 +603,7 @@ export function MemberPane({
             {fetchedAt !== null && (
               <span
                 className="ss-meta"
-                title="这份运行态快照是本地什么时候收到的(useProjectLive 自带 2.5s 轮询)。这个数一直变大 = 轮询没有在成功回来 —— 下面的「在跑」是收到那一刻的事实,不是此刻的。"
+                title="本地收到这一刻的快照 · 一直变大 = 轮询没回来"
               >
                 快照 {formatAge(elapsedSinceFetch(fetchedAt, now))} 前收到
               </span>
@@ -622,7 +622,7 @@ export function MemberPane({
               <div className="flex flex-col">
                 <span
                   className="ss-meta"
-                  title="库里的真状态:派给他的工作项里 status ∈ {in_progress, blocked}。与宿主内存里的忙闩不同,它重启后照样成立。"
+                  title="库里的真状态(重启后照样成立)· 不等于内存忙闩"
                 >
                   手上的活
                 </span>
@@ -649,7 +649,7 @@ export function MemberPane({
               {facts.length > 0 && (
                 <div
                   className="ss-meta"
-                  title="readyWorks = 派给他、前置已满足、还没终态的活;waitingWorks = 派给他但前置没满足的活(「他为什么还没动」的答案);exhaustedTodos = 尝试预算用尽、排空器不再叫醒的待办数(静默放弃是禁止的,所以它必须显示)。"
+                  title="ready 前置已满 · waiting 还没 · exhausted 不再叫醒"
                 >
                   {facts.join(" · ")}
                 </div>
@@ -659,7 +659,7 @@ export function MemberPane({
               <div className="flex flex-col">
                 <span
                   className="ss-meta"
-                  title="直接来自 collectTodos 的 runnable,按 agentId 分组 —— 与排空器用的是同一个判据,前端不重算。attempts 是尝试预算已用掉的次数,用满的条目不在这一列,而在上面「预算用尽不再叫醒」那个数里。"
+                  title="与排空器同一判据,前端不重算 · 用满预算的在上一个数里"
                 >
                   排空器现在要叫醒它的待办
                 </span>
@@ -705,7 +705,7 @@ export function MemberPane({
                   「正在调什么工具」只有 WS 在飞轮里有(那是对话页的事,不在这一屏)。 */}
               <div
                 className="ss-meta"
-                title="最近一条落库的会话消息(库里实际只有 user / assistant / system —— tool 不落库)。它回答「他最后一次留下痕迹是什么时候」,不回答「现在在不在跑」。"
+                title="最后一次留下痕迹的时刻 · 不回答「现在在不在跑」"
               >
                 {activity.lastMessage !== null ? (
                   <>
@@ -722,7 +722,7 @@ export function MemberPane({
                 <div
                   className="ss-meta"
                   style={{ borderTop: "1px solid var(--ink-3)", paddingTop: 6 }}
-                  title="宿主里 fixed-delay 定时器的心跳(默认 10s):它不携带任何状态,只说「现在去查一下该谁跑」。判定永远重新查库(见 runtime/dispatcher.ts)。"
+                  title="定时器心跳(默认 10s)· 它只说「去查一下」,不携带状态"
                 >
                   平台兜底每 {dispatch.intervalMs / 1000}s 查一次 ·{" "}
                   {runtime === "unavailable" ? (
@@ -770,7 +770,7 @@ export function MemberPane({
         <div className="flex flex-col gap-1.5" style={{ borderTop: "1px solid var(--ink-3)", paddingTop: 8 }}>
           <span
             className="ss-meta"
-            title="这一块是只读的:它不写任何东西、不发任何指令。它答的是「这个人具体说了什么」—— 逐条对话线 + 全文(旧 → 新)。"
+            title="只读 · 逐条对话线 + 选中那条线的全文(旧 → 新)"
           >
             他说了什么
           </span>
@@ -789,7 +789,7 @@ export function MemberPane({
         <div className="flex flex-col">
           <span
             className="ss-meta"
-            title="按 authorAgentId === 这个人的 id 过滤(过滤在页面层做,面板只负责摆)。工件是流水线上的关键节点:一个人的活干到哪一步,看他产出了什么最直接。"
+            title="按作者过滤 · 一个人的活干到哪,看他产出了什么"
           >
             他产出了什么工件 · {artifacts.length} 件
           </span>
@@ -1032,7 +1032,7 @@ export function MembersPage() {
    */
   const liveAside =
     live.error !== null ? (
-      <span className="ss-meta" style={{ color: "var(--cinnabar)" }} title="GET /api/projects/:id/live 失败。WS 断了 REST 还在,所以这一条会自己重试(2.5s 一次)。">
+      <span className="ss-meta" style={{ color: "var(--cinnabar)" }} title="运行态读面失败 · 会自己重试(2.5s 一次)">
         运行态读取失败:{live.error}
       </span>
     ) : live.data === null ? (

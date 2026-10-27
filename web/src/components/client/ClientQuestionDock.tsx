@@ -148,7 +148,7 @@ export function ClientQuestionDock() {
           className="ss-meta px-3 py-1 flex-none"
           style={{ borderTop: "1px solid var(--ink-3)", color: "var(--ochre)" }}
           data-from-closed-projects={closedCount}
-          title="这些提问属于已收口的项目。排空器只跑 active 的项目,所以那里没有人会被叫醒来处理它们 —— 它们不再是「待答」。事实仍在项目页里。"
+          title="项目已收口 · 不会再有人来处理,事实仍在项目页"
         >
           另有 {closedCount} 件来自已收口,不再等回复(项目页里还看得见)
         </div>

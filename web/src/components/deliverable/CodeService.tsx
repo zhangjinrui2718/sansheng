@@ -342,7 +342,7 @@ export const CodeService = memo(function CodeService({ artifactId, at, service }
           className="ss-note"
           data-ignored-files={meta.ignoredFiles.length}
           style={{ borderLeft: "2px solid var(--amber)", paddingLeft: 8 }}
-          title="交付物 = 被 git 跟踪的文件。这些被 .gitignore 忽略,甲方 clone 不到 —— 正常的(node_modules / 构建产物)也在其中,所以这是告警不是错误。"
+          title="这些被 .gitignore 忽略,甲方 clone 不到 · 告警不是错误"
         >
           ⚠️ 交付物会缺这 {meta.ignoredFiles.length} 项(被 `.gitignore` 忽略,甲方 clone 不到):
           <div

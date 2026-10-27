@@ -56,7 +56,7 @@ export function ToolTable({ briefs }: { briefs: readonly ToolBriefView[] }) {
             </td>
             <td
               className="ss-table-purpose"
-              title="平台写给模型的原文说明(不是为界面重写的文案)—— 界面照原样渲染,免得出现第二份会漂开的真相"
+              title="写给模型的原文 · 不重写,免得出现第二份真相"
             >
               <Markdown text={b.purpose} />
             </td>

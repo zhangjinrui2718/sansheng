@@ -829,13 +829,13 @@ export function ProjectDetailPage() {
                   <>
                     <div className="flex items-center gap-2 flex-wrap ss-meta">
                       <span>条目 {workspace.counts.entries}</span>
-                      <span title="artifacts.body_path 里有这条路径 —— 这是正文落点索引(库不存正文,只记落点 + sha + 字节数),与记忆页的知识语料(检索索引)是两回事">
+                      <span title="库不存正文,只记落点 · 与知识语料(检索索引)不同">
                         正文已索引 {workspace.counts.indexed}
                       </span>
                       <span>孤儿文件 {workspace.counts.orphanFile}</span>
                       <span>库里有盘上无 {workspace.missing.length}</span>
                       {/* 对账的分母:artifacts.body_path 的行数(它不会被遍历上限影响) */}
-                      <span title="artifacts.body_path 里的总条数 —— 对账的另一个分母(与遍历上限无关)">
+                      <span title="落点索引的总条数 · 对账的另一个分母">
                         正文索引行 {workspace.index.paths}
                       </span>
                       {workspace.truncated && (
@@ -866,7 +866,7 @@ export function ProjectDetailPage() {
                             {e.indexed && (
                               <Pill
                                 tone="cyan"
-                                title="artifacts.body_path 里有这条路径 —— 这是正文落点索引,与记忆页的知识语料(检索索引)不是一回事"
+                                title="正文落点索引 · 与知识语料(检索索引)不同"
                               >
                                 正文已索引
                               </Pill>

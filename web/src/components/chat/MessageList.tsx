@@ -769,7 +769,7 @@ function WorkLogBlock({ text, streaming }: { text: string; streaming?: boolean }
     <div
       className="ss-worklog"
       data-channel="work-log"
-      title="工作记录:业务经理判断「这次不值得打扰你」时留下的现场(设计 1 §2.10.4)"
+      title="业务经理判断「不值得打扰你」时留下的现场"
     >
       <span className="ss-worklog-label">工作记录 · 未播报</span>
       <span className="ss-worklog-text">

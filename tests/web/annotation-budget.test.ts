@@ -245,20 +245,21 @@ describe("注解预算(Wave 2b):悬停只留一行话,屏上不许有 markdown �
     expect(/\w\s\*\*\s*\w/.test("const d = 1000 * 2 ** n;")).toBe(true);
   });
 
-  it("⑨ 长悬停(> 40 字)只许减不许增 —— 这是下一批要还的债", () => {
-    // 2026-10-26 实测:`title="…"` 共 103 条,其中 > 40 字 **33** 条。
-    // 它们渲染成灰字悬停(触屏不触发、不可复制),是 Wave 0a 想除掉的那类东西的残余。
-    // 本波不做大改(会撞 `harness-by-role` / `artifact-timeline` 等既有判据),
-    // 但**从今天起不许再长**:数一下就知道有没有人往回加。
+  it("⑨ 悬停不许长篇(`title=\"…\"` ≤ 40 字,条数只许减不许增)", () => {
+    // 2026-10-26 实测起点:`title="…"` 共 103 条,其中 > 40 字 **33** 条。
+    // 它们渲染成灰字悬停(触屏不触发、不可复制),是 Wave 0a 想除掉的那类东西的残余:
+    // 一条 142 字的状态摘要、125 字的 `readyWorks = …` 口径说明 —— **那是正文,
+    // 被塞进了悬停**。Wave 2c 逐条压到 40 字以内(留歧义消解,砍机制细节)。
+    // 条数仍是 ratchet:103 条里大多数是画布节点的短标签,减得动再减。
     const long: string[] = [];
     let total = 0;
     for (const f of FILES) {
       for (const m of f.src.matchAll(/title="([^"]*)"/g)) {
         total++;
-        if (m[1].length > 40) long.push(`${f.rel}: ${m[1].length} 字`);
+        if (m[1].length > 40) long.push(`${f.rel}: ${m[1].length} 字 —— ${m[1]}`);
       }
     }
-    expect(long.length).toBeLessThanOrEqual(33);
+    expect(long.join("\n")).toBe("");
     expect(total).toBeLessThanOrEqual(103);
     // 自检:计数口径不是「有没有 title=」而是「字面量长度」—— 两条边界都验一遍
     expect([...'title="短"'.matchAll(/title="([^"]*)"/g)][0][1].length).toBe(1);

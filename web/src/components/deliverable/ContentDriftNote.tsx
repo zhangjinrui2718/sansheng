@@ -38,7 +38,7 @@ export function ContentDriftNote({ drifted }: { drifted: boolean }) {
     <div
       className="ss-note"
       data-content-drifted="true"
-      title="正文住在项目仓的文件里,而 artifacts.body_sha256 是写入那一刻的快照。手改文件之后索引就旧了 —— 下一次提交会重建索引收回一致。"
+      title="盘上这份被手改过 · 下一次提交会收回一致"
     >
       {text}
     </div>

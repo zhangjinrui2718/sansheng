@@ -293,7 +293,7 @@ export function SettingsPanel() {
           <p
             className="sansheng-text-mute"
             style={{ fontSize: 11 }}
-            title="工作目录 = 三生跑命令 / 读写文件的根,Pi 工具相对它解析路径。出厂默认 ~/sansheng-workspace(首次启动自动创建);可改成任意绝对路径,需自行创建,系统不会代建。"
+            title="命令与文件的根 · 换成新路径要你先自己建好它"
           >
             agent 跑命令、读写文件的根。默认 <code>~/sansheng-workspace</code>(自动创建)。
           </p>
@@ -383,7 +383,7 @@ function ResetSection() {
           onClick={onReset}
           disabled={busy}
           className="sansheng-button"
-          title="清空平台数据表(项目 / 工作项 / 工件 / 会话消息 / 记忆 / 组织 / 排空器状态 / 回合用量);不删设置、API key、提示词、备份、日志与数据库文件"
+          title="只清数据表 · 设置 / key / 提示词 / 备份都留着"
           style={{
             padding: "8px 16px",
             color: "var(--cinnabar)",

@@ -190,7 +190,7 @@ export function ChatSurface() {
                 className="sansheng-button flex-none"
                 style={{ padding: "2px 8px", fontSize: 11 }}
                 onClick={() => void startIntake()}
-                title="回到接待入口 —— 等同左栏 + 新建;接待消息已落库,这条按钮只重置前端视图,不删除已落库的消息"
+                title="回到接待入口 · 只重置视图,不删已落库的消息"
               >
                 ↻ 重新谈
               </button>
