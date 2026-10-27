@@ -6,7 +6,13 @@
     「在语句前面加个注释」不会让语句失效,那样「改坏了却全绿」是假的;
   - `str.replace` 不匹配时**静默不执行** ⇒ 每一步都断言「改后与改前不同」;
   - 复原后断言**与原文逐字相同**(不用 `git checkout --`:未入库的新文件它会直接报错);
-  - runner 覆盖**本波所有判据所在的文件**。
+  - runner 覆盖**本波所有判据所在的文件**;
+  - ⚠️⚠️ **「变红」不等于「判据有效」** —— 变红可能是**语法错**或**编译错**
+    (2026-10-26 实测:第一版 M1 把一个 `<span>` 插成 `<section>` 的兄弟,
+    JSX 直接不合法 ⇒ 整份测试文件 transform 失败 ⇒ 「红」了,但判据**根本没被问到**)。
+    ⇒ 本脚本**额外判「红的原因」**:输出里出现 `Transform failed` / `Failed Suites`
+    (即没有测试跑到断言)⇒ 这条变异**不算数**,报「红在了错误的原因上」。
+    ⇒ 所以变异必须保持**语法合法**、且**真的让某个断言失败**。
 """
 import io
 import subprocess
@@ -27,9 +33,10 @@ CASES = [
                 'import { fmtTime } from "@/lib/vocab";',
             ),
             (
-                "            <MetadataStrip items={items} />",
-                "            <MetadataStrip items={items} />\n"
-                "            <span>{fmtTime(0)}</span>",
+                # ⚠️ **插在同一个元素内部** —— 插成兄弟会让 JSX 不合法,
+                # 那就是「红在了语法错上」,证明不了判据(见文件头)。
+                "<MetadataStrip items={items} />",
+                "<span>{fmtTime(0)}<MetadataStrip items={items} /></span>",
             ),
         ],
     ),
@@ -37,41 +44,32 @@ CASES = [
         "M2 「拿不到的主体」也画关系段 ⇒ 一段空的关系",
         INSPECTOR,
         [
+            # ⚠️ **不许把守卫改成 `true &&`** —— 那会让 `subject` 不再被收窄,
+            # TS 直接报错 ⇒ 整份测试文件编译失败 ⇒ 「红」了,但红在**编译错**上,
+            # 判据根本没被问到(见文件头)。
+            # ⇒ 这里改成「**段头移出守卫**」:主体拿不到时那一段照样出现 ⇒ 断言照样红,
+            # 而类型仍然合法。
             (
                 "        {subject !== null && (",
-                "        {true && (",
+                '        <div className="ss-section">关系</div>\n'
+                "        {subject !== null && (",
             ),
         ],
     ),
     (
         "M3 「没有事实」也画事实段 ⇒ 一段空的事实",
         INSPECTOR,
-        [
-            (
-                "        {items.length > 0 && (",
-                "        {true && (",
-            ),
-        ],
+        [("        {items.length > 0 && (", "        {true && (")],
     ),
     (
         "M4 去掉 ESC 关抽屉 ⇒ 键盘用户没有出路",
         INSPECTOR,
-        [
-            (
-                '      if (e.key === "Escape") onClose();',
-                "      if (false) onClose();",
-            ),
-        ],
+        [('      if (e.key === "Escape") onClose();', "      if (false) onClose();")],
     ),
     (
         "M5 抽屉不接地址里的 `artifact=` ⇒ 深链接打不开详情",
         WORKS,
-        [
-            (
-                "      {openId !== null && (",
-                "      {false && (",
-            ),
-        ],
+        [("      {openId !== null && (", "      {false && (")],
     ),
     (
         "M6 工件行里再内联展开一份详情 ⇒ 同一实体两个渲染面",
@@ -87,18 +85,25 @@ CASES = [
 ]
 
 
-def run_tests() -> int:
+def run_tests() -> tuple[int, str]:
     p = subprocess.run(
         ["npx", "vitest", "run", *TEST_FILES],
         capture_output=True,
         text=True,
     )
-    return p.returncode
+    return p.returncode, p.stdout + p.stderr
+
+
+def red_for_the_right_reason(output: str) -> bool:
+    """红在**断言**上(测试跑到并断言失败),而不是红在语法/编译/模块加载上。"""
+    if "Transform failed" in output or "Failed Suites" in output:
+        return False
+    return "AssertionError" in output or "expected" in output
 
 
 def main() -> int:
-    base = run_tests()
-    if base != 0:
+    code, out = run_tests()
+    if code != 0:
         print("基线就是红的 —— 先修好再谈变异")
         return 1
     print("基线:绿")
@@ -114,14 +119,14 @@ def main() -> int:
                 failed += 1
                 broken = True
                 break
+            before = mutated
             mutated = mutated.replace(old, new, 1)
-            assert mutated != src, f"变异没有改动任何字节:{path}"
+            assert mutated != before, f"变异没有改动任何字节:{path}"
         if broken:
             continue
-        assert mutated != src, f"变异没有改动任何字节:{path}"
         io.open(path, "w", encoding="utf-8").write(mutated)
         try:
-            code = run_tests()
+            code, out = run_tests()
         finally:
             io.open(path, "w", encoding="utf-8").write(src)
         back = io.open(path, encoding="utf-8").read()
@@ -129,12 +134,15 @@ def main() -> int:
         if code == 0:
             print(f"✗ {name}:改坏了却是绿的(该断言没生效)")
             failed += 1
+        elif not red_for_the_right_reason(out):
+            print(f"✗ {name}:红了,但红的原因不对(语法/编译错,断言根本没被问到)")
+            failed += 1
         else:
-            print(f"✓ {name}:如期变红")
+            print(f"✓ {name}:如期变红(且红在断言上)")
 
-    tail = run_tests()
-    print("复原后:", "绿" if tail == 0 else "红")
-    return 1 if failed or tail != 0 else 0
+    code, _ = run_tests()
+    print("复原后:", "绿" if code == 0 else "红")
+    return 1 if failed or code != 0 else 0
 
 
 if __name__ == "__main__":
