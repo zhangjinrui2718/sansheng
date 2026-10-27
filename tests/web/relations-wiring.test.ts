@@ -31,6 +31,8 @@ const members = read("web/src/routes/Members.tsx");
 const projectDetail = read("web/src/routes/ProjectDetail.tsx");
 const relations = read("web/src/lib/relations.ts");
 const rail = read("web/src/components/relations/RelationsRail.tsx");
+const deepLink = read("web/src/lib/deepLink.ts");
+const app = read("web/src/App.tsx");
 
 /** 去掉注释再找 —— 注释里写着反面教材会让 grep 命中假阳性。 */
 const stripComments = (src: string): string =>
@@ -66,8 +68,17 @@ describe("接线:地址参数真的有人读", () => {
     expect(relations).toContain("blockerLocation(b.id, data.projectId)");
   });
 
-  it("`?project=` 被项目页读 —— 深链接要能落到别的项目上", () => {
-    expect(projectDetail).toContain('paramOf(loc, "project")');
+  it("`?project=` 被**应用外壳**读 —— 深链接要能落到别的项目上", () => {
+    // ⚠️ **判据没变、落点变了**（2026-10-26,Wave 2e）：改版前这一条判据落在
+    // `routes/ProjectDetail.tsx`（那一页自己读 `?project=` 并切项目）。
+    // 那个落点有一个**真 bug**：它每次渲染都看地址里的项目 ⇒ **用户从左栏切了项目**
+    // （地址没变）⇒ 那个效果又把他拽回去 ⇒ 「切项目」这个动作被撤销，
+    // 症状是「点左栏没反应」。
+    // ⇒ 落点搬到 `lib/deepLink.ts`（**只有一处**），由 `App.tsx` 挂一次。
+    expect(deepLink).toContain('paramOf(loc, "project")');
+    expect(app).toContain("useProjectCoordinate()");
+    // ⚠️ 而且**不许**再有第二个判据：页面自己切项目 = 两处判断互相撤销。
+    expect(stripComments(projectDetail)).not.toContain("selectProject(wantedProject)");
   });
 
   it("⚠️ 产出 `?blocker=` 的地方必须带项目 id,否则那是一条半个地址", () => {
@@ -94,7 +105,11 @@ describe("接线:深链接不许被自己抹掉", () => {
 
   it("⚠️ 清参数的两行必须在判据之后(不是无条件执行)", () => {
     const body = stripComments(works);
-    const guardAt = body.indexOf("shouldClearSelection(prev, scope)");
+    // ⚠️ **不写收尾的右括号** —— 2026-10-26(Wave 2e)给这个判据加了第三格
+    // (地址里的项目坐标),写成 `shouldClearSelection(prev, scope)` 就会因为
+    // 少一个逗号而找不到 ⇒ 判据自己被一次无关的签名变化弄红了。
+    // 判据是「**守卫在清理之前**」,不是「第三个参数长什么样」。
+    const guardAt = body.indexOf("shouldClearSelection(prev, scope");
     const clearAt = body.indexOf("setPicked(undefined)");
     expect(guardAt).toBeGreaterThan(-1);
     expect(clearAt).toBeGreaterThan(guardAt);

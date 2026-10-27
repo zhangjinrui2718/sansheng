@@ -135,13 +135,24 @@ export interface ProjectChangeState {
  * 而症状是「页面就是没选中」—— 看着像用户自己点错了,不像 bug。
  *
  * ⚠️ **项目没变也不清** —— 只有真的换了项目,旧 id 才不再成立。
+ *
+ * ⚠️ **地址带来的换项目 ⇒ 不清**(2026-10-26,Wave 2e):深链接长这样
+ * `#/works?work=w_1&project=p_2` —— **地址里的项目坐标**把应用带到 p_2,
+ * 而 `?work=w_1` **本来就是给 p_2 写的**。若这里照「项目变了就清」处理,
+ * 深链接落地后选中项会被自己抹掉 —— 症状是「点得动、跳得过去、就是没选中」,
+ * 而这正是这一层改动**要修的那个 bug** 换个方向又犯一次。
+ * ⇒ `addressProjectId` 就是那个坐标(= 新项目 ⇒ 这次换项目是**地址带来的**)。
  */
 export function shouldClearSelection(
   state: ProjectChangeState,
   nextProjectId: string | null,
+  addressProjectId?: string | null,
 ): boolean {
   if (!state.mounted) return false;
-  return state.projectId !== nextProjectId;
+  if (state.projectId === nextProjectId) return false;
+  // ⚠️ **地址带来的换项目** ⇒ 地址里选中的那一项是**给新项目写的** ⇒ 不清。
+  if (addressProjectId !== undefined && addressProjectId === nextProjectId) return false;
+  return true;
 }
 
 /** 改一个参数(`null` = 删掉它)。返回新对象,不改入参。 */

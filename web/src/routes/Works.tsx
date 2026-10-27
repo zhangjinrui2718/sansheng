@@ -1841,13 +1841,20 @@ export function WorksPage() {
    * ⇒ 判断本身在 `lib/route.ts` 的 `shouldClearSelection`(可单测)。
    */
   const selState = useRef<ProjectChangeState>({ mounted: false, projectId: scope });
+  /**
+   * 地址里的**项目坐标**(`?project=`)—— 这次换项目是不是**地址带来的**。
+   * 深链接(`#/works?work=w_1&project=p_2`)落地时,坐标把应用带到 p_2,
+   * 而 `?work=w_1` 本来就是给 p_2 写的 ⇒ 那种换项目**不清**选中项。
+   * 判据在 `lib/route.ts` 的 `shouldClearSelection`(第三格)。
+   */
+  const addressProject = paramOf(loc, "project");
   useEffect(() => {
     const prev = selState.current;
     selState.current = { mounted: true, projectId: scope };
-    if (!shouldClearSelection(prev, scope)) return;
+    if (!shouldClearSelection(prev, scope, addressProject)) return;
     setPicked(undefined);
     setOpenId(null);
-  }, [scope, setPicked, setOpenId]);
+  }, [scope, addressProject, setPicked, setOpenId]);
 
   const worksLoad = useWorks(scope);
   const artifactsLoad = useArtifacts({ projectId: scope });

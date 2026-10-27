@@ -48,6 +48,8 @@ import type { KnowledgeChunkView, KnowledgeOverviewView, MemoryFragmentView } fr
 import * as api from "@/lib/api";
 import { errorMessage } from "@/lib/api";
 import { corpusStatus, corpusTone, fmtSpan, pendingTotal } from "@/lib/knowledgeState";
+import { chunkSourceLabel, chunkSourceLocation } from "@/lib/entityMeta";
+import { toHash } from "@/lib/route";
 import { fmtTime } from "@/lib/vocab";
 
 const KIND_ORDER = ["fact", "preference", "project", "context", "summary"] as const;
@@ -501,11 +503,22 @@ export function MemoryPage() {
                     {q.trim() === "" ? `最近索引的 ${chunks.length} 块` : `命中 ${chunks.length} 块`}
                     {chunkProject !== null ? " · 已按项目过滤" : ""}
                   </div>
-                  {chunks.map((c) => (
+                  {chunks.map((c) => {
+                    /**
+                     * 来源的**地址**与**名字**同源(`lib/entityMeta.ts`)——
+                     * 语料是全局可读的,所以它的来源几乎总是**别的项目**里的东西:
+                     * 不带项目坐标的地址是**半个地址**(点得动、跳得过去、就是找不到)。
+                     */
+                    const sourceTo = chunkSourceLocation(c);
+                    return (
                     <div key={c.id} className="sansheng-card p-2 grid gap-1">
                       <div className="ss-meta truncate" title={`${c.id} · ${c.sourceId}`}>
                         [{c.sourceKind === "artifact" ? "工件" : "消息"}]{" "}
-                        {c.artifactTitle ?? c.messageId ?? c.sourceId}
+                        {sourceTo === null ? (
+                          chunkSourceLabel(c)
+                        ) : (
+                          <a href={toHash(sourceTo)}>{chunkSourceLabel(c)}</a>
+                        )}
                         {c.projectName !== null ? ` · ${c.projectName}` : ""}
                         {c.bodyPath !== null
                           ? ` · ${c.bodyPath}${c.commitSha !== null ? `@${c.commitSha.slice(0, 8)}` : ""}`
@@ -528,7 +541,8 @@ export function MemoryPage() {
                         </>
                       )}
                     </div>
-                  ))}
+                    );
+                  })}
                 </div>
               )}
             </div>

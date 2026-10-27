@@ -38,7 +38,12 @@
  * 那是另一种「各说一套」。⇒ 成员**作为邻居**存在(别人链到它),
  * 但**自己不占一条身份条**。
  */
-import type { ArtifactView, BlockerView, WorkView } from "@shared/types/platform";
+import type {
+  ArtifactView,
+  BlockerView,
+  KnowledgeChunkView,
+  WorkView,
+} from "@shared/types/platform";
 import type { Tone } from "@/components/ui/primitives";
 import {
   artifactKindLabel,
@@ -126,6 +131,53 @@ export const projectLocation = (projectId: string | null | undefined): AppLocati
   route: "project",
   params: projectId ? { project: projectId } : {},
 });
+
+/**
+ * 给一条地址**补上项目坐标**。
+ *
+ * ⚠️ **只在地址指向别的项目时需要** —— 同项目内的地址(当前项目里的工件、
+ * 环节、成员)补了坐标只是噪音(而坐标是**坐标**,不是状态:它回答
+ * 「这条地址说的是哪个项目」,不回答「你现在在看哪个项目」)。
+ *
+ * ⇒ 这也是「跨项目地址带坐标」的唯一实现处:页面**不许**自己拼 `project=`。
+ */
+export const withProjectCoordinate = (
+  loc: AppLocation,
+  projectId: string | null | undefined,
+): AppLocation =>
+  projectId ? { route: loc.route, params: { ...loc.params, project: projectId } } : loc;
+
+/**
+ * 一块**语料**的来源地址(记忆页「知识语料」段)。
+ *
+ * ⚠️ **语料是全局可读的**(跨项目),所以它的来源地址**几乎总是跨项目的**
+ * ⇒ 不带坐标就是**半个地址**:点得动、跳得过去、就是找不到。
+ *
+ * ⚠️ **消息来源没有自己的地址** —— 库里那条消息属于某条对话线,
+ * 而地址这一层**还没有「定位到某条消息」的参数**(对话页只有项目与线两个层级)。
+ * ⇒ 消息来源落到**那个项目的对话页**(落得到点上,只是落不到那一句)。
+ * 这个缺口如实记着,不假装「点进去就能看到那句话」。
+ */
+export function chunkSourceLocation(chunk: KnowledgeChunkView): AppLocation | null {
+  // ⚠️ **拿不到项目 ⇒ 不编地址** —— 半个地址(只在「你正好在看那个项目」时成立)
+  // 比没有地址更坏:点得动、跳得过去、就是找不到。
+  if (chunk.projectId === null) return null;
+  if (chunk.sourceKind === "artifact") {
+    if (chunk.artifactId === null) return null;
+    return withProjectCoordinate(artifactLocation(chunk.artifactId), chunk.projectId);
+  }
+  return withProjectCoordinate({ route: "chat", params: {} }, chunk.projectId);
+}
+
+/**
+ * 一块语料的来源**叫什么**(与地址同源 —— 标签与地址不许各说各的)。
+ */
+export function chunkSourceLabel(chunk: KnowledgeChunkView): string {
+  if (chunk.sourceKind === "artifact") {
+    return chunk.artifactTitle ?? chunk.artifactId ?? chunk.sourceId;
+  }
+  return chunk.messageId ?? chunk.sourceId;
+}
 
 // ── 三类实体的身份 ────────────────────────────────────────────────
 

@@ -37,7 +37,7 @@
  * 关联目标只显示 id —— 契约 `ArtifactView.links` / `AskView.parentAskId` 都只有 id,
  * 没有目标标题,不编一个出来。
  */
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { PageHeader, Pill, Section, StatStrip, EmptyState, KV, Flag } from "@/components/ui/primitives";
 import { ClientQuestionCard } from "@/components/client/ClientQuestionCard";
 
@@ -151,19 +151,19 @@ export function ProjectDetailPage() {
   const { loc } = useAppLocation();
   const pickedBlocker = paramOf(loc, "blocker");
   /**
-   * 地址里指定的项目(`?project=<id>`)—— **深链接**。
+   * 地址里的 `?project=<id>` —— **深链接坐标**。
    *
-   * ⚠️ 「当前项目」是应用里的一处**全局选择**(store 的 `projectId`),
-   * 而阻塞只存在于**某一个**项目里。所以一条指向阻塞的地址必须**连项目一起点名**,
-   * 否则它只在「你正好在看那个项目」时成立。
-   * ⇒ 这一页认 `?project=`:与当前项目不同时就切过去(`selectProject` = 左栏同一个动作)。
+   * ⚠️ **这一页不再自己切项目**（2026-10-26,Wave 2e）：改版前这里有一个自己的
+   * 效果（与当前项目不同时就 `selectProject`），它每次渲染都看地址 ⇒
+   * **用户从左栏切了项目**（地址没变）⇒ 那个效果又把他拽回去 ⇒
+   * 「切项目」这个动作被撤销，症状是「点左栏没反应」。
+   * ⇒ 现在这件事**只有一处**做：`lib/deepLink.ts` 的 `useProjectCoordinate`
+   * （`App.tsx` 挂一次，且**只切一次** —— 坐标过期之后不再生效）。
+   *
+   * ⇒ 这一页**不需要读**这个参数：坐标的落地不在页面里，而在应用外壳上。
+   * （留着「读到了但不用」的变量就是一处**没有读者的判据**—— 它看着像
+   * 「这一页认这个参数」，而实际上这一页对它的态度是「不认」。）
    */
-  const wantedProject = paramOf(loc, "project");
-  const selectProject = useChatStore((s) => s.selectProject);
-  useEffect(() => {
-    if (wantedProject === null || wantedProject === projectId) return;
-    void selectProject(wantedProject);
-  }, [wantedProject, projectId, selectProject]);
   /**
    * 工作项 id → 标题。⚠️ 只用来把「地址格」里的 id 翻成人能读的标题 ——
    * 一个链接钣着 `w_1a2b3c` 也能点,但没人能读。

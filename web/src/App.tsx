@@ -49,6 +49,7 @@ import { useChatStore } from "./stores/chat";
 import { initAppSocket } from "./lib/appSocket";
 import { getConfig, getHealth } from "./lib/api";
 import { useAppLocation, toRoute } from "./lib/route";
+import { useProjectCoordinate } from "./lib/deepLink";
 import type { Route } from "./lib/route";
 
 /**
@@ -101,6 +102,15 @@ export function App() {
   useEffect(() => {
     void decideInitialContext();
   }, [decideInitialContext]);
+
+  /**
+   * 地址里的 `?project=`(跨项目地址带的**坐标**)在这里落地。
+   *
+   * ⚠️ **整个应用只挂这一处** —— 挂多处就会有多份「切过了哪个」的记据,
+   * 它们互相看不见,于是地址与当前项目来回抢(「点左栏没反应」)。
+   * 判据在 `lib/deepLink.ts` 的 `shouldApplyProjectCoordinate`(纯函数)。
+   */
+  useProjectCoordinate();
 
   useEffect(() => {
     getConfig()
