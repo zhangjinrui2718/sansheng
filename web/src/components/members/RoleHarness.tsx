@@ -127,6 +127,8 @@ import {
   Flag,
   KV,
   Pill,
+  RedInline,
+  RedMeta,
   Section,
 } from "@/components/ui/primitives";
 import { ToolTable } from "@/components/members/ToolTable";
@@ -140,6 +142,7 @@ import {
   updatePromptUnit,
 } from "@/lib/api";
 import { ROLE_LABEL } from "@/lib/vocab";
+import { DataState, remoteOf } from "@/components/ui/DataState";
 
 /**
  * 提示词单元默认画多少个字(超过就只给前这么多,由「展开全部」补全)。
@@ -626,23 +629,28 @@ export function RoleHarnessDisclosure({
 
         {/* 可编辑的配置**默认折叠**:提示词单元编辑器 / 工具集合文件 / 常量。 */}
         <Disclosure summary="展开配置(提示词单元 · 工具面 · 常量)" defaultOpen={defaultOpen}>
-          {error !== null ? (
-            // ⚠️ 三种「不知道」必须与「真的没有」分得开:`getHarness` 失败是**读不到**,
-            // 不能说成「这个角色没有单元」。
-            // ⚠️ 这里**不套** `sansheng-card`:它已经在卡片本体的 `article` 里了,
-            // 再套一层就是卡片套卡片(这一刀要清掉的正是嵌套的壳)。
-            <div className="p-2 text-xs" style={{ color: "var(--cinnabar)" }}>
-              加载失败:{error} —— 这是「读不到 harness 视图」,不是「这个角色没有提示词单元」。
-            </div>
-          ) : loading && view === null ? (
-            <EmptyState>正在读取 harness 视图…</EmptyState>
-          ) : view === null ? (
-            <EmptyState>读不到 harness 视图。</EmptyState>
-          ) : found === null ? (
-            <EmptyState>
-              这一份 harness 视图里没有角色 {role}(与「它没有提示词单元」是两件事)。
-            </EmptyState>
-          ) : (
+          {/*
+            ⚠️ 三种「不知道」必须与「真的没有」分得开:`getHarness` 失败是**读不到**,
+            不能说成「这个角色没有单元」。
+            ⚠️ 这里**不套** `sansheng-card`:它已经在卡片本体的 `article` 里了,
+            再套一层就是卡片套卡片(这一刀要清掉的正是嵌套的壳)——
+            ⇒ `variant="inline"` 就是为这种场合留的。
+          */}
+          <DataState
+            what="harness 视图"
+            state={remoteOf(view, error, loading && view === null)}
+            variant="inline"
+            errorLabel="加载失败"
+            errorNote=" —— 这是「读不到 harness 视图」,不是「这个角色没有提示词单元」。"
+            loadingLabel="正在读取 harness 视图…"
+            unavailable="读不到 harness 视图。"
+          >
+            {(view) => (
+              found === null ? (
+                <EmptyState>
+                  这一份 harness 视图里没有角色 {role}(与「它没有提示词单元」是两件事)。
+                </EmptyState>
+              ) : (
             <>
               {/* 落在空处的意图:文件名写错(如 workers.json)会被安静忽略 —— 必须报出来。
                   它原来是 harness 页页级的告警,页面并进成员页后搬到这里;不搬就等于
@@ -668,7 +676,9 @@ export function RoleHarnessDisclosure({
                 onApplied={onApplied}
               />
             </>
-          )}
+              )
+            )}
+        </DataState>
         </Disclosure>
       </article>
     </Section>
@@ -1120,9 +1130,7 @@ export function PromptUnitEditForm({
             >
               取消
             </button>
-            <span className="ss-meta" style={{ color: "var(--cinnabar)" }}>
-              会丢弃本单元的全部改动(当前内容先落一份备份)
-            </span>
+            <RedMeta>会丢弃本单元的全部改动(当前内容先落一份备份)</RedMeta>
           </>
         ) : (
           <button
@@ -1163,14 +1171,14 @@ export function PromptUnitEditForm({
       {op.kind === "failed" && (
         // ⚠️ 同样的理由:这里在卡片本体的 `article` 里,不再套第二层
         // `sansheng-card`(失败提示本来就该是红色小字,不是另一张卡)。
-        <div className="p-2 text-xs" style={{ color: "var(--cinnabar)" }}>
+        <RedInline>
           <div>操作失败:{op.message}</div>
           {op.validIds !== undefined && op.validIds.length > 0 && (
             <div style={{ marginTop: 4 }}>
               后端说这个 id 不认识。合法 id:{op.validIds.join(" · ")}
             </div>
           )}
-        </div>
+        </RedInline>
       )}
     </div>
   );

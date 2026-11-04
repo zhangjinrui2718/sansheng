@@ -50,6 +50,7 @@
 import { memo, useCallback, useRef, useState } from "react";
 import { useArtifactContent } from "@/lib/data";
 import { ContentDriftNote } from "./ContentDriftNote";
+import { RedCard } from "@/components/ui/primitives";
 
 /** 预览区初始高度(px)。iframe 内部滚动,所以这个值只决定「不滚动时露出多少」。 */
 const DEFAULT_HEIGHT = 560;
@@ -81,14 +82,14 @@ function ContentProblem({
   runtime: "unavailable" | "error";
 }) {
   return (
-    <div
-      className="sansheng-card p-3 text-xs flex flex-col gap-0.5"
-      style={{ color: "var(--cinnabar, #b4483c)" }}
+    <RedCard
+      className="flex flex-col gap-0.5"
+      color="var(--cinnabar, #b4483c)"
       data-content-runtime={runtime}
     >
       <span>{text}</span>
       {detail !== undefined && <span className="ss-meta">{detail}</span>}
-    </div>
+    </RedCard>
   );
 }
 

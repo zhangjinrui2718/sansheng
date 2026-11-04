@@ -131,6 +131,119 @@ export function EmptyState({ children }: { children: ReactNode }) {
 }
 
 /**
+ * 四种**红字外壳** —— 只有这一处定义。
+ *
+ * ⚠️ **为什么单独抽出来**:「这一处出错了 / 这一项不对」原先在十几个地方各写一遍
+ * `style={{ color: "var(--cinnabar)" }}` ⇒ 改一次颜色要改十几处,而漏掉的那几处
+ * **看起来完全一样**(都是红字)⇒ **没有任何检查会红**。
+ * ⇒ 「红的壳」是**表现原语**,归 `primitives`;
+ * **读槽的四态**归 `ui/DataState.tsx`(判据在那里,壳在这里)。
+ */
+/** 红字的**唯一颜色字面量**:改颜色只许改这一处。 */
+const RED = "var(--cinnabar)";
+
+/**
+ * 红壳原语的公共入参。
+ *
+ * ⚠️ **`className` 是追加不是替换** —— 调用点常常还要带 `mt-1` 之类;
+ * **`style` 里的 `color` 会被壳的颜色盖住**(除非显式传 `color`),
+ * 这样「壳是红的」这条判据不会因为某次顺手加样式而失效。
+ */
+type RedShellProps = {
+  children: ReactNode;
+  title?: string;
+  /** 追加的 class(壳自己的 class 保留)。 */
+  className?: string;
+  /** 覆盖颜色(默认 `var(--cinnabar)`)—— 只给「带兜底色」的旧调用点。 */
+  color?: string;
+} & React.HTMLAttributes<HTMLElement>;
+
+function redShellClass(shell: string, extra: string | undefined): string {
+  return extra ? `${shell} ${extra}` : shell;
+}
+
+export function RedNote({ children, title, className, color, style, ...rest }: RedShellProps) {
+  return (
+    <div
+      className={redShellClass("ss-note", className)}
+      style={{ ...style, color: color ?? RED }}
+      title={title}
+      {...rest}
+    >
+      {children}
+    </div>
+  );
+}
+
+/** 红字 + **等宽小字**:页首 / 侧栏那一行(行内,不能换块)。 */
+export function RedMeta({
+  children,
+  title,
+  className,
+  color,
+  style,
+  as = "span",
+  ...rest
+}: RedShellProps & { as?: "span" | "div" }) {
+  const cls = redShellClass("ss-meta", className);
+  const st = { ...style, color: color ?? RED };
+  return as === "div" ? (
+    <div className={cls} style={st} title={title} {...rest}>
+      {children}
+    </div>
+  ) : (
+    <span className={cls} style={st} title={title} {...rest}>
+      {children}
+    </span>
+  );
+}
+
+/** 红字 + **卡片**:主区里的错误块。 */
+export function RedCard({ children, title, className, color, style, ...rest }: RedShellProps) {
+  return (
+    <div
+      className={redShellClass("sansheng-card p-3 text-xs", className)}
+      style={{ ...style, color: color ?? RED }}
+      title={title}
+      {...rest}
+    >
+      {children}
+    </div>
+  );
+}
+
+/** 红字 + **空态壳**:「这里本来该有东西,现在读不到」。 */
+export function RedEmpty({ children, title, className, color, style, ...rest }: RedShellProps) {
+  return (
+    <div
+      className={redShellClass("ss-empty", className)}
+      style={{ ...style, color: color ?? RED }}
+      title={title}
+      {...rest}
+    >
+      {children}
+    </div>
+  );
+}
+
+/**
+ * 红字 + **无壳小字**:已经在卡片里的时候用 ——
+ * 再套一层卡片就是卡片套卡片(那一层要清掉的正是嵌套的壳)。
+ */
+export function RedInline({ children, title, className, color, style, ...rest }: RedShellProps) {
+  return (
+    <div
+      className={redShellClass("p-2 text-xs", className)}
+      style={{ ...style, color: color ?? RED }}
+      title={title}
+      {...rest}
+    >
+      {children}
+    </div>
+  );
+}
+
+/**
  * 「点开看细节」容器(原生 <details>)。默认收起,标题是**一个词**级别的动作提示。
  * 用来装:失败原因全文、估算口径说明、id / 依赖等原始字段。
  */
@@ -248,7 +361,7 @@ export function toneColor(tone: Tone | undefined): string {
     case "amber":
       return "var(--amber)";
     case "cinnabar":
-      return "var(--cinnabar)";
+      return RED;
     case "cyan":
       return "var(--cyan)";
     case "bamboo":

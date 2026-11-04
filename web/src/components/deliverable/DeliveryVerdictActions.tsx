@@ -23,7 +23,7 @@
  */
 import { useState } from "react";
 import type { ArtifactAcceptanceView } from "@shared/types/platform";
-import { Pill } from "@/components/ui/primitives";
+import { Pill, RedMeta } from "@/components/ui/primitives";
 import {
   DELIVERY_VERDICT_LABEL,
   DELIVERY_VERDICT_TONE,
@@ -169,9 +169,7 @@ export function DeliveryVerdictActions({
       </div>
 
       {failed !== null && (
-        <div className="ss-meta mt-1" style={{ color: "var(--cinnabar)" }}>
-          {failed}
-        </div>
+        <RedMeta className="mt-1">{failed}</RedMeta>
       )}
     </div>
   );

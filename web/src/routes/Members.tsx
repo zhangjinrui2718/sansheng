@@ -129,6 +129,7 @@ import {
   EmptyState,
   PageHeader,
   Pill,
+  RedMeta,
   Section,
   StatStrip,
 } from "@/components/ui/primitives";
@@ -1031,9 +1032,7 @@ export function MembersPage() {
    */
   const liveAside =
     live.error !== null ? (
-      <span className="ss-meta" style={{ color: "var(--cinnabar)" }} title="运行态读面失败 · 会自己重试(2.5s 一次)">
-        运行态读取失败:{live.error}
-      </span>
+      <RedMeta title="运行态读面失败 · 会自己重试(2.5s 一次)">运行态读取失败:{live.error}</RedMeta>
     ) : live.data === null ? (
       <span className="ss-meta" style={{ color: "var(--bone-dim)" }}>
         <span className="ss-live-dot" data-state="unknown" /> 正在读取运行态…

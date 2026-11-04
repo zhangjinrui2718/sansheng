@@ -44,6 +44,7 @@ import type {
   SessionMessageView,
 } from "@shared/types/platform";
 import { Pill } from "@/components/ui/primitives";
+import { DataState, remoteListOf } from "@/components/ui/DataState";
 import { Markdown } from "@/components/chat/Markdown";
 import { useAgentConversations } from "@/lib/data";
 import { inFlightTurns, useChatStore, type Turn } from "@/stores/chat";
@@ -168,7 +169,14 @@ export function AgentConversationBody({
    * `useAgentConversations` 的注释):`loading && lines.length === 0` 是
    * 「还没拿到过任何一份数据」,而 `共 0 条` 是「他真的一句话都没说过」。
    */
-  const known = error === null && !(loading && lines.length === 0);
+  /**
+   * 这块读面的**唯一判据** —— 四态只在这里算一次。
+   * ⚠️ 原来下面是 `known = error === null && !(loading && lines.length === 0)`,
+   * 而那个四态链又**自己算了一遍**(error / !known / 空)⇒ 两处各算一次,
+   * 迟早算出不一样的结果(那正是「同一个东西两个地方说法不一样」那类病)。
+   */
+  const convState = remoteListOf(lines, loading, error);
+  const known = convState.kind === "ready";
 
   return (
     <div className="flex flex-col gap-2">
@@ -197,101 +205,110 @@ export function AgentConversationBody({
         <div className="ss-section" style={{ fontSize: 12 }}>
           已说完的
           <span className="ss-meta" style={{ marginLeft: 6 }}>
-            {error !== null ? "读不到" : known ? `共 ${total} 条` : "正在读取…"}
+            {convState.kind === "error"
+              ? "读不到"
+              : known
+                ? `共 ${total} 条`
+                : "正在读取…"}
           </span>
         </div>
 
-        {error !== null ? (
-          <div className="ss-note" style={{ color: "var(--cinnabar)" }}>
-            {`对话内容读不到:${error} —— 这一次请求失败了,所以下面不是「他一句话都没说过」。`}
-          </div>
-        ) : !known ? (
-          <div className="ss-note">正在读取对话内容…</div>
-        ) : lines.length === 0 ? (
-          <div className="ss-note">
-            {`${agentName}在这个项目里还没有留下任何发言记录。`}
-          </div>
-        ) : (
-          <details className="ss-disclosure">
-            {/* ⚠️ **默认收起**(与这一屏原来的那块一致):成员面板一屏只显示一个
-                成员,里面还有「正在做什么」「工件」两块 —— 把几百条消息铺开会把
-                结构淹掉(这一屏 2026-10-06 重排的就是这个)。**条数永远可见**
-                (上面那行),内容点开就看。 */}
-            <summary>{`展开看已说完的 · ${total} 条`}</summary>
-            <div style={{ paddingTop: 6 }}>
-              {/* 线头:哪条对话线 */}
-              <div className="flex flex-wrap items-center gap-1.5">
-                {lines.map((l) => {
-                  const on = l.sessionId === selectedSessionId;
-                  return (
-                    <button
-                      key={l.sessionId}
-                      type="button"
-                      className="sansheng-card"
-                      onClick={() => onSelectSession(l.sessionId)}
-                      style={{
-                        padding: "2px 8px",
-                        fontSize: 12,
-                        cursor: "pointer",
-                        borderColor: on ? "var(--jade)" : "var(--ink-3)",
-                      }}
-                      title={`${lineSubtitle(l)} · 最后一条 ${fmtTime(l.lastMessageAt)}`}
-                    >
-                      <span style={{ color: on ? "var(--bone)" : "var(--bone-dim)" }}>
-                        {lineLabel(l)}
-                      </span>
-                      <span className="ss-meta" style={{ marginLeft: 6 }}>
-                        {l.messageCount} 条
-                      </span>
-                    </button>
-                  );
-                })}
+        <DataState
+          what="对话内容"
+          variant="note"
+          state={convState}
+          errorLabel="对话内容读不到"
+          errorNote=" —— 这一次请求失败了,所以下面不是「他一句话都没说过」。"
+          loadingLabel="正在读取对话内容…"
+        >
+          {(rows) =>
+            rows.length === 0 ? (
+              <div className="ss-note">
+                {`${agentName}在这个项目里还没有留下任何发言记录。`}
               </div>
+            ) : (
+              <details className="ss-disclosure">
+                {/* ⚠️ **默认收起**(与这一屏原来的那块一致):成员面板一屏只显示一个
+                    成员,里面还有「正在做什么」「工件」两块 —— 把几百条消息铺开会把
+                    结构淹掉(这一屏 2026-10-06 重排的就是这个)。**条数永远可见**
+                    (上面那行),内容点开就看。 */}
+                <summary>{`展开看已说完的 · ${total} 条`}</summary>
+                <div style={{ paddingTop: 6 }}>
+                  {/* 线头:哪条对话线 */}
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    {lines.map((l) => {
+                      const on = l.sessionId === selectedSessionId;
+                      return (
+                        <button
+                          key={l.sessionId}
+                          type="button"
+                          className="sansheng-card"
+                          onClick={() => onSelectSession(l.sessionId)}
+                          style={{
+                            padding: "2px 8px",
+                            fontSize: 12,
+                            cursor: "pointer",
+                            borderColor: on ? "var(--jade)" : "var(--ink-3)",
+                          }}
+                          title={`${lineSubtitle(l)} · 最后一条 ${fmtTime(l.lastMessageAt)}`}
+                        >
+                          <span style={{ color: on ? "var(--bone)" : "var(--bone-dim)" }}>
+                            {lineLabel(l)}
+                          </span>
+                          <span className="ss-meta" style={{ marginLeft: 6 }}>
+                            {l.messageCount} 条
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div>
 
-              {selected !== null && (
-                <div className="ss-meta">
-                  {`${lineSubtitle(selected)} · 最后一条 ${fmtTime(selected.lastMessageAt)}`}
-                </div>
-              )}
+                  {selected !== null && (
+                    <div className="ss-meta">
+                      {`${lineSubtitle(selected)} · 最后一条 ${fmtTime(selected.lastMessageAt)}`}
+                    </div>
+                  )}
 
-              {/* 正文:旧 → 新,全文不截断。
-                  ⚠️ **限高 + 滚动**(不是折叠):用户要看的是「具体内容」——
-                      折叠起来等于要他多点一次才能看见;限高则内容就在眼前,
-                      而面板不会被几百条消息撑爆。 */}
-              <div
-                className="flex flex-col gap-2"
-                style={{ maxHeight: 420, overflowY: "auto", paddingRight: 4 }}
-              >
-                {messages.map((m) => (
-                  <article
-                    key={m.id}
-                    className="sansheng-card p-2.5"
-                    style={{ borderColor: "var(--ink-3)" }}
+                  {/* 正文:旧 → 新,全文不截断。
+                      ⚠️ **限高 + 滚动**(不是折叠):用户要看的是「具体内容」——
+                          折叠起来等于要他多点一次才能看见;限高则内容就在眼前,
+                          而面板不会被几百条消息撑爆。 */}
+                  <div
+                    className="flex flex-col gap-2"
+                    style={{ maxHeight: 420, overflowY: "auto", paddingRight: 4 }}
                   >
-                    <div className="flex items-baseline gap-2 flex-wrap" style={{ fontSize: 12 }}>
-                      <span className="ss-meta font-mono">{fmtTime(m.createdAt)}</span>
-                      <Pill tone={m.agentId === null ? "mute" : "jade"}>
-                        {m.agentId === null ? MESSAGE_KIND_LABEL.user : MESSAGE_KIND_LABEL.assistant}
-                      </Pill>
-                      {m.agentId === null && (
-                        <span className="ss-meta">甲方在这条线上的话(他说这些话的上下文)</span>
-                      )}
-                    </div>
-                    <div style={{ marginTop: 4 }}>
-                      <Markdown text={m.content} />
-                    </div>
-                  </article>
-                ))}
-              </div>
+                    {messages.map((m) => (
+                      <article
+                        key={m.id}
+                        className="sansheng-card p-2.5"
+                        style={{ borderColor: "var(--ink-3)" }}
+                      >
+                        <div className="flex items-baseline gap-2 flex-wrap" style={{ fontSize: 12 }}>
+                          <span className="ss-meta font-mono">{fmtTime(m.createdAt)}</span>
+                          <Pill tone={m.agentId === null ? "mute" : "jade"}>
+                            {m.agentId === null ? MESSAGE_KIND_LABEL.user : MESSAGE_KIND_LABEL.assistant}
+                          </Pill>
+                          {m.agentId === null && (
+                            <span className="ss-meta">甲方在这条线上的话(他说这些话的上下文)</span>
+                          )}
+                        </div>
+                        <div style={{ marginTop: 4 }}>
+                          <Markdown text={m.content} />
+                        </div>
+                      </article>
+                    ))}
+                  </div>
 
-              {truncated && (
-                <div className="ss-note">
-                  只显示最近 {messages.length} 条(这条线上还有更早的;`?limit=` 可调,上限 500)
+                  {truncated && (
+                    <div className="ss-note">
+                      只显示最近 {messages.length} 条(这条线上还有更早的;`?limit=` 可调,上限 500)
+                    </div>
+                  )}
                 </div>
-              )}
-            </div>
-          </details>
-        )}
+              </details>
+            )
+          }
+        </DataState>
       </div>
     </div>
   );

@@ -18,7 +18,7 @@
  */
 import { useState } from "react";
 import type { ClientQuestionView } from "@shared/types/platform";
-import { Disclosure, Flag, Pill } from "@/components/ui/primitives";
+import { Disclosure, Flag, Pill, RedMeta } from "@/components/ui/primitives";
 import { useChatStore } from "@/stores/chat";
 import { fmtTime } from "@/lib/vocab";
 
@@ -112,11 +112,7 @@ export function ClientQuestionCard({
               resize: "vertical",
             }}
           />
-          {failed !== null && (
-            <span className="ss-meta" style={{ color: "var(--cinnabar)" }}>
-              {failed}
-            </span>
-          )}
+          {failed !== null && <RedMeta>{failed}</RedMeta>}
           <div className="flex items-center gap-2">
             <button
               className="sansheng-button-primary"

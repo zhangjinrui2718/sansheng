@@ -39,6 +39,7 @@
  */
 import { useCallback, useMemo, useState } from "react";
 import { PageHeader, Pill, Section, StatStrip, EmptyState, KV, Flag } from "@/components/ui/primitives";
+import { DataState, remoteListOf, remoteOf } from "@/components/ui/DataState";
 import { ClientQuestionCard } from "@/components/client/ClientQuestionCard";
 
 import {
@@ -305,15 +306,14 @@ export function ProjectDetailPage() {
       */}
       {detail && <DashboardCards cards={cards} next={next} />}
 
-      {error !== null ? (
-        <div className="sansheng-card p-3 text-xs" style={{ color: "var(--cinnabar)" }}>
-          加载失败:{error}
-        </div>
-      ) : loading && !detail ? (
-        <EmptyState>加载中…</EmptyState>
-      ) : !detail ? (
-        <EmptyState>读不到这个项目。</EmptyState>
-      ) : (
+      <DataState
+        what="这个项目"
+        state={remoteOf(detail, error, loading)}
+        variant="card"
+        unavailable="读不到这个项目。"
+        loadingLabel="加载中…"
+      >
+        {(detail) => (
         <>
           <Section title="目标">
             {detail.goal.length > 0 ? (
@@ -367,15 +367,16 @@ export function ProjectDetailPage() {
                 </span>
               )}
             </div>
-            {noticesError !== null ? (
-              <div className="sansheng-card p-3 text-xs" style={{ color: "var(--cinnabar)" }}>
-                加载失败:{noticesError}
-              </div>
-            ) : noticesLoading && runtime.stops.length === 0 ? (
-              <EmptyState>加载中…</EmptyState>
-            ) : runtime.stops.length === 0 ? (
-              <EmptyState>没有异常停下过 —— 排空每次都跑到了没有待办为止。</EmptyState>
-            ) : (
+            <DataState
+              what="异常"
+              state={remoteListOf(runtime.stops, noticesLoading, noticesError)}
+              variant="card"
+              loadingLabel="加载中…"
+            >
+              {() => (
+                runtime.stops.length === 0 ? (
+                  <EmptyState>没有异常停下过 —— 排空每次都跑到了没有待办为止。</EmptyState>
+                ) : (
               <div className="grid gap-1.5">
                 {runtime.stops.map(({ notice, state }) => (
                   <article
@@ -420,7 +421,8 @@ export function ProjectDetailPage() {
                   </article>
                 ))}
               </div>
-            )}
+            ))}
+            </DataState>
           </Section>
 
           <Section
@@ -534,15 +536,16 @@ export function ProjectDetailPage() {
             hint="不用你处理"
             helpId="ask"
           >
-            {asksError !== null ? (
-              <div className="sansheng-card p-3 text-xs" style={{ color: "var(--cinnabar)" }}>
-                加载失败:{asksError}
-              </div>
-            ) : asksLoading && asks.length === 0 ? (
-              <EmptyState>加载中…</EmptyState>
-            ) : asks.length === 0 ? (
-              <EmptyState>没有角色之间的提问 —— 团队没卡在横向沟通上。</EmptyState>
-            ) : (
+            <DataState
+              what="内部提问"
+              state={remoteListOf(asks, asksLoading, asksError)}
+              variant="card"
+              loadingLabel="加载中…"
+            >
+              {() => (
+                asks.length === 0 ? (
+                  <EmptyState>没有角色之间的提问 —— 团队没卡在横向沟通上。</EmptyState>
+                ) : (
               <div className="grid gap-1.5">
                 {asks.map((a) => (
                   <article key={a.id} className="sansheng-card p-2.5" title={a.id}>
@@ -598,7 +601,8 @@ export function ProjectDetailPage() {
                   </article>
                 ))}
               </div>
-            )}
+            ))}
+            </DataState>
           </Section>
 
           <Section
@@ -606,15 +610,16 @@ export function ProjectDetailPage() {
             count={changes.length}
             helpId="change"
           >
-            {changesError !== null ? (
-              <div className="sansheng-card p-3 text-xs" style={{ color: "var(--cinnabar)" }}>
-                加载失败:{changesError}
-              </div>
-            ) : changesLoading && changes.length === 0 ? (
-              <EmptyState>加载中…</EmptyState>
-            ) : changes.length === 0 ? (
-              <EmptyState>没有变更记录 —— 这个项目还没改过范围或方向。</EmptyState>
-            ) : (
+            <DataState
+              what="变更记录"
+              state={remoteListOf(changes, changesLoading, changesError)}
+              variant="card"
+              loadingLabel="加载中…"
+            >
+              {() => (
+                changes.length === 0 ? (
+                  <EmptyState>没有变更记录 —— 这个项目还没改过范围或方向。</EmptyState>
+                ) : (
               <div className="grid gap-1.5">
                 {changes.map((c) => (
                   <article key={c.id} className="sansheng-card p-2.5" title={c.id}>
@@ -635,7 +640,8 @@ export function ProjectDetailPage() {
                   </article>
                 ))}
               </div>
-            )}
+            ))}
+            </DataState>
           </Section>
 
           <Section
@@ -717,79 +723,79 @@ export function ProjectDetailPage() {
             title="成本"
             helpId="usage.cost"
           >
-            {usageError !== null ? (
-              <div className="sansheng-card p-3 text-xs" style={{ color: "var(--cinnabar)" }}>
-                读不到用量:{usageError}
-              </div>
-            ) : usageLoading && usage === null ? (
-              <EmptyState>加载中…</EmptyState>
-            ) : usage === null ? (
-              // 「还没查过」不是「查过了,是 0」—— 与 useProjectUsage 文件头那条同源。
-              <EmptyState>还没有读到用量。</EmptyState>
-            ) : (
-              <div className="grid gap-2">
-                <div className="sansheng-card p-3">
-                  <div className="flex items-center gap-3 flex-wrap">
-                    {[
-                      { label: "全历史", b: usage.allTime },
-                      { label: `最近 ${usage.window.days} 天`, b: usage.totals },
-                      { label: "今日", b: usage.today },
-                    ].map(({ label, b }) => {
-                      const total = b.input + b.output;
-                      return (
-                        <div key={label} className="flex flex-col">
-                          <span className="ss-meta">{label}</span>
-                          <span
-                            className="ss-body"
-                            style={{ color: "var(--bone)" }}
-                            title={`${total.toLocaleString()} token(输入 ${b.input.toLocaleString()} / 输出 ${b.output.toLocaleString()}),${b.turns} 个有花费的回合`}
-                          >
-                            {fmtTokens(total)} token · {b.turns} 回合
+            <DataState
+              what="用量"
+              variant="card"
+              state={remoteOf(usage, usageError, usageLoading)}
+              errorLabel="读不到用量"
+              loadingLabel="加载中…"
+              unavailable="还没有读到用量。"
+            >
+              {(u) => (
+                <div className="grid gap-2">
+                  <div className="sansheng-card p-3">
+                    <div className="flex items-center gap-3 flex-wrap">
+                      {[
+                        { label: "全历史", b: u.allTime },
+                        { label: `最近 ${u.window.days} 天`, b: u.totals },
+                        { label: "今日", b: u.today },
+                      ].map(({ label, b }) => {
+                        const total = b.input + b.output;
+                        return (
+                          <div key={label} className="flex flex-col">
+                            <span className="ss-meta">{label}</span>
+                            <span
+                              className="ss-body"
+                              style={{ color: "var(--bone)" }}
+                              title={`${total.toLocaleString()} token(输入 ${b.input.toLocaleString()} / 输出 ${b.output.toLocaleString()}),${b.turns} 个有花费的回合`}
+                            >
+                              {fmtTokens(total)} token · {b.turns} 回合
+                            </span>
+                          </div>
+                        );
+                      })}
+                      <span className="ss-meta ml-auto">
+                        {u.updatedAt === null
+                          ? "这个窗口里一笔都没有"
+                          : `最近一笔 ${fmtTime(u.updatedAt)}`}
+                      </span>
+                    </div>
+                  </div>
+
+                  {u.byAgent.length > 0 && (
+                    <div className="sansheng-card p-3">
+                      <div className="ss-meta mb-1">谁花的</div>
+                      {u.byAgent.map((a) => (
+                        <div key={a.agentId} className="flex items-center gap-2">
+                          <span className="ss-body" style={{ color: "var(--bone-dim)" }}>
+                            {a.agentName}
+                          </span>
+                          <span className="ss-meta ml-auto">
+                            {fmtTokens(a.input + a.output)} token · {a.turns} 回合
                           </span>
                         </div>
-                      );
-                    })}
-                    <span className="ss-meta ml-auto">
-                      {usage.updatedAt === null
-                        ? "这个窗口里一笔都没有"
-                        : `最近一笔 ${fmtTime(usage.updatedAt)}`}
-                    </span>
-                  </div>
-                </div>
+                      ))}
+                    </div>
+                  )}
 
-                {usage.byAgent.length > 0 && (
-                  <div className="sansheng-card p-3">
-                    <div className="ss-meta mb-1">谁花的</div>
-                    {usage.byAgent.map((a) => (
-                      <div key={a.agentId} className="flex items-center gap-2">
-                        <span className="ss-body" style={{ color: "var(--bone-dim)" }}>
-                          {a.agentName}
-                        </span>
-                        <span className="ss-meta ml-auto">
-                          {fmtTokens(a.input + a.output)} token · {a.turns} 回合
-                        </span>
-                      </div>
-                    ))}
-                  </div>
-                )}
-
-                {usage.byWork.length > 0 && (
-                  <div className="sansheng-card p-3">
-                    <div className="ss-meta mb-1">花在哪件活上</div>
-                    {usage.byWork.map((w) => (
-                      <div key={w.workId ?? "__platform__"} className="flex items-center gap-2">
-                        <span className="ss-body" style={{ color: "var(--bone-dim)" }}>
-                          {w.workTitle ?? (w.workId === null ? "平台回合(不挂工作项)" : w.workId)}
-                        </span>
-                        <span className="ss-meta ml-auto">
-                          {fmtTokens(w.input + w.output)} token · {w.turns} 回合
-                        </span>
-                      </div>
-                    ))}
-                  </div>
-                )}
+                  {u.byWork.length > 0 && (
+                    <div className="sansheng-card p-3">
+                      <div className="ss-meta mb-1">花在哪件活上</div>
+                      {u.byWork.map((w) => (
+                        <div key={w.workId ?? "__platform__"} className="flex items-center gap-2">
+                          <span className="ss-body" style={{ color: "var(--bone-dim)" }}>
+                            {w.workTitle ?? (w.workId === null ? "平台回合(不挂工作项)" : w.workId)}
+                          </span>
+                          <span className="ss-meta ml-auto">
+                            {fmtTokens(w.input + w.output)} token · {w.turns} 回合
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
               </div>
-            )}
+              )}
+            </DataState>
           </Section>
 
           {/*
@@ -809,13 +815,14 @@ export function ProjectDetailPage() {
             count={workspace?.runtime === "ok" ? workspace.counts.entries : undefined}
             helpId="workspace.read"
           >
-            {workspaceError !== null ? (
-              <div className="sansheng-card p-3 text-xs" style={{ color: "var(--cinnabar)" }}>
-                加载失败:{workspaceError}
-              </div>
-            ) : workspace === null ? (
-              <EmptyState>{workspaceLoading ? "加载中…" : "读不到工作区。"}</EmptyState>
-            ) : (
+            <DataState
+              what="工作区"
+              state={remoteOf(workspace, workspaceError, workspaceLoading)}
+              variant="card"
+              unavailable="读不到工作区。"
+              loadingLabel="加载中…"
+            >
+              {(workspace) => (
               <div className="grid gap-2">
                 {/* root 的绝对路径(可复制)—— 「读不到」时它更要显示:用户要拿着它去盘上核对 */}
                 <CopyPath text={workspace.root} />
@@ -904,9 +911,11 @@ export function ProjectDetailPage() {
                 )}
               </div>
             )}
+            </DataState>
           </Section>
         </>
       )}
+      </DataState>
     </div>
   );
 }

@@ -48,6 +48,10 @@ import type { CodeServiceView } from "@shared/types/platform";
 import { dockerCommands, shortSha } from "@/lib/deliverable";
 import { useArtifactContent } from "@/lib/data";
 import { ContentDriftNote } from "./ContentDriftNote";
+import { RedMeta, RedNote } from "@/components/ui/primitives";
+
+/** 交付物渲染面的红字颜色:**带兑底色(这两个组件可能被嵌在别的壳里)。 */
+const RED_FALLBACK = "var(--cinnabar, #b4483c)";
 
 export interface CodeServiceProps {
   /** 工件 id —— 用来读**现读**的提交列表(`GET /api/artifacts/:id/commits`)与正文。 */
@@ -79,9 +83,7 @@ function Row({
         {label}
       </span>
       {value === null ? (
-        <span className="ss-meta" style={{ color: "var(--cinnabar, #b4483c)" }}>
-          读不到
-        </span>
+        <RedMeta color={RED_FALLBACK}>读不到</RedMeta>
       ) : (
         <span
           className="ss-body"
@@ -186,19 +188,19 @@ function CommitList({ artifactId }: { artifactId: string }) {
   }, [artifactId]);
 
   if (error !== null) {
-    return <div className="ss-meta" style={{ color: "var(--cinnabar, #b4483c)" }}>读不到提交:{error}</div>;
+    return <RedMeta as="div" color={RED_FALLBACK}>读不到提交:{error}</RedMeta>;
   }
   if (data === null) return <div className="ss-meta">读取仓库提交…</div>;
   if (data.runtime !== "ok") {
     return (
-      <div
-        className="ss-meta"
-        style={{ color: "var(--cinnabar, #b4483c)" }}
+      <RedMeta
+        as="div"
+        color={RED_FALLBACK}
         data-commits-runtime={data.runtime}
       >
         {commitsRuntimeLabel(data.runtime)}仓库提交 —— {data.problem ?? "原因未说明"}。
         (这不是「没有提交」,是这次读不到。)
-      </div>
+      </RedMeta>
     );
   }
   const commits = data.commits ?? [];
@@ -233,18 +235,16 @@ function ServiceBody({ artifactId, at }: { artifactId: string; at?: string }) {
 
   if (error !== null) {
     return (
-      <div className="ss-note" style={{ color: "var(--cinnabar, #b4483c)" }}>
-        读不到说明正文:{error}
-      </div>
+      <RedNote color={RED_FALLBACK}>读不到说明正文:{error}</RedNote>
     );
   }
   if (loading || data === null) return <div className="ss-meta">读取说明正文…</div>;
   if (data.runtime !== "ok") {
     return (
-      <div className="ss-note" style={{ color: "var(--cinnabar, #b4483c)" }} data-content-runtime="unavailable">
+      <RedNote color={RED_FALLBACK} data-content-runtime="unavailable">
         读不到说明正文 —— {data.problem ?? "原因未说明"}。
         (这不是「没有说明」,是这次读不到。正文落点:{data.path})
-      </div>
+      </RedNote>
     );
   }
   if (data.content.trim() === "") {
@@ -357,10 +357,10 @@ export const CodeService = memo(function CodeService({ artifactId, at, service }
       )}
 
       {cmds === null ? (
-        <div className="ss-meta" style={{ color: "var(--cinnabar, #b4483c)" }}>
+        <RedMeta as="div" color={RED_FALLBACK}>
           服务名、端口或服务目录读不到,所以不生成部署命令 —— 编一个默认值会让你照着一条错的
           命令去部署(构建上下文写错时,镜像里会混进内部工作区)。
-        </div>
+        </RedMeta>
       ) : (
         <div className="flex flex-col gap-1">
           <div className="ss-meta">在仓库根目录执行(构建上下文 = 交付物边界):</div>

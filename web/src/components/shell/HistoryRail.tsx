@@ -115,9 +115,9 @@ export function HistoryRail() {
             加载失败: {error.message}
           </div>
         )}
-        {loading && projects.length === 0 && !error && <EmptyState text="加载中…" />}
+        {loading && projects.length === 0 && !error && <RailEmpty text="加载中…" />}
         {!loading && projects.length === 0 && !error && !intakeActive && (
-          <EmptyState text="还没有项目。点右上「+ 新建」和业务经理聊聊要做什么。" />
+          <RailEmpty text="还没有项目。点右上「+ 新建」和业务经理聊聊要做什么。" />
         )}
 
         {projects.map((p) => {
@@ -396,7 +396,16 @@ function NewThreadForm(props: { onCancel(): void; onSubmit(title: string | undef
   );
 }
 
-function EmptyState({ text }: { text: string }) {
+/**
+ * 左栏自己的空态 —— **故意不叫 `EmptyState`**。
+ *
+ * ⚠️ **同名陷阱**:`ui/primitives.tsx` 里有一个真正的 `EmptyState`(通用空态卡),
+ * 而这一个带「缘起」头 + 虚线框,是**左栏专有的那一种**。
+ * 两个组件同名而形状不同 ⇒ 迟早有人 import 错,而**屏幕上看起来完全正常**
+ * (都是一个空态框)⇒ 没有检查会红。
+ * ⇒ 所以这个叫 `RailEmpty`。
+ */
+function RailEmpty({ text }: { text: string }) {
   return (
     <div
       className="rounded-md flex flex-col items-center justify-center text-center px-4 py-6"

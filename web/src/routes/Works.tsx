@@ -123,6 +123,7 @@ import {
   KV,
   PageHeader,
   Pill,
+  RedNote,
   Section,
   StatStrip,
   toneColor,
@@ -181,6 +182,7 @@ import { Help } from "@/components/ui/Help";
 import { HtmlReport } from "@/components/deliverable/HtmlReport";
 import { CodeService } from "@/components/deliverable/CodeService";
 import { ContentDriftNote } from "@/components/deliverable/ContentDriftNote";
+import { DataState, remoteListOf, remoteOf } from "@/components/ui/DataState";
 import { DeliveryVerdictActions } from "@/components/deliverable/DeliveryVerdictActions";
 import { bodyMode, htmlReportFileName, shortSha } from "@/lib/deliverable";
 
@@ -1992,18 +1994,20 @@ export function WorksPage() {
 
       {scope === null ? (
         <EmptyState>先在「对话」页的左栏选一个项目,或在上面的选择器里挑一个。</EmptyState>
-      ) : error !== null ? (
-        <div className="sansheng-card p-3 text-xs" style={{ color: "var(--cinnabar)" }}>
-          加载失败:{error}
-        </div>
-      ) : (worksLoad.loading || artifactsLoad.loading) && nothingYet ? (
-        <EmptyState>加载中…</EmptyState>
-      ) : nothingYet ? (
-        <EmptyState>
-          这个项目还没有工作项,也没有工件。项目跑起来后,环节与工件会落在这里。
-        </EmptyState>
       ) : (
-        <ArtifactsScreen
+        <DataState
+          what="工作项与工件"
+          state={remoteListOf(works, worksLoad.loading || artifactsLoad.loading, error)}
+          variant="card"
+          loadingLabel="加载中…"
+        >
+          {() => (
+            nothingYet ? (
+              <EmptyState>
+                这个项目还没有工作项,也没有工件。项目跑起来后,环节与工件会落在这里。
+              </EmptyState>
+            ) : (
+              <ArtifactsScreen
           works={works}
           artifacts={artifacts}
           relations={relations}
@@ -2016,6 +2020,9 @@ export function WorksPage() {
           openId={openId}
           onToggleDetail={(id) => setOpenId((cur) => (cur === id ? null : id))}
         />
+            )
+          )}
+        </DataState>
       )}
     </div>
   );
@@ -2069,16 +2076,16 @@ function ArtifactBodySection({ id }: { id: string }) {
         按 id 现读的正文
         <Help id="artifact.detail" />
       </span>
-      {error !== null ? (
-        <div className="text-xs" style={{ color: "var(--cinnabar)" }}>
-          详情加载失败:{error}
-        </div>
-      ) : loading ? (
-        <div className="ss-meta">详情加载中…</div>
-      ) : artifact === null ? (
-        <div className="ss-meta">读不到这条工件的详情。</div>
-      ) : (
-        <div className="flex flex-col gap-1.5">
+      <DataState
+        what="工件详情"
+        state={remoteOf(artifact, error, loading)}
+        variant="note"
+        errorLabel="详情加载失败"
+        loadingLabel="详情加载中…"
+        unavailable="读不到这条工件的详情。"
+      >
+        {(artifact) => (
+          <div className="flex flex-col gap-1.5">
           {/*
             ⚠️ 这里**不再印标题 / 类型 / 状态 / 作者 / 时间 / 关系** ——
             标题在抽屉头,事实条与关系栏在抽屉的前两段(同一份判据:
@@ -2140,7 +2147,8 @@ function ArtifactBodySection({ id }: { id: string }) {
             </div>
           </Disclosure>
         </div>
-      )}
+        )}
+      </DataState>
     </div>
   );
 }
@@ -2166,23 +2174,15 @@ function TextArtifactBody({ artifactId }: { artifactId: string }) {
   const { data, loading, error } = useArtifactContent(artifactId);
 
   if (error !== null) {
-    return (
-      <div className="ss-note" style={{ color: "var(--cinnabar)" }}>
-        读不到正文:{error}
-      </div>
-    );
+    return <RedNote>读不到正文:{error}</RedNote>;
   }
   if (loading || data === null) return <div className="ss-meta">读取正文…</div>;
   if (data.runtime !== "ok") {
     return (
-      <div
-        className="ss-note"
-        style={{ color: "var(--cinnabar)" }}
-        data-content-runtime="unavailable"
-      >
+      <RedNote data-content-runtime="unavailable">
         读不到这份正文 —— {data.problem ?? "原因未说明"}。
         (这不是「这条工件没有正文」,是这一次读不到。落点:{data.path})
-      </div>
+      </RedNote>
     );
   }
   if (data.content.length === 0) {

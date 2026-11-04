@@ -51,6 +51,8 @@ import { corpusStatus, corpusTone, fmtSpan, pendingTotal } from "@/lib/knowledge
 import { chunkSourceLabel, chunkSourceLocation } from "@/lib/entityMeta";
 import { toHash } from "@/lib/route";
 import { fmtTime } from "@/lib/vocab";
+import { DataState, ReadError, remoteListOf, remoteOf } from "@/components/ui/DataState";
+import { RedNote } from "@/components/ui/primitives";
 
 const KIND_ORDER = ["fact", "preference", "project", "context", "summary"] as const;
 type FragmentKind = (typeof KIND_ORDER)[number];
@@ -263,25 +265,22 @@ export function MemoryPage() {
         }
       />
 
-      {error !== null ? (
-        <div className="sansheng-card p-3 text-xs" style={{ color: "var(--cinnabar)" }}>
-          加载失败:{error}
-        </div>
-      ) : null}
+      {error !== null ? <ReadError error={error} variant="card" /> : null}
 
       {/* 「结构化摘要 · 与碎片互补」删了(2026-10-26):它解释的是**这一页的布局**,
           而两块的标题已经说完了(「用户画像」/「碎片」)。**标题说得清的,不要再解释一遍**。 */}
       <Section title="用户画像" count={profileKeys.length}>
-        {profileError !== null ? (
-          <div className="sansheng-card p-3 text-xs" style={{ color: "var(--cinnabar)" }}>
-            加载失败:{profileError}
-          </div>
-        ) : profileLoading ? (
-          <EmptyState>加载中…</EmptyState>
-        ) : profileKeys.length === 0 ? (
-          <EmptyState>暂无用户画像 —— 还没沉淀出「用户是谁」这一层。</EmptyState>
-        ) : (
-          <div className="grid gap-1.5">
+        <DataState
+          what="用户画像"
+          state={remoteOf(entries ?? {}, profileError, profileLoading)}
+          variant="card"
+          loadingLabel="加载中…"
+        >
+          {() => (
+            profileKeys.length === 0 ? (
+              <EmptyState>暂无用户画像 —— 还没沉淀出「用户是谁」这一层。</EmptyState>
+            ) : (
+              <div className="grid gap-1.5">
             {profileKeys.map((key) => {
               const value = entries?.[key];
               const broken = isUnparsable(value);
@@ -293,9 +292,9 @@ export function MemoryPage() {
                     {key}
                   </div>
                   {broken ? (
-                    <div className="ss-note" style={{ color: "var(--cinnabar)" }}>
+                    <RedNote>
                       这一项的 JSON 在库里解析失败 —— 后端如实回了 {"{ __unparsable: true }"},没有原文可显示。
-                    </div>
+                    </RedNote>
                   ) : long ? (
                     <>
                       <Clamp lines={3}>{text}</Clamp>
@@ -314,16 +313,23 @@ export function MemoryPage() {
               );
             })}
           </div>
-        )}
+            )
+          )}
+        </DataState>
       </Section>
 
       <Section title="碎片" count={fragments.length}>
-        {loading ? (
-          <EmptyState>加载中…</EmptyState>
-        ) : fragments.length === 0 ? (
-          <EmptyState>暂无记忆碎片。</EmptyState>
-        ) : (
-          <div className="grid gap-4">
+        <DataState
+          what="记忆碎片"
+          state={remoteListOf(fragments, loading, error)}
+          variant="card"
+          loadingLabel="加载中…"
+        >
+          {() => (
+            fragments.length === 0 ? (
+              <EmptyState>暂无记忆碎片。</EmptyState>
+            ) : (
+              <div className="grid gap-4">
             {grouped.map(({ kind, rows }) => (
               <div key={kind} title={kind}>
                 <Section title={kindLabel(kind)} count={rows.length}>
@@ -356,7 +362,9 @@ export function MemoryPage() {
               </div>
             ))}
           </div>
-        )}
+            )
+          )}
+        </DataState>
       </Section>
 
       <Section
@@ -364,14 +372,17 @@ export function MemoryPage() {
         count={knowledge !== null && knowledge.runtime === "ok" ? knowledge.chunks : undefined}
         helpId="knowledge.corpus"
       >
-        {knowledgeError !== null ? (
-          <div className="sansheng-card p-3 text-xs" style={{ color: "var(--cinnabar)" }}>
-            加载失败:{knowledgeError}
-          </div>
-        ) : knowledgeLoading || knowledge === null || corpus === null ? (
-          <EmptyState>加载中…</EmptyState>
-        ) : (
-          <div className="grid gap-3">
+        <DataState
+          what="知识语料"
+          state={remoteOf(knowledge, knowledgeError, knowledgeLoading)}
+          variant="card"
+          loadingLabel="加载中…"
+          unavailable="读不到知识语料。"
+        >
+          {(knowledge) => {
+            const corpus = corpusStatus(knowledge);
+            return (
+              <div className="grid gap-3">
             {/* ① 机制状态:一行判据 + 量级 / 时效 */}
             <div className="sansheng-card p-2 grid gap-1.5">
               <div className="flex items-center gap-2 flex-wrap">
@@ -484,9 +495,7 @@ export function MemoryPage() {
               </form>
 
               {chunksError !== null ? (
-                <div className="ss-note" style={{ color: "var(--cinnabar)" }}>
-                  {chunksError}
-                </div>
+                <ReadError error={chunksError} label="" variant="note" />
               ) : null}
 
               {chunksLoading ? (
@@ -527,12 +536,12 @@ export function MemoryPage() {
                       </div>
                       {/* ⚠️ 三态:不是 ok 就都不是「空正文」 */}
                       {c.state !== "ok" ? (
-                        <div className="ss-note" style={{ color: "var(--cinnabar)" }}>
+                        <RedNote>
                           {c.state === "unavailable"
                             ? "读不到正文"
                             : "索引记的那一段与来源现在的内容不一致(drifted)"}
                           :{c.problem}
-                        </div>
+                        </RedNote>
                       ) : null}
                       {c.state === "unavailable" ? null : (
                         <>
@@ -547,7 +556,9 @@ export function MemoryPage() {
               )}
             </div>
           </div>
-        )}
+            );
+          }}
+        </DataState>
       </Section>
     </div>
   );

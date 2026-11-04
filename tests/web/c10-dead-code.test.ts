@@ -118,12 +118,22 @@ describe("C10 追加 · 两处诚实接线不许被顺手删掉", () => {
         "每个人的对话块都会显示「共 0 条」,而那句话是假的",
     ).toBe(true);
     expect(
-      /error !== null \? "读不到"/.test(agentConv),
+      /convState\.kind === "error"/.test(agentConv),
       "拿到 error 时必须走「读不到」那一支(而不是拿 total 冒充)",
+    ).toBe(true);
+    // ⚠️ **判据没变、落点变了**(2026-10-27,Wave 5):那一行原来写的是
+    // `error !== null ? "读不到"`,现在写的是 `convState.kind === "error"` ——
+    // 而 `convState` 由 `remoteListOf(lines, loading, error)` 算出。
+    // ⇒ 「拿到 error 就走「读不到」」依然成立,而且证据链**更短**:
+    // 状态只有一个来源(以前那一行与下面那个四态链**各算一遍**)。
+    expect(
+      /remoteListOf\(lines, loading, error\)/.test(agentConv),
+      "对话内容的四态必须由 remoteListOf 算 —— 不许在 JSX 里手写第二遍判据",
     ).toBe(true);
     // 正样本自检:这两条正则对**必然不匹配**的串要给 false(防止断言恒真)
     expect(/error=\{conv\.error\}/.test("error={null}")).toBe(false);
     expect(/<AgentConversations/.test("<MemberPane")).toBe(false);
+    expect(/convState\.kind === "error"/.test('error !== null ? "读不到"')).toBe(false);
   });
 
   it("② 面板里保存 harness 之后,页签角标那一份必须重取(revision 要接上)", () => {

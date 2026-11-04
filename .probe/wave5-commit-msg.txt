@@ -1,0 +1,33 @@
+feat(web) Wave 5:红壳与四态各收成一处
+
+「这里出错了 / 这一项不对」原先在十几个地方各写一遍
+style={{ color: "var(--cinnabar)" }} ⇒ 改一次颜色要改十几处,
+而漏掉的那几处**看起来完全一样**(都是红字)⇒ 没有任何检查会红。
+四态(loading/error/unavailable/ready)也一样:Wave 0b 收进了 ui/DataState.tsx,
+但只有四个读面文件真接上了,其余页面仍各写一遍手写三元链。
+
+**两把原语,职责严格分开**
+- ui/primitives.tsx = 壳:RedNote / RedMeta / RedCard / RedEmpty / RedInline
+  (色值字面量 var(--cinnabar) 在这个文件里只许出现一次,连 toneColor 也走它)
+- ui/DataState.tsx = 判据:DataState / remoteOf / remoteListOf / ReadError
+
+**三条容易踩的选择**
+1. 条件色(红/灰二选一)不算红壳 —— 那是状态色,扫描器显式豁免
+2. className 是追加不是替换;style 里的 color 会被壳色盖住(除非显式传 color)
+3. 仪器比判据窄 ⇒ 会漏:第一版按精确 className 扫只抓到 4 处,
+   放宽成「class 含这个壳 + 同一元素上有朱色」抓到 13 处(多出的 9 处全是变体)
+
+⚠️ 第一版的正样本自检是坏的(壳抽成原语后不再以字面量出现 ⇒ 自检当场失效)
+   ⇒ 改成合成样本:已知红壳命中 / 变体壳命中 / 条件色不命中 / 无朱色不命中
+
+**判据**:tests/web/data-state.test.ts(24 条)——
+红壳零手写 · 色值只有一处 · 五个原语都得有读者 · RemoteState 与四个状态字面量
+只在 ui/DataState.tsx · 九个读面文件必须用 <DataState> · 每个 variant 有读者 ·
+同名组件不许有两个
+
+**变异自检**:.probe/mutation-wave5.py 7 条全部实测变红
+(M3/M4 是「把仪器改坏」—— 它们让判据绿,只有靠正样本自检才抓得住)
+工具:.probe/red-shell-scan.mjs(不开服务就能扫出手写红壳)
+
+基线 2417 passed / 126 files · 两条 typecheck 0 error · build 绿 ·
+check:design E1–E14 绿
