@@ -64,7 +64,7 @@
   判据的一部分:同一对节点上两类边**方向一致**时不是环(真机那份数据就是这样),方向相反
   才是环(`mutualPairs` 会点名是哪两条边)。写反会让「交付」跑到最左、并且把一个不存在的
   环报出来(`web/src/lib/workGraph.ts` 的 `collectEdges`)。
-- 基线:**2269 passed / 117 test files** · 两条 typecheck 0 error · `check:design` E1–E14 全绿(5 角色)。
+- 基线:**2441 passed / 128 test files** · 两条 typecheck 0 error · `check:design` E1–E14 全绿(5 角色)。
 - **角色中文名只有一处**:`src/platform/runtime/org.ts` 的 `ORG`(播种 / `roleDisplayName()` /
   `RoleHarnessView.displayName` / **系统提示里的「# 你的角色:X」**全走它);
   前端兜底表 `web/src/lib/vocab.ts` 的 `ROLE_LABEL` 必须逐项相同,由
@@ -731,6 +731,56 @@ dev/prod + CI/CD」,09:54 业务经理只回了一句「我先看下你之前留
 
 **回归**:`tests/web/data-state.test.ts`(24 条)· 工具 `.probe/red-shell-scan.mjs`。
 **基线 2417 passed / 126 files**。
+
+## 「停止对话」的能力(2026-11-10)
+
+**用户原话**:「和业务经理聊天的时候 没有停止对话的能力」。
+
+**症状不是「没做」,是「做了但有一格是空的」**:中断链路**一直都在**
+(`ClientCommand.interrupt` → `hub.onInterrupt` → `AgentSession.abort()`,
+`src/platform/host/serve.ts` 的 `inflight` 登记表;端到端回归 `tests/platform/interrupt.test.ts`),
+界面上也**一直**有一个「■ 中断」按钮 —— 但它的可见性只数**本地在飞的轮**:
+
+- `selectProject` / `selectSession` / 刷新页面都会清 `inFlight`(WS 没有回放);
+- 于是「刷新时正好有一轮在跑」⇒ **按钮不见了**;
+- `ChatComposer` 的 Esc 武装条件是 `disabled && reason === "streaming"`,
+  而那一刻输入框**没被禁用**(本地没有在飞的轮)⇒ **Esc 也不武装**;
+- 而顶部那盏灯**照样显示「推演中」**(它读的是服务端那份运行态 `remoteRunning`)。
+
+⇒ 屏幕上写着「推演中」,手上却没有任何办法停下来。更糟的是:此时再发一条,
+服务端的忙闩会拒,原文是「与你对话的那位正在跑一个回合,等它结束或**先中断**」
+—— **服务端叫你先中断,而界面上没有中断的入口**。
+
+**修法(判据收成一处)**:新增 `web/src/lib/data.ts` 的 `interruptAvailableOf(activity, remote)`
+—— **唯一**的「此刻能不能停」:
+① 本地在飞的轮 ⇒ 能停;② 否则看服务端那份(`GET /live` / `GET /api/intake/live`)⇒ 它说有 ⇒ 能停;
+③ `remote === null`(**读不到**)⇒ **不给入口**(摆一个按下去必然无效的按钮比没有按钮更坏)。
+
+**四条配套**
+
+- `ChatComposer` 新增 `interruptible` prop:输入区里多一个**「■ 停止」**按钮(就在「发送」旁边),
+  **Esc 的武装条件改成它**(不再是「输入框被禁用」)。⚠️ 「能不能停」与「输入框该不该禁用」
+  是**两个判据**:输入框的禁用只认**甲方通道在跑**(bug A 的纪律),而停止入口认**任何**在跑的回合。
+- `stores/chat.ts` 的 `refreshRunning` 现在看 `live.runtime === "host"`:
+  运行态没接上(`unavailable`)⇒ `remoteRunning = null`(**读不到**),
+  **不是**「一个人都没在跑」—— 此前正是这么读的(把「读不到」说成了「空闲」)。
+- 服务端拒收(`code: "busy"`)现在被当成**「他正忙着」这条事实**而不是故障:
+  顶灯走「推演中」,并把它记成运行态证据(于是界面上真的有那个中断入口);
+  那句话在回合收口时过期(`agent_end` 清它),对话页照旧显示它
+  (**用户的输入框已经被清空了** —— 静默它等于让用户以为消息到了)。
+- 左栏那一句「加载失败:」**只对真的是取数失败的错误说**(别把「他正忙着」说成「加载失败」)。
+
+**回归**:`tests/web/interrupt-stop.test.ts`(22 条)· `tests/platform/interrupt-live.test.ts`(2 条:
+真 WS + 真 HTTP `/live` ⇒ **服务端那份快照真的报得出在跑的那一轮**(带 `trigger:{kind:"user"}`),
+中断之后它真的从快照里消失 —— 否则界面会一直亮着一个按了没用的按钮)。
+**变异自检** `.probe/mutation-interrupt-stop.py`(**12 条全部实测变红**)。
+**基线 2441 passed / 128 files**。
+
+⚠️ **第一版那条断言是弱的**(变异 M3 抓不住):它只断言页面上**有「■ 停止」这几个字**,
+而状态行里也写着「■ 停止」⇒ 把按钮删掉而留下那行提示,断言照样绿。
+⇒ 现在断言的是「那是个 `<button>`」(`/<button[^>]*>■ 停止<\/button>/`)。
+⚠️ **「红的原因」要分两种**:vitest 的 `Failed Suites` = 模块没加载起来(语法/编译错,**不算数**);
+`Failed Tests` = 测试跑到了、断言失败(或测试自己 `throw` 了一个错)**算数**。
 
 ## 项目页降级为「仪表盘」(2026-10-26 · §3.4)
 

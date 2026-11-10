@@ -19,6 +19,18 @@ interface Props {
   onChange: (v: string) => void;
   onSubmit: (text: string) => void;
   onInterrupt?: () => void;
+  /**
+   * **「此刻有东西可以停」** —— 中断入口的可见性。
+   *
+   * ⚠️ 判据在 `lib/data.ts` 的 `interruptAvailableOf`(**唯一一处**):本地有在飞的轮,
+   * 或者服务端说这个上下文有回合在跑(刷新 / 切走再切回之后本地轮表是空的,
+   * 而那个回合**真的还在跑**)。
+   *
+   * ⚠️ 它**不是**「输入框被禁用」的同义词:输入框的禁用只认**甲方通道在跑**
+   * (bug A 的纪律 —— 内部角色在跑不许锁死输入框),而「能不能停」认**任何**在跑的
+   * 回合。两个判据各管各的,不许互相顶替。
+   */
+  interruptible?: boolean;
   disabled?: boolean;
   reason?: "streaming" | "noContext" | "noKey";
   placeholder?: string;
@@ -29,6 +41,7 @@ export function ChatComposer({
   onChange,
   onSubmit,
   onInterrupt,
+  interruptible,
   disabled,
   reason,
   placeholder,
@@ -36,7 +49,12 @@ export function ChatComposer({
   const [focused, setFocused] = useState(false);
 
   // 「Esc 中断」必须真接线:推演中 textarea 是 disabled,监听挂 window。
-  const canInterrupt = !!disabled && reason === "streaming" && !!onInterrupt;
+  //
+  // ⚠️ **武装条件是「有东西可以停」,不是「输入框被禁用」** ——
+  // 此前是 `disabled && reason === "streaming"`:刷新页面之后本地轮表是空的
+  // (输入框**没被禁用**),于是 Esc 不武装 ⇒ 用户按 Esc 什么也没发生,
+  // 而顶部那盏灯明明写着「推演中」。
+  const canInterrupt = !!interruptible && !!onInterrupt;
   useEffect(() => {
     if (!canInterrupt) return;
     const onKey = (e: KeyboardEvent) => {
@@ -103,6 +121,25 @@ export function ChatComposer({
             maxHeight: 220,
           }}
         />
+        {/*
+          **停止按钮** —— 它就在「发送」旁边,因为发送键此刻是死的
+          (推演中时被禁用,写着「推演中…」)。
+
+          ⚠️ **按钮的可见性只看「能不能停」,不看输入框的可用性** ——
+          刷新页面之后输入框是可用的(本地没有在飞的轮),而服务端那一轮
+          **真的还在跑**:这时唯一说得清的入口就是这个按钮
+          ( Esc 同理,见上面 `canInterrupt`)。
+        */}
+        {interruptible && (
+          <button
+            className="sansheng-button flex-none"
+            onClick={() => onInterrupt?.()}
+            title="停止这一轮(也可以按 Esc)"
+            style={{ padding: "6px 12px" }}
+          >
+            ■ 停止
+          </button>
+        )}
         <button
           className="sansheng-button-primary flex-none"
           onClick={send}
@@ -127,7 +164,12 @@ export function ChatComposer({
               : reason === "noKey"
                 ? "请先在「设置」配置 API Key"
                 : "推演中 · Esc 中断"
-            : "就绪"}
+            : interruptible
+              ? // ⚠️ **输入框可用、但确实有回合在跑** —— 这是刷新 / 切走再切回之后
+                // 的那一档:本地轮表是空的,服务端那一轮还在跑。
+                // 话不能说「就绪」(那是在说「没事」),也不能说「推演中」(输入框没禁用)。
+                "有回合在跑 · ■ 停止 / Esc 也能停"
+              : "就绪"}
         </span>
         <span className="ml-auto">⏎ 发送 · ⇧⏎ 换行</span>
       </div>

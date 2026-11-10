@@ -37,6 +37,7 @@ import { projectStatusLabel, projectStatusTone } from "@/lib/vocab";
 import {
   channelActivityOf,
   channelContextOf,
+  interruptAvailableOf,
   surfaceStatusOf,
   useHarnessRoles,
   useProjectMembers,
@@ -136,8 +137,17 @@ export function ChatSurface() {
    * 否则会出现「页面上一条甲方消息都没有,而输入框说甲方正在说话」。
    */
   const clientBusy = activity.client.length > 0;
-  /** 本上下文里有在飞的轮(内部也算)—— 中断按钮的可见性。 */
+  /** 本上下文里有在飞的轮(内部也算)—— 「有没有东西可以停」的**本地**那一半。 */
   const liveCount = activity.client.length + activity.internal.length;
+  /**
+   * **「此刻能不能停」** —— 判据在 `lib/data.ts` 的 `interruptAvailableOf`(**唯一一处**)。
+   *
+   * ⚠️ 它**不等于** `liveCount > 0`:刷新页面 / 切走再切回之后本地轮表是空的
+   * (`selectProject` 会清 `inFlight`,WS 也没有回放),而服务端那一轮**真的还在跑**
+   * ⇒ 此前那盏灯写着「推演中」、手上却没有任何办法停下来(用户原话:
+   * 「和业务经理聊天的时候 没有停止对话的能力」)。
+   */
+  const interruptible = interruptAvailableOf(activity, remoteRunning);
 
   function send() {
     const text = input.trim();
@@ -210,15 +220,25 @@ export function ChatSurface() {
         </div>
         <div className="flex items-center gap-2 flex-none ss-meta">
           <SurfaceStatusIndicator status={surface} />
-          {/* 中断按钮的可见性跟「有没有在飞的轮」走,不跟输入框的可用性走 ——
+          {/* 中断按钮的可见性跟「**能不能停**」走,不跟输入框的可用性走 ——
               否则「内部在跑」时既解除了输入框禁用、又撤掉了唯一的中断入口
-              (Esc 那条路要求输入框处于禁用态,见 ChatComposer)。 */}
-          {liveCount > 0 && (
+              (Esc 那条路要求输入框处于禁用态,见 ChatComposer)。
+
+              ⚠️ **判据是 `interruptAvailableOf`**(本地在飞 **或** 服务端说在跑),
+              不是「本地有没有在飞的轮」—— 后者让刷新之后的中断入口凭空消失。
+              ⚠️ **服务端那份是快照**:它可能已经过期(那一轮早就结束了)。所以点下去
+              之后服务端会幂等地忽略它(`onInterrupt` 那条日志写着「没有正在跑的回合」),
+              而下一轮 `refreshRunning()` 会把灯与按钮一起收回。 */}
+          {interruptible && (
             <button
               className="sansheng-button"
               style={{ padding: "2px 8px", fontSize: 11 }}
               onClick={sendInterrupt}
-              title="中断当前上下文正在跑的这一轮(等价于 Esc)"
+              title={
+                liveCount > 0
+                  ? "中断当前上下文正在跑的这一轮(等价于 Esc)"
+                  : "中断服务端那边还在跑的这一轮(本地没看到它 —— 多半是你刷新过页面)"
+              }
             >
               ■ 中断
             </button>
@@ -258,6 +278,7 @@ export function ChatSurface() {
         onChange={setInput}
         onSubmit={send}
         onInterrupt={sendInterrupt}
+        interruptible={interruptible}
         disabled={clientBusy || !hasKey || !hasContext}
         reason={reason}
         placeholder={

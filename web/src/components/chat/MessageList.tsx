@@ -523,7 +523,16 @@ export function MessageList() {
             streaming={live.timeline}
             hiddenNote={hiddenNote}
           />
-          {error && status === "error" && (
+          {/*
+            ⚠️ **`busy` 那一条不是故障,但它必须看得见** ——
+            用户的输入框**已经被清空了**(`ChatSurface.send` 发完就清),
+            服务端又拒收了(原文:「与你对话的那位正在跑一个回合,等它结束或先中断」)
+            ⇒ 这一句是「你那条没发出去」的**唯一**现场,静默它等于让用户
+            以为消息到了。
+            它与真故障分开的理由:顶灯走「推演中」那一档(他在跑,不是系统坏了),
+            这里照旧把它显示出来;它在回合收口时过期(store 的 `agent_end` 分支清它)。
+          */}
+          {error && (status === "error" || error.code === "busy") && (
             <div
               className="rounded-md px-3 py-2"
               style={{

@@ -31,6 +31,7 @@ import {
   type ServerEvent,
   type SessionMessageView,
   type SessionSummaryView as SessionSummary,
+  type TurnTrigger,
   type TurnTriggerKind,
   type TriggerTodoKind,
   type WsToolInfo,
@@ -954,13 +955,36 @@ export const useChatStore = create<ChatState>((set, get) => ({
       return;
     }
     try {
-      const running = intakeActive
-        ? (await api.getIntakeLive()).live.turns
-        : (await api.getProjectLive(projectId as string)).live.agents.flatMap((a) =>
-            a.turn === null
-              ? []
-              : [{ agentId: a.agentId, trigger: a.turn.trigger }],
-          );
+      // ⚠️ **`runtime !== "host"` = 读不到,不是「没在跑」** —— 与
+      // `ProjectLiveView.runtime` / `IntakeLiveView.runtime` 的注释同一条纪律
+      // (成员页 `Members.tsx` 就是这么分的:只有 `runtime === "host"` 时
+      // `turn` 才是事实)。
+      //
+      // 此前这里**没看 `runtime`**:运行态没接上的装配里 `agents[].turn` 全是
+      // `null` ⇒ 被读成「一个人都没在跑」⇒ **把「读不到」说成了「空闲」**,
+      // 而它喂的是那盏灯与(现在)中断入口的可见性。
+      // 「读不到」必须落成 `remoteRunning = null` —— 那一位是「没有服务端信息」,
+      // 不是「服务端说没人跑」(判据见 `lib/data.ts` 的 `interruptAvailableOf`)。
+      let running: ReadonlyArray<{ agentId: string; trigger: TurnTrigger }>;
+      if (intakeActive) {
+        const live = (await api.getIntakeLive()).live;
+        if (live.runtime !== "host") {
+          set({ remoteRunning: null });
+          return;
+        }
+        running = live.turns;
+      } else {
+        const live = (await api.getProjectLive(projectId as string)).live;
+        if (live.runtime !== "host") {
+          set({ remoteRunning: null });
+          return;
+        }
+        running = live.agents.flatMap((a) =>
+          a.turn === null
+            ? []
+            : [{ agentId: a.agentId, trigger: a.turn.trigger }],
+        );
+      }
       // 判据与 `channelOf` 的第 4 步同源(**不另立一份**):
       //   甲方亲口发起 ⇒ 甲方通道;三类客户端待办 ⇒ 甲方通道;其余 ⇒ 内部。
       // ⚠️ 这里**不做角色两跳** —— `live` 只给 `agentId`,而
@@ -1294,6 +1318,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
           return {
             turns: visible.length > 0 ? [...s.turns, ...visible] : s.turns,
             ...kept,
+            // ⚠️ **「他正忙着」那条拒收在回合收口时过期** —— 它解释的是
+            // 「为什么你那条没发出去」,而理由是「他当时在跑一个回合」。
+            // 那一轮停了,这句话就成了**过期的事实**（「他在跑」而他已经不跑了）。
+            // 别的错误**不许**在这里被清掉(失败现场要留着,见 7-N)。
+            error: s.error?.code === "busy" ? null : s.error,
             // 兼容指针只在**它指向的轮真的被收口**时交接:`withTurn` 的语义是
             // 「最近一次被写入的进行中轮」,所以交接给还活着的那一轮(没有才 null)。
             // 直接置 null 会让别的项目收口把本项目的指针打空 —— 与「清空轮表」
@@ -1380,6 +1409,24 @@ export const useChatStore = create<ChatState>((set, get) => ({
       case "error": {
         // 带 projectId 的错误只对那个项目有意义:别的项目的面板不该被刷成错误态。
         if (e.projectId !== undefined && e.projectId !== get().projectId) return;
+        // ⚠️ **`code === "busy"` 不是故障,是「他正在跑」这条事实** ——
+        // 服务端拒收的原文就是「与你对话的那位正在跑一个回合,等它结束或**先中断**」。
+        //
+        // 两条处置(都直接服务于「停止对话的能力」):
+        //   ① 顶灯**不许变红** —— 那盏灯的「出错」是给真故障的,而这一条的意思
+        //      是「他在忙」⇒ 走「推演中」那一档;
+        //   ② 把这次拒收**记成运行态证据** —— 它证明服务端此刻确实有回合在跑,
+        //      而文案里写着「先中断」⇒ 界面上必须真的有那个中断入口
+        //      (`lib/data.ts` 的 `interruptAvailableOf` 读的就是这一位)。
+        // 下一轮 `refreshRunning()` 会用服务端自己的读数校正它。
+        if (e.error.code === "busy") {
+          set((s) => ({
+            status: "streaming",
+            error: e.error,
+            remoteRunning: { client: true, internal: s.remoteRunning?.internal ?? false },
+          }));
+          return;
+        }
         set({ status: "error", error: e.error });
         return;
       }

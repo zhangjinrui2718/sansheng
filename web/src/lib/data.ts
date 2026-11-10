@@ -1037,3 +1037,39 @@ export function surfaceStatusOf(
   if (remote !== null && remote.internal) return "internal";
   return "idle";
 }
+
+/**
+ * **「此刻能不能停」** —— 中断入口的可见性判据(**唯一一处**)。
+ *
+ * ── 为什么要它(用户原话:「和业务经理聊天的时候 没有停止对话的能力」)──
+ *
+ * 中断按钮此前的可见性只数**本地在飞的轮**(`liveCount`),而:
+ *
+ *   · `selectProject` / `selectSession` / 刷新页面都会清 `inFlight`(WS 没有回放);
+ *   · 于是「刷新时正好有一轮在跑」⇒ **按钮不见了**,`ChatComposer` 的 Esc 也不武装
+ *     (它的条件是 `disabled && reason === "streaming"`,而输入框此时**没被禁用**),
+ *     而顶部那盏灯**照样显示「推演中」**(它读的是服务端那份运行态)。
+ *
+ * ⇒ 屏幕上写着「推演中」,手上却没有任何办法停下来。
+ * 更糟的是:此时再发一条,服务端的忙闩会拒,错误文案是
+ * 「与你对话的那位正在跑一个回合,等它结束或**先中断**」——
+ * **服务端叫你先中断,而界面上没有中断的入口**。
+ *
+ * ── 判据(两个来源,本地优先)────────────────────────────────────
+ *
+ *   ① 本地在飞的轮(这一屏看得见的)⇒ 一定能停;
+ *   ② 否则看服务端那份(`GET /live` / `GET /api/intake/live`)⇒ 它说有 ⇒ 能停。
+ *
+ * ⚠️ `remote === null` = **读不到**(取数失败 / 运行态没接上)⇒ **不给入口**:
+ * 「读不到」既不是「没在跑」也不是「在跑」—— 摆一个按下去必然无效的按钮,
+ * 比没有按钮更坏(它是一句**自信的假话**:看起来能停,其实停不了)。
+ * 与 `ProjectLiveView.runtime = "unavailable"` 同一条纪律。
+ */
+export function interruptAvailableOf(
+  activity: ChannelActivity,
+  remote: { readonly client: boolean; readonly internal: boolean } | null,
+): boolean {
+  if (activity.client.length > 0 || activity.internal.length > 0) return true;
+  if (remote === null) return false;
+  return remote.client || remote.internal;
+}

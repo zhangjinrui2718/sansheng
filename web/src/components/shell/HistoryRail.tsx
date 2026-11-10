@@ -112,7 +112,13 @@ export function HistoryRail() {
               fontSize: 11,
             }}
           >
-            加载失败: {error.message}
+            {/*
+              ⚠️ **「加载失败」只对真的是取数失败的错误说** ——
+              别的错误(例如「他正忙着,你那条没发出去」)说成「加载失败」是一句
+              **假话**:项目列表**没有**加载失败,失败的是「你那条消息没发出去」。
+              ⇒ 非取数错误只报原文(它自己说得清是怎么回事)。
+            */}
+            {error.code.endsWith("_load_failed") ? `加载失败: ${error.message}` : error.message}
           </div>
         )}
         {loading && projects.length === 0 && !error && <RailEmpty text="加载中…" />}
