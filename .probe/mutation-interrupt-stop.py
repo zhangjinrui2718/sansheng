@@ -23,11 +23,13 @@ TEST_FILES = [
     "tests/web/interrupt-stop.test.ts",
     "tests/platform/interrupt-live.test.ts",
     "tests/platform/interrupt-before-session.test.ts",
+    "tests/web/offline-recovery.test.ts",
 ]
 DATA = "web/src/lib/data.ts"
 COMPOSER = "web/src/components/chat/ChatComposer.tsx"
 SURFACE = "web/src/components/chat/ChatSurface.tsx"
 STORE = "web/src/stores/chat.ts"
+WS = "web/src/lib/ws.ts"
 
 CASES = [
     (
@@ -66,7 +68,7 @@ CASES = [
             "        const live = (await api.getProjectLive(projectId as string)).live;\n"
             "        if (live.runtime !== \"host\") {\n"
             "          set({ remoteRunning: null });\n"
-            "          return;\n"
+            "          return null;\n"
             "        }\n",
             "        const live = (await api.getProjectLive(projectId as string)).live;\n",
         )],
@@ -150,8 +152,8 @@ CASES = [
         "M15 按下停止之后不再补问运行态(那盏灯与按钮一直亮着,按下去只被幂等忽略)",
         STORE,
         [(
-            "    void get().refreshRunning();\n  },\n\n  async answerQuestion(",
-            "  },\n\n  async answerQuestion(",
+            "    void get().refreshRunning();\n    return true;\n  },",
+            "    return true;\n  },",
         )],
     ),
     (
@@ -178,6 +180,73 @@ CASES = [
             "  if (remote === null) return false;\n"
             "  return false;\n"
             "}",
+        )],
+    ),
+    # ── 第三波:「连接断了」那一格 ───────────────────────────────────
+    (
+        "M18 传输层断了也回报「发成功了」(静默丢弃 = 用户以为消息到了)",
+        WS,
+        [(
+            "      ws.send(JSON.stringify(cmd));\n"
+            "      return true;\n"
+            "    }\n"
+            "    return false;\n"
+            "  }",
+            "      ws.send(JSON.stringify(cmd));\n"
+            "      return true;\n"
+            "    }\n"
+            "    return true;\n"
+            "  }",
+        )],
+    ),
+    (
+        "M19 发送失败时**不撤乐观上屏**(那句话留在屏幕上,假装到了)",
+        STORE,
+        [(
+            "    const delivered = socket.sendToProject(intakeActive ? null : projectId, text, line ?? undefined);\n"
+            "    if (!delivered) {",
+            "    const delivered = socket.sendToProject(intakeActive ? null : projectId, text, line ?? undefined);\n"
+            "    if (delivered) {",
+        )],
+    ),
+    (
+        "M20 中断失败时也回报「发出去了」(用户按了没反应,界面还说没事)",
+        STORE,
+        [(
+            "    const delivered = socket.interrupt(intakeActive ? null : projectId);\n"
+            "    if (!delivered) {",
+            "    const delivered = socket.interrupt(intakeActive ? null : projectId);\n"
+            "    if (delivered) {",
+        )],
+    ),
+    (
+        "M21 中断入口不看连接状态(亮着一个按下去必然无效的按钮)",
+        DATA,
+        [(
+            '  if (socket !== "open") return false;\n'
+            "  if (activity.client.length > 0 || activity.internal.length > 0) return true;",
+            "  if (activity.client.length > 0 || activity.internal.length > 0) return true;",
+        )],
+    ),
+    (
+        "M22 过期的那几轮永远不被认出(重连之后输入框还是死锁的)",
+        DATA,
+        [(
+            "  if (runningAgentIds === null) return [];\n"
+            "  return turns\n"
+            "    .filter((t) => t.agentId !== null && !runningAgentIds.has(t.agentId))\n"
+            "    .map((t) => t.id);",
+            "  return [];",
+        )],
+    ),
+    (
+        "M23 重连之后不对账(本地那张轮表永远留着过期的那几轮)",
+        STORE,
+        [(
+            "    const stale = staleTurnIds(local, runningAgentIds);\n"
+            "    if (stale.length === 0) return;",
+            "    const stale = staleTurnIds(local, runningAgentIds);\n"
+            "    if (stale.length >= 0) return;",
         )],
     ),
 ]

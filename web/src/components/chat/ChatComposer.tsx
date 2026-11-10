@@ -13,12 +13,28 @@
  * 绑在它上面永远收不到按键)。
  */
 import { useEffect, useState } from "react";
+import type { SocketStatus } from "@/lib/ws";
 
 interface Props {
   value: string;
   onChange: (v: string) => void;
-  onSubmit: (text: string) => void;
+  onSubmit: (text: string) => boolean;
   onInterrupt?: () => void;
+  /**
+   * **传输层的状态** —— WS 不在 OPEN 时,发出去的消息与停止指令**都会被丢掉**。
+   *
+   * ⚠️ 此前这个状态在整个界面上**没有一处看得见**,而它同时毁掉三件事:
+   * 发出去的消息静默丢失(乐观上屏让它看起来发出去了)、「■ 中断」按下去没反应、
+   * 输入框永久死锁(本地轮表收不到 `agent_end`)。
+   *
+   * ⇒ 断线时**不给能按的按钮**(摆一个按下去必然无效的按钮比没有按钮更坏),
+   * 并且**说清楚**「这期间发不出去」。
+   *
+   * ⚠️ **三态不是两种**:`connecting`(还在连)与 `closed`(已经断了)是**两件事** ——
+   * 前者等一下就好,后者要等重连。说成同一句就是在骗用户
+   * (他会以为是平台坏了,于是反复重试)。
+   */
+  connection?: SocketStatus;
   /**
    * **「此刻有东西可以停」** —— 中断入口的可见性。
    *
@@ -41,12 +57,16 @@ export function ChatComposer({
   onChange,
   onSubmit,
   onInterrupt,
+  connection = "open",
   interruptible,
   disabled,
   reason,
   placeholder,
 }: Props) {
   const [focused, setFocused] = useState(false);
+  // ⚠️ **「还在连」与「已经断了」是两种不同的故障** —— 界面不许把前者说成后者。
+  const offline = connection === "closed";
+  const connecting = connection === "connecting";
 
   // 「Esc 中断」必须真接线:推演中 textarea 是 disabled,监听挂 window。
   //
@@ -67,17 +87,25 @@ export function ChatComposer({
   }, [canInterrupt, onInterrupt]);
 
   function send() {
-    if (disabled) return;
+    if (disabled || connection !== "open") return;
     const t = value.trim();
     if (!t) return;
-    onSubmit(t);
+    // ⚠️ **没发出去就不清输入框** —— 用户那句话还在他手里。
+    // 清掉就是「我说了话,它没了」,而服务端压根没收到。
+    if (onSubmit(t) === false) return;
     onChange("");
   }
 
   // 调用方没给 placeholder 时才退回默认文案。
   const ph =
     placeholder ??
-    (disabled ? "正在生成…" : "说点什么 · Enter 发送 · Shift+Enter 换行");
+    (offline
+      ? "连接已断开,正在重连…"
+      : connecting
+        ? "连接中…"
+        : disabled
+          ? "正在生成…"
+          : "说点什么 · Enter 发送 · Shift+Enter 换行");
 
   return (
     <div
@@ -143,33 +171,41 @@ export function ChatComposer({
         <button
           className="sansheng-button-primary flex-none"
           onClick={send}
-          disabled={disabled || !value.trim()}
+          disabled={disabled || connection !== "open" || !value.trim()}
           style={{ padding: "6px 14px" }}
         >
-          {disabled
-            ? reason === "noContext"
-              ? "先选上下文"
-              : reason === "noKey"
-                ? "未配 API Key"
-                : "推演中…"
-            : "发送 ⏎"}
+          {offline
+            ? "连接断了"
+            : connecting
+              ? "连接中…"
+              : disabled
+                ? reason === "noContext"
+                  ? "先选上下文"
+                  : reason === "noKey"
+                    ? "未配 API Key"
+                    : "推演中…"
+                : "发送 ⏎"}
         </button>
       </div>
       {/* 状态与快捷键合并成一行。 */}
       <div className="mt-1.5 flex items-center gap-2 ss-meta">
         <span>
-          {disabled
-            ? reason === "noContext"
-              ? "左栏选一个项目,或点「+ 新建」和业务经理聊聊"
-              : reason === "noKey"
-                ? "请先在「设置」配置 API Key"
-                : "推演中 · Esc 中断"
-            : interruptible
-              ? // ⚠️ **输入框可用、但确实有回合在跑** —— 这是刷新 / 切走再切回之后
-                // 的那一档:本地轮表是空的,服务端那一轮还在跑。
-                // 话不能说「就绪」(那是在说「没事」),也不能说「推演中」(输入框没禁用)。
-                "有回合在跑 · ■ 停止 / Esc 也能停"
-              : "就绪"}
+          {offline
+            ? "连接已断开,正在重连… —— 这期间发不出去的消息与停止指令都不会生效"
+            : connecting
+              ? "连接中… —— 连接好之前,发不出去的消息与停止指令都不会生效"
+              : disabled
+                ? reason === "noContext"
+                  ? "左栏选一个项目,或点「+ 新建」和业务经理聊聊"
+                  : reason === "noKey"
+                    ? "请先在「设置」配置 API Key"
+                    : "推演中 · Esc 中断"
+                : interruptible
+                  ? // ⚠️ **输入框可用、但确实有回合在跑** —— 这是刷新 / 切走再切回之后
+                    // 的那一档:本地轮表是空的,服务端那一轮还在跑。
+                    // 话不能说「就绪」(那是在说「没事」),也不能说「推演中」(输入框没禁用)。
+                    "有回合在跑 · ■ 停止 / Esc 也能停"
+                  : "就绪"}
         </span>
         <span className="ml-auto">⏎ 发送 · ⇧⏎ 换行</span>
       </div>

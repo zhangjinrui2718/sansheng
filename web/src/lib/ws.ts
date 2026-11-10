@@ -32,10 +32,29 @@ import {
 
 type Handler = (e: ServerEvent) => void;
 
+/**
+ * **连接状态** —— 传输层的事实,不是界面状态。
+ *
+ * ⚠️ **它必须能被读到**,因为「连接断了」这件事此前**在整个界面上没有任何一处
+ * 看得见**:WS 断了之后 `PlatformSocket` 只是自己按指数退避重连,而界面:
+ *
+ *   · 那盏灯照样写着「推演中」(它读的是服务端那份运行态 —— 而那份**可能过期**);
+ *   · 输入框照样被禁用(它读的是**本地**那张轮表 —— 断线时那条 `agent_end`
+ *     永远等不到,于是本地永远说「他在跑」)⇒ **输入框永久死锁**;
+ *   · 「■ 中断」照样在(按下去的命令在非 OPEN 时被**静默丢弃**)⇒ **按了没反应**;
+ *   · 发出去的消息照样**乐观上屏**然后被静默丢弃 ⇒ **用户以为消息到了**。
+ *
+ * ⇒ 「读不到 ≠ 没在跑」这条纪律在传输层也要有:**连接断了就是断了**,
+ * 而界面必须**说这件事**(而不是装作一切正常)。
+ */
+export type SocketStatus = "connecting" | "open" | "closed";
+
 export class PlatformSocket {
   private ws: WebSocket | null = null;
   private handlers = new Set<Handler>();
   private projectHandlers = new Map<string, Set<Handler>>();
+  private statusHandlers = new Set<(s: SocketStatus) => void>();
+  private status: SocketStatus = "connecting";
   private readonly url: string;
   private reconnectAttempts = 0;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
@@ -51,11 +70,40 @@ export class PlatformSocket {
     this.openSocket();
   }
 
+  /** 订阅连接状态。**立刻**回调一次当前状态;返回退订函数。 */
+  onStatus(cb: (s: SocketStatus) => void): () => void {
+    this.statusHandlers.add(cb);
+    cb(this.status);
+    return () => {
+      this.statusHandlers.delete(cb);
+    };
+  }
+
+  /** 此刻的连接状态。 */
+  getStatus(): SocketStatus {
+    return this.status;
+  }
+
+  private setStatus(s: SocketStatus): void {
+    if (this.status === s) return;
+    this.status = s;
+    // ⚠️ 一个订阅者抛错**不许**拖垮别的订阅者(状态是给界面看的,不是关键路径)。
+    this.statusHandlers.forEach((h) => {
+      try {
+        h(s);
+      } catch {
+        /* 忽略 */
+      }
+    });
+  }
+
   private openSocket(): void {
     const ws = new WebSocket(this.url);
     this.ws = ws;
+    this.setStatus("connecting");
     ws.onopen = () => {
       this.reconnectAttempts = 0;
+      this.setStatus("open");
     };
     ws.onmessage = (ev) => {
       let data: ServerEvent;
@@ -72,6 +120,8 @@ export class PlatformSocket {
       }
     };
     ws.onclose = () => {
+      // ⚠️ **先报状态,再看是不是主动关的** —— 主动关也是「连接没了」。
+      this.setStatus("closed");
       if (this.explicitlyClosed) return;
       const delay = Math.min(1000 * 2 ** this.reconnectAttempts, 8000);
       this.reconnectAttempts++;
@@ -86,11 +136,20 @@ export class PlatformSocket {
     };
   }
 
-  send(cmd: ClientCommand): void {
+  /**
+   * 发一条命令。**返回它到底有没有发出去。**
+   *
+   * ⚠️ 此前它**静默丢弃**(连接不在 OPEN 时直接返回)⇒ 调用方以为消息到了,
+   * 而服务端一条也没收到 —— 而乐观上屏已经让那句话**看起来发出去了**。
+   * ⇒ 现在返回 `false`,由调用方**如实说「没发出去」**。
+   */
+  send(cmd: ClientCommand): boolean {
     const ws = this.ws;
     if (ws && ws.readyState === WebSocket.OPEN) {
       ws.send(JSON.stringify(cmd));
+      return true;
     }
+    return false;
   }
 
   /**
@@ -106,16 +165,16 @@ export class PlatformSocket {
    * 漏传的表现是「消息落到了主对话而不是你选的那条线」—— **看得见**的错
    * (它出现在另一条线上),所以它不像服务端那七条事件那样必填。
    */
-  sendToProject(projectId: string | null, content: string, sessionId?: string): void {
-    this.send({
+  sendToProject(projectId: string | null, content: string, sessionId?: string): boolean {
+    return this.send({
       type: "send", projectId, content,
       ...(sessionId !== undefined ? { sessionId } : {}),
     });
   }
 
   /** 中断某个上下文正在跑的一轮(`null` = 接待会话)。 */
-  interrupt(projectId: string | null): void {
-    this.send({ type: "interrupt", projectId });
+  interrupt(projectId: string | null): boolean {
+    return this.send({ type: "interrupt", projectId });
   }
 
   /** 经 WS 回答一个等甲方拍板的问题(与 HTTP POST answer 等价,前端统一走 HTTP)。 */

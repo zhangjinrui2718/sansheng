@@ -37,9 +37,9 @@ import {
   type WsToolInfo,
 } from "@shared/types/platform";
 import * as api from "../lib/api";
-import { invalidateHarnessCache } from "../lib/data";
+import { invalidateHarnessCache, staleTurnIds } from "../lib/data";
 import { errorMessage } from "../lib/api";
-import type { PlatformSocket } from "../lib/ws";
+import type { PlatformSocket, SocketStatus } from "../lib/ws";
 
 export type Role = "user" | "assistant" | "system";
 
@@ -405,6 +405,20 @@ export interface ChatState {
   currentUsage: { input: number; output: number };
   totalUsage: { input: number; output: number };
   socket: PlatformSocket | null;
+  /**
+   * **传输层的连接状态**(`lib/ws.ts` 的 `SocketStatus`)。
+   *
+   * ⚠️ 「连接断了」此前在整个界面上**没有任何一处看得见** —— 而它同时毁掉三件事:
+   *
+   *   · 输入框**永久死锁**(它读的是本地那张轮表;断线时那条 `agent_end`
+   *     永远等不到 ⇒ 本地永远说「他在跑」);
+   *   · 「■ 中断」按下去**没有反应**(命令在非 OPEN 时被静默丢弃);
+   *   · 发出去的消息**乐观上屏**然后被静默丢弃 ⇒ 用户以为消息到了。
+   *
+   * ⇒ 这一格是**事实**,界面必须照它说话(见 `ChatSurface` 的连接横幅、
+   * `interruptAvailableOf` 的第三个参数、`sendMessage` 的前置检查)。
+   */
+  socketStatus: SocketStatus;
 
   loadProjects(): Promise<void>;
   loadSessionIndex(): Promise<void>;
@@ -461,10 +475,32 @@ export interface ChatState {
    * 调用点都是**本地状态归零或可能过期**的时刻:进入上下文(`selectProject` /
    * `selectSession` / `startIntake`)与 WS 重连(`ready`)。失败时清成 `null`
    * (读不到 ≠ 没在跑),不抛。
+   *
+   * ⚠️ **返回值 = 此刻占着闩的那些 agent**(服务端忙闩的粒度就是
+   * `(上下文, agent)`)⇒ 它是「本地那一格过期了哪些轮」的判据输入
+   * (见 `lib/data.ts` 的 `staleTurnIds`)。
+   * **`null` = 读不到** ⇒ 调用方**不许**据此清理任何东西。
    */
-  refreshRunning(): Promise<void>;
-  sendMessage(text: string): void;
-  sendInterrupt(): void;
+  refreshRunning(): Promise<ReadonlySet<string> | null>;
+  /**
+   * 发一句话。**返回它到底有没有发出去。**
+   *
+   * ⚠️ `false` = **没发出去**(连接断了 / 没有 socket)。调用方据此**别清输入框**
+   * —— 用户的话还在他手里,清掉就是「我说了话,它没了」。
+   */
+  sendMessage(text: string): boolean;
+  /** 中断当前上下文正在跑的那一轮。**返回指令有没有发出去。** */
+  sendInterrupt(): boolean;
+  /**
+   * **重连之后对账** —— 断线期间发生的事,本地一条事件都没收到过。
+   *
+   * 做三件事:① 按**服务端那份**把本地过期的那几轮收掉(否则输入框永久死锁);
+   * ② 把那一轮的**最终正文**从库里找回来(否则用户看到的是半句话凭空消失);
+   * ③ 重新问一次运行态(灯与中断入口按事实收回)。
+   */
+  resyncAfterReconnect(): Promise<void>;
+  /** 重新拉当前对话的历史(只换 `turns`,**不动** `inFlight`)。 */
+  reloadCurrentMessages(): Promise<void>;
   /** 回答问题(HTTP POST;WS 也有等价命令,前端统一走 HTTP 有回执)。 */
   answerQuestion(questionId: string, answer: string): Promise<boolean>;
   /**
@@ -703,6 +739,26 @@ function messageToTurn(m: SessionMessageView, projectId: string | null): Turn {
   };
 }
 
+/**
+ * **「没发出去」的那句话** —— 传输层断了的时候,界面必须**如实说**。
+ *
+ * ⚠️ 「还在连」与「已经断了」是**两件事**:前者等一下就好,后者要等重连 ——
+ * 说成同一句就是在骗用户(他会以为是平台坏了,于是反复重试)。
+ */
+function notSentMessage(status: SocketStatus, subject: string): string {
+  return status === "connecting"
+    ? `连接中,${subject}还没发出去 —— 等一下再发`
+    : `连接已断开,${subject}没发出去 —— 重连之后请再发一次`;
+}
+
+/**
+ * **当前那个 socket 的状态订阅** —— 换 socket 时要退掉上一次的那个。
+ *
+ * ⚠️ 它是**模块级**的而不是 store 的一个字段:它不是界面要读的事实
+ * (界面读的是 `socketStatus`),而是「谁还订着」的资源账。
+ */
+let socketStatusUnsubscribe: (() => void) | null = null;
+
 export const useChatStore = create<ChatState>((set, get) => ({
   projects: [],
   projectsLoading: false,
@@ -734,9 +790,27 @@ export const useChatStore = create<ChatState>((set, get) => ({
   currentUsage: { input: 0, output: 0 },
   totalUsage: { input: 0, output: 0 },
   socket: null,
+  socketStatus: "connecting",
 
   attachSocket(socket) {
+    // ⚠️ **退订上一次的那个订阅** —— 否则换 socket 时旧订阅还活着,
+    // 它的回调会把状态写到已经不该被它写的 store 上。
+    socketStatusUnsubscribe?.();
+    socketStatusUnsubscribe = null;
     set({ socket });
+    if (socket === null) {
+      set({ socketStatus: "connecting" });
+      return;
+    }
+    set({ socketStatus: socket.getStatus() });
+    socketStatusUnsubscribe = socket.onStatus((st) => {
+      const was = get().socketStatus;
+      set({ socketStatus: st });
+      // ⚠️ **「从不通到通」的那一下 ⇒ 对账**:断线期间服务端那边发生的事,
+      // 本地一条事件都没收到过(WS 没有回放)⇒ 本地那张轮表可能永远留着
+      // 一轮**已经结束**的轮(输入框就此永久死锁)。
+      if (st === "open" && was !== "open") void get().resyncAfterReconnect();
+    });
   },
 
   async loadProjects() {
@@ -947,12 +1021,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
   },
 
-  async refreshRunning() {
+  async refreshRunning(): Promise<ReadonlySet<string> | null> {
     const { projectId, intakeActive } = get();
     // 既不在项目、也不在接待 —— 没有「这个上下文」可言
     if (!intakeActive && projectId === null) {
       set({ remoteRunning: null });
-      return;
+      return null;
     }
     try {
       // ⚠️ **`runtime !== "host"` = 读不到,不是「没在跑」** —— 与
@@ -970,14 +1044,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
         const live = (await api.getIntakeLive()).live;
         if (live.runtime !== "host") {
           set({ remoteRunning: null });
-          return;
+          return null;
         }
         running = live.turns;
       } else {
         const live = (await api.getProjectLive(projectId as string)).live;
         if (live.runtime !== "host") {
           set({ remoteRunning: null });
-          return;
+          return null;
         }
         running = live.agents.flatMap((a) =>
           a.turn === null
@@ -1001,19 +1075,32 @@ export const useChatStore = create<ChatState>((set, get) => ({
       }
       // 迟到的响应不许覆盖已经换过的上下文(与 `loadIntakeMessages` 同一条纪律)
       const now = get();
-      if (now.projectId !== projectId || now.intakeActive !== intakeActive) return;
+      if (now.projectId !== projectId || now.intakeActive !== intakeActive) return null;
       set({ remoteRunning: { client, internal } });
+      // ⚠️ **同时交出「此刻占着闩的那些 agent」** —— 它是「本地那一格过期了哪些轮」
+      // 的判据输入(`lib/data.ts` 的 `staleTurnIds`)。
+      // 粒度与服务端忙闩一致:`(上下文, agent)`。
+      return new Set(running.map((t) => t.agentId));
     } catch {
       // 读不到 ≠ 没在跑 —— 如实清成「没有服务端信息」,让本地 `inFlight` 说话。
       set({ remoteRunning: null });
+      return null;
     }
   },
 
-  sendMessage(text) {
-    const { projectId, intakeActive, socket } = get();
-    if (!socket) return;
+  sendMessage(text): boolean {
+    const { projectId, intakeActive, socket, socketStatus } = get();
+    if (!socket) return false;
     // 既没选项目、也不在接待会话 —— 没有可发送的上下文(而不是发进 void)
-    if (projectId === null && !intakeActive) return;
+    if (projectId === null && !intakeActive) return false;
+    // ⚠️ **连接断了不许假装发出去了**:WS 不在 OPEN 时 `send` 会**把它丢掉**,
+    // 而下面那段乐观上屏已经让这句话**看起来发出去了** —— 用户以为消息到了,
+    // 服务端一条也没收到。
+    //
+    // ⇒ **判据是 socket 自己返回的那个 `false`**,不是界面那份状态镜像:
+    // 「能不能发出去」只有 socket 知道(它看的是 `ws.readyState`),
+    // 而 `socketStatus` 那份是**给显示用的镜像**(重连提示 / 中断入口的可见性)。
+    // 拿镜像当闸门 = 两个真相,漂开的时候是**用户那句话被吞了**。
     // 这一轮属于**当前上下文**(接待会话 = null)—— 乐观上屏这一轮不进
     // `inFlight`,所以 `projectId` 在这里只做「这条轮属于哪段对话」的如实标注。
     //
@@ -1029,6 +1116,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
     // 提示已经显示过了,用户开始新的话题 ⇒ 它不该一直挂着。
     set({ contextNotice: null });
     const line = intakeActive ? null : get().sessionId;
+    /** 乐观上屏的那一条 —— 发送失败时**按引用**把它撤掉。 */
+    let optimisticTurn: Turn | null = null;
     if (line !== null) {
       const t = newTurn(
         `u_${Date.now().toString(36)}`,
@@ -1038,21 +1127,53 @@ export const useChatStore = create<ChatState>((set, get) => ({
         { source: "turn", trigger: { kind: "user" } },
         line,
       );
-      set((s) => ({ turns: [...s.turns, { ...t, blocks: [{ kind: "text", text }] }] }));
+      optimisticTurn = { ...t, blocks: [{ kind: "text", text }] };
+      set((s) => ({ turns: [...s.turns, optimisticTurn as Turn] }));
     }
     // **把「这一句发出去时上没上屏」记下来** —— 接待会话不上屏(`line` 恒为 null),
     // 而 server 的 `message_start(user)` 回显又假设已经上屏了、不建轮。
     // 没有这个记录,接待里甲方说的话就**没有任何一条路**能进 `turns`(见字段注释)。
     set({ lastUserSend: { text, optimistic: line !== null } });
     // 接待会话发送 `projectId: null` —— 契约里这就是「第一个项目之前」那条会话
-    socket.sendToProject(intakeActive ? null : projectId, text, line ?? undefined);
+    //
+    // ⚠️ **发送仍可能失败**(检查与发送之间连接断了)⇒ 那就把那句乐观上屏**撤掉** ——
+    // 否则用户看着自己的话稳稳地停在屏幕上,而服务端一条也没收到
+    // (那与「消息被吞了」在屏幕上长得一模一样)。
+    const delivered = socket.sendToProject(intakeActive ? null : projectId, text, line ?? undefined);
+    if (!delivered) {
+      if (optimisticTurn !== null) {
+        const gone = optimisticTurn;
+        set((s) => ({ turns: s.turns.filter((t) => t !== gone) }));
+      }
+      set({
+        lastUserSend: null,
+        error: {
+          code: "socket_disconnected",
+          message: notSentMessage(socketStatus, "消息"),
+        },
+      });
+      return false;
+    }
+    return true;
   },
 
-  sendInterrupt() {
-    const { projectId, intakeActive, socket } = get();
-    if (!socket) return;
-    if (projectId === null && !intakeActive) return;
-    socket.interrupt(intakeActive ? null : projectId);
+  sendInterrupt(): boolean {
+    const { projectId, intakeActive, socket, socketStatus } = get();
+    if (!socket) return false;
+    if (projectId === null && !intakeActive) return false;
+    // ⚠️ **连接断了 ⇒ 这条指令发不出去** —— 与「摆一个按下去必然无效的按钮」同源。
+    // ⚠️ 判据同样是 **socket 返回的那个 `false`**(它看的是 `ws.readyState`),
+    // 不是界面那份状态镜像(镜像只管显示)。
+    const delivered = socket.interrupt(intakeActive ? null : projectId);
+    if (!delivered) {
+      set({
+        error: {
+          code: "socket_disconnected",
+          message: notSentMessage(socketStatus, "停止指令"),
+        },
+      });
+      return false;
+    }
     // ⚠️ **按完立刻补问一次运行态**:服务端那份是**快照**,而用户按下停止的那一轮
     // 可能**早就结束**了(他刷新过页面才按的)⇒ 服务端会幂等忽略,界面却还亮着
     // 「推演中」。补问一次,灯与按钮立刻按事实收回。
@@ -1060,6 +1181,69 @@ export const useChatStore = create<ChatState>((set, get) => ({
     // ⚠️ 这一问**不是**等它停:abort 是异步的,此刻服务端可能仍报「在跑」——
     // 那就由 `ChatSurface` 的补问定时器接着收(每隔 `REMOTE_WATCH_INTERVAL_MS`)。
     void get().refreshRunning();
+    return true;
+  },
+
+  /**
+   * **重连之后对账** —— 断线期间发生的事,本地一条事件都没收到过(WS 没有回放)。
+   *
+   * 三件事:
+   *   ① 重新问一次服务端那份运行态(灯与中断入口按事实收回);
+   *   ② **把本地过期的那几轮收掉** —— 断线期间结束的那一轮,它的 `agent_end`
+   *      永远等不到 ⇒ 本地那张轮表永远留着它 ⇒ 输入框**永久死锁**
+   *      (它读的是本地那张表);
+   *   ③ 那一轮的**最终正文**在库里 ⇒ 把它找回来(否则用户看到的是半句话凭空消失)。
+   *
+   * ⚠️ 判据在 `lib/data.ts` 的 `staleTurnIds`(纯函数),粒度与服务端忙闩一致:
+   * `(上下文, agent)`。
+   */
+  async resyncAfterReconnect() {
+    // ① 服务端那份 —— **读不到(`null`)⇒ 下面两步都不动**
+    // (读不到的时候「清掉」就是在瞎猜)。
+    const runningAgentIds = await get().refreshRunning();
+    if (runningAgentIds === null) return;
+    // ② 本地过期的那几轮(只算**当前上下文**的 —— 别的上下文的轮,
+    //    服务端这份运行态答不了,不能顺带清掉)。
+    const { inFlight, inFlightOrder, projectId, intakeActive } = get();
+    const contextKey = intakeActive ? null : projectId;
+    const local = inFlightOrder
+      .map((id) => inFlight[id])
+      .filter((t): t is Turn => t !== undefined && t.projectId === contextKey);
+    const stale = staleTurnIds(local, runningAgentIds);
+    if (stale.length === 0) return;
+    const gone = new Set(stale);
+    set((s) => ({
+      inFlight: Object.fromEntries(Object.entries(s.inFlight).filter(([id]) => !gone.has(id))),
+      inFlightOrder: s.inFlightOrder.filter((id) => !gone.has(id)),
+    }));
+    // ③ 把最终正文找回来。
+    await get().reloadCurrentMessages();
+  },
+
+  /**
+   * 重新拉当前对话的历史。**只换 `turns`,不动 `inFlight`** ——
+   * 正在流的那一轮不在 REST 历史里,把它一起清掉就是「正在写的字凭空消失」。
+   */
+  async reloadCurrentMessages() {
+    const { projectId, intakeActive, sessionId } = get();
+    try {
+      if (intakeActive) {
+        const res = await api.getIntakeMessages();
+        if (!get().intakeActive) return;
+        const msgs = res.messages ?? [];
+        set({
+          turns: msgs.map((m) => messageToTurn(m, null)),
+          sessionId: msgs[0]?.sessionId ?? get().sessionId,
+        });
+        return;
+      }
+      if (projectId === null || sessionId === null) return;
+      const res = await api.getProjectMessages(projectId, sessionId);
+      if (get().projectId !== projectId || get().sessionId !== sessionId) return;
+      set({ turns: (res.messages ?? []).map((m) => messageToTurn(m, projectId)) });
+    } catch {
+      // ⚠️ **读不到就保持原样** —— 不把「读不到」渲染成「没有」。
+    }
   },
 
   async answerQuestion(questionId, answer) {

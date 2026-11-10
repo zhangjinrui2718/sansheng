@@ -47,8 +47,14 @@ beforeEach(() => {
           type: "send", projectId, content,
           ...(sessionId !== undefined ? { sessionId } : {}),
         });
+        // ⚠️ **契约**:`sendToProject` 返回「有没有发出去」
+        // (`web/src/lib/ws.ts` 的 `PlatformSocket.sendToProject(): boolean`)。
+        // 返回 `undefined` 会被 store 当成「没发出去」⇒ 那句话不会乐观上屏。
+        return true;
       },
-      send: () => {},
+      send: () => true,
+      getStatus: () => "open",
+      onStatus: () => () => undefined,
       on: () => {},
       close: () => {},
     } as never,

@@ -52,6 +52,9 @@ import type {
 import * as api from "./api";
 import { errorMessage } from "./api";
 import { useChatStore, type ChatStatus, type Turn } from "../stores/chat";
+// ⚠️ **type-only**:只要「连接状态」这个类型,不要传输层本身
+// (`lib/ws.ts` 会在浏览器里 new WebSocket,而 `lib/data.ts` 被 node 里的测试直接引用)。
+import type { SocketStatus } from "./ws";
 
 /** 客户端请求的页大小。后端有上限时由后端截断,这里不假装知道它的上限。 */
 export const ARTIFACT_LIMIT = 200;
@@ -1064,14 +1067,59 @@ export function surfaceStatusOf(
  * 「读不到」既不是「没在跑」也不是「在跑」—— 摆一个按下去必然无效的按钮,
  * 比没有按钮更坏(它是一句**自信的假话**:看起来能停,其实停不了)。
  * 与 `ProjectLiveView.runtime = "unavailable"` 同一条纪律。
+ *
+ * ⚠️ **连接断了 ⇒ 也不给入口**:中断指令走 WS,而连接不在 OPEN 时
+ * `PlatformSocket.send` 会**把它丢掉** ⇒ 那个按钮按下去必然没有反应。
+ * 与上一条同源:「按了没反应」比「没有这个按钮」更坏。
  */
 export function interruptAvailableOf(
   activity: ChannelActivity,
   remote: { readonly client: boolean; readonly internal: boolean } | null,
+  /**
+   * **传输层的连接状态**(`lib/ws.ts` 的 `SocketStatus`)。
+   *
+   * ⚠️ 缺省是 `"open"` —— 调用方**必须**显式传它(测试里传 `"open"` 表示
+   * 「连接正常」)。这一格不看它就会出现那种最坏的样子:界面亮着一个
+   * 「■ 中断」,而按下去的命令被**静默丢弃**。
+   */
+  socket: SocketStatus = "open",
 ): boolean {
+  if (socket !== "open") return false;
   if (activity.client.length > 0 || activity.internal.length > 0) return true;
   if (remote === null) return false;
   return remote.client || remote.internal;
+}
+
+/**
+ * **本地那一格里,哪些轮已经过期了?**
+ *
+ * ── 为什么需要它(断线那一格)────────────────────────────────────
+ *
+ * WS **没有回放**:断线期间结束的那一轮,它的 `agent_end` 永远等不到 ⇒
+ * 本地那张轮表永远留着它 ⇒ ① 输入框**永久禁用**(它读的是本地那张表),
+ * ② 屏幕上挂着一个永远不收口的气泡。
+ *
+ * ⇒ 重连之后按**服务端那份**(`GET /live` / `/api/intake/live`)对账:
+ * 服务端说「这个 agent 现在没在跑」⇒ 本地那条就是**过期**的。
+ *
+ * ── 判据的粒度 = 服务端忙闩的粒度 ──────────────────────────────
+ *
+ * 服务端的忙闩是 **`(上下文, agent)`**(`hub.setBusy(projectId, agentId, …)`),
+ * 而运行态视图给的也正是「**哪些 agent 现在占着闩**」⇒ 两边同一粒度,
+ * 不会把「同一个 agent 在别的线上还在跑」误判成「这一轮过期」。
+ *
+ * ⚠️ `runningAgentIds === null` = **服务端那份读不到** ⇒ **一条都不动**
+ * (读不到的时候「清掉」就是在瞎猜)。
+ * ⚠️ `agentId === null` 的轮(甲方自己那句乐观上屏)⇒ **不归它管**,跳过。
+ */
+export function staleTurnIds(
+  turns: ReadonlyArray<{ id: string; agentId: string | null }>,
+  runningAgentIds: ReadonlySet<string> | null,
+): string[] {
+  if (runningAgentIds === null) return [];
+  return turns
+    .filter((t) => t.agentId !== null && !runningAgentIds.has(t.agentId))
+    .map((t) => t.id);
 }
 
 /**

@@ -64,7 +64,7 @@
   判据的一部分:同一对节点上两类边**方向一致**时不是环(真机那份数据就是这样),方向相反
   才是环(`mutualPairs` 会点名是哪两条边)。写反会让「交付」跑到最左、并且把一个不存在的
   环报出来(`web/src/lib/workGraph.ts` 的 `collectEdges`)。
-- 基线:**2450 passed / 129 test files** · 两条 typecheck 0 error · `check:design` E1–E14 全绿(5 角色)。
+- 基线:**2477 passed / 130 test files** · 两条 typecheck 0 error · `check:design` E1–E14 全绿(5 角色)。
 - **角色中文名只有一处**:`src/platform/runtime/org.ts` 的 `ORG`(播种 / `roleDisplayName()` /
   `RoleHarnessView.displayName` / **系统提示里的「# 你的角色:X」**全走它);
   前端兜底表 `web/src/lib/vocab.ts` 的 `ROLE_LABEL` 必须逐项相同,由
@@ -835,6 +835,70 @@ dev/prod + CI/CD」,09:54 业务经理只回了一句「我先看下你之前留
   (新增 M13–M17:登记挪回 await 之后 / 意图不被记下来 / 按完不补问 / 页面不补问 / 开关恒为否)。
 
 **基线 2450 passed / 129 files**。
+
+## 「停止对话」的第三格:连接断了(2026-11-10 · 第三轮)
+
+前两轮修的是「**入口不见了**」与「**按下去没反应**」;这一轮修的是「**连接断了**」。
+
+### 现场
+
+WS 断了之后:`PlatformSocket.ws.onclose` 只做**指数退避重连**(`web/src/lib/ws.ts`),
+**不通知任何界面** —— 此前整个界面上**没有一处看得见「连接断了」**。于是三件事同时坏掉:
+
+| 现象 | 根因 |
+|---|---|
+| **输入框永久禁用** | 输入框的禁用读**本地那张轮表**(`inFlight`),而断线期间结束的那一轮它的 `agent_end` **永远等不到**(WS 没有回放)⇒ 本地永远说「他在跑」 |
+| **「■ 中断」按下去没反应** | 传输层不在 OPEN 时那条命令被**静默丢弃**(`PlatformSocket.send` 此前直接 `return`) |
+| **发出去的消息静默丢失** | `send` 静默丢弃 + **乐观上屏**已经让那句话看起来发出去了 ⇒ **用户以为消息到了**,而服务端一条也没收到 |
+
+### 三件事
+
+**① 传输层必须**说**「发出去没有」**(`web/src/lib/ws.ts`)**
+
+`PlatformSocket.send(cmd): boolean` / `sendToProject(...): boolean` / `interrupt(...): boolean`
+—— 此前它们**静默丢弃**(不在 OPEN 时直接返回)⇒ 调用方以为发出去了。
+⇒ 现在返回 `false`,由调用方**如实说「没发出去」**。
+
+⚠️ **判据只有一处**:**socket 自己返回的那个 `false`**(它看的是 `ws.readyState`)。
+界面那份 `socketStatus`(store 的镜像)只管**显示**(重连提示 / 中断入口的可见性)——
+拿镜像当闸门就是**两个真相**,漂开的时候是**用户那句话被吞了**。
+
+**② 界面必须看得见「连接断了」**(`lib/ws.ts` 的 `SocketStatus` 三态 + store 镜像)
+
+- `SocketStatus` = `connecting | open | closed` —— ⚠️ **「还在连」与「已经断了」是两件事**:
+  前者等一下就好,后者要等重连。说成同一句就是在骗用户(他会以为是平台坏了,于是反复重试);
+- `store.socketStatus` 由 `attachSocket` 订阅 `socket.onStatus` 得到(**显示用的镜像**);
+- 断线时:页面一条 `RedNote` 横幅 + 发送键写「连接断了」+ 状态行说
+  「这期间发不出去的消息与停止指令都不会生效」;
+- ⚠️ **输入框不许因此被锁死** —— 用户那句话还在他手里(要能接着打,重连好再发);
+- ⚠️ 中断入口(`lib/data.ts` 的 `interruptAvailableOf`)在**连接不在 OPEN 时不给** ——
+  摆一个按下去必然无效的按钮比没有按钮更坏。
+
+**③ 重连之后对账**(把过期的那几轮收掉)
+
+`store.resyncAfterReconnect()`:按**服务端那份**(`GET /live` / `/api/intake/live`)对账 ——
+服务端说「这个 agent 现在没在跑」⇒ 本地那条就是**过期**的 ⇒ 收掉
+(`lib/data.ts` 的 `staleTurnIds`)。粒度与服务端忙闩一致:**`(上下文, agent)`**。
+
+⚠️ **`null`(读不到)⇒ 一条都不动** —— 读不到的时候「清掉」就是在瞎猜,
+而猜错的后果是「正在跑的一轮凭空消失」。
+⚠️ 只清**当前上下文**的轮(别的上下文的轮,服务端这份运行态答不了)。
+
+### 回归
+
+- `tests/web/offline-recovery.test.ts`(**27 条**):三态的**四格**(能停 / 断了不给 / 还在连不给)、
+  `staleTurnIds` 的四格、**断线时发消息与中断都「如实说没发出去」**、
+  `PlatformSocket.send` 在不在 OPEN 时**真的返回 `false`**、
+  断线时界面看得见、接线哨兵(`ws.ts` 的 `send` 返回 boolean / 发送失败要**撤乐观上屏** /
+  `attachSocket` 订阅状态并在「从不通到通」时对账);
+- ⚠️ **夹具也要跟上契约**:`tests/web/context-pointer-hygiene.test.ts` 的假 socket
+  此前 `sendToProject` 返回 `undefined` ⇒ 新契约下被读成「没发出去」⇒ 那几条断言红了。
+  **改的是夹具的返回值,不是断言**;
+- **变异自检** `.probe/mutation-interrupt-stop.py`:**23 条全部实测变红**
+  (新增 M18–M23:传输层谎报成功 / 不撤乐观上屏 / 中断谎报成功 / 中断入口不看连接 /
+  过期轮不被认出 / 重连不对账)。
+
+**基线 2477 passed / 130 files**。
 
 ## 项目页降级为「仪表盘」(2026-10-26 · §3.4)
 

@@ -32,7 +32,7 @@ import { inFlightTurns, useChatStore } from "@/stores/chat";
 import { useSettingsStore, activeProviderOf } from "@/stores/settings";
 import { MessageList } from "./MessageList";
 import { ChatComposer } from "./ChatComposer";
-import { Pill } from "@/components/ui/primitives";
+import { Pill, RedNote } from "@/components/ui/primitives";
 import { projectStatusLabel, projectStatusTone } from "@/lib/vocab";
 import {
   channelActivityOf,
@@ -122,7 +122,17 @@ export function ChatSurface() {
   // 服务端那份「此刻有回合在跑」—— 本地 WS 状态在刷新/切换之后会归零,
   // 那一份是**唯一**还能说出「它还在跑」的东西(见 `surfaceStatusOf` 的第三个参数)。
   const remoteRunning = useChatStore((s) => s.remoteRunning);
+  /**
+   * **传输层的连接状态** —— 「连接断了」这件事此前在整个界面上**没有一处看得见**。
+   *
+   * ⚠️ 它同时毁掉三件事:输入框永久死锁(本地轮表收不到 `agent_end`)、
+   * 「■ 中断」按下去没反应(命令被静默丢弃)、发出去的消息静默丢失
+   * (乐观上屏已经让它看起来发出去了)。
+   */
+  const socketStatus = useChatStore((s) => s.socketStatus);
   const contextNotice = useChatStore((s) => s.contextNotice);
+  /** 「连接断了所以没发出去」那一类错误 —— 它**不是**回合的错,得单独说。 */
+  const transportError = useChatStore((s) => s.error);
   const activity = useMemo(
     () => channelActivityOf(live, ctx, contextKey, sessionId),
     [live, ctx, contextKey, sessionId],
@@ -148,8 +158,12 @@ export function ChatSurface() {
    * (`selectProject` 会清 `inFlight`,WS 也没有回放),而服务端那一轮**真的还在跑**
    * ⇒ 此前那盏灯写着「推演中」、手上却没有任何办法停下来(用户原话:
    * 「和业务经理聊天的时候 没有停止对话的能力」)。
+   *
+   * ⚠️ **第三个参数是连接状态**:连接断了的时候,这条指令**发不出去**
+   * (`PlatformSocket.send` 在非 OPEN 时把它丢掉)⇒ **不给入口**
+   * (摆一个按下去必然无效的按钮比没有按钮更坏)。
    */
-  const interruptible = interruptAvailableOf(activity, remoteRunning);
+  const interruptible = interruptAvailableOf(activity, remoteRunning, socketStatus);
 
   /**
    * **服务端那份运行态是快照** —— 它可能已经过期(那一轮早就结束了,而 WS 断了
@@ -170,11 +184,12 @@ export function ChatSurface() {
     return () => clearInterval(t);
   }, [remoteRunning, refreshRunning]);
 
-  function send() {
+  function send(): boolean {
     const text = input.trim();
-    if (!text || clientBusy || !hasKey || !hasContext) return;
-    sendMessage(text);
-    setInput("");
+    if (!text || clientBusy || !hasKey || !hasContext) return false;
+    // ⚠️ **返回「有没有发出去」** —— 没发出去时**不清输入框**:
+    // 用户的话还在他手里(清掉就是「我说了话,它没了」)。
+    return sendMessage(text);
   }
 
   const reason: "streaming" | "noContext" | "noKey" | undefined =
@@ -292,6 +307,39 @@ export function ChatSurface() {
         </div>
       )}
 
+      {/*
+        ⚠️ **连接断了** —— 这件事此前在整个界面上**没有一处看得见**,而它同时毁掉三件事:
+        输入框永久死锁(本地轮表收不到 `agent_end`)、「■ 中断」按下去没反应
+        (命令在非 OPEN 时被静默丢弃)、发出去的消息静默丢失(乐观上屏已经让它
+        看起来发出去了)⇒ 界面必须**说这件事**,而不是装作一切正常。
+      */}
+      {socketStatus === "closed" && (
+        <RedNote
+          className="flex-none"
+          style={{
+            padding: "6px 16px", fontSize: 11, lineHeight: "1.6",
+            background: "var(--ink-1)", borderBottom: "1px solid var(--ink-3)",
+          }}
+        >
+          连接已断开,正在重连… —— 这期间发不出去的消息与停止指令都不会生效
+        </RedNote>
+      )}
+      {/*
+        ⚠️ **「没发出去」必须看得见** —— 用户那句话还稳稳地停在屏幕上(除非它压根
+        没上屏),而服务端一条也没收到。静默它 = 用户以为消息到了。
+      */}
+      {transportError !== null && transportError.code === "socket_disconnected" && (
+        <RedNote
+          className="flex-none"
+          style={{
+            padding: "6px 16px", fontSize: 11, lineHeight: "1.6",
+            background: "var(--ink-1)", borderBottom: "1px solid var(--ink-3)",
+          }}
+        >
+          {transportError.message}
+        </RedNote>
+      )}
+
       <MessageList />
 
       <ChatComposer
@@ -300,16 +348,21 @@ export function ChatSurface() {
         onSubmit={send}
         onInterrupt={sendInterrupt}
         interruptible={interruptible}
+        connection={socketStatus}
         disabled={clientBusy || !hasKey || !hasContext}
         reason={reason}
         placeholder={
-          !hasContext
-            ? "先在左栏选一个项目,或点「+ 新建」和业务经理聊聊"
-            : !hasKey
-              ? "请先在「设置」配置 API Key"
-              : intakeActive
-                ? "说说你想做什么 —— 业务经理会和你对齐,谈拢后由他立项"
-                : "说点什么 · Enter 发送 · Shift+Enter 换行"
+          socketStatus === "closed"
+            ? "连接已断开,正在重连…"
+            : socketStatus === "connecting"
+              ? "连接中…"
+              : !hasContext
+                ? "先在左栏选一个项目,或点「+ 新建」和业务经理聊聊"
+                : !hasKey
+                  ? "请先在「设置」配置 API Key"
+                  : intakeActive
+                    ? "说说你想做什么 —— 业务经理会和你对齐,谈拢后由他立项"
+                    : "说点什么 · Enter 发送 · Shift+Enter 换行"
         }
       />
     </section>
