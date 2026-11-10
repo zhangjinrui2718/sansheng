@@ -43,9 +43,10 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import type { IntakeLiveView, ProjectLiveView } from "@shared/types/platform";
-import { interruptAvailableOf, type ChannelActivity } from "@/lib/data";
+import { interruptAvailableOf, remoteClaimsRunning, type ChannelActivity } from "@/lib/data";
 import { ChatComposer } from "@/components/chat/ChatComposer";
 import { useChatStore, type Turn } from "@/stores/chat";
+import type { PlatformSocket } from "@/lib/ws";
 import * as api from "@/lib/api";
 
 // ⚠️ **必须 mock 掉 `@/lib/api`** —— store 的 `refreshRunning` 走的是它。
@@ -313,7 +314,6 @@ describe("store · 服务端说「他正忙着」", () => {
 });
 
 // ── ⑤ 接线:判据只有一处,页面真的用它 ────────────────────────────
-
 describe("接线 · 中断入口", () => {
   it("对话页用 `interruptAvailableOf` 判「能不能停」,并把它交给输入区", () => {
     expect(chatSurface).toContain("interruptAvailableOf(");
@@ -334,5 +334,58 @@ describe("接线 · 中断入口", () => {
 
   it("⚠️ 左栏不许把「他正忙着」说成「加载失败」(那是一句假话:列表没加载失败)", () => {
     expect(historyRail).toContain('error.code.endsWith("_load_failed")');
+  });
+});
+
+// ── ⑥ 快照会过期:服务端那份运行态要能被补问 ──────────────────────
+
+describe("remoteClaimsRunning · 「服务端那份说在跑吗」", () => {
+  it("**正样本**:甲方通道在跑 ⇒ 要补问", () => {
+    expect(remoteClaimsRunning({ client: true, internal: false })).toBe(true);
+  });
+
+  it("**正样本**:内部在跑 ⇒ 也要补问(那一轮同样在烧 token)", () => {
+    expect(remoteClaimsRunning({ client: false, internal: true })).toBe(true);
+  });
+
+  it("**负样本**:服务端说一个人都没在跑 ⇒ 不补问", () => {
+    expect(remoteClaimsRunning({ client: false, internal: false })).toBe(false);
+  });
+
+  it("⚠️ **负样本**:`null` = **读不到** ⇒ 不补问(读不到的时候轮询只会得到更多的读不到)", () => {
+    expect(remoteClaimsRunning(null)).toBe(false);
+  });
+});
+
+describe("store · 按下停止之后立刻补问一次运行态", () => {
+  it("**正样本**:按「停止」⇒ 中断指令发出去 **且** 运行态被重新读了一次", async () => {
+    const sent: (string | null)[] = [];
+    useChatStore.setState({
+      socket: {
+        interrupt: (p: string | null) => sent.push(p),
+      } as unknown as PlatformSocket,
+    });
+    vi.mocked(api.getProjectLive).mockResolvedValue(projectLive());
+
+    useChatStore.getState().sendInterrupt();
+
+    // 中断指令真的发出去了(对象是「接待会话」之外的当前项目)
+    expect(sent).toEqual(["p1"]);
+    // ⚠️ **补问**:服务端那份是快照 —— 用户可能是刷新过页面才按的,
+    // 那一轮早就结束了。不补问 ⇒ 灯与按钮一直亮着,而按下去服务端只会幂等忽略。
+    await vi.waitFor(() => expect(vi.mocked(api.getProjectLive)).toHaveBeenCalled());
+  });
+});
+
+describe("接线 · 快照过期时的自愈", () => {
+  it("对话页在服务端那份说「在跑」时**定期补问**(否则那盏灯与按钮一直亮着)", () => {
+    expect(chatSurface).toContain("remoteClaimsRunning(");
+    expect(chatSurface).toMatch(/setInterval\(\s*\(\)\s*=>\s*void refreshRunning\(\)/);
+  });
+
+  it("⚠️ 判据不许散成第二份 —— 补问的开关必须是 `remoteClaimsRunning`", () => {
+    const stripped = chatSurface.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/.*$/gm, "$1");
+    // 不许自己写 `remoteRunning !== null && (remoteRunning.client || …)` 那一串
+    expect(stripped).not.toMatch(/remoteRunning\s*&&\s*\(remoteRunning\.client/);
   });
 });

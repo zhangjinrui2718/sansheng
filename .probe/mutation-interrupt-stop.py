@@ -19,7 +19,11 @@ import io
 import subprocess
 import sys
 
-TEST_FILES = ["tests/web/interrupt-stop.test.ts", "tests/platform/interrupt-live.test.ts"]
+TEST_FILES = [
+    "tests/web/interrupt-stop.test.ts",
+    "tests/platform/interrupt-live.test.ts",
+    "tests/platform/interrupt-before-session.test.ts",
+]
 DATA = "web/src/lib/data.ts"
 COMPOSER = "web/src/components/chat/ChatComposer.tsx"
 SURFACE = "web/src/components/chat/ChatSurface.tsx"
@@ -118,6 +122,62 @@ CASES = [
         [(
             '            {error.code.endsWith("_load_failed") ? `加载失败: ${error.message}` : error.message}',
             "            加载失败: {error.message}",
+        )],
+    ),
+    # ── 第二波:「按了没反应」的两半 ─────────────────────────────────
+    (
+        "M13 中断登记挪回 await 之后(「停止」落在建会话那段时间里 ⇒ 落到空气上)",
+        "src/platform/host/serve.ts",
+        [(
+            "    inflight.set(inflightKey, abortThisTurn);\n\n"
+            "    const got = await getOrCreateSession({ projectId, agentId, sessionId });",
+            "    const got = await getOrCreateSession({ projectId, agentId, sessionId });",
+        ), (
+            "    const session = got.session;\n    sessionRef = session;",
+            "    const session = got.session;\n    sessionRef = session;\n"
+            "    inflight.set(inflightKey, abortThisTurn);",
+        )],
+    ),
+    (
+        "M14 中断意图不被记下来(用户按了停止,那一轮照跑、照花 token)",
+        "src/platform/host/serve.ts",
+        [(
+            "    const abortThisTurn = (): void => {\n      aborted = true;",
+            "    const abortThisTurn = (): void => {\n      aborted = false;",
+        )],
+    ),
+    (
+        "M15 按下停止之后不再补问运行态(那盏灯与按钮一直亮着,按下去只被幂等忽略)",
+        STORE,
+        [(
+            "    void get().refreshRunning();\n  },\n\n  async answerQuestion(",
+            "  },\n\n  async answerQuestion(",
+        )],
+    ),
+    (
+        "M16 对话页不再定期补问服务端那份运行态(快照过期 ⇒ 灯与按钮永远亮着)",
+        SURFACE,
+        [(
+            "    const t = setInterval(() => void refreshRunning(), REMOTE_WATCH_INTERVAL_MS);",
+            "    const t = setInterval(() => void undefined, REMOTE_WATCH_INTERVAL_MS);",
+        )],
+    ),
+    (
+        "M17 「服务端那份说在跑吗」恒为否(于是永远不补问)",
+        DATA,
+        [(
+            "export function remoteClaimsRunning(\n"
+            "  remote: { readonly client: boolean; readonly internal: boolean } | null,\n"
+            "): boolean {\n"
+            "  if (remote === null) return false;\n"
+            "  return remote.client || remote.internal;\n"
+            "}",
+            "export function remoteClaimsRunning(\n"
+            "  remote: { readonly client: boolean; readonly internal: boolean } | null,\n"
+            "): boolean {\n"
+            "  if (remote === null) return false;\n"
+            "  return false;\n"
+            "}",
         )],
     ),
 ]

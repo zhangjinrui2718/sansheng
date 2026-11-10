@@ -64,7 +64,7 @@
   判据的一部分:同一对节点上两类边**方向一致**时不是环(真机那份数据就是这样),方向相反
   才是环(`mutualPairs` 会点名是哪两条边)。写反会让「交付」跑到最左、并且把一个不存在的
   环报出来(`web/src/lib/workGraph.ts` 的 `collectEdges`)。
-- 基线:**2441 passed / 128 test files** · 两条 typecheck 0 error · `check:design` E1–E14 全绿(5 角色)。
+- 基线:**2450 passed / 129 test files** · 两条 typecheck 0 error · `check:design` E1–E14 全绿(5 角色)。
 - **角色中文名只有一处**:`src/platform/runtime/org.ts` 的 `ORG`(播种 / `roleDisplayName()` /
   `RoleHarnessView.displayName` / **系统提示里的「# 你的角色:X」**全走它);
   前端兜底表 `web/src/lib/vocab.ts` 的 `ROLE_LABEL` 必须逐项相同,由
@@ -781,6 +781,60 @@ dev/prod + CI/CD」,09:54 业务经理只回了一句「我先看下你之前留
 ⇒ 现在断言的是「那是个 `<button>`」(`/<button[^>]*>■ 停止<\/button>/`)。
 ⚠️ **「红的原因」要分两种**:vitest 的 `Failed Suites` = 模块没加载起来(语法/编译错,**不算数**);
 `Failed Tests` = 测试跑到了、断言失败(或测试自己 `throw` 了一个错)**算数**。
+
+## 「停止对话」的第二格:按了没反应的那一半(2026-11-10 · 第二轮)
+
+第一轮修的是「**入口不见了**」;这一轮修的是「**入口在,按下去没反应**」。
+
+### ① 服务端:中断登记必须在**第一次 await 之前**
+
+`runAgentTurn`(`src/platform/host/serve.ts`)原先是 `await getOrCreateSession(...)`
+**之后**才 `inflight.set(...)` ⇒ **建会话**那段 await 里按下的「停止」**落到空气上**:
+服务端日志写着「没有正在跑的回合」(`onInterrupt` 的幂等分支),而屏幕上那盏灯还亮着
+—— 用户看到的就是「按了没反应」。
+
+⇒ 现在登记的是**中断意图**,不是一次 `abort()` 调用:
+
+- `inflight.set(inflightKey, abortThisTurn)` 在**函数入口**(第一次 await 之前);
+- `aborted = true` **先记意图**;`sessionRef` 还是 `null` 时**不调用** `abort()`
+  (那时还没有会话可 abort);
+- 会话一建好就兑现:`if (aborted) { … }` ⇒ **这一轮根本不要跑** ——
+  不发模型请求、不花 token、不留副作用;⚠️ **也不发 `message_start`**
+  (屏幕上本来就没有这一轮的气泡,发一个只会多一个空气泡),
+  但**照发 `agent_end`**(前端要靠它把「推演中」收回去);
+- ⚠️ **兑现方式是「别做了」,不是「做了再扔掉」** —— 中断不是丢弃。
+
+### ② 前端:服务端那份运行态是**快照**,会过期
+
+`remoteRunning` 是 `GET /live` / `GET /api/intake/live` 那一刻的样子,而 **WS 没有回放**:
+回合结束时那条 `agent_end` 若因断线没送来,这份快照就**永远**说「在跑」⇒
+那盏灯与「■ 中断」按钮一直亮着,而按下去服务端只会幂等忽略。
+
+⇒ 三处补问:
+
+- `lib/data.ts` 的 `remoteClaimsRunning(remote)`(**唯一**的开关判据)+
+  `REMOTE_WATCH_INTERVAL_MS`(5 秒);
+- `ChatSurface.tsx` 在它说「在跑」时**定期补问**(`setInterval` ⇒ `refreshRunning()`);
+  `null`(**读不到**)⇒ **不轮询**(读不到的时候轮询只会得到更多的读不到);
+- `stores/chat.ts` 的 `sendInterrupt()` **按完立刻补问一次** —— 用户可能是刷新过页面
+  才按的,那一轮早就结束了。
+
+⚠️ **补问不是新真相**:重问的还是服务端同一个读面。
+⚠️ 这一格治的是**服务端那份**过期;**本地 `inFlight` 过期**(WS 在回合中途断线)不在此列
+—— 本地那份由 WS 事件收口,断了就是断了(如实记着)。
+
+### 回归
+
+- `tests/platform/interrupt-before-session.test.ts`(**2 条**):用 `ServeOptions.createSession`
+  这个 DI seam 把**建会话**做成慢的 ⇒「停止」必然落在那段时间里;
+  断言这一轮**不跑**(`promptCalls === 0`)+ `agent_end` 照发;
+  ⚠️ 另有一条**负样本**:没按停止时那一轮**照跑**(别把「建会话慢」当成「不跑」)。
+- `tests/web/interrupt-stop.test.ts`(22 → **29 条**):`remoteClaimsRunning` 的四格 +
+  「按完立刻补问」的**行为**断言(真的调了一次 `getProjectLive`)+ 页面补问的接线哨兵。
+- **变异自检** `.probe/mutation-interrupt-stop.py`:**17 条全部实测变红**
+  (新增 M13–M17:登记挪回 await 之后 / 意图不被记下来 / 按完不补问 / 页面不补问 / 开关恒为否)。
+
+**基线 2450 passed / 129 files**。
 
 ## 项目页降级为「仪表盘」(2026-10-26 · §3.4)
 

@@ -1073,3 +1073,37 @@ export function interruptAvailableOf(
   if (remote === null) return false;
   return remote.client || remote.internal;
 }
+
+/**
+ * **服务端那份运行态「说在跑」吗?** —— 决定要不要**补问**。
+ *
+ * ── 为什么要补问(快照会过期)────────────────────────────────────
+ *
+ * `remoteRunning` 是一份**快照**(`GET /live` / `GET /api/intake/live` 那一刻的样子),
+ * 而 WS **没有回放**:回合结束时那条 `agent_end` 若因为断线没送来,
+ * 这份快照就会**永远**说「在跑」⇒ 那盏灯与「■ 中断」按钮一直亮着,
+ * 而按下去服务端只会幂等忽略(`onInterrupt` 的日志写着「没有正在跑的回合」)——
+ * 用户看到的就是「按了没反应」。
+ *
+ * ⇒ 只要它说「在跑」,就**定期重问**一次,直到服务端说「没人跑」。
+ *
+ * ⚠️ 它**不是**新真相:重问的还是服务端同一个读面。
+ * ⚠️ `null`(**读不到**)⇒ **不轮询**:读不到的时候轮询只会得到更多的「读不到」,
+ * 而每一次轮询都是一次 HTTP 请求。
+ */
+export function remoteClaimsRunning(
+  remote: { readonly client: boolean; readonly internal: boolean } | null,
+): boolean {
+  if (remote === null) return false;
+  return remote.client || remote.internal;
+}
+
+/**
+ * **补问运行态的间隔** —— 5 秒。
+ *
+ * ⚠️ 为什么不是更短:一次 `/live` 是一次 HTTP 请求,而这份快照只用于**纠正过期**,
+ * 不用于实时显示(实时显示走 WS 事件)。
+ * ⚠️ 为什么不是更长:过期的那份快照会让用户以为「还在跑」,而他随时可能按下停止 ——
+ * 按了没反应比多等 5 秒更坏。
+ */
+export const REMOTE_WATCH_INTERVAL_MS = 5000;

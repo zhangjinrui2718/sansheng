@@ -1723,10 +1723,47 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
      */
     userMessageId?: string,
   ): Promise<AgentTurnOutcome> {
-    const got = await getOrCreateSession({
-      projectId, agentId, sessionId: onSession ?? mainSessionOf(projectId, agentId),
-    });
+    // ⚠️ **会话 id 与中断登记都必须在第一次 await 之前**。
+    //
+    // 「停止」可能落在**建会话**这段 await 里(新会话要起 SDK 会话、加载模型,
+    // 实测可达数秒)。那时 `session` 还不存在,`abort()` 无从谈起 ⇒ 登记若放在
+    // `getOrCreateSession` 之后,那一次「停止」就**落到空气上**:服务端日志写着
+    // 「没有正在跑的回合」,而屏幕上那盏灯还亮着 —— 用户看到的就是「按了没反应」。
+    //
+    // ⇒ 这里登记的是**中断意图**,不是一个 `abort()` 调用:意图先记下来,
+    // 会话一建好就兑现(会话还没建好就按下的,那一轮**根本不会跑**)。
+    const sessionId = onSession ?? mainSessionOf(projectId, agentId);
+    const inflightKey = pooledKey(projectId, sessionId, agentId);
+    /** 用户是否按了中断。区分「用户停的」与「自己炸了」—— 两者呈现完全不同。 */
+    let aborted = false;
+    /**
+     * 会话句柄 —— **建出来之前是 null**。
+     *
+     * 它存在的理由就是上面那段:`abort()` 需要一个真实的会话,而会话要等 await。
+     */
+    let sessionRef: AgentSession | null = null;
+    const abortThisTurn = (): void => {
+      aborted = true;
+      const s = sessionRef;
+      // 会话还没建出来 ⇒ **意图留着**,兑现点在下面 `if (aborted)` 那一支。
+      if (s === null) return;
+      // `AgentSession.abort()` 是 async 且会等到 agent 真正 idle。这里**不 await**:
+      // WS 的消息处理器不该被一次取消阻塞住。但失败要留现场(7-N),不许静默。
+      void s.abort().catch((err: unknown) => {
+        log.error(
+          `platform: 中断${channelLabel(projectId)}上 ${agentId} 的回合失败:` +
+            `${err instanceof Error ? err.message : String(err)}`,
+        );
+      });
+    };
+    // **登记必须发生在第一次 await 之前。** 放在 `await runTurn(...)` 之后等于
+    // 永远登记不上:WS 的每一条消息是各自 fire-and-forget 处理的,中断消息会在
+    // 这个回合还卡在 await 里的时候就被处理掉。这正是「死接线」得以藏身的缝隙。
+    inflight.set(inflightKey, abortThisTurn);
+
+    const got = await getOrCreateSession({ projectId, agentId, sessionId });
     if (!got.ok) {
+      inflight.delete(inflightKey);
       hub.broadcast({
         type: "error", projectId,
         error: { code: got.code, message: `${agentId}:${got.message}` },
@@ -1738,6 +1775,7 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
       };
     }
     const session = got.session;
+    sessionRef = session;
     // **通道:按「这个角色是不是甲方接口」定**(调用点显式声明的那一条)。
     //
     // `runAgentTurn` 是本文件里**唯一**服务多个角色的调用点:业务经理
@@ -1749,7 +1787,24 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
     // 查不到这个 agent 时**取 `internal`(fail-closed)**:宁可让一条发言留在
     // 内部会话里,也不把可能是内部角色的发言塞进甲方通道 —— 与前端
     // `channelOf`(web/src/lib/data.ts)同一条纪律,连失效方向都一样。
-    const sessionId = onSession ?? mainSessionOf(projectId, agentId);
+    // ⚠️ **会话建好之前用户就按了「停止」** ⇒ 这一轮**不跑**。
+    //
+    // 不发一个模型请求、不花 token、不留任何副作用 ——「停止」的意思是「别做了」,
+    // 不是「做了再扔掉」。
+    //
+    // ⚠️ **不发 `message_start`**:屏幕上本来就没有这一轮的气泡(它还没开始),
+    // 发一个只会多出一个空气泡。`agent_end` 照发 —— 前端要靠它把「推演中」收回去。
+    if (aborted) {
+      log.muted(
+        `platform: ${channelLabel(projectId)}上 ${agentId} 的回合在会话建好之前就被用户中断 —— 这一轮没有跑`,
+      );
+      hub.emitAgentEnd(projectId, sessionId);
+      inflight.delete(inflightKey);
+      return {
+        aborted: true, timedOut: false, text: "", toolCalls: [],
+        openedProjectIds: [], failed: false,
+      };
+    }
     const messageId = newId("msg");
     // 建轮那一刻就把说话人钉住 —— 这一条是**跑这个回合的那个 agent**(参数,不是常量):
     // `handleUserMessage` 传业务经理,排空器传项目经理 / 质检(见 `drainOne` 的回调)。
@@ -1758,8 +1813,6 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
     const textBuf: string[] = [];
     const thinkBuf: string[] = [];
 
-    /** 用户是否按了中断。区分「用户停的」与「自己炸了」—— 两者呈现完全不同。 */
-    let aborted = false;
     /**
      * 回合**怎么结束的** —— 只用于回合边界那次 housekeeping 提交的说明。
      *
@@ -1767,20 +1820,10 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
      * 产物里看出来)。缺省写成「结束」是安全的:真失败会在 catch 那一支覆盖它。
      */
     let outcomeLabel = "结束";
-    // **登记必须发生在第一次 await 之前。** 放在 `await runTurn(...)` 之后等于
-    // 永远登记不上:WS 的每一条消息是各自 fire-and-forget 处理的,中断消息会在
-    // 这个回合还卡在 await 里的时候就被处理掉。这正是「死接线」得以藏身的缝隙。
-    inflight.set(pooledKey(projectId, sessionId, agentId), () => {
-      aborted = true;
-      // `AgentSession.abort()` 是 async 且会等到 agent 真正 idle。这里**不 await**:
-      // WS 的消息处理器不该被一次取消阻塞住。但失败要留现场(7-N),不许静默。
-      void session.abort().catch((err: unknown) => {
-        log.error(
-          `platform: 中断${channelLabel(projectId)}上 ${agentId} 的回合失败:` +
-            `${err instanceof Error ? err.message : String(err)}`,
-        );
-      });
-    });
+    // ⚠️ **登记已经在函数入口就做好了**(见上面 `inflight.set(inflightKey, abortThisTurn)`)
+    // —— 放在 `await runTurn(...)` 之后等于永远登记不上:WS 的每一条消息是各自
+    // fire-and-forget 处理的,中断消息会在这个回合还卡在 await 里的时候就被处理掉。
+    // 这正是「死接线」得以藏身的缝隙。
 
     try {
       const turn = await runTurn({
@@ -2013,7 +2056,7 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
         failureReason: e instanceof Error ? e.message : String(e),
       };
     } finally {
-      inflight.delete(pooledKey(projectId, sessionId, agentId));
+      inflight.delete(inflightKey);
       // ── **回合边界的 housekeeping 提交**(设计 §3.1 / §3.4)────────────
       //
       // 放在 `finally` 里是刻意的:**成功 / 失败 / 超时 / 被中断四条路都做** ——

@@ -38,6 +38,8 @@ import {
   channelActivityOf,
   channelContextOf,
   interruptAvailableOf,
+  remoteClaimsRunning,
+  REMOTE_WATCH_INTERVAL_MS,
   surfaceStatusOf,
   useHarnessRoles,
   useProjectMembers,
@@ -148,6 +150,25 @@ export function ChatSurface() {
    * 「和业务经理聊天的时候 没有停止对话的能力」)。
    */
   const interruptible = interruptAvailableOf(activity, remoteRunning);
+
+  /**
+   * **服务端那份运行态是快照** —— 它可能已经过期(那一轮早就结束了,而 WS 断了
+   * 没送来 `agent_end`)。⇒ 只要它**说「在跑」**,就定期**重问**一次,直到服务端
+   * 说「没人跑」。
+   *
+   * ⚠️ 不轮询的后果:刷新页面之后那盏灯与「■ 中断」按钮会**一直亮着**(快照过期),
+   * 而按下去服务端只会幂等忽略(`onInterrupt` 那条日志写着「没有正在跑的回合」)——
+   * 用户看到的就是「按了没反应」。
+   *
+   * ⚠️ 这**不是**新真相:重问的还是服务端同一个读面(`GET /live` / `/api/intake/live`)。
+   * ⚠️ `remoteRunning === null`(**读不到**)⇒ 不轮询(见 `remoteClaimsRunning`)。
+   */
+  const refreshRunning = useChatStore((s) => s.refreshRunning);
+  useEffect(() => {
+    if (!remoteClaimsRunning(remoteRunning)) return;
+    const t = setInterval(() => void refreshRunning(), REMOTE_WATCH_INTERVAL_MS);
+    return () => clearInterval(t);
+  }, [remoteRunning, refreshRunning]);
 
   function send() {
     const text = input.trim();

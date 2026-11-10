@@ -1053,6 +1053,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
     if (!socket) return;
     if (projectId === null && !intakeActive) return;
     socket.interrupt(intakeActive ? null : projectId);
+    // ⚠️ **按完立刻补问一次运行态**:服务端那份是**快照**,而用户按下停止的那一轮
+    // 可能**早就结束**了(他刷新过页面才按的)⇒ 服务端会幂等忽略,界面却还亮着
+    // 「推演中」。补问一次,灯与按钮立刻按事实收回。
+    //
+    // ⚠️ 这一问**不是**等它停:abort 是异步的,此刻服务端可能仍报「在跑」——
+    // 那就由 `ChatSurface` 的补问定时器接着收(每隔 `REMOTE_WATCH_INTERVAL_MS`)。
+    void get().refreshRunning();
   },
 
   async answerQuestion(questionId, answer) {
