@@ -2884,6 +2884,18 @@ export interface DrainTurnReport {
    * 「是不是限流」—— 判据漂开 = 「看起来正常的错误答案」。
    */
   readonly failoverApplied?: boolean;
+  /**
+   * 这一轮被 provider 拒绝、降不了级,而且**判为可重试 + 零工具调用**:
+   * 平台已进入「全局刹车」(限流退避)—— 工作项**不记 `failed`**(留在
+   * `in_progress`,仍在 `board.runnable` 里),尝试预算归零,刹车到期后
+   * 由定时器自动重派。
+   *
+   * ⚠️ 与 {@link DrainTurnReport.failoverApplied} 同一条纪律的另一半:
+   * 降级是「有人接手了」,刹车是「大家都退一步」—— 两者都是「这一轮
+   * 没跑起来但**不该算组织的失败**」,都不烧预算。quota / auth 不在此列
+   * (账号/配置问题,烧预算 → 升级 → 交代甲方才是对的)。
+   */
+  readonly brakePaused?: boolean;
 }
 
 export interface DrainWorkReport extends DrainTurnReport {
@@ -2946,9 +2958,24 @@ export interface DrainDeps {
   readonly reportMaxDelayMs?: number;
   /** 用户中断:每回合前后各看一次 */
   readonly isCancelled?: () => boolean;
+  /**
+   * provider 故障「全局刹车」是否生效中(`providerBrake.ts`,进程级内存状态;
+   * 宿主接一个 `() => isBraked(now())`,不接 = 无刹车 = 现状,全部既有测试不受影响)。
+   *
+   * 为真时 `drainProject` **直接停**:不 `bumpAttempt`、不叫醒任何人 ——
+   * 定时器 10s 后自然再来,恢复不需要任何新定时器。刹车是**限流退避**,
+   * 不是判据:它不改库里任何状态。
+   */
+  readonly providerBrakeActive?: () => boolean;
 }
 
-export type DrainStopReason = "exhausted" | "max_rounds" | "no_progress" | "cancelled";
+export type DrainStopReason =
+  | "exhausted"
+  | "max_rounds"
+  | "no_progress"
+  | "cancelled"
+  /** provider 刹车(限流退避)生效中 —— 不是失败,到期后定时器自动恢复 */
+  | "braked";
 
 /**
  * 一次派发的结局。**这是「8 个回合」那条告警里唯一能分辨真假的东西。**
@@ -3033,6 +3060,8 @@ export interface DrainResult {
   readonly newlyExhausted: readonly DriverTodo[];
   /** 有没有真的叫醒过业务经理去汇报 */
   readonly reportedToClient: boolean;
+  /** 这次排空是被 provider 刹车挡停的(`stopReason === "braked"` 时为真) */
+  readonly braked?: boolean;
 }
 
 const DEFAULT_MAX_ROUNDS = 8;
@@ -3085,6 +3114,18 @@ export async function drainProject(deps: DrainDeps): Promise<DrainResult> {
     if (deps.isCancelled?.() === true) {
       stopReason = "cancelled";
       stopDetail = "用户中断了这次排空";
+      break;
+    }
+    // ── provider 全局刹车(批次 31):限流退避期内不叫醒任何人 ─────────
+    //
+    // 放在 maxRounds 之前:刹车不是「跑满了」,是「外面在拒绝」。
+    // ⚠️ 它**不 bumpAttempt、不写库** —— 刹车是限流,不是判据;定时器
+    // 10s 后自然再来,到期自动恢复,不需要任何新定时器或状态落盘。
+    if (deps.providerBrakeActive?.() === true) {
+      stopReason = "braked";
+      stopDetail =
+        "provider 故障退避中 —— 自动派发已暂停(不烧尝试预算)," +
+        "到期后由定时器自动恢复";
       break;
     }
     if (rounds >= maxRounds) {
@@ -3210,6 +3251,8 @@ export async function drainProject(deps: DrainDeps): Promise<DrainResult> {
      * 「组织试过了没进展」限流,provider 故障是「外面在拒绝」)。
      */
     let failoverApplied = false;
+    /** 这一轮是不是「provider 故障 + 降不了 + 可重试 + 零工具调用」(刹车路径) */
+    let brakePaused = false;
     try {
       if (todo.kind === "execute_work") {
         if (todo.target === null) {
@@ -3223,6 +3266,7 @@ export async function drainProject(deps: DrainDeps): Promise<DrainResult> {
         failed = r.failed === true;
         refused = r.refused === true;
         failoverApplied = r.failoverApplied === true;
+        brakePaused = r.brakePaused === true;
         detail = r.detail ?? null;
       } else {
         const r = await deps.runAgentTurn(todo.agentId, renderTask(deps.db, todo), todo.kind);
@@ -3230,6 +3274,7 @@ export async function drainProject(deps: DrainDeps): Promise<DrainResult> {
         failed = r.failed === true;
         refused = r.refused === true;
         failoverApplied = r.failoverApplied === true;
+        brakePaused = r.brakePaused === true;
         detail = r.detail ?? null;
       }
     } catch (err) {
@@ -3257,6 +3302,16 @@ export async function drainProject(deps: DrainDeps): Promise<DrainResult> {
       deps.log(
         `dispatcher: 这条待办(${todo.label})刚被 provider 拒绝但**已降级** —— ` +
           `尝试预算归零(那 3 次是给人用的限流,provider 故障不烧它)`,
+      );
+    } else if (brakePaused) {
+      // ── 刹车路径(批次 31):同一条纪律的另一半 ──────────────────────
+      // 降不了级 + 可重试 + 零工具调用 ⇒ 平台已进退避期,工作项留在
+      // `in_progress`(仍在 `board.runnable` 里),预算归零 —— 到期自动重派,
+      // 而 429 打死的这次派发不该烧「叫醒 3 次」的预算。
+      resetAttempt(deps.db, deps.projectId, todo.key);
+      deps.log(
+        `dispatcher: 这条待办(${todo.label})刚被 provider 拒绝(退避期内自动重试)—— ` +
+          `尝试预算归零,工作项留在 in_progress`,
       );
     }
 
@@ -3288,7 +3343,7 @@ export async function drainProject(deps: DrainDeps): Promise<DrainResult> {
     // ⚠️ **`failoverApplied`(已降级)也不消费**:那一轮**没跑起来** ——
     // 它只是把 provider 换了一家,活儿一件没办。消费了就是把「没办」
     // 说成「办过了」(而 `report_downstream` 消费掉的就是「已向甲方交代」)。
-    if (!aborted && !failed && !failoverApplied) {
+    if (!aborted && !failed && !failoverApplied && !brakePaused) {
       if (todo.kind === "review_work") {
         // ⚠️ **021 之后,判据从「回合成功结束」翻成「存在一条 pass 结论」。**
         //
@@ -3379,6 +3434,7 @@ export async function drainProject(deps: DrainDeps): Promise<DrainResult> {
     exhausted,
     newlyExhausted,
     reportedToClient,
+    ...(stopReason === "braked" ? { braked: true } : {}),
   };
 }
 

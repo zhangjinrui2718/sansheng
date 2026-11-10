@@ -86,6 +86,13 @@ import {
   providerFailureLabel,
   type ProviderFailure,
 } from "../runtime/providerFailure.js";
+// provider 全局刹车(批次 31):别名引入 —— 调用点一眼看出这是平台级开关,
+// 不是本次故障的分类判据(分类只在 providerFailure.ts)。
+import {
+  clear as clearProviderBrake,
+  isBraked as providerBrakeIsBraked,
+  noteProviderFailure as noteProviderBrake,
+} from "../runtime/providerBrake.js";
 import { listPendingDispatchEvents } from "../storage/repo/dispatch.js";
 // ⚠️ **`todoKindReachesClient` 是**值**导入,所以走相对路径而不是 `@shared/*`** ——
 // 2026-10-06 撞过一次:`import { todoKindReachesClient } from "@shared/types/platform.js"`
@@ -981,6 +988,9 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
     currentProvider = p;
     // 用户重新表态了 ⇒ 「哪一家坏过」的判断作废(他可能就是要用刚才坏的那家)。
     failedProviderIds.clear();
+    // 同理 ⇒ 退避也作废(他可能就是刚处理好额度/网络)。刹车是限流不是判据,
+    // 用户显式动作优先于它。
+    clearProviderBrake();
     log.muted(`platform: 模型已重新解析 → ${currentModel !== null ? `${p.provider}/${p.modelId}` : "(失败)"}`);
   }
 
@@ -1065,6 +1075,9 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
     });
     // ⚠️ **旧会话绑的是旧模型**:继续用会把请求发到已经限流的那家。
     disposeAllSessions("provider 降级");
+    // 换了家 provider ⇒ 刹车没意义了(退避是在等「这一家」缓过来;
+    // 备用那家没吃过这次故障,不需要退避)。
+    clearProviderBrake();
     log.warn(
       `platform: provider 降级:${from} → ${backup.provider}/${backup.modelId}(原因:${reason})`,
     );
@@ -1139,6 +1152,58 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
       // 同 `announceDrain`:平台通知不属于任何封套。
       originSource: null, triggerKind: null,
     });
+  }
+
+  // ── provider 全局刹车:通知与恢复(批次 31)─────────────────────
+  //
+  // 「暂停」通知在 **episode 第一次**进入刹车时播(「同一条只播一次」——
+  // episode 内延长冷却只记日志,每 10 秒一条也是静默);「恢复」通知在刹车
+  // 到期后**第一次放行**时播(`brakePausedProjects` 记「哪个项目还欠一条恢复
+  // 通知」—— 放在宿主内存,重启即清,最多少一条恢复通知,不产生假话)。
+  const brakePausedProjects = new Set<string>();
+
+  /** 机制仿 {@link announceProviderFailover}:internal 会话 + agent_id NULL + 「⚠️ 供应商」前缀。 */
+  function announceProviderBrakePaused(projectId: string, brakedUntilAt: number): void {
+    const waitSeconds = Math.max(1, Math.round((brakedUntilAt - now()) / 1000));
+    const sessionId = ensureSession(db, projectId, now(), newId, "internal");
+    appendSessionMessage(db, {
+      id: newId("m"),
+      sessionId,
+      agentId: null,
+      kind: "system",
+      content:
+        `⚠️ 供应商:连续遇到 provider 故障(限流/断网类),自动派发已暂停,` +
+        `预计约 ${waitSeconds} 秒后自动重试(provider 恢复后无需人工干预)。`,
+      createdAt: now(),
+      originSource: null, triggerKind: null,
+    });
+  }
+
+  function announceProviderBrakeRecovered(projectId: string): void {
+    const sessionId = ensureSession(db, projectId, now(), newId, "internal");
+    appendSessionMessage(db, {
+      id: newId("m"),
+      sessionId,
+      agentId: null,
+      kind: "system",
+      content: "⚠️ 供应商:故障退避结束 —— 自动派发已恢复。",
+      createdAt: now(),
+      originSource: null, triggerKind: null,
+    });
+  }
+
+  /**
+   * 刹车到期后的第一次放行 ⇒ 补一条「已恢复」。
+   *
+   * 在 `drainOne` 开头调(定时器每 10s 来一次;同步、无 await ⇒ 与暂停通知
+   * 没有竞态)。没播过暂停通知的项目(刹车前就没在跑它 / 重启后)不补 ——
+   * 「恢复」只有相对「暂停」才有意义。
+   */
+  function maybeAnnounceBrakeRecovery(projectId: string): void {
+    if (!brakePausedProjects.has(projectId)) return;
+    if (providerBrakeIsBraked(now())) return;
+    brakePausedProjects.delete(projectId);
+    announceProviderBrakeRecovered(projectId);
   }
 
   // ── 常驻会话(键 = 上下文 + agent)────────────────────────────
@@ -1296,28 +1361,41 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
           });
         }
       },
-      onInterrupt: (projectId) => {
-        // ── 一次中断停掉这个上下文里**正在跑的每一个**回合 ─────────────
+      onInterrupt: (projectId, channel) => {
+        // ── 中断这个上下文里正在跑的回合 ─────────────────────────────
         //
         // 不是「随便一个」、更不是「最后一个」。旧键(`projectId`)下,同一个项目
         // 里两个角色并发时后登记的那条会**覆盖**前一条,于是用户的中断只到得了
         // 最后起来的那个回合 —— 那正是 R1 读出来的雷 (b),也正是忙闩改细之后
         // 会变成可达的那条路。
         //
-        // ⚠️ **「只停某一个角色」在今天的协议上不可表达**:`ClientCommand.interrupt`
-        // 只带 `projectId`(`shared/types/platform.ts`),角色维度没有上过线。
-        // 所以这里给的是**超集**:能保证的是**不丢任何一个**,而不是「精确到角色」。
+        // ⚠️ **范围(2026-11-10 用户裁决)**:带 `channel: "client"` 时只停
+        // **甲方通道**(业务经理)的回合 —— 「我和业务经理的对话要能终止下来,
+        // 而不是终止整个项目在做的事情」;要停整个项目走组织路线(告诉业务经理),
+        // 不靠一个按钮。判据复用 `channelForAgent`(`ROLE_SPECS[role].clientFacing`,
+        // 与会话通道归属同一条判据)。不带 `channel` = 原有超集(协议保留给
+        // CLI / 测试):能保证的是**不丢任何一个**。
         const prefix = contextPrefix(projectId);
-        const hit = [...inflight.entries()].filter(([k]) => k.startsWith(prefix));
+        const hit = [...inflight.entries()].filter(([k]) => {
+          if (!k.startsWith(prefix)) return false;
+          if (channel === undefined) return true;
+          // 键形状 = `${ctx}::${sessionId}::${agentId}`(见 `pooledKey`)——
+          // 末段就是 agentId。会话 / agent id 都不含 `::`。
+          const agentId = k.slice(prefix.length).split("::").pop() ?? "";
+          return channelForAgent(db, agentId) === channel;
+        });
         if (hit.length === 0) {
-          // 幂等:没有正在跑的回合(用户连点两次、或回合刚好结束)不是错误。
-          // 但**必须留一行日志** —— 否则「中断按钮没反应」和「真的没有活可停」
-          // 在事后完全无法区分(7-N:见不到的现场等于没有现场)。
-          log.muted(`platform: 收到中断,但${channelLabel(projectId)}上没有正在跑的回合 —— 忽略`);
+          // 幂等:没有正在跑的回合(用户连点两次、或回合刚好结束、或带了
+          // `channel` 而在跑的是别的角色)不是错误。但**必须留一行日志** ——
+          // 否则「中断按钮没反应」和「真的没有活可停」在事后完全无法区分
+          // (7-N:见不到的现场等于没有现场)。
+          log.muted(
+            `platform: 收到中断${channel === "client" ? "(只停甲方通道)" : ""},${channelLabel(projectId)}上没有${channel === "client" ? "甲方通道的" : ""}正在跑的回合 —— 忽略`,
+          );
           return;
         }
         log.ok(
-          `platform: 中断${channelLabel(projectId)}正在跑的 ${hit.length} 个回合` +
+          `platform: 中断${channelLabel(projectId)}${channel === "client" ? "甲方通道" : "正在跑"}的 ${hit.length} 个回合` +
             `(${hit.map(([k]) => k.slice(prefix.length)).join(", ")})`,
         );
         for (const [, abort] of hit) abort();
@@ -1978,6 +2056,29 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
           // 并让「叫醒三次」的预算真被烧掉一次 —— 外部在拒绝时烧掉那个
           // **给人用**的预算才是对的)。
           providerRejected = true;
+          // ── 全局刹车(批次 31):降不了 + 可重试 ⇒ 进退避,暂停自动派发 ──
+          // quota / auth / unknown **不刹车**(账号/配置问题,等不好;烧预算 →
+          // 升级 → 业务经理向甲方交代才是对的)。episode 第一次 ⇒ 播一条
+          // 「自动派发已暂停」;episode 内延长冷却只记日志(同一条只播一次)。
+          if (failure.retryable) {
+            const note = noteProviderBrake(failure.kind, now());
+            if (note.episode && projectId !== null) {
+              brakePausedProjects.add(projectId);
+              announceProviderBrakePaused(projectId, note.brakedUntilAt);
+              log.warn(
+                `platform: provider 刹车启动 —— 自动派发暂停约 ` +
+                  `${Math.max(1, Math.round((note.brakedUntilAt - now()) / 1000))}s` +
+                  `(${providerFailureLabel(failure.kind)})`,
+              );
+            } else if (note.episode) {
+              log.warn(`platform: provider 刹车启动(无项目上下文,通知无处落)`);
+            } else {
+              log.muted(
+                `platform: provider 刹车延长 —— 退避至 ` +
+                  `${new Date(note.brakedUntilAt).toISOString()}(同一段,不重播)`,
+              );
+            }
+          }
         } else if (projectId !== null) {
           announceProviderFailover(
             projectId,
@@ -2005,6 +2106,9 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
           },
         });
       }
+      // 一次没有 provider 故障的回合正常收尾 ⇒ 刹车清零(provider 恢复了;
+      // 下一次故障从 30s 重新退避,而不是接着上次的退避序列)。
+      if (turn.providerError == null) clearProviderBrake();
       if (turn.timedOut) {
         hub.broadcast({
           type: "error", projectId,
@@ -2198,6 +2302,8 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
       let providerDegraded = false;
       /** 降不了 ⇒ 平台把工作项记成了终态(failed)。 */
       let providerMarkedFailed = false;
+      /** 刹车路径(批次 31):可重试 + 零工具调用 + 降不了 ⇒ 不记 failed,进退避。 */
+      let providerBrakePaused = false;
       if (execution.turn.providerError != null) {
         const failure = execution.turn.providerError;
         const retries = execution.turn.providerRetries ?? 0;
@@ -2233,6 +2339,52 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
                 retries,
                 `${degraded.provider}/${degraded.modelId}`,
                 "已切到备用 provider,这条工作项会被重新派发",
+              ),
+            },
+          });
+        } else if (
+          failure.retryable &&
+          execution.turn.toolCalls.length === 0 &&
+          !execution.turn.timedOut &&
+          !aborted
+        ) {
+          // ── 刹车路径(批次 31):可重试 + 零工具调用 + 降不了 ──────────
+          //
+          // 零工具调用 = 本回合没有副作用 ⇒ **自动重跑是安全的**(与「降级只
+          // 发生在本回合没干过活时」同一条纪律,这里把它的结论接到「不降级」
+          // 的那一侧);而 provider 是限流/断网类故障 ⇒ 立刻重跑只是把同一个
+          // 限流窗口再打一遍。所以:**不记 failed**(工作项留在 `in_progress`,
+          // 仍在 `board.runnable` 里)、进全局退避、dispatcher 据此把尝试预算
+          // 归零,刹车到期后定时器自动重派。
+          //
+          // ⚠️ 有工具调用 ⇒ 仍走下面的终态分支(副作用后重跑不安全,不许放宽);
+          // quota / auth ⇒ 同样走终态(账号/配置问题,等不好)。
+          providerBrakePaused = true;
+          const note = noteProviderBrake(failure.kind, now());
+          if (note.episode) {
+            brakePausedProjects.add(projectId);
+            announceProviderBrakePaused(projectId, note.brakedUntilAt);
+          } else {
+            log.muted(
+              `platform: provider 刹车延长 —— 退避至 ` +
+                `${new Date(note.brakedUntilAt).toISOString()}(同一段,不重播)`,
+            );
+          }
+          const waitSeconds = Math.max(1, Math.round((note.brakedUntilAt - now()) / 1000));
+          log.warn(
+            `platform: 工作项 ${workId}「${execution.work.title}」被 provider 拒绝` +
+              `(${providerFailureLabel(failure.kind)}) —— 零工具调用,不记 failed;` +
+              `自动派发暂停约 ${waitSeconds}s 后自动重试`,
+          );
+          hub.broadcast({
+            type: "error", projectId,
+            error: {
+              code: "provider_error",
+              message: providerFailureMessage(
+                failure,
+                retries,
+                null,
+                `自动派发已暂停,预计约 ${waitSeconds} 秒后自动重试(provider 恢复后无需人工干预)`,
               ),
             },
           });
@@ -2288,6 +2440,8 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
           });
         }
       }
+      // 一次没有 provider 故障的回合正常收尾 ⇒ 刹车清零(provider 恢复了)。
+      if (execution.turn.providerError == null) clearProviderBrake();
       // ── 拒绝执行 ≠ 成功(2026-10-05 补)────────────────────────────
       //
       // `runWorkItem` 的 `checkRunnable` 会拒绝三类工作项(已是终态 / 负责人不存在 /
@@ -2324,6 +2478,10 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
         // dispatcher 见到它会重置这条待办的尝试预算 —— provider 故障不该烧掉
         // 「叫醒 3 次」那个**给人用**的限流。
         ...(providerDegraded ? { failoverApplied: true } : {}),
+        // ⚠️ **刹车这一轮也不算失败**:工作项留在 in_progress(仍在
+        // `board.runnable` 里),dispatcher 见到它同样重置尝试预算 ——
+        // 刹车到期后定时器自动重派,不需要任何人动手。
+        ...(providerBrakePaused ? { brakePaused: true } : {}),
       };
     } catch (e) {
       outcomeLabel = aborted ? "被中断" : "失败";
@@ -2568,6 +2726,8 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
    * `maxConcurrentProjects` 信号量是**另一层**(全局上界),一点都不动。
    */
   async function drainOne(projectId: string): Promise<DrainResult | null> {
+    // 刹车到期后的第一次放行 ⇒ 补一条「已恢复」(同步、无 await,与暂停通知无竞态)。
+    maybeAnnounceBrakeRecovery(projectId);
     // **重入闩的一半**:甲方正与业务经理对话时,排空让开(那条路结束时会自己
     // 敲门)。判据是**那个角色**,不是整个项目 —— 项目里 worker 在跑不该挡住
     // 甲方找业务经理,反过来也一样。另一半是 `drainingProjects`(按项目)。
@@ -2593,6 +2753,9 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
       // (`DEFAULT_REPORT_BATCH_SIZE` / `DEFAULT_REPORT_MAX_DELAY_MS`)。
       ...collectOptions,
       isCancelled: () => cancelled,
+      // provider 全局刹车(批次 31):退避期内不叫醒任何人 —— dispatcher 见真
+      // 就直接停(不 bumpAttempt)。定时器 10s 后自然再来,恢复不需要新定时器。
+      providerBrakeActive: () => providerBrakeIsBraked(now()),
       // `todoKind` 是 `drainProject` 传下来的**真值**(`todo.kind`)。宿主在这里
       // 把它翻成契约的 `trigger` —— 这是「runtime 的待办种类」跨到「回合为什么
       // 存在」的**唯一**一处接缝:`runAgentTurn` 不可能自己知道,因为它拿到的
