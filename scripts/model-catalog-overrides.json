@@ -6,23 +6,14 @@
     "⚠️ 第三层的 key 必须带 `chat:` 前缀 —— 那是**磁盘上**的形状;pi-ai 载入内存时会剥掉它,",
     "   所以运行期 `getBuiltinModel('minimax-cn', 'MiniMax-M3')` 查的是裸 id。写错前缀 = 静默不生效。",
     "覆盖语义:本文件同名 model **覆盖**内置值(上游哪天自己加了,这里说了算)。",
-    "新增 model 必须带全 `type` 字段 —— 内置 3 条都有,siblings 即是模板。"
-  ],
-  "minimax-cn": {
-    "anthropic-messages": {
-      "chat:MiniMax-M3.1-Flash-Preview": {
-        "id": "MiniMax-M3.1-Flash-Preview",
-        "name": "MiniMax-M3.1-Flash-Preview",
-        "api": "anthropic-messages",
-        "provider": "minimax-cn",
-        "baseUrl": "https://api.minimaxi.com/anthropic",
-        "reasoning": true,
-        "input": ["text"],
-        "cost": { "input": 0.3, "output": 1.2, "cacheRead": 0.06, "cacheWrite": 0 },
-        "contextWindow": 1000000,
-        "maxTokens": 131072,
-        "type": "chat"
-      }
-    }
-  }
+    "新增 model 必须带全 `type` 字段 —— 内置 3 条都有,siblings 即是模板。",
+    "",
+    "**2026-11-10:覆盖清单已清空。** 原先这里注入的是 `minimax-cn/MiniMax-M3.1-Flash-Preview`,",
+    "而上游 pi-ai **1.4.0 起已内置 `chat:MiniMax-M3.1-Flash`**(1.3.0 还没有)⇒",
+    "自定义注入的那份已是重复数据,且 preview id 与上游 id 不同 ⇒ 两个 model 会同时出现在列表里。",
+    "处置:依赖 `@earendil-works/pi-ai` 升到 `^1.4.0`(见 package.json),覆盖条目删除。",
+    "⚠️ 本文件留空**不是**遗留物:上游 catalog 缺 model 时,机制还要用(形状同上)。",
+    "   判据:上游 pi-ai 的 `dist/providers/data/<provider>.json` 里有没有那个 `chat:` key。",
+    "   有 ⇒ 不要写在这里(会变成重复条目);没有 ⇒ 写在这里,并把依赖版本钉到含它的那个版本。"
+  ]
 }

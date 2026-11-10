@@ -1332,6 +1332,15 @@ package.json → "postinstall"           # npm install 时重放
 
 ⚠️ **磁盘上 model 的 key 必须带 `chat:` 前缀** —— 那是 `providers/data/*.json` 的形状,pi-ai 载入内存时会剥掉,所以运行期 `getBuiltinModel('minimax-cn','MiniMax-M3')` 查的是**裸 id**。写错前缀 = 静默不生效。覆盖语义:同名 model 覆盖内置值。
 
+⚠️ **先查上游,再决定要不要注入(2026-11-10 教训)**。`scripts/model-catalog-overrides.json` 的清单
+**当前是空的** —— 原先注入的 `minimax-cn/MiniMax-M3.1-Flash-Preview` 已删,因为**上游 pi-ai 1.4.0 起
+内置了 `chat:MiniMax-M3.1-Flash`**(1.3.0 还没有)⇒ 自定义注入的那份成了重复数据,而且 preview id 与
+上游 id 不同 ⇒ **两个 model 会同时出现在设置列表里**(用户裁决:删掉 preview 那份)。
+⇒ 判据:**上游 `node_modules/@earendil-works/pi-ai/dist/providers/data/<provider>.json` 里有没有那个
+`chat:` key** —— 有 ⇒ 不要写进 overrides(并把依赖版本钉到含它的那个版本);没有 ⇒ 才写。
+⚠️ 依赖版本下限因此是 **`@earendil-works/pi-ai: ^1.4.0`**(pi-coding-agent 仍固定 `1.2.0`,
+它对 pi-ai 的依赖是 `^1.2.0` ⇒ npm 装的是**单份** pi-ai 1.4.0,`npm ls` 已核对)。
+
 > 不用 `patch-package` 的理由:catalog 是**单行压缩 JSON**,它产出的 diff 人读不懂、review 不了。
 >
 > ⚠️ 正确形态仍是「让 `resolveModel` 读 `<dataDir>` 下的用户覆盖层」—— 那才是「任意用户都能加 model」的结构性功能(需开批次 + 回归测试)。当前注入法**只服务本机**,且作为 npm 包发布时会给**消费者的 `node_modules`** 也注入同一个 model。
@@ -1380,7 +1389,7 @@ npm run check:design      # 设计一致性 E1–E14
 ### 决策自主
 
 - **可逆、有依据的决策:直接做完再汇报,不要把选项抛回用户。**
-- 准备抛 A/B/C 之前先跑 jev 闸门:`~/.dsh/skills/jev/scripts/jev.sh decide --state "<5 段写满>" --choice "..."`。`PROCEED` 就自己干,`ASK_USER` 才问。
+- ~~jev 闸门~~ **已删(2026-11-10)**:jev 的接口返回 HTTP 451(`Typesafe is not available in your region`),skill 与 `~/.pi/agent/extensions/jev-check.ts` 一并删除。⇒ **决策自主靠论证,不靠外部打分器**:有依据就自己干并汇报(把「为什么这么选」写进汇报),只有下面四类才问用户。
 - 只有四类才问用户:**不可逆操作、审美/主观偏好、只有用户知道的信息、高风险(资金/个人/团队)**。
 
 ### 委派
