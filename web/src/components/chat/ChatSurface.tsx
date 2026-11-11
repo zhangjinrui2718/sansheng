@@ -159,11 +159,18 @@ export function ChatSurface() {
    * ⇒ 此前那盏灯写着「推演中」、手上却没有任何办法停下来(用户原话:
    * 「和业务经理聊天的时候 没有停止对话的能力」)。
    *
+   * ⚠️ **范围 = 甲方通道(2026-11-10 用户裁决)**:`{ scope: "client" }` ——
+   * 「停止」停的是**我和业务经理的对话**,不是整个项目:内部角色在跑时**不**给
+   * 停止入口(按了也停不掉它们)。`sendInterrupt` 发的指令带 `channel: "client"`,
+   * 服务端按同一份判据(`clientForAgent`)只停甲方通道的回合 —— 两头同一格。
+   *
    * ⚠️ **第三个参数是连接状态**:连接断了的时候,这条指令**发不出去**
    * (`PlatformSocket.send` 在非 OPEN 时把它丢掉)⇒ **不给入口**
    * (摆一个按下去必然无效的按钮比没有按钮更坏)。
    */
-  const interruptible = interruptAvailableOf(activity, remoteRunning, socketStatus);
+  const interruptible = interruptAvailableOf(activity, remoteRunning, socketStatus, {
+    scope: "client",
+  });
 
   /**
    * **服务端那份运行态是快照** —— 它可能已经过期(那一轮早就结束了,而 WS 断了

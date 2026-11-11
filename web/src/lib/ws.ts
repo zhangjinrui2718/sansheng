@@ -172,9 +172,13 @@ export class PlatformSocket {
     });
   }
 
-  /** 中断某个上下文正在跑的一轮(`null` = 接待会话)。 */
-  interrupt(projectId: string | null): boolean {
-    return this.send({ type: "interrupt", projectId });
+  /**
+   * 中断某个上下文正在跑的一轮(`null` = 接待会话)。`channel: "client"`
+   * = 只停甲方通道(业务经理)的回合 —— 前端的停止入口一律带它(2026-11-10:
+   * 「停止」是停这段对话,不是停整个项目)。
+   */
+  interrupt(projectId: string | null, channel?: "client"): boolean {
+    return this.send({ type: "interrupt", projectId, ...(channel ? { channel } : {}) });
   }
 
   /** 经 WS 回答一个等甲方拍板的问题(与 HTTP POST answer 等价,前端统一走 HTTP)。 */

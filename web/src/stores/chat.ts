@@ -1164,7 +1164,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
     // ⚠️ **连接断了 ⇒ 这条指令发不出去** —— 与「摆一个按下去必然无效的按钮」同源。
     // ⚠️ 判据同样是 **socket 返回的那个 `false`**(它看的是 `ws.readyState`),
     // 不是界面那份状态镜像(镜像只管显示)。
-    const delivered = socket.interrupt(intakeActive ? null : projectId);
+    // ⚠️ **范围收窄(2026-11-10 用户裁决)**:`channel: "client"` = 只停**甲方通道**
+    // (业务经理)的回合 —— 「我说的停止,是当前的对话能终止下来,而不是终止
+    // 整个项目在做的事情」。项目经理 / 工程师 / 质检的后台活不受影响;要停整个
+    // 项目走组织路线(告诉业务经理)。两个停止入口(页头「■ 中断」与输入区
+    // 「■ 停止」)都走这一条路 ⇒ 收窄只写这一处。
+    const delivered = socket.interrupt(intakeActive ? null : projectId, "client");
     if (!delivered) {
       set({
         error: {

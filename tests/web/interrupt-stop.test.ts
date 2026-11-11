@@ -159,6 +159,36 @@ describe("interruptAvailableOf · 「此刻能不能停」", () => {
     // 摆一个按下去必然无效的按钮,比没有按钮更坏(自信的假话)。
     expect(interruptAvailableOf(NOTHING, null)).toBe(false);
   });
+
+  // ── 范围收窄(2026-11-10 用户裁决)───────────────────────────
+  //「我说的停止,是指我和业务经理沟通的时候,当前的对话能终止下来,
+  //  而不是终止整个项目在做的事情」⇒ `scope: "client"` 时只数甲方通道那一半。
+  it("**收窄**:scope=client + 只有内部通道在跑 ⇒ **不**给入口(按了也停不掉它们)", () => {
+    expect(interruptAvailableOf(activity(0, 1), null, "open", { scope: "client" })).toBe(false);
+  });
+
+  it("**收窄**:scope=client + 服务端只有内部在跑 ⇒ **不**给入口", () => {
+    expect(
+      interruptAvailableOf(NOTHING, { client: false, internal: true }, "open", { scope: "client" }),
+    ).toBe(false);
+  });
+
+  it("**收窄**:scope=client + 甲方通道在跑 ⇒ 照常给入口", () => {
+    expect(interruptAvailableOf(activity(1, 0), null, "open", { scope: "client" })).toBe(true);
+    expect(
+      interruptAvailableOf(NOTHING, { client: true, internal: true }, "open", { scope: "client" }),
+    ).toBe(true);
+  });
+
+  it("**收窄**:scope=client + 连接断了 ⇒ 不给入口(与不收窄同一格)", () => {
+    expect(interruptAvailableOf(activity(1, 0), null, "closed", { scope: "client" })).toBe(false);
+  });
+
+  it("**收窄**:内部在跑但 scope=client 判否 —— ChatSurface 必须把 scope 传进去(源码级)", () => {
+    // 判据两头同源:前端不给入口 + 发出的指令带 `channel: "client"`,
+    // 服务端按同一份判据只停甲方通道。前端那一半在 ChatSurface 的调用点上。
+    expect(chatSurface).toContain('scope: "client"');
+  });
 });
 
 // ── ② 停止按钮在输入区里 ─────────────────────────────────────────

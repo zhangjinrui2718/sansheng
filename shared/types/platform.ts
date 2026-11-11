@@ -1440,7 +1440,19 @@ export type ClientCommand =
   /** 回答一个等甲方拍板的问题 —— 走 resolveClientQuestion,落 decision 工件 */
   | { type: "answer_client_question"; questionId: string; answer: string }
   /** `null` = 中断接待会话正在跑的那一轮 */
-  | { type: "interrupt"; projectId: string | null }
+  | {
+      type: "interrupt";
+      projectId: string | null;
+      /**
+       * 收窄中断的范围(2026-11-10 用户裁决:「我说的停止,是指我和业务经理沟通
+       * 的时候,当前的对话能终止下来,而不是终止整个项目在做的事情」):
+       * `"client"` = 只停**甲方通道**(业务经理)正在跑的回合,内部角色
+       * (项目经理 / 工程师 / 质检)的后台活不受影响 —— 要停整个项目走组织路线。
+       * 缺省 = 停这个上下文里所有正在跑的回合(原有超集语义,协议保留给
+       * CLI / 测试;前端两个停止入口一律带 `"client"`)。
+       */
+      channel?: "client";
+    }
   | { type: "ping" };
 
 export interface WsToolInfo {

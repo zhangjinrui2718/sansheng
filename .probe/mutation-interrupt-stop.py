@@ -24,12 +24,14 @@ TEST_FILES = [
     "tests/platform/interrupt-live.test.ts",
     "tests/platform/interrupt-before-session.test.ts",
     "tests/web/offline-recovery.test.ts",
+    "tests/platform/interrupt.test.ts",
 ]
 DATA = "web/src/lib/data.ts"
 COMPOSER = "web/src/components/chat/ChatComposer.tsx"
 SURFACE = "web/src/components/chat/ChatSurface.tsx"
 STORE = "web/src/stores/chat.ts"
 WS = "web/src/lib/ws.ts"
+SERVE = "src/platform/host/serve.ts"
 
 CASES = [
     (
@@ -213,9 +215,9 @@ CASES = [
         "M20 中断失败时也回报「发出去了」(用户按了没反应,界面还说没事)",
         STORE,
         [(
-            "    const delivered = socket.interrupt(intakeActive ? null : projectId);\n"
+            '    const delivered = socket.interrupt(intakeActive ? null : projectId, "client");\n'
             "    if (!delivered) {",
-            "    const delivered = socket.interrupt(intakeActive ? null : projectId);\n"
+            '    const delivered = socket.interrupt(intakeActive ? null : projectId, "client");\n'
             "    if (delivered) {",
         )],
     ),
@@ -224,8 +226,10 @@ CASES = [
         DATA,
         [(
             '  if (socket !== "open") return false;\n'
-            "  if (activity.client.length > 0 || activity.internal.length > 0) return true;",
-            "  if (activity.client.length > 0 || activity.internal.length > 0) return true;",
+            '  const clientOnly = opts.scope === "client";\n'
+            "  if (activity.client.length > 0 || (!clientOnly && activity.internal.length > 0)) return true;",
+            '  const clientOnly = opts.scope === "client";\n'
+            "  if (activity.client.length > 0 || (!clientOnly && activity.internal.length > 0)) return true;",
         )],
     ),
     (
@@ -247,6 +251,36 @@ CASES = [
             "    if (stale.length === 0) return;",
             "    const stale = staleTurnIds(local, runningAgentIds);\n"
             "    if (stale.length >= 0) return;",
+        )],
+    ),
+    # ── 第四波(2026-11-11):范围收窄 ─────────────────────────────
+    # 用户裁决:「我说的停止,是指我和业务经理沟通的时候,当前的对话能终止下来,
+    # 而不是终止整个项目在做的事情」⇒ 带 `channel: "client"` 的中断只停甲方通道。
+    (
+        "M24 服务端忽略 channel(带 client 的中断把内部角色一起停 —— 回到超集)",
+        SERVE,
+        [(
+            "          return channelForAgent(db, agentId) === channel;",
+            "          return channel === undefined || channelForAgent(db, agentId) === channel;\n"
+            "          // MUT-INVALID",
+        )],
+    ),
+    (
+        "M25 对话页不再把 scope 传给判据(前端重新给「停不掉的入口」)",
+        SURFACE,
+        [(
+            "  const interruptible = interruptAvailableOf(activity, remoteRunning, socketStatus, {\n"
+            '    scope: "client",\n'
+            "  });",
+            "  const interruptible = interruptAvailableOf(activity, remoteRunning, socketStatus);",
+        )],
+    ),
+    (
+        "M26 传输层把 channel 丢了(指令到了服务端,却退化成停全部)",
+        WS,
+        [(
+            '    return this.send({ type: "interrupt", projectId, ...(channel ? { channel } : {}) });',
+            '    return this.send({ type: "interrupt", projectId });',
         )],
     ),
 ]

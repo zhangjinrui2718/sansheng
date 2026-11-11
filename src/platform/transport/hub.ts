@@ -112,7 +112,11 @@ export interface HubHandlers {
   ) => Promise<void>;
   /** 用户答了一个 client_question */
   readonly onAnswerQuestion: (questionId: string, answer: string) => Promise<void>;
-  readonly onInterrupt: (projectId: string | null) => void;
+  /**
+   * 中断某个上下文正在跑的回合。`channel === "client"` 时只停**甲方通道**
+   * (业务经理)的回合(范围收窄,2026-11-10);缺省 = 全部(原有超集)。
+   */
+  readonly onInterrupt: (projectId: string | null, channel?: "client") => void;
 }
 
 export class PlatformHub {
@@ -332,7 +336,7 @@ export class PlatformHub {
           await this.handlers.onAnswerQuestion(cmd.questionId, cmd.answer);
           return;
         case "interrupt":
-          this.handlers.onInterrupt(cmd.projectId);
+          this.handlers.onInterrupt(cmd.projectId, cmd.channel);
           return;
         default: {
           // 穷尽性检查:新增 ClientCommand 时这里会编译失败

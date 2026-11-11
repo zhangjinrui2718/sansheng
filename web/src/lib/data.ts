@@ -1083,11 +1083,19 @@ export function interruptAvailableOf(
    * 「■ 中断」,而按下去的命令被**静默丢弃**。
    */
   socket: SocketStatus = "open",
+  /**
+   * **中断的范围**(2026-11-10 用户裁决:「停止」是停**我和业务经理的对话**,
+   * 不是停整个项目)。`scope: "client"` 时只数**甲方通道**那一半 ——
+   * 内部角色(项目经理 / 工程师 / 质检)在跑时,**不**给停止入口(按了也停不掉它们;
+   * 摆一个必然无效的按钮比没有按钮更坏)。缺省不收窄(两半都算)。
+   */
+  opts: { scope?: "client" } = {},
 ): boolean {
   if (socket !== "open") return false;
-  if (activity.client.length > 0 || activity.internal.length > 0) return true;
+  const clientOnly = opts.scope === "client";
+  if (activity.client.length > 0 || (!clientOnly && activity.internal.length > 0)) return true;
   if (remote === null) return false;
-  return remote.client || remote.internal;
+  return clientOnly ? remote.client : remote.client || remote.internal;
 }
 
 /**
