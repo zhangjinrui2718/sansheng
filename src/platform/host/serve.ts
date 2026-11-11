@@ -90,6 +90,7 @@ import {
 // 不是本次故障的分类判据(分类只在 providerFailure.ts)。
 import {
   clear as clearProviderBrake,
+  configureProviderBrake,
   isBraked as providerBrakeIsBraked,
   noteProviderFailure as noteProviderBrake,
 } from "../runtime/providerBrake.js";
@@ -299,6 +300,19 @@ export interface ServeOptions {
    */
   readonly turnWallClockMs?: number;
   /**
+   * **provider 全局刹车**的第一档冷却(毫秒)。默认 30 秒,第二档 2 分钟,
+   * 封顶 8 分钟(序列见 `runtime/providerBrake.ts`,常量集中在那一个文件)。
+   *
+   * 连续遇到可重试的 provider 故障(限流/断网/5xx)且降不了级时,自动派发
+   * 暂停这么久,而不是每 10 秒把「叫醒 3 次」的尝试预算烧一遍(三次全打在
+   * 同一个限流窗口里)。⚠️ 只对**可重试**的 kind 生效:quota / auth 是
+   * 账号/配置问题,等不好,照旧烧预算 → 升级 → 交代甲方。测试用它把
+   * 冷却调到几十毫秒观察「到期自动恢复」。
+   */
+  readonly providerBrakeBaseCooldownMs?: number;
+  /** **provider 全局刹车**的封顶冷却(毫秒)。默认 8 分钟;必须 ≥ base。 */
+  readonly providerBrakeMaxCooldownMs?: number;
+  /**
    * **合并唤醒**的两个旋钮(见 `runtime/dispatcher.ts` 的 `collectTodos`)。
    *
    * 下游事件不再「有一条就生成一次汇报待办」,而是:
@@ -490,6 +504,13 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
   const db = booted.deps.db;
   const now = booted.now;
   const newId = booted.newId;
+
+  // provider 全局刹车(批次 31):冷却常量的覆盖入口 —— 默认值集中在
+  // `providerBrake.ts`,这里只把 `ServeOptions` 的两个旋钮接过去(缺省 = 不覆盖)。
+  configureProviderBrake({
+    baseCooldownMs: opts.providerBrakeBaseCooldownMs,
+    maxCooldownMs: opts.providerBrakeMaxCooldownMs,
+  });
 
   /**
    * 启动时把组织补进**每一个已存在的项目**(幂等)。
@@ -1154,13 +1175,12 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
     });
   }
 
-  // ── provider 全局刹车:通知与恢复(批次 31)─────────────────────
+  // ── provider 全局刹车:通知(批次 31)─────────────────────────
   //
   // 「暂停」通知在 **episode 第一次**进入刹车时播(「同一条只播一次」——
-  // episode 内延长冷却只记日志,每 10 秒一条也是静默);「恢复」通知在刹车
-  // 到期后**第一次放行**时播(`brakePausedProjects` 记「哪个项目还欠一条恢复
-  // 通知」—— 放在宿主内存,重启即清,最多少一条恢复通知,不产生假话)。
-  const brakePausedProjects = new Set<string>();
+  // episode 内延长冷却只记日志,每 10 秒一条也是静默)。**解除时不播**:
+  // 恢复是常态、暂停才是异常,恢复播报只会把「组织运行态」淹掉;界面上
+  // 的证据是暂停通知 + 接下来真的有活儿在跑。
 
   /** 机制仿 {@link announceProviderFailover}:internal 会话 + agent_id NULL + 「⚠️ 供应商」前缀。 */
   function announceProviderBrakePaused(projectId: string, brakedUntilAt: number): void {
@@ -1177,33 +1197,6 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
       createdAt: now(),
       originSource: null, triggerKind: null,
     });
-  }
-
-  function announceProviderBrakeRecovered(projectId: string): void {
-    const sessionId = ensureSession(db, projectId, now(), newId, "internal");
-    appendSessionMessage(db, {
-      id: newId("m"),
-      sessionId,
-      agentId: null,
-      kind: "system",
-      content: "⚠️ 供应商:故障退避结束 —— 自动派发已恢复。",
-      createdAt: now(),
-      originSource: null, triggerKind: null,
-    });
-  }
-
-  /**
-   * 刹车到期后的第一次放行 ⇒ 补一条「已恢复」。
-   *
-   * 在 `drainOne` 开头调(定时器每 10s 来一次;同步、无 await ⇒ 与暂停通知
-   * 没有竞态)。没播过暂停通知的项目(刹车前就没在跑它 / 重启后)不补 ——
-   * 「恢复」只有相对「暂停」才有意义。
-   */
-  function maybeAnnounceBrakeRecovery(projectId: string): void {
-    if (!brakePausedProjects.has(projectId)) return;
-    if (providerBrakeIsBraked(now())) return;
-    brakePausedProjects.delete(projectId);
-    announceProviderBrakeRecovered(projectId);
   }
 
   // ── 常驻会话(键 = 上下文 + agent)────────────────────────────
@@ -2060,10 +2053,11 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
           // quota / auth / unknown **不刹车**(账号/配置问题,等不好;烧预算 →
           // 升级 → 业务经理向甲方交代才是对的)。episode 第一次 ⇒ 播一条
           // 「自动派发已暂停」;episode 内延长冷却只记日志(同一条只播一次)。
-          if (failure.retryable) {
+          // ⚠️ 超时 / 被中断**不算 provider 故障**(那是自己的纪律在管):
+          // 不触发刹车(自动重跑卡死行为 / 用户决定,都不是「等一等」能治的)。
+          if (failure.retryable && !turn.timedOut && !aborted) {
             const note = noteProviderBrake(failure.kind, now());
             if (note.episode && projectId !== null) {
-              brakePausedProjects.add(projectId);
               announceProviderBrakePaused(projectId, note.brakedUntilAt);
               log.warn(
                 `platform: provider 刹车启动 —— 自动派发暂停约 ` +
@@ -2108,7 +2102,11 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
       }
       // 一次没有 provider 故障的回合正常收尾 ⇒ 刹车清零(provider 恢复了;
       // 下一次故障从 30s 重新退避,而不是接着上次的退避序列)。
-      if (turn.providerError == null) clearProviderBrake();
+      // 清零判据 = **成功收尾**(provider 没出错、没超时、没被打断、有答复);
+      // 「没报 provider 错但也没干成」的回合不清零 —— 刹车是限流,等它到期。
+      if (turn.providerError == null && !turn.timedOut && turn.unanswered == null) {
+        clearProviderBrake();
+      }
       if (turn.timedOut) {
         hub.broadcast({
           type: "error", projectId,
@@ -2362,7 +2360,6 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
           providerBrakePaused = true;
           const note = noteProviderBrake(failure.kind, now());
           if (note.episode) {
-            brakePausedProjects.add(projectId);
             announceProviderBrakePaused(projectId, note.brakedUntilAt);
           } else {
             log.muted(
@@ -2441,7 +2438,14 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
         }
       }
       // 一次没有 provider 故障的回合正常收尾 ⇒ 刹车清零(provider 恢复了)。
-      if (execution.turn.providerError == null) clearProviderBrake();
+      // 清零判据 = **真跑过模型且没故障**(refused 根本没调模型;timed_out
+      // 不是 provider 故障,也不是成功 —— 都不该解除刹车)。
+      if (
+        execution.turn.providerError == null && !execution.turn.timedOut &&
+        execution.outcome !== "refused" && execution.outcome !== "timed_out"
+      ) {
+        clearProviderBrake();
+      }
       // ── 拒绝执行 ≠ 成功(2026-10-05 补)────────────────────────────
       //
       // `runWorkItem` 的 `checkRunnable` 会拒绝三类工作项(已是终态 / 负责人不存在 /
@@ -2726,8 +2730,6 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
    * `maxConcurrentProjects` 信号量是**另一层**(全局上界),一点都不动。
    */
   async function drainOne(projectId: string): Promise<DrainResult | null> {
-    // 刹车到期后的第一次放行 ⇒ 补一条「已恢复」(同步、无 await,与暂停通知无竞态)。
-    maybeAnnounceBrakeRecovery(projectId);
     // **重入闩的一半**:甲方正与业务经理对话时,排空让开(那条路结束时会自己
     // 敲门)。判据是**那个角色**,不是整个项目 —— 项目里 worker 在跑不该挡住
     // 甲方找业务经理,反过来也一样。另一半是 `drainingProjects`(按项目)。

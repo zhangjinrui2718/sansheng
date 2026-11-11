@@ -477,9 +477,51 @@ dev/prod + CI/CD」,09:54 业务经理只回了一句「我先看下你之前留
 
 ⇒ **不许在前端加常量**(那会多一个没有读者的声明)。
 
+### 限流全局刹车:退避期内不烧预算、冷却结束自动重派(2026-11-11 · 批次 31)
+
+> **用户原话**:「如果当前项目还未完结,但是因为网络抖动、预算耗光等问题导致所有员工都停下来了,
+> 我期望有一个周期性检查的机制,能够恢复起来,而不是等我来再启动任务」。
+>
+> 刹车之前:限流/断网期间排空器每 10s 重派一次,45 秒内把「叫醒 3 次」的预算烧光,
+> 三次全打在同一个限流窗口里;预算烧光后 `escalate_stalled_work` 叫 PM,PM 也是模型回合
+> ⇒ 同样失败 ⇒ 全组织瘫着,且每条待办都带着 `notified_at` 灯。
+
+**判据落点:`src/platform/runtime/providerBrake.ts`(进程级内存,重启即清)**
+
+- **哪些 kind 刹车**:只有 **retryable** 的三类 —— `rate_limit` / `network` / `server`。
+  **quota / auth 不刹车**:额度与鉴权是账号/配置问题,等不好 —— 烧预算 → 升级 →
+  业务经理向甲方交代才是对的(所以那条「预算是给人用的限流」的纪律对它们**照旧成立**)。
+- **退避档位:30s → 2min → 8min(封顶 8min)**,episode 内 streak 不清零
+  (退避单调变长,防「刹车 30s → 期满 → 立刻再打」的抖动循环);「过了没有故障的
+  一段时间之后再次失败」算新 episode(通知重播)。常量集中在 `providerBrake.ts`
+  一个文件,可经 `ServeOptions.providerBrakeBaseCooldownMs / providerBrakeMaxCooldownMs`
+  覆盖(测试用它把冷却调到几十 ms 观察「到期自动恢复」;非法值整组忽略)。
+- **刹车期内 `drainAll` 直接停**(`drainProject` 的 round 循环开头查
+  `providerBrakeActive()` ⇒ `stopReason:"braked"`,不查待办、不 bump、不叫人);
+  定时器每 10s 照常敲门,**恢复不需要新机制** —— 冷却一过,下一轮自然重派。
+- **provider 造成的失败不烧预算、不留 `failed` 终态**(刹车本身就是那个机制):
+  工作路径上 rate_limit/network/server + **零工具调用** + 降不了级 ⇒ 工作项留
+  `in_progress`(仍在 `board.runnable`),该待办 `resetAttempt`(attempts=0 +
+  `notified_at`=NULL)。**quota / auth / 回合超时 / 被中断 / 有副作用的回合
+  (toolCalls>0)维持现状:记 `failed`** —— 装忙与「自动重跑卡死行为」的纪律不变。
+  ⚠️ 终态 ⇒ 待办消失 ⇒ `pruneAttempts` 把预算行整行删掉(「待办消失即预算作废」)——
+  所以「烧预算」与「重置预算」在库里的分界是:终态 ⇒ 行没了;刹车 ⇒ 行在且 attempts=0。
+- **成功清零**:任何一次**成功收尾**的回合(provider 没出错、没超时、没被打断、有答复;
+  refused 不算 —— 它没调模型)立即 `clear()`,不等冷却过期;降级成功与用户重选
+  provider 也清(原有)。清零之后下一次故障从 30s 第一档重新退避。
+- **可见性两条**:① 刹车**第一次生效**时向项目内部会话落一条 `system` 消息,
+  首行前缀 `⚠️ 供应商`(「同一条只播一次」:episode 内延长冷却只记日志;
+  **解除时不播** —— 恢复是常态,播报只会淹掉组织运行态)。前端零改动
+  (`platformNotices.ts` 对该前缀已自动归类)。② `ProjectLiveView` **不加字段** ——
+  刹车是进程级瞬时状态,不是项目状态。
+
+**回归**:`tests/platform/provider-brake.test.ts`(16 条)·
+`tests/platform/provider-failure.test.ts` 32 条按新语义改了 3 处夹具
+(④-1 换额度原文、④-5 与 M10 改期望,每处带注释)。
+**变异自检**:`.probe/mutation-provider-brake.py`(≥6 条,全部实测变红)。
+
 ### 还没做的(如实记)
 
-- **限流全局刹车**:连续 429 时暂停排空器(而不是烧预算)—— 下一批的第一件事;
 - **per-session provider**:降级是平台级的,一个项目里的所有会话一起换;
 - **降级的 env 竞态**:忙闩检查覆盖了「别的回合在跑」这个窗口;`syncActiveProviderApiKeyEnv` 改的是进程级 env,理论上还有一个「回合刚开始、还没进 `runningTurns`」的窗口;
 - **额度/鉴权不降级**:这是刻意的(额度是账户级的),但如果用户配了**另一个账户**的 provider,这条就不对了 —— 判据现在只看错误分类,不看 provider 归属;

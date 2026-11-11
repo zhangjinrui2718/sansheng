@@ -36,6 +36,7 @@ import { insertProject } from "../../src/platform/storage/repo/projects.js";
 import { getWork, insertWork } from "../../src/platform/storage/repo/works.js";
 import { listSessions, listSessionMessages } from "../../src/platform/storage/repo/sessions.js";
 import { listAttempts, bumpAttempt, markAttemptNotified, resetAttempt } from "../../src/platform/storage/repo/dispatch.js";
+import { clear as clearProviderBrake } from "../../src/platform/runtime/providerBrake.js";
 import { runTurn, type TurnResult } from "../../src/platform/runtime/turn.js";
 import { openPlatformMemoryDb } from "../../src/platform/storage/index.js";
 import { insertAgent } from "../../src/platform/storage/repo/agents.js";
@@ -439,6 +440,10 @@ function failoverNotices(): string[] {
 
 beforeEach(() => {
   vi.spyOn(console, "log").mockImplementation(() => undefined);
+  // 批次31:刹车是**进程级内存状态**,与本文件所有测试共享同一份模块状态 ——
+  // 不清的话,上一条测试留下的退避期会把这一条的 dispatchTimer 派发静默挡住
+  // (症状是「工作项没被派发」,看起来像判据坏了,其实是夹具互相污染)。
+  clearProviderBrake();
   dataDir = mkdtempSync(join(tmpdir(), "ss-providerfail-"));
   root = join(dataDir, "ws");
   mkdirSync(root, { recursive: true });
@@ -492,6 +497,10 @@ describe("③ 宿主 · 聊天路径:provider 故障要上屏", () => {
 describe("④ 宿主 · 工作路径:降级 / 终态", () => {
   it("正样本:没有备用 provider ⇒ 工作项记 `failed`,并写出 `work_failed` 事件", async () => {
     await startHost({ backup: false });
+    // 批次31改夹具:rate_limit 无备用现在走**刹车路径**(不记 failed,见
+    // provider-brake.test.ts);「failed + work_failed 事件」这条判据改用
+    // 额度原文(quota 仍走终态)保留。
+    h.errorText = QUOTA_TEXT;
     seedProject("w1");
     await host!.dispatchTimer.runNow();
     await until(() => getWork(h.db!, "w1")?.status === "failed");
@@ -546,9 +555,17 @@ describe("④ 宿主 · 工作路径:降级 / 终态", () => {
     // 排空器自己会卡在忙闩上等它,那一轮就变成「测试超时」而不是「不降级」。
     host!.hub.setBusy("p1", "qc", true, { kind: "user" });
     await host!.dispatchTimer.runNow();
-    await until(() => getWork(h.db!, "w1")?.status === "failed");
-    expect(failoverNotices().length, "别的回合正跑时换 provider 会误伤它们").toBe(0);
-    expect(getWork(h.db!, "w1")?.status).toBe("failed");
+    // 批次31改期望:busy ⇒ **不降级**(没建备用会话,models 不长),但
+    // rate_limit 现在走**刹车路径** —— 工作项不记 failed、进退避,播的是
+    // 「已暂停」而不是「已切换」。「不降级」这条判据改由 models 数组钉住。
+    expect(h.models.length, "别的回合正跑时不许降级(没建备用会话)").toBe(1);
+    const switched = failoverNotices().filter((c) => c.includes("备用 provider"));
+    expect(switched.length, "不许出现「已切换」通知").toBe(0);
+    expect(getWork(h.db!, "w1")?.status, "刹车路径不记 failed").not.toBe("failed");
+    expect(
+      failoverNotices().filter((c) => c.includes("已暂停")).length,
+      "降不了级 ⇒ 进刹车并播暂停通知",
+    ).toBe(1);
     host!.hub.setBusy("p1", "qc", false);
   });
 });
@@ -792,12 +809,23 @@ describe("⑦ 复核补钉:四条没有断言的行为", () => {
     seedProject("w1");
     await host!.dispatchTimer.runNow();
     await until(() => failoverNotices().length > 0);
-    // 第二轮:刚切过去的那家也坏了 ⇒ 没有别的候选 ⇒ 工作项记 failed。
+    // 第二轮:刚切过去的那家也坏了 ⇒ 没有别的候选。
     await host!.dispatchTimer.runNow();
-    await until(() => getWork(h.db!, "w1")?.status === "failed", 8000);
+    // 批次31改期望:第二家也坏 + 无候选 ⇒ 原来记 failed;现在 rate_limit 走
+    // **刹车路径**(不记 failed、进退避)。「不切回第一家」的可观察面改成
+    // models 数组停在 2(第一家→备用,没有第三次建会话)。
     expect(
-      failoverNotices().length,
-      "只降级一次:第二家也坏 ⇒ 没有别的候选 ⇒ 记 failed(**不是**切回第一家)",
+      await until(() => failoverNotices().some((c) => c.includes("已暂停")), 8000),
+      "第二轮降不了级 ⇒ 进刹车(通知落库)",
+    ).toBe(true);
+    expect(
+      h.models.length,
+      "只降级一次:第二家也坏 ⇒ 没有第三次建会话(**不是**切回第一家)",
+    ).toBe(2);
+    expect(getWork(h.db!, "w1")?.status, "刹车路径不记 failed").not.toBe("failed");
+    expect(
+      failoverNotices().filter((c) => c.includes("备用 provider")).length,
+      "只降级一次",
     ).toBe(1);
   });
 
