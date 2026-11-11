@@ -64,7 +64,7 @@
   判据的一部分:同一对节点上两类边**方向一致**时不是环(真机那份数据就是这样),方向相反
   才是环(`mutualPairs` 会点名是哪两条边)。写反会让「交付」跑到最左、并且把一个不存在的
   环报出来(`web/src/lib/workGraph.ts` 的 `collectEdges`)。
-- 基线:**2477 passed / 130 test files** · 两条 typecheck 0 error · `check:design` E1–E14 全绿(5 角色)。
+- 基线:**2502 passed / 131 test files** · 两条 typecheck 0 error · `check:design` E1–E14 全绿(5 角色)。
 - **角色中文名只有一处**:`src/platform/runtime/org.ts` 的 `ORG`(播种 / `roleDisplayName()` /
   `RoleHarnessView.displayName` / **系统提示里的「# 你的角色:X」**全走它);
   前端兜底表 `web/src/lib/vocab.ts` 的 `ROLE_LABEL` 必须逐项相同,由
@@ -515,10 +515,11 @@ dev/prod + CI/CD」,09:54 业务经理只回了一句「我先看下你之前留
   (`platformNotices.ts` 对该前缀已自动归类)。② `ProjectLiveView` **不加字段** ——
   刹车是进程级瞬时状态,不是项目状态。
 
-**回归**:`tests/platform/provider-brake.test.ts`(16 条)·
+**回归**:`tests/platform/provider-brake.test.ts`(**18 条**)·
 `tests/platform/provider-failure.test.ts` 32 条按新语义改了 3 处夹具
 (④-1 换额度原文、④-5 与 M10 改期望,每处带注释)。
-**变异自检**:`.probe/mutation-provider-brake.py`(≥6 条,全部实测变红)。
+**变异自检**:`.probe/mutation-provider-brake.py`(**8 条,全部实测变红**;
+每条真的改写语句并断言「改后那一行确实变了」)。
 
 ### 还没做的(如实记)
 
@@ -941,6 +942,41 @@ WS 断了之后:`PlatformSocket.ws.onclose` 只做**指数退避重连**(`web/sr
   过期轮不被认出 / 重连不对账)。
 
 **基线 2477 passed / 130 files**。
+
+## 「停止对话」的第四格:范围收窄 —— 只停甲方通道(2026-11-11 · 批次 32)
+
+**用户原话**:「我说的停止,是指我和业务经理沟通的时候,当前的对话能终止下来,
+而不是终止整个项目在做的事情」;「如果我要终止整个项目在做的事情,我会和业务经理讲,
+业务经理再去和项目经理沟通」。
+
+前三轮修的都是「入口/有效性/断线」;这一轮改的是**语义**:中断此前是**有意的超集**
+(`onInterrupt` 按上下文前缀停**所有角色**的回合)—— 顺手按一下「■ 停止」,项目经理
+正在跑的拆解、工程师正在跑的服务也会一起被杀。裁决之后:**甲方通道的停止入口只停
+甲方↔业务经理那一段对话**;停整个项目走组织路线(告诉业务经理)。
+
+**判据只有一个来源:角色属性(`ROLE_SPECS.clientFacing`)**,两侧同源:
+
+- **协议**:`ClientCommand.interrupt` 加可选 `channel?: "client"` —— **缺省 = 旧超集**
+  (停全上下文;CLI/运维场景保留,协议向后兼容)。前端两个停止入口(页头「■ 中断」、
+  输入区「■ 停止」)一律带 `client`;写点只有一处(`stores/chat.ts` 的 `sendInterrupt`)。
+- **服务端**:`hub.ts` 的 `onInterrupt(projectId, channel?)` → `serve.ts` 按
+  `channelForAgent(db, agentId) === channel` 过滤在飞轮(`channelForAgent` 读
+  `ROLE_SPECS`;**不许写死一个角色名** —— 与 `EXECUTOR_ROLES` 同一条纪律)。
+- **前端判据**:`lib/data.ts` 的 `interruptAvailableOf(activity, remote, socket, opts?)`
+  加 `opts.scope: "client"`:收窄时只数 `activity.client` / `remote.client` ——
+  **只有内部角色在跑 ⇒ 不给入口**(按了也停不掉它们的按钮比没有按钮更坏;
+  与「读不到不给入口」同一格逻辑)。
+
+**回归**:`tests/web/interrupt-stop.test.ts`(29 → **34**:scope 四格 + 源码哨兵
+—— `ChatSurface` 必须把 `scope: "client"` 传进判据)· `tests/platform/interrupt.test.ts`
++2 条真 WS(**带 channel 只停业务经理、PM 的 abort 次数必须是 0**;缺省 = 超集兼容,
+两者都停)· 变异脚本 23 → **26 条全部实测变红**(M24 服务端忽略 channel 退回超集 /
+M25 页面不传 scope / M26 传输层把 channel 丢了 —— 指令到了服务端却退化成停全部,
+**看起来一样,语义全错**的那类变异)。
+**基线 2502 passed / 131 files**(与批次 31 同库验证:A 未提交、B 已提交的合并状态
+全绿后才提交 A —— ⚠️ 教训:上一轮「A 已提交 `26a30d5`」的记录是**假的**,那个对象
+不存在 —— A 的提交当时根本没落盘,改动一直在工作区里;**提交哈希要当场 `git log` 核实**,
+不能从记忆里拿)。
 
 ## 项目页降级为「仪表盘」(2026-10-26 · §3.4)
 
