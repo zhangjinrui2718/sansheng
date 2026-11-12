@@ -20,7 +20,7 @@
  *
  * ── 起点(2026-11-12,Wave 6 实测)────────────────────────────
  *
- *   重构前 9,809 字 → 重构后 9,384 字(-425)。
+ *   Wave 6 前 9,809 → Wave 6 后 9,384 → Wave 7 后 9,325。
  *   同时:悬停超集(模板 `title`)8 处超标全压进 ≤ 40 字
  *   (`annotation-budget.test.ts` 规则 ⑩);平台记录长正文默认夹紧
  *   (`ProjectDetail.NoticeBody`);确认弹窗长文案收进默认折叠的 Disclosure。
@@ -62,10 +62,10 @@ const cjkCount = (s: string): number => (s.match(/[\u4e00-\u9fff]/g) ?? []).leng
 const BASELINE: Record<string, number> = {
   "App.tsx": 18,
   "components/brand/Seal.tsx": 2,
-  "components/chat/ChatComposer.tsx": 154,
+  "components/chat/ChatComposer.tsx": 136,
   "components/chat/ChatSurface.tsx": 317,
   "components/chat/Markdown.tsx": 0,
-  "components/chat/MessageList.tsx": 119,
+  "components/chat/MessageList.tsx": 103,
   "components/chat/ThinkingBlock.tsx": 25,
   "components/chat/ToolCallCard.tsx": 0,
   "components/client/AcceptanceDock.tsx": 97,
@@ -76,13 +76,13 @@ const BASELINE: Record<string, number> = {
   "components/deliverable/ContentDriftNote.tsx": 30,
   "components/deliverable/DeliveryVerdictActions.tsx": 276,
   "components/deliverable/HtmlReport.tsx": 113,
-  "components/members/AgentConversations.tsx": 271,
+  "components/members/AgentConversations.tsx": 256,
   "components/members/RoleHarness.tsx": 1051,
   "components/members/ToolTable.tsx": 84,
   "components/relations/RelationsRail.tsx": 9,
   "components/settings/SettingsPanel.tsx": 343,
-  "components/shell/AgentPanel.tsx": 61,
-  "components/shell/ChatRightRail.tsx": 0,
+  "components/shell/AgentPanel.tsx": 52,
+  "components/shell/ChatRightRail.tsx": 9,
   "components/shell/EntityInspector.tsx": 8,
   "components/shell/HistoryRail.tsx": 255,
   "components/shell/TopBar.tsx": 37,
@@ -112,8 +112,8 @@ const BASELINE: Record<string, number> = {
   "lib/ws.ts": 0,
   "main.tsx": 0,
   "routes/Members.tsx": 927,
-  "routes/Memory.tsx": 382,
-  "routes/ProjectDetail.tsx": 719,
+  "routes/Memory.tsx": 358,
+  "routes/ProjectDetail.tsx": 733,
   "routes/Works.tsx": 1527,
   "stores/chat.ts": 111,
   "stores/settings.ts": 0,
@@ -138,7 +138,7 @@ describe("可见文字预算:屏上的中文只许减不许增", () => {
       }
     }
     expect(over.join("\n")).toBe("");
-    expect(total).toBeLessThanOrEqual(9384);
+    expect(total).toBeLessThanOrEqual(9325);
   });
 
   it("② 基线表覆盖所有文件(不许有文件悄悄逃出仪器)", () => {

@@ -20,6 +20,7 @@
 import { AgentPanel } from "./AgentPanel";
 import { AcceptanceDock } from "@/components/client/AcceptanceDock";
 import { ClientQuestionDock } from "@/components/client/ClientQuestionDock";
+import { EmptyState } from "@/components/ui/primitives";
 import { useProjectDetail } from "@/lib/data";
 import { useChatStore } from "@/stores/chat";
 
@@ -30,6 +31,18 @@ export function ChatRightRail() {
   /* 配比:上面 `flex-1`(它在内部滚),下面两块 `flex-none` 且 `maxHeight` 封顶。
      有件可验收 + 有个问题在等时,两块的上界是 35% + 45% ⇒「本项目」仍分得到 ~20%,
      而它内部自己滚 —— 右栏高度有限,任何一块占满都意味着「别的还没查过/没有」。 */
+
+  // ⚠️ 未选项目时,三块的空态说的是**同一句话** —— 各说一遍就是同一屏三份重复
+  // (Wave 7,2026-11-12)。空态收成一张卡一句话;三块各自的空态文案仍在
+  // (组件级测试钉着),只是不再同屏三连。
+  if (projectId === null) {
+    return (
+      <aside className="sansheng-card p-3">
+        <EmptyState>先在左栏选一个项目。</EmptyState>
+      </aside>
+    );
+  }
+
   return (
     <div className="flex flex-col gap-3" style={{ minHeight: 0 }}>
       <AgentPanel state={state} />

@@ -74,7 +74,10 @@ function NextThingView({ next }: { next: NextThing }) {
         读者只能信不信;而「读不到运行态」那一档尤其需要说清**为什么不能断言没事**。
       */}
       <span className="ss-meta">{next.why}</span>
-      <span className="ss-meta">{next.action}</span>
+      {/* next_none 那一档不渲染 action(Wave 7):label「此刻没有等你动作的事」+
+          why 的四个 0 已经把「没事」说全,第三行「不需要你动作」是同一句话的重复份。
+          lib 层的 action 保留(逐档判据测试钉着它非空)。 */}
+      {next.key !== "next_none" && <span className="ss-meta">{next.action}</span>}
       {next.to !== null && (
         <a className="ss-link" href={toHash(next.to)}>
           过去看一眼 →

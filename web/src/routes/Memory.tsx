@@ -416,16 +416,8 @@ export function MemoryPage() {
                     value: `${knowledge.projects.filter((p) => p.chunks > 0).length} / ${knowledge.projects.length}`,
                     title: "有语料的项目数 / 项目总数 —— 只给数,不列项目(这一页是跨项目的面)",
                   },
-                  {
-                    label: "上次索引",
-                    value: knowledge.lastIndexedAt === null ? "从未" : `${fmtSpan(knowledge.at - knowledge.lastIndexedAt)}前`,
-                  },
-                  {
-                    label: "落后",
-                    value: knowledge.lagMs === null ? "—" : fmtSpan(knowledge.lagMs),
-                    tone: (knowledge.lagMs ?? 0) > 0 ? "amber" : "jade",
-                    title: "最新来源 与 上次索引 之间的时间差",
-                  },
+                  /* 「上次索引 / 落后」两格已删(Wave 7):上面那句状态判据
+                     (`corpus.detail`)带着同一组数字 —— 台账只留判据说不到的。 */
                 ]}
               />
             </div>

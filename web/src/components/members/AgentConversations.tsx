@@ -189,11 +189,13 @@ export function AgentConversationBody({
           </span>
         </div>
         {live.length === 0 ? (
+          /* 边界句压短(Wave 7):判据 kernel(「回合结束后才落库」)留在屏上,
+             连接断了的排查提示进悬停。 */
           <div
             className="ss-note"
             title="这里空着多半是实时连接断了 · 已完成的不受影响"
           >
-            进行中的内容只在它正在跑的时候看得见(它在实时流里,回合结束后才落库)。
+            只在实时流里看得见,回合结束后才落库。
           </div>
         ) : (
           live.map((t) => <LiveTurn key={t.id} turn={t} lines={lines} />)

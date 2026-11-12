@@ -38,7 +38,7 @@
  * 没有目标标题,不编一个出来。
  */
 import { useCallback, useMemo, useState } from "react";
-import { PageHeader, Pill, Section, StatStrip, EmptyState, KV, Flag, Disclosure } from "@/components/ui/primitives";
+import { PageHeader, Pill, Section, StatStrip, EmptyState, KV, Flag, Disclosure, Clamp } from "@/components/ui/primitives";
 import { DataState, remoteListOf, remoteOf } from "@/components/ui/DataState";
 import { ClientQuestionCard } from "@/components/client/ClientQuestionCard";
 
@@ -340,9 +340,26 @@ export function ProjectDetailPage() {
         <>
           <Section title="目标">
             {detail.goal.length > 0 ? (
-              <div className="sansheng-card p-3 ss-body" style={{ color: "var(--bone)" }}>
-                {detail.goal}
-              </div>
+              detail.goal.length > 120 ? (
+                /* 长目标默认夹 4 行(Wave 7):首屏要的是「这是个什么项目」,
+                   逐字读全文是点开之后的动作。全文仍在 DOM 里。 */
+                <div className="sansheng-card p-3">
+                  <Clamp lines={4}>
+                    <span className="ss-body" style={{ color: "var(--bone)" }}>
+                      {detail.goal}
+                    </span>
+                  </Clamp>
+                  <Disclosure summary="展开全文">
+                    <div className="ss-body" style={{ color: "var(--bone)", whiteSpace: "pre-wrap" }}>
+                      {detail.goal}
+                    </div>
+                  </Disclosure>
+                </div>
+              ) : (
+                <div className="sansheng-card p-3 ss-body" style={{ color: "var(--bone)" }}>
+                  {detail.goal}
+                </div>
+              )
             ) : (
               <EmptyState>这个项目还没写目标。</EmptyState>
             )}
@@ -547,16 +564,20 @@ export function ProjectDetailPage() {
             hint="不用你处理"
             helpId="ask"
           >
-            <DataState
-              what="内部提问"
-              state={remoteListOf(asks, asksLoading, asksError)}
-              variant="card"
-              loadingLabel="加载中…"
-            >
-              {() => (
-                asks.length === 0 ? (
-                  <EmptyState>没有角色之间的提问 —— 团队没卡在横向沟通上。</EmptyState>
-                ) : (
+            {/* 角色问角色的详单(Wave 7 默认收起):表头已经说了「不用你处理」,
+                两张一百五十字的大卡却占着首屏 —— 详单留着的理由是「要查时查得到」,
+                不是「常驻」。0 条时空态照常直排(那是一句正向事实)。 */}
+            {asks.length === 0 ? (
+              <EmptyState>没有角色之间的提问 —— 团队没卡在横向沟通上。</EmptyState>
+            ) : (
+              <Disclosure summary={`展开详单(${asks.length} 条 · 不用你处理)`}>
+                <DataState
+                  what="内部提问"
+                  state={remoteListOf(asks, asksLoading, asksError)}
+                  variant="card"
+                  loadingLabel="加载中…"
+                >
+                  {() => (
               <div className="grid gap-1.5">
                 {asks.map((a) => (
                   <article key={a.id} className="sansheng-card p-2.5" title={a.id}>
@@ -612,8 +633,10 @@ export function ProjectDetailPage() {
                   </article>
                 ))}
               </div>
-            ))}
-            </DataState>
+                  )}
+                </DataState>
+              </Disclosure>
+            )}
           </Section>
 
           <Section

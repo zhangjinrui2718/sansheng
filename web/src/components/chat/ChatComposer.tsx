@@ -196,7 +196,8 @@ export function ChatComposer({
               ? "连接中… —— 连接好之前,发不出去的消息与停止指令都不会生效"
               : disabled
                 ? reason === "noContext"
-                  ? "左栏选一个项目,或点「+ 新建」和业务经理聊聊"
+                  ? // 与 placeholder 逐字同句(Wave 7):同屏说两遍是重复,留 placeholder 那份。
+                    ""
                   : reason === "noKey"
                     ? "请先在「设置」配置 API Key"
                     : "推演中 · Esc 中断"

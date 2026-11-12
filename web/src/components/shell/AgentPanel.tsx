@@ -91,24 +91,31 @@ export function AgentPanel({ state }: { state: ProjectDetailState }) {
                   {d.members.length === 0 ? (
                     <div className="ss-note">还没有成员。</div>
                   ) : (
-                    d.members.map((m) => (
-                      <KV
-                        key={m.id}
-                        label={ROLE_LABEL[m.role]}
-                        value={m.displayName}
-                        title={m.specialization ?? undefined}
-                      />
-                    ))
+                    d.members.map((m) => {
+                      // 名字与角色同词(一人一角色的组织里常态)时不重复显示 ——
+                      // 两遍同一个词是排版,不是信息(Wave 7)。
+                      const same = m.displayName === ROLE_LABEL[m.role];
+                      return (
+                        <KV
+                          key={m.id}
+                          label={ROLE_LABEL[m.role]}
+                          value={same ? m.specialization ?? "" : m.displayName}
+                          title={m.specialization ?? undefined}
+                        />
+                      );
+                    })
                   )}
                 </div>
 
+                {/* 未完成的工作项:**零态整节不渲染** —— StatStrip 的「工作项 0/7」
+                    已经在说这件事,一节「没有未完成的工作项」是把同一个 0 说两遍
+                    (「数量为 0 不占版面」的既有纪律,Wave 7 执行到这一节)。 */}
+                {openWorks.length > 0 && (
                 <div className="flex flex-col">
                   <div className="ss-section" style={{ fontSize: 12 }}>
                     未完成的工作项
                   </div>
-                  {openWorks.length === 0 ? (
-                    <div className="ss-note">没有未完成的工作项。</div>
-                  ) : (
+                  {(
                     <ul className="grid gap-1">
                       {openWorks.map((w) => (
                         <li key={w.id} className="flex items-center gap-1.5" title={`${w.title} · ${w.assigneeName}`}>
@@ -123,6 +130,7 @@ export function AgentPanel({ state }: { state: ProjectDetailState }) {
                     </ul>
                   )}
                 </div>
+                )}
 
                 {blockers.length > 0 && (
                   <div className="flex flex-col">

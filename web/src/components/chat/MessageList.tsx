@@ -612,9 +612,9 @@ function Empty() {
           "radial-gradient(600px 400px at 50% 50%, rgba(94,139,126,0.05), transparent 60%)",
       }}
     >
-      {/* 原文案是三段:人格名 / 「你的数字雇员 · token 是工资 · 思考 / 行动 / 反思 都在这里」
-          / 一块「先到设置配 API Key;配好后回来发条消息试试」的方框。
-          slogan 是产品介绍文案(README 里有),不是界面文案 —— 只留人格名 + 可执行的一步。 */}
+      {/* 原文案是三段:人格名 / slogan / 「先到设置配 API Key」。前两段早删了;
+          第三段也删了(Wave 7):provider 已配置时它是**假话**,而没配时输入框
+          的 placeholder 会说同一件事 —— 一个空态不该背两句可能都不成立的引导。 */}
       <div className="flex flex-col items-center gap-3 text-center">
         <svg width="44" height="44" viewBox="0 0 64 64">
           <g stroke="#5E8B7E" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" fill="none">
@@ -628,9 +628,6 @@ function Empty() {
         <div className="font-serif text-xl" style={{ color: "var(--bone)", letterSpacing: ".08em" }}>
           三生
         </div>
-        <p className="sansheng-text-mute" style={{ fontSize: 12 }}>
-          先到「设置」配一个 Provider 的 API Key,回来发条消息试试。
-        </p>
       </div>
     </div>
   );
