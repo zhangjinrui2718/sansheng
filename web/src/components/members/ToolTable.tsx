@@ -44,8 +44,8 @@ export function ToolTable({ briefs }: { briefs: readonly ToolBriefView[] }) {
               {b.group}
             </td>
             <td className="ss-table-name" title={b.source === "sdk"
-              ? "Pi SDK 内置工具:实现由 SDK 提供,平台只决定「给不给这个角色」"
-              : "平台自有工具:实现与说明都在平台的工具注册表里"}
+              ? "Pi SDK 内置:实现由 SDK 提供,平台只决定「给不给」"
+              : "平台自有:实现与说明都在平台的工具注册表里"}
             >
               {b.name}
               {b.source === "sdk" && (

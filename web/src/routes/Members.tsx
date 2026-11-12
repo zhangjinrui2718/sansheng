@@ -377,12 +377,8 @@ export function MemberRoleTabs({
               (turn !== null
                 ? `\n此刻有回合在它身上跑(${triggerText(turn.trigger)})`
                 : unknown
-                  ? `\n运行态${runtime === null ? "还没读到" : "读不到"} —— 这一刻不下任何结论`
-                  : "\n此刻没有回合在它身上跑") +
-              (debt > 0 ? `\n它欠着 ${debt} 件(优先做的活 + 排空器要叫醒它的待办)` : "") +
-              (issues > 0
-                ? `\n这个角色有 ${issues} 处需要注意(缺单元 / 集合文件坏 / 越权被拒 / 未知工具名 —— 来自 GET /api/harness)`
-                : "")
+                  ? `\n运行态${runtime === null ? "还没读到" : "读不到"} —— 不下结论`
+                  : "\n此刻没有回合在跑")
             }
             style={{
               padding: "6px 10px",
@@ -410,7 +406,7 @@ export function MemberRoleTabs({
             {debt > 0 && (
               <Pill
                 tone="cinnabar"
-                title={`它欠着 ${debt} 件 = 优先做的活 ${activity?.readyWorks ?? 0} 件 + 排空器现在要叫醒它的待办 ${activity?.todos.length ?? 0} 条(两个来源会重叠,所以这是「需要它动手的处数」)`}
+                title={`欠 ${debt} 件:在做的活 + 排空器要叫醒的待办(两来源有重叠)`}
               >
                 {debt}
               </Pill>
@@ -421,7 +417,7 @@ export function MemberRoleTabs({
             {issues > 0 && (
               <Pill
                 tone="cinnabar"
-                title={`这个角色的 harness 有 ${issues} 处需要注意:缺单元 / 集合文件坏 / 越权被拒 / 未知工具名(来自 GET /api/harness;不是它手上的活)`}
+                title={`harness 有 ${issues} 处要注意(配置问题,不是它手上的活)`}
               >
                 {issues}
               </Pill>

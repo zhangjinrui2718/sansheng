@@ -235,7 +235,7 @@ export function InternalProcessDisclosure({
         title={
           open
             ? "收起内部过程(思考与工具调用)"
-            : "展开内部过程:这一轮里模型想了什么、调了哪些工具(内部过程,不是对你说的话)"
+            : "展开内部过程 —— 模型想法与工具调用,不是对你说的话"
         }
       >
         <span

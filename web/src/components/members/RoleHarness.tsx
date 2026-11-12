@@ -599,7 +599,7 @@ export function RoleHarnessDisclosure({
         issues > 0 ? (
           <Pill
             tone="cinnabar"
-            title={`这个角色的 harness 有 ${issues} 处需要注意:缺单元 / 集合文件坏 / 越权被拒 / 未知工具名(与成员页签上那个告警角标同源:roleIssueCount;不是它手上的活)`}
+            title={`harness 有 ${issues} 处要注意 —— 与成员页签角标同源`}
           >
             {issues} 处需要注意
           </Pill>
@@ -965,10 +965,10 @@ function PromptUnitEditor({
           style={{ padding: "2px 10px", fontSize: 11 }}
           title={
             editing
-              ? "收起编辑区(没保存的改动会留在上面,标着「未保存」)"
+              ? "收起编辑区(改动会留在上面)"
               : unit.loaded
-                ? "直接改这个单元的正文 —— 改完要点保存才写盘"
-                : "盘上还没有这个文件 —— 存下去就是它的第一次创建"
+                ? "直接改正文;改完要点保存才写盘"
+                : "盘上还没有这个文件;存下去即首次创建"
           }
           onClick={() => setEditing((v) => !v)}
         >

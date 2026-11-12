@@ -28,7 +28,7 @@ import { Help } from "@/components/ui/Help";
  */
 export function contentDriftNote(drifted: boolean): string | null {
   return drifted
-    ? "盘上这份与索引里记的不是同一份(有人手改过文件?)—— 下一次提交会重建索引收回一致,这不是故障。"
+    ? "盘上这份被手改过,与索引不是同一份 —— 下一次提交会收回一致,不是故障。"
     : null;
 }
 
@@ -37,11 +37,8 @@ export function ContentDriftNote({ drifted }: { drifted: boolean }) {
   const text = contentDriftNote(drifted);
   if (text === null) return null;
   return (
-    <div
-      className="ss-note"
-      data-content-drifted="true"
-      title="盘上这份被手改过 · 下一次提交会收回一致"
-    >
+    // 同一件事只说一遍:正文那行已经说清了,悬停里再压一份是「解释」。
+    <div className="ss-note" data-content-drifted="true">
       {text}
       <Help id="artifact.drift" />
     </div>

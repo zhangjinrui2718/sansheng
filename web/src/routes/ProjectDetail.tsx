@@ -38,7 +38,7 @@
  * 没有目标标题,不编一个出来。
  */
 import { useCallback, useMemo, useState } from "react";
-import { PageHeader, Pill, Section, StatStrip, EmptyState, KV, Flag } from "@/components/ui/primitives";
+import { PageHeader, Pill, Section, StatStrip, EmptyState, KV, Flag, Disclosure } from "@/components/ui/primitives";
 import { DataState, remoteListOf, remoteOf } from "@/components/ui/DataState";
 import { ClientQuestionCard } from "@/components/client/ClientQuestionCard";
 
@@ -79,6 +79,29 @@ const NOTICE_TITLE: Record<PlatformNoticeKind, string> = {
     "平台叫醒的回合没留工作记录(未调 tell_client,正文也没有行首 [未播报])—— 「判断过」与「漏了」的分界",
   other: "平台自己落的通知:作者不是任何角色,也不是甲方",
 };
+
+/**
+ * 平台记录正文的**唯一渲染口**:全文在 DOM 里(分类靠首行前缀,搜索/测试不丢),
+ * 但屏幕上默认只摊开前几行 —— 一条十几行的告警全文会把「组织运行态」顶成一堵墙。
+ * 长正文收进 `Disclosure`;短的(含全部首行前缀)照旧直排。
+ */
+function NoticeBody({ content }: { content: string }) {
+  const long = content.length > 200;
+  const body = (
+    <div className="ss-body" style={{ color: "var(--bone)", whiteSpace: "pre-wrap" }}>
+      {content}
+    </div>
+  );
+  if (!long) return <div className="mt-1">{body}</div>;
+  return (
+    <div className="mt-1">
+      <div className="ss-body" style={{ color: "var(--bone)" }}>
+        {content.slice(0, content.indexOf("\n") > 0 && content.indexOf("\n") < 200 ? content.indexOf("\n") : 200)} …
+      </div>
+      <Disclosure summary="展开全文">{body}</Disclosure>
+    </div>
+  );
+}
 
 /**
  * 字节数的读法。**没有**引入任何格式化库 —— 这里只需要「一眼看出量级」,
@@ -390,7 +413,8 @@ export function ProjectDetailPage() {
                       <Pill tone="amber" title={NOTICE_TITLE.stop}>
                         {platformNoticeLabel("stop")}
                       </Pill>
-                      {/* 状态是这一批的重点:同一个类名下的两条,状态可能完全不同 */}
+                      {/* 状态是这一批的重点:同一个类名下的两条,状态可能完全不同。
+                          why 不再塞进悬停 —— 下一行已经常显它,重复份是「解释」。 */}
                       <Pill
                         tone={
                           state.key === "stalled"
@@ -401,7 +425,6 @@ export function ProjectDetailPage() {
                                 ? "mute"
                                 : "bone"
                         }
-                        title={state.why}
                       >
                         {state.label}
                       </Pill>
@@ -411,13 +434,8 @@ export function ProjectDetailPage() {
                       {state.why}
                     </div>
                     <div className="ss-meta">该怎么办:{state.action}</div>
-                    {/* 正文原样:换行保留(库里那几段本来就是分行写的) */}
-                    <div
-                      className="ss-body mt-1"
-                      style={{ color: "var(--bone)", whiteSpace: "pre-wrap" }}
-                    >
-                      {notice.content}
-                    </div>
+                    {/* 正文原样:换行保留;长的收进 Disclosure(见 NoticeBody) */}
+                    <NoticeBody content={notice.content} />
                   </article>
                 ))}
               </div>
@@ -450,9 +468,7 @@ export function ProjectDetailPage() {
                       </Pill>
                       <span className="ss-meta ml-auto">{fmtTime(n.createdAt)}</span>
                     </div>
-                    <div className="ss-body mt-1" style={{ color: "var(--bone)", whiteSpace: "pre-wrap" }}>
-                      {n.content}
-                    </div>
+                    <NoticeBody content={n.content} />
                   </article>
                 ))}
               </div>
@@ -485,12 +501,7 @@ export function ProjectDetailPage() {
                       </Pill>
                       <span className="ss-meta ml-auto">{fmtTime(n.createdAt)}</span>
                     </div>
-                    <div
-                      className="ss-body mt-1"
-                      style={{ color: "var(--bone)", whiteSpace: "pre-wrap" }}
-                    >
-                      {n.content}
-                    </div>
+                    <NoticeBody content={n.content} />
                   </article>
                 ))}
               </div>

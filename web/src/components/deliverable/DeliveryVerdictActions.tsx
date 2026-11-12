@@ -76,7 +76,7 @@ export function DeliveryVerdictActions({
         </Pill>
         <span className="ss-meta">
           {acceptance.verdict === null
-            ? "这个项目在验收这件事落地之前就收口了(收口不可逆)—— 这一版没有被任何人验收过。要接着做,请让业务经理开下一个版本。"
+            ? "项目先于验收收口了(收口不可逆)—— 这一版没被任何人验收过;要接着做,让业务经理开下一个版本。"
             : "项目已收口,这条裁决不再可改。"}
         </span>
       </div>

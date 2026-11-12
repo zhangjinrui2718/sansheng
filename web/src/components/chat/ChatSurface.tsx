@@ -279,8 +279,8 @@ export function ChatSurface() {
               onClick={sendInterrupt}
               title={
                 liveCount > 0
-                  ? "中断当前上下文正在跑的这一轮(等价于 Esc)"
-                  : "中断服务端那边还在跑的这一轮(本地没看到它 —— 多半是你刷新过页面)"
+                  ? "中断这一轮(等价于 Esc)"
+                  : "中断服务端还在跑的这一轮(本地没看到它)"
               }
             >
               ■ 中断

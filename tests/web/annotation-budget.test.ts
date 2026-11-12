@@ -75,6 +75,54 @@ function scanAll(re: RegExp): { rel: string; line: string }[] {
 const show = (hits: { rel: string; line: string }[]): string =>
   hits.map((h) => `${h.rel}: ${h.line}`).join("\n");
 
+/**
+ * `title={…}` 模板悬停的静态中文量(Wave 6,2026-11-12)。
+ *
+ * 规则 ⑨ 只量得出**引号字面量**(`title="…"`),而模板字符串形态
+ * `title={\`…${x}…\`}` 与三元分支形态 `title={cond ? "长文本" : "短"}` 都从它
+ * 眼皮底下溜走了 —— 实测现场:成员页签上一段 ~200 字的四行传记、124 字的
+ * 「欠活」口径说明,全都走的这两条路。
+ *
+ * 计数口径(诚实计量的两条):
+ *   · **每个字符串字面量段**(`"…"` / `'…'` / 反引号头尾段,剥掉 `${…}` 插值)
+ *     的中文字数 ≤ 40 —— 与规则 ⑨ 的 40 字同一杆秤;
+ *   · **整个 `title={…}` 表达式**的所有段合计 ≤ 60 —— 堵「把一句长话拆成
+ *     几个 ≤ 40 的段拼回去」的洞(三元分支的每个变体都算在内)。
+ */
+function templateTitleViolations(src: string): string[] {
+  const cjk = (s: string) => (s.match(/[\u4e00-\u9fff]/g) ?? []).length;
+  const violations: string[] = [];
+  const re = /title=\{/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(src)) !== null) {
+    // 取平衡花括号的内容(嵌套也算进去)
+    let i = m.index + m[0].length;
+    let depth = 1;
+    let buf = "";
+    while (i < src.length && depth > 0) {
+      const ch = src[i]!;
+      if (ch === "{") depth++;
+      else if (ch === "}") {
+        depth--;
+        if (depth === 0) break;
+      }
+      buf += ch;
+      i++;
+    }
+    const litRe = /"((?:[^"\\]|\\.)*)"|'((?:[^'\\]|\\.)*)'|`((?:[^`\\]|\\.)*)`/g;
+    let lm: RegExpExecArray | null;
+    let exprTotal = 0;
+    while ((lm = litRe.exec(buf)) !== null) {
+      const seg = (lm[1] ?? lm[2] ?? lm[3] ?? "").replace(/\$\{[\s\S]*?\}/g, "").replace(/\\n/g, "");
+      const n = cjk(seg);
+      exprTotal += n;
+      if (n > 40) violations.push(`段 ${n} 字 —— ${seg.slice(0, 50)}`);
+    }
+    if (exprTotal > 60) violations.push(`表达式合计 ${exprTotal} 字`);
+  }
+  return violations;
+}
+
 describe("注解预算:悬停正文这条路已经封死", () => {
   it("① web/src 里 `hintTitle` 出现 0 次", () => {
     const hits = scanAll(/hintTitle/);
@@ -278,5 +326,33 @@ describe("注解预算(Wave 2b):悬停只留一行话,屏上不许有 markdown �
     expect(total).toBeLessThanOrEqual(103);
     // 自检:计数口径不是「有没有 title=」而是「字面量长度」—— 两条边界都验一遍
     expect([...'title="短"'.matchAll(/title="([^"]*)"/g)][0][1].length).toBe(1);
+  });
+
+  it("⑩ 模板悬停同样不许长篇(`title={…}` 静态段 ≤ 40 字、表达式合计 ≤ 60 字)", () => {
+    // 2026-11-12 实测起点:模板形态共 108 处,超标 8 处(最长一段 81 字的页签传记)
+    // —— 全部压进预算。表达式条数仍是 ratchet。
+    const all: string[] = [];
+    let total = 0;
+    for (const f of FILES) {
+      const before = all.length;
+      all.push(...templateTitleViolations(f.src).map((v) => `${f.rel}: ${v}`));
+      total += [...f.src.matchAll(/title=\{/g)].length;
+    }
+    expect(all.join("\n")).toBe("");
+    expect(total).toBeLessThanOrEqual(108);
+    // 合成样本自检(判据自己要有「已知答案」)。样本源用 repeat 程序化构造 ——
+    // 手数字数会数错(第一版就是这么红的)。
+    //  正样本 —— 超长段(45 字 > 40)必须被判出来;
+    expect(
+      templateTitleViolations(`title={cond ? "${"长".repeat(45)}" : "短"}`).length,
+    ).toBeGreaterThan(0);
+    //  正样本 —— 「拆成两段各 35 字拼回去」(合计 70 > 60)必须被表达式合计抓住;
+    expect(
+      templateTitleViolations(`title={"${"字".repeat(35)}" + "${"字".repeat(35)}"}`).length,
+    ).toBeGreaterThan(0);
+    //  负样本 —— 纯插值(动态数字)不算字数;
+    expect(templateTitleViolations("title={`有 ${n} 条 · ${name} 在跑`}").length).toBe(0);
+    //  负样本 —— 短的中文字面量不误伤。
+    expect(templateTitleViolations('title={`欠 ${debt} 件:在做的活 + 待叫醒`}').length).toBe(0);
   });
 });

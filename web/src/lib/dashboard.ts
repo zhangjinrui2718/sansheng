@@ -105,7 +105,7 @@ export function nextThing(facts: DashboardFacts): NextThing {
     return {
       key: "next_unreadable",
       label: "运行态读不到",
-      why: "GET /api/projects/:id/live 没拿到(或这个进程没接上运行期快照)—— 读不到不等于没事",
+      why: "运行态快照没拿到 —— 读不到不等于没事",
       to: null,
       action: "不需要你动作 —— 刷新页面再看一次",
     };
@@ -119,7 +119,7 @@ export function nextThing(facts: DashboardFacts): NextThing {
     return {
       key: "next_high_blocker",
       label: `有 ${high.length} 条高危阻塞没解决`,
-      why: `阻塞状态是 open/acknowledged 且严重度是 high/critical(${high[0]?.title ?? ""})`,
+      why: `状态 open/acknowledged · 严重度 high/critical(${high[0]?.title ?? ""})`,
       // ⚠️ 地址带项目 id —— 阻塞只存在于某一个项目里(见 `entityMeta.blockerLocation`)。
       to: blockerLocation(high[0]?.id ?? "", facts.projectId),
       action: "要你动作 —— 它影响时间表",
@@ -131,7 +131,7 @@ export function nextThing(facts: DashboardFacts): NextThing {
     return {
       key: "next_waiting_client",
       label: `有 ${facts.pendingQuestions.count} 个问题等你答`,
-      why: "client_questions 里 consumed_at 为空的那些 —— 球在你那边,平台自己动不了",
+      why: "还没等到你的回答 —— 球在你这边,平台动不了",
       to: { route: "chat", params: {} },
       action: "要你动作 —— 对话页右下角「待答」",
     };
@@ -142,7 +142,7 @@ export function nextThing(facts: DashboardFacts): NextThing {
     return {
       key: "next_waiting_acceptance",
       label: `有 ${facts.pendingAcceptance.count} 份交付物等你验收`,
-      why: "已交付(project_sessions.deliverable_artifact_id 非空)、还没有裁决的那些",
+      why: "已交付、还没有你的裁决",
       to: { route: "chat", params: {} },
       action: "要你动作 —— 对话页右栏「待你验收」",
     };
@@ -154,7 +154,7 @@ export function nextThing(facts: DashboardFacts): NextThing {
     return {
       key: "next_stalled_work",
       label: `有 ${stalled.length} 条工作项停了`,
-      why: `状态是 failed/blocked(${stalled[0]?.title ?? ""})—— 平台会自己重划范围`,
+      why: `状态 failed/blocked(${stalled[0]?.title ?? ""})—— 平台会自己重划范围`,
       to: workLocation(stalled[0]?.id ?? ""),
       action: "暂时不需要你动作 —— 平台会重新划范围",
     };
@@ -166,7 +166,7 @@ export function nextThing(facts: DashboardFacts): NextThing {
     return {
       key: "next_running",
       label: `有 ${running} 个回合正在跑`,
-      why: "GET /api/projects/:id/live 的 runningTurns",
+      why: "运行态快照里的在跑回合",
       to: { route: "works", params: {} },
       action: "不需要你动作",
     };
@@ -176,7 +176,7 @@ export function nextThing(facts: DashboardFacts): NextThing {
   return {
     key: "next_none",
     label: "此刻没有等你动作的事",
-    why: "没有高危阻塞 · 没有等你答的问题 · 没有等你验收的交付物 · 没有停下的工作项",
+    why: "高危阻塞 0 · 等你答 0 · 等你验收 0 · 停下的工作项 0",
     to: null,
     action: "不需要你动作",
   };

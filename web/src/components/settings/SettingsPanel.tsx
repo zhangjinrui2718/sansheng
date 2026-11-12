@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { Help } from "@/components/ui/Help";
+import { Disclosure } from "@/components/ui/primitives";
 import { useSettingsStore } from "@/stores/settings";
 import { resetData } from "@/lib/api";
 import { invalidateHarnessCache } from "@/lib/data";
@@ -332,11 +333,13 @@ function ResetSection() {
     // 旧文案声称会删「配置 / API key」(按钮 tooltip 更声称删「数据库、密钥环、设置与
     // Pi 会话目录」)—— 两处都与实现对不上,而方向是**让人以为破坏更大**:想清干净的人
     // 会以为 key 也没了,想保留 key 的人会不敢点。危险区里的文案不许夸大。
+    // ⚠️ confirm 只留一句核心;完整清单在页面上那个默认折叠的 Disclosure 里
+    // (点按钮之前能查,不必把六行字顶在一个弹窗里)。两段文案仍须与实现对齐:
+    // 实现只有两步(`src/platform/host/serve.ts` 的 `reset`)—— ① 丢掉进程里的
+    // 常驻会话;② 一个事务删掉 `PLATFORM_DATA_TABLES` 里那些表的行。不碰任何文件。
     const ok = window.confirm(
-      "确认重置 Sansheng?\n\n" +
-        "将清空平台数据表:项目 / 工作项与依赖 / 工件与边 / 阻塞 / 变更 / 提问 / 会议 / 会话与消息 / 记忆 / 组织 / 排空器状态 / 回合用量。\n\n" +
-        "不会删除:设置与 API key(settings.json / 密钥环)、提示词单元与它们的备份、日志、数据库文件本身;schema 版本也不回退。\n\n" +
-        "重置后组织会在你下一条消息(或建项目)时自动重新播种,不需要重启 server。",
+      "确认重置 Sansheng?平台数据表会被清空(项目 / 工件 / 会话 / 记忆等);" +
+        "设置与 API key、提示词与备份、日志都不动。详见页面上的完整清单。",
     );
     if (!ok) return;
     setDone(null);
@@ -378,9 +381,14 @@ function ResetSection() {
       >
         危险区
       </h2>
-      {/* 批次 UI U4:这段说明与 window.confirm 里的那段**逐条重复** —— 点按钮之前
-          说一遍,点下去还要再确认一遍。屏幕上只留 confirm 弹窗那一版。 */}
-      <div className="flex items-center gap-3">
+      {/* 完整清单默认收起:危险区只需要「一句核心 + 能查到细节」。文案与实现对齐
+          (见 onReset 里的注释),不夸大、也不缩水。 */}
+      <Disclosure summary="重置会清什么 / 不动什么(完整清单)">
+        <div>清空:项目 / 工作项与依赖 / 工件与边 / 阻塞 / 变更 / 提问 / 会议 / 会话与消息 / 记忆 / 组织 / 排空器状态 / 回合用量。</div>
+        <div>不动:设置与 API key(settings.json / 密钥环)、提示词单元与备份、日志、数据库文件本身;schema 版本也不回退。</div>
+        <div>重置后组织会在你下一条消息(或建项目)时自动重新播种,不需要重启 server。</div>
+      </Disclosure>
+      <div className="flex items-center gap-3 mt-2">
         <button
           onClick={onReset}
           disabled={busy}

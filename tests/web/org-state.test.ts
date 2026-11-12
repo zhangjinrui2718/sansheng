@@ -126,7 +126,9 @@ describe("stopState · 停止推进的五档判据", () => {
   it("没有可执行待办、但有问题等甲方 ⇒ 在等你(这一档要人动手)", () => {
     const s = stopState({ ...base, live: live({ pendingQuestions: 2, openWorks: 1 }), turnsAfter: 0 });
     expect(s.key).toBe("waiting_client");
-    expect(s.action).toContain("待办");
+    // 指引跟着页面走:「待办」页签已删(2026-10-06),待答住在对话页右栏
+    // (`ClientQuestionDock`)—— 断言改钉「待答」,钉的是「指引指对地方」。
+    expect(s.action).toContain("待答");
     expect(needsAttention(s)).toBe(true);
   });
 

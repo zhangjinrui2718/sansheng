@@ -1096,23 +1096,20 @@ export function ArtifactRelationLegend({ layout }: { layout: ArtifactGraphLayout
         ))}
       </div>
       <div style={{ marginTop: 3 }}>
-        {`「质检所审」是派生关系(库里没有这一条边,来自 014 的 work_id 的「关于」语义):` +
-          `它是集合关系 —— 一条工作项有几份产出就画几条,每条都成立,但没有一条能说` +
-          `「它审的就是这一份」。${layout.multiTargetReviews > 0
-            ? `本图里有 ${layout.multiTargetReviews} 件审查产出指向了不止一件产出。`
-            : "本图里没有一件审查产出指向多份(所以每条边都是一对一)。"}`}
+        {`「质检所审」= 派生关系(库里没有这条边):` +
+          `一条工作项有几份产出就画几条,但没有一条能说「审的就是这一份」。${layout.multiTargetReviews > 0
+            ? `本图有 ${layout.multiTargetReviews} 件审查产出指向不止一件。`
+            : "本图没有审查产出指向多份(每条边一对一)。"}`}
       </div>
       <div style={{ marginTop: 3 }}>{LOGICAL_RELATION_NOTE}</div>
       {isIsolated(layout) && (
         <div style={{ marginTop: 3, color: "var(--amber)" }}>
-          {"这一版一件工件都没有连线 —— 卡片仍在,只是它们之间没有已记录的关系。" +
-            "这是数据没记,不是图画不出来。"}
+          {"一件工件都没连上线 —— 是数据没记关系,不是图画不出来;卡片仍在。"}
         </div>
       )}
       {layout.backwardEdges.length > 0 && (
         <div style={{ marginTop: 3, color: "var(--amber)" }}>
-          {`⚠️ 有 ${layout.backwardEdges.length} 条边的因果方向反了(源比目标晚),已不画:` +
-            "「从左到右读先后」这句话在有它们时不成立,所以宁可少画也不画错。"}
+          {`⚠️ ${layout.backwardEdges.length} 条边因果方向反了(源比目标晚),已不画 —— 宁可少画,不画错。`}
         </div>
       )}
       {layout.dangling.length > 0 && (
@@ -1122,8 +1119,8 @@ export function ArtifactRelationLegend({ layout }: { layout: ArtifactGraphLayout
       )}
       {layout.unlayeredIds.length > 0 && (
         <div style={{ marginTop: 3, color: "var(--amber)" }}>
-          {`有 ${layout.unlayeredIds.length} 件工件的先后算不出来(在关系环上或环的下游):` +
-            `${layout.unlayeredIds.join(" · ")} —— 它们被排在第 0 列,别按左右位置读先后。`}
+          {`${layout.unlayeredIds.length} 件工件先后算不出来(在环上或环下游):` +
+            `${layout.unlayeredIds.join(" · ")} —— 排在第 0 列,别按左右读先后。`}
         </div>
       )}
     </div>
@@ -1525,9 +1522,8 @@ export function UnattachedArtifacts({
       {/* `.ss-dag-orphan`:安静一点,不与主图争注意力(类在 globals.css 里)。 */}
       <div className="ss-dag-orphan">
         <div className="ss-note" style={{ marginBottom: 6 }}>
-          {"这些是决策 / 会议记录 / 变更记录 / 甲方问答 —— 本来就不由某条工作项产出。" +
-            "它们已在上面那张图上(按 kind 落在自己那一行),所以这里默认收起:" +
-            "点开是为了逐条看详情 / 抄 id,不是因为图上没画。"}
+          {"决策 / 会议 / 变更 / 甲方问答 —— 本来就不由某条工作项产出;" +
+            "已在上面那张图上,这里默认收起,点开是为了逐条看详情。"}
         </div>
         <Disclosure summary={`展开清单(${artifacts.length} 条 · 可逐条看详情)`}>
           <ArtifactGroups

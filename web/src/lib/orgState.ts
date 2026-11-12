@@ -82,7 +82,7 @@ export function stopState(input: StopStateInput): StopState {
     return {
       key: "unreadable",
       label: "读不到运行态",
-      why: "这一条是那一刻的记录;此刻有没有在跑读不到(GET /api/projects/:id/live 没拿到)",
+      why: "这一条是那一刻的记录;此刻有没有在跑,读不到",
       action: "不需要你动作 —— 刷新页面再看一次;读不到不等于空闲",
     };
   }
@@ -125,10 +125,9 @@ export function stopState(input: StopStateInput): StopState {
     return {
       key: "waiting_client",
       label: "在等你",
-      why:
-        `此刻没有可执行待办,但有 ${live.pendingQuestions} 个问题等你回答` +
-        " —— 它们是流水线停下来的原因",
-      action: "到「待办」页回答",
+      why: `此刻没有可执行待办,但有 ${live.pendingQuestions} 个问题等你回答`,
+      // 「待办」页签已删(2026-10-06)—— 待答现在住在对话页右栏,指引跟着搬。
+      action: "到对话页右栏「待答」回答",
     };
   }
   const exhausted = exhaustedTodos(live);
@@ -137,22 +136,22 @@ export function stopState(input: StopStateInput): StopState {
       key: "stalled",
       label: "不会自愈",
       why: `${exhausted} 条待办的尝试预算用尽 —— 平台不再叫醒它们`,
-      action: "要你看:到「待办」页看卡住的是哪几条(通常是某个前置一直没动)",
+      action: "要你看:成员页「预算用尽」那几条(通常是某个前置一直没动)",
     };
   }
   if (live.openWorks === 0) {
     return {
       key: "done",
       label: "已收口",
-      why: "此刻未终态工作项 0,可执行待办 0 —— 那一刻之后没有新的活",
+      why: "未终态工作项 0 · 可执行待办 0 —— 之后没有新的活",
       action: "不需要你动作",
     };
   }
   return {
     key: "stalled",
     label: "停着且没有下一步",
-    why: `还有 ${live.openWorks} 个未终态工作项,但可执行待办为空(前置没满足,或都派给了不能执行的角色)`,
-    action: "要你看:到「工作项」页看这些工作项在等什么",
+    why: `还有 ${live.openWorks} 个未终态工作项,但可执行待办为空(前置没满足,或派给了不能执行的角色)`,
+    action: "要你看:到「工作项」页看它们在等什么",
   };
 }
 

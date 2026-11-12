@@ -150,8 +150,7 @@ export const RELATIONS: Readonly<Record<ArtifactRelation, RelationSpec>> = {
  */
 export const LOGICAL_RELATION_NOTE =
   "逻辑关系(「这条决策是因为那条质检发现」)—— 当前 0 条。" +
-  "库里没有这一列事实,而「按时间先后推一条出来」是编造关系,所以不画。" +
-  "要它变成非 0 需要一次写入侧改动。";
+  "库里没有这一列事实;按时间推一条是编造,不画。";
 
 // ── 布局输出 ──────────────────────────────────────────────────────
 

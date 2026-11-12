@@ -790,10 +790,11 @@ describe("⑤ 页签角标 = 它欠着几件事(口径:readyWorks + todos.length
         runtime: "host",
       }),
     );
-    // 欠活 2 + harness 告警 1 ⇒ 两个 cinnabar 角标,而且各自的 title 说不同的事
+    // 欠活 2 + harness 告警 1 ⇒ 两个 cinnabar 角标,而且各自的 title 说不同的事。
+    // (措辞按「悬停收口」波次压短:钉的是「两件事分开说」,不是原来的句子长度。)
     expect((html.match(/data-tone="cinnabar"/g) ?? []).length, "欠活 + harness 告警 = 两个角标").toBe(2);
-    expect(html).toContain("它欠着 2 件");
-    expect(html).toContain("这个角色的 harness 有 1 处需要注意");
+    expect(html).toContain("欠 2 件");
+    expect(html).toContain("harness 有 1 处要注意");
 
     // 负样本:全部正常(告警 0)⇒ 只剩「欠活」那一个角标,告警那句一个字都不出现
     const okHtml = renderToStaticMarkup(
@@ -807,7 +808,7 @@ describe("⑤ 页签角标 = 它欠着几件事(口径:readyWorks + todos.length
       }),
     );
     expect((okHtml.match(/data-tone="cinnabar"/g) ?? []).length, "正常时不该有告警角标").toBe(1);
-    expect(okHtml).not.toContain("这个角色的 harness 有");
+    expect(okHtml).not.toContain("harness 有");
   });
 });
 
