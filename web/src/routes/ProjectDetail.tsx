@@ -38,7 +38,7 @@
  * 没有目标标题,不编一个出来。
  */
 import { useCallback, useMemo, useState } from "react";
-import { PageHeader, Pill, Section, StatStrip, EmptyState, KV, Flag, Disclosure, Clamp } from "@/components/ui/primitives";
+import { PageHeader, Pill, Section, StatStrip, EmptyState, Flag, Disclosure, Clamp } from "@/components/ui/primitives";
 import { DataState, remoteListOf, remoteOf } from "@/components/ui/DataState";
 import { ClientQuestionCard } from "@/components/client/ClientQuestionCard";
 
@@ -50,7 +50,6 @@ import { platformNoticeLabel, type PlatformNoticeKind } from "@/lib/platformNoti
 import { liveHeadline, orgRuntime } from "@/lib/orgState";
 import { useChatStore } from "@/stores/chat";
 import {
-  ROLE_LABEL,
   askStatusLabel,
   askStatusTone,
   changeStatusLabel,
@@ -82,11 +81,11 @@ const NOTICE_TITLE: Record<PlatformNoticeKind, string> = {
 
 /**
  * 平台记录正文的**唯一渲染口**:全文在 DOM 里(分类靠首行前缀,搜索/测试不丢),
- * 但屏幕上默认只摊开前几行 —— 一条十几行的告警全文会把「组织运行态」顶成一堵墙。
- * 长正文收进 `Disclosure`;短的(含全部首行前缀)照旧直排。
+ * 但屏幕上默认只摊开首行 —— 记录的正文是**平台的现场**,不是甲方的阅读材料
+ * (阈值 80:首行前缀本来就60–70 字,超过它就算「长」,全文收进 Disclosure)。
  */
 function NoticeBody({ content }: { content: string }) {
-  const long = content.length > 200;
+  const long = content.length > 80;
   const body = (
     <div className="ss-body" style={{ color: "var(--bone)", whiteSpace: "pre-wrap" }}>
       {content}
@@ -96,7 +95,7 @@ function NoticeBody({ content }: { content: string }) {
   return (
     <div className="mt-1">
       <div className="ss-body" style={{ color: "var(--bone)" }}>
-        {content.slice(0, content.indexOf("\n") > 0 && content.indexOf("\n") < 200 ? content.indexOf("\n") : 200)} …
+        {content.slice(0, content.indexOf("\n") > 0 && content.indexOf("\n") < 80 ? content.indexOf("\n") : 80)} …
       </div>
       <Disclosure summary="展开全文">{body}</Disclosure>
     </div>
@@ -311,6 +310,7 @@ export function ProjectDetailPage() {
                   title: "角色之间的提问,不是问你的 —— 不需要你处理",
                 },
                 { label: "变更", value: changes.length },
+                { label: "成员", value: detail.members.length },
               ]}
             />
           ) : undefined
@@ -338,6 +338,10 @@ export function ProjectDetailPage() {
       >
         {(detail) => (
         <>
+          {/* ⚠️ **「成员」这一节删掉了**(Wave 8,2026-11-12)—— 名册在这里是
+              **第三份重复**(对话右栏「本项目」+ 成员页都在说),而表头 StatStrip
+              的「成员 N」保留计数。名册的家在成员页,那边有状态、有对话、有工件。 */}
+
           <Section title="目标">
             {detail.goal.length > 0 ? (
               detail.goal.length > 120 ? (
@@ -362,23 +366,6 @@ export function ProjectDetailPage() {
               )
             ) : (
               <EmptyState>这个项目还没写目标。</EmptyState>
-            )}
-          </Section>
-
-          <Section title="成员" count={detail.members.length}>
-            {detail.members.length === 0 ? (
-              <EmptyState>还没有成员。四个角色:业务经理 / 项目经理 / 工程师 / 质检。</EmptyState>
-            ) : (
-              <div className="sansheng-card px-3 py-1.5">
-                {detail.members.map((m) => (
-                  <KV
-                    key={m.id}
-                    label={ROLE_LABEL[m.role]}
-                    value={m.displayName}
-                    title={m.specialization !== null ? `专长 ${m.specialization} · ${m.id}` : m.id}
-                  />
-                ))}
-              </div>
             )}
           </Section>
 
@@ -536,22 +523,23 @@ export function ProjectDetailPage() {
             球在甲方那边,而甲方 90% 的时间在对话页。
             ⇒ 下面的 `待验收` 计数**留着**:删掉它等于「有事在等你」在这页上
             又变成没人知道(真机第一条 `client_question` 就是这么被漏掉的)。 */}
-          <Section
-            title="待你回答"
-            count={detail.pendingQuestions.length}
-            hint="需要你处理"
-            helpId="client-question"
-          >
-            {detail.pendingQuestions.length === 0 ? (
-              <EmptyState>没有等甲方回答的问题。</EmptyState>
-            ) : (
+          {/* 待你回答:**0 时整节不渲染**(Wave 8)—— 计数卡的「待答 0」已经
+              如实说了这个 0,一节空卡把同一个 0 再说一遍,一屏多出一块墙。
+              >0 时它是甲方真正要动手的地方,整节常显。 */}
+          {detail.pendingQuestions.length > 0 && (
+            <Section
+              title="待你回答"
+              count={detail.pendingQuestions.length}
+              hint="需要你处理"
+              helpId="client-question"
+            >
               <div className="grid gap-2">
                 {detail.pendingQuestions.map((q) => (
                   <ClientQuestionCard key={q.id} q={q} />
                 ))}
               </div>
-            )}
-          </Section>
+            </Section>
+          )}
 
           {/*
             内部协作区。**刻意与「待你回答」分开**:这一区里的提问收件人是别的角色,
@@ -639,53 +627,45 @@ export function ProjectDetailPage() {
             )}
           </Section>
 
-          <Section
-            title="变更记录"
-            count={changes.length}
-            helpId="change"
-          >
-            <DataState
-              what="变更记录"
-              state={remoteListOf(changes, changesLoading, changesError)}
-              variant="card"
-              loadingLabel="加载中…"
-            >
-              {() => (
-                changes.length === 0 ? (
-                  <EmptyState>没有变更记录 —— 这个项目还没改过范围或方向。</EmptyState>
-                ) : (
-              <div className="grid gap-1.5">
-                {changes.map((c) => (
-                  <article key={c.id} className="sansheng-card p-2.5" title={c.id}>
-                    <div className="flex items-center gap-2 flex-wrap">
-                      <Pill tone={changeStatusTone(c.status)} title={`ChangeStatus.${c.status}`}>
-                        {changeStatusLabel(c.status)}
-                      </Pill>
-                      <span className="ss-body" style={{ color: "var(--bone)" }}>
-                        {c.title || "(无标题)"}
-                      </span>
-                      <span className="ss-meta ml-auto">{fmtTime(c.createdAt)}</span>
-                    </div>
-                    {c.rationale.length > 0 && (
-                      <div className="ss-note mt-0.5" title={c.rationale}>
-                        {excerpt(c.rationale, 140)}
-                      </div>
-                    )}
-                  </article>
-                ))}
-              </div>
-            ))}
-            </DataState>
-          </Section>
+          {/* 变更记录:**0 时整节不渲染**(Wave 8)—— 表头 StatStrip 的
+              「变更 0」已经在说这件事。 */}
+          {changes.length > 0 && (
+            <Section title="变更记录" count={changes.length} helpId="change">
+              <DataState
+                what="变更记录"
+                state={remoteListOf(changes, changesLoading, changesError)}
+                variant="card"
+                loadingLabel="加载中…"
+              >
+                {() => (
+                  <div className="grid gap-1.5">
+                    {changes.map((c) => (
+                      <article key={c.id} className="sansheng-card p-2.5" title={c.id}>
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <Pill tone={changeStatusTone(c.status)} title={`ChangeStatus.${c.status}`}>
+                            {changeStatusLabel(c.status)}
+                          </Pill>
+                          <span className="ss-body" style={{ color: "var(--bone)" }}>
+                            {c.title || "(无标题)"}
+                          </span>
+                          <span className="ss-meta ml-auto">{fmtTime(c.createdAt)}</span>
+                        </div>
+                        {c.rationale.length > 0 && (
+                          <div className="ss-note mt-0.5" title={c.rationale}>
+                            {excerpt(c.rationale, 140)}
+                          </div>
+                        )}
+                      </article>
+                    ))}
+                  </div>
+                )}
+              </DataState>
+            </Section>
+          )}
 
-          <Section
-            title="阻塞"
-            count={blockers.length}
-            helpId="blocker"
-          >
-            {blockers.length === 0 ? (
-              <EmptyState>没有登记在案的阻塞。</EmptyState>
-            ) : (
+          {/* 阻塞:**0 时整节不渲染**(Wave 8,同上 —— 计数卡已说)。 */}
+          {blockers.length > 0 && (
+            <Section title="阻塞" count={blockers.length} helpId="blocker">
               <div className="grid gap-1.5">
                 {blockers.map((b) => (
                   <article
@@ -731,8 +711,8 @@ export function ProjectDetailPage() {
                   </article>
                 ))}
               </div>
-            )}
-          </Section>
+            </Section>
+          )}
 
           {/*
             成本观测面(2026-10-08)。**只读、不设上界** —— 用户裁决:
@@ -891,33 +871,38 @@ export function ProjectDetailPage() {
                         这个项目的目录是空的 —— 这一次确实「读到了」(runtime ok),里面一个条目都没有。
                       </EmptyState>
                     ) : (
-                      <div className="grid gap-1">
-                        {workspace.entries.map((e) => (
-                          <div
-                            key={e.path}
-                            className="sansheng-card p-1.5 flex items-center gap-2 flex-wrap"
-                            title={e.path}
-                          >
-                            <Pill tone={e.kind === "dir" ? "mute" : "bone"}>
-                              {e.kind === "dir" ? "目录" : "文件"}
-                            </Pill>
-                            <code style={{ fontSize: 12, color: "var(--bone)", wordBreak: "break-all" }}>
-                              {e.path}
-                            </code>
-                            {e.indexed && (
-                              <Pill
-                                tone="cyan"
-                                title="正文落点索引 · 与知识语料(检索索引)不同"
-                              >
-                                正文已索引
+                      /* 文件清单默认折叠(Wave 8):它是**取证**用的详单(注释见本节头),
+                         35 条平铺会把「成本」以下的页面全部顶走;上面那行对账计数
+                         (条目 / 已索引 / 孤儿 / 缺失)才是每次都该看见的。 */
+                      <Disclosure summary={`展开文件清单(${workspace.entries.length} 条)`}>
+                        <div className="grid gap-1">
+                          {workspace.entries.map((e) => (
+                            <div
+                              key={e.path}
+                              className="sansheng-card p-1.5 flex items-center gap-2 flex-wrap"
+                              title={e.path}
+                            >
+                              <Pill tone={e.kind === "dir" ? "mute" : "bone"}>
+                                {e.kind === "dir" ? "目录" : "文件"}
                               </Pill>
-                            )}
-                            <span className="ss-meta ml-auto">
-                              {e.bytes === null ? "— 目录" : fmtBytes(e.bytes)} · {fmtTime(e.mtimeMs)}
-                            </span>
-                          </div>
-                        ))}
-                      </div>
+                              <code style={{ fontSize: 12, color: "var(--bone)", wordBreak: "break-all" }}>
+                                {e.path}
+                              </code>
+                              {e.indexed && (
+                                <Pill
+                                  tone="cyan"
+                                  title="正文落点索引 · 与知识语料(检索索引)不同"
+                                >
+                                  正文已索引
+                                </Pill>
+                              )}
+                              <span className="ss-meta ml-auto">
+                                {e.bytes === null ? "— 目录" : fmtBytes(e.bytes)} · {fmtTime(e.mtimeMs)}
+                              </span>
+                            </div>
+                          ))}
+                        </div>
+                      </Disclosure>
                     )}
 
                     {workspace.missing.length > 0 && (

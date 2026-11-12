@@ -20,7 +20,7 @@
  *
  * ── 起点(2026-11-12,Wave 6 实测)────────────────────────────
  *
- *   Wave 6 前 9,809 → Wave 6 后 9,384 → Wave 7 后 9,325。
+ *   Wave 6 前 9,809 → Wave 7 后 9,325 → Wave 8 后 9,270。
  *   同时:悬停超集(模板 `title`)8 处超标全压进 ≤ 40 字
  *   (`annotation-budget.test.ts` 规则 ⑩);平台记录长正文默认夹紧
  *   (`ProjectDetail.NoticeBody`);确认弹窗长文案收进默认折叠的 Disclosure。
@@ -113,7 +113,7 @@ const BASELINE: Record<string, number> = {
   "main.tsx": 0,
   "routes/Members.tsx": 927,
   "routes/Memory.tsx": 358,
-  "routes/ProjectDetail.tsx": 733,
+  "routes/ProjectDetail.tsx": 678,
   "routes/Works.tsx": 1527,
   "stores/chat.ts": 111,
   "stores/settings.ts": 0,
@@ -138,7 +138,7 @@ describe("可见文字预算:屏上的中文只许减不许增", () => {
       }
     }
     expect(over.join("\n")).toBe("");
-    expect(total).toBeLessThanOrEqual(9325);
+    expect(total).toBeLessThanOrEqual(9270);
   });
 
   it("② 基线表覆盖所有文件(不许有文件悄悄逃出仪器)", () => {
