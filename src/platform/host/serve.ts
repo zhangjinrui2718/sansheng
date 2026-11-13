@@ -399,6 +399,11 @@ export interface FailoverInput {
   readonly hasBackup: boolean;
   /** 还有**别的**回合在跑吗(换 provider 要改进程级 env)。 */
   readonly otherTurnRunning: boolean;
+  /**
+   * 候选里有没有**与故障那家不同凭据**的 provider(`hasDifferentCredentialOf`)。
+   * 缺省 `false`(保守 = 现状):额度/鉴权故障不降级。
+   */
+  readonly hasDifferentCredential?: boolean;
 }
 
 export interface FailoverDecision {
@@ -408,11 +413,28 @@ export interface FailoverDecision {
 }
 
 /**
+ * 候选里有没有「与故障那家**不同凭据**」的 provider(2026-11-13,归属判断)。
+ *
+ * 凭据就是 `apiKey` 字符串(env 通道灌进去的正是它)—— 两家 provider 配了同一个
+ * key = 同一个账号,额度故障切过去照样撞墙;不同 key = 不同账号,切过去是有效的。
+ */
+export function hasDifferentCredentialOf(
+  candidates: readonly ProviderConfig[],
+  failed: ProviderConfig | undefined,
+): boolean {
+  if (failed === undefined) return candidates.length > 0;
+  return candidates.some((p) => p.apiKey !== failed.apiKey);
+}
+
+/**
  * 该不该降级。
  *
  * 六条纪律,每条都有理由:
  * ① `failure.retryable` —— **`quota` / `auth` 是账号/配置级的**,换一家治不了
- *    (额度与凭据不是 provider 的问题,是**你的**账号的问题);
+ *    (额度与凭据不是 provider 的问题,是**你的**账号的问题)。
+ *    ⚠️ **例外(2026-11-13,归属判断)**:如果候选里有**不同凭据**的 provider
+ *    (另一家账号),额度故障换过去是有效的 —— 此时 quota/auth 照常走后面的门。
+ *    备用与故障那家**同一份凭据**时维持不降级(换了也没用)。
  * ② `toolCalls === 0` —— 有工具调用就可能已有副作用(写文件 / 发消息 / 提交),
  *    **重跑不安全**;
  * ③ 没超时 —— 「自动重跑只是把同一段卡死行为再买一遍」;
@@ -422,8 +444,14 @@ export interface FailoverDecision {
  *    会把它们打到 ⇒ **宁可这次失败,不要误伤别的回合**。
  */
 export function decideFailover(input: FailoverInput): FailoverDecision {
-  if (!input.failure.retryable) {
-    return { degrade: false, reason: `故障不可重试(${input.failure.kind})` };
+  const quotaLike = input.failure.kind === "quota" || input.failure.kind === "auth";
+  if (!input.failure.retryable && !(quotaLike && input.hasDifferentCredential === true)) {
+    return {
+      degrade: false,
+      reason: quotaLike
+        ? "额度/鉴权故障(quota/auth),且备用 provider 没有不同凭据 —— 换了也没用"
+        : `故障不可重试(${input.failure.kind})`,
+    };
   }
   if (input.toolCalls > 0) {
     return { degrade: false, reason: "本回合已经干过活,重跑不安全" };
@@ -2050,6 +2078,9 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
           aborted,
           hasBackup: candidates.length > 0,
           otherTurnRunning: otherTurnRunning(projectId, agentId),
+
+          // 归属判断(2026-11-13):quota/auth 只在候选里有「不同凭据」时才降级
+          hasDifferentCredential: hasDifferentCredentialOf(candidates, currentProvider ?? undefined),
         });
         const degraded = decision.degrade
           ? degradeProvider(decision.reason, () => otherTurnRunning(projectId, agentId))
@@ -2327,6 +2358,9 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
           aborted,
           hasBackup: candidates.length > 0,
           otherTurnRunning: otherTurnRunning(projectId, agentId),
+
+          // 归属判断(2026-11-13):quota/auth 只在候选里有「不同凭据」时才降级
+          hasDifferentCredential: hasDifferentCredentialOf(candidates, currentProvider ?? undefined),
         });
         const degraded = decision.degrade
           ? degradeProvider(decision.reason, () => otherTurnRunning(projectId, agentId))

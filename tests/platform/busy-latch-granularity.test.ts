@@ -842,3 +842,19 @@ describe("活 2 · usage 接线(`turn_usage.session_id` + `usage_recorded`)", ()
     expect(row.session_id).toBe(intakeSession);
   });
 });
+
+// ── 降级竞态判据的**书面证据**(2026-11-13)────────────────────────
+//
+// AGENTS.md 备案过一个理论窗口:「回合刚开始、还没进 runningTurns」时降级
+// 判据(`otherTurnRunning` 读 `hub.runningTurns()`)会看不见它。核实结论:
+// **窗口已经闭合** —— 两条回合入口的忙闩都在第一个 `await` 之前同步置位
+// (聊天路径 `handleUserMessage` 的 `hub.setBusy`;工作路径 `acquireTurn`
+// 在 key 空闲时同步 `busy.set`)。这条钉住「同步置位」本身:
+// `acquireTurn` 一返回(还没 await 任何东西),`runningTurns()` 必须看得到它。
+it("acquireTurn 在 key 空闲时**同步**占闩 —— 降级判据没有「刚启动看不见」的窗口", async () => {
+  await startHost();
+  host!.hub.acquireTurn("pA", "wk", { kind: "user" });
+  // 刻意**不 await**:此刻任何异步都可能还没跑,而闩必须已经在了。
+  expect(host!.hub.isBusy("pA", "wk")).toBe(true);
+  expect(host!.hub.runningTurns().some((t) => t.agentId === "wk")).toBe(true);
+});

@@ -28,7 +28,7 @@ import { tmpdir } from "node:os";
 import { createServer, type Server } from "node:http";
 import { WebSocketServer, WebSocket } from "ws";
 import type { AgentSession, AgentSessionEvent } from "@earendil-works/pi-coding-agent";
-import { createPlatformHost, decideFailover, failoverCandidatesOf, type PlatformHost } from "../../src/platform/host/serve.js";
+import { createPlatformHost, decideFailover, failoverCandidatesOf, type PlatformHost , hasDifferentCredentialOf } from "../../src/platform/host/serve.js";
 import { attachHub } from "../../src/platform/transport/hub.js";
 import { listProviders, providerEnvKey } from "../../src/platform/infra/providers.js";
 import { ensureOrg, ensureProjectOrg } from "../../src/platform/runtime/org.js";
@@ -210,11 +210,32 @@ describe("② decideFailover · 降级判据的六条纪律", () => {
     expect(decideFailover(ok).degrade).toBe(true);
   });
 
-  it("①额度/凭据类故障不可重试 ⇒ **不**降级(负样本:它长得像限流)", () => {
+  it("①额度/凭据类故障 + 备用**同一份凭据** ⇒ **不**降级(负样本:它长得像限流)", () => {
     // ⚠️ 真机那条 provider 自报 `rate_limit_error`,真实语义是账户级额度耗尽 ——
-    // 判成可重试就会去换一家,而换一家也一样。
+    // 换一家**同凭据**的 provider 照样撞墙。hasDifferentCredential 缺省 false = 保守现状。
     expect(decideFailover({ ...ok, failure: quota }).degrade).toBe(false);
-    expect(decideFailover({ ...ok, failure: quota }).reason).toContain("不可重试");
+    expect(decideFailover({ ...ok, failure: quota }).reason).toContain("没有不同凭据");
+  });
+
+  it("①b 归属判断(2026-11-13):额度故障 + 备用有**不同凭据** ⇒ 降级放行", () => {
+    // 凭据 = apiKey 字符串:不同 key = 不同账号,换过去是有效的。
+    // 放行之后**仍要走后面的门**(toolCalls / 超时 / 忙闩一条不少)。
+    expect(decideFailover({ ...ok, failure: quota, hasDifferentCredential: true }).degrade).toBe(true);
+    expect(decideFailover({ ...ok, failure: quota, hasDifferentCredential: true }).reason).toContain("quota");
+    const auth = { kind: "auth" as const, retryable: false, message: "invalid api key" };
+    expect(decideFailover({ ...ok, failure: auth, hasDifferentCredential: true }).degrade).toBe(true);
+    expect(decideFailover({ ...ok, failure: auth, hasDifferentCredential: false }).degrade).toBe(false);
+  });
+
+  it("①c hasDifferentCredentialOf:同 key = 同账号(不降),不同 key = 不同账号(可降)", () => {
+    const failed = { id: "a", provider: "p1", modelId: "m", apiKey: "sk-same" } as never;
+    const same = { id: "b", provider: "p2", modelId: "m", apiKey: "sk-same" } as never;
+    const diff = { id: "c", provider: "p3", modelId: "m", apiKey: "sk-other" } as never;
+    expect(hasDifferentCredentialOf([same], failed)).toBe(false);
+    expect(hasDifferentCredentialOf([diff], failed)).toBe(true);
+    // 故障那家未知(理论上不该发生)⇒ 有候选就算不同凭据(保守放行给调用方判断)
+    expect(hasDifferentCredentialOf([diff], undefined)).toBe(true);
+    expect(hasDifferentCredentialOf([], undefined)).toBe(false);
   });
 
   it("②本回合干过活 ⇒ **不**降级(有副作用,重跑不安全)", () => {
@@ -339,7 +360,7 @@ function backupModelLabel(): string {
 }
 
 /** 写一份 settings:一个或两个 provider。 */
-function writeSettings(opts: { backup: boolean }): void {
+function writeSettings(opts: { backup: boolean; sameCredential?: boolean }): void {
   // ⚠️ **只挑有 env 映射的 provider**(2026-10-22 复核补的):三生的凭据**只**经
   // env 通道进 SDK(`syncActiveProviderApiKeyEnv`),`agentDir/auth.json` 三生从不写
   // ⇒ 没有映射的 provider **根本拿不到 key**。夹具原来挑的是 `amazon-bedrock`
@@ -360,7 +381,10 @@ function writeSettings(opts: { backup: boolean }): void {
   if (opts.backup && b !== undefined && b.models[0] !== undefined) {
     providers.push({
       id: "prov_b", label: "B", provider: b.id, modelId: b.models[0]!.id,
-      apiKey: "key-b-not-used", thinkingLevel: "off",
+      // 归属判断(2026-11-13)的夹具轴:sameCredential = 备用与故障那家**同一份 key**
+      // (同一个账号开了两个 provider 条目)⇒ 额度故障换过去照样撞墙 ⇒ 不降级。
+      apiKey: opts.sameCredential === true ? "key-a-not-used" : "key-b-not-used",
+      thinkingLevel: "off",
     });
   }
   writeFileSync(
@@ -373,9 +397,9 @@ function writeSettings(opts: { backup: boolean }): void {
 }
 
 async function startHost(o: {
-  backup: boolean; maxCascadeRounds?: number;
+  backup: boolean; sameCredential?: boolean; maxCascadeRounds?: number;
 } = { backup: false }): Promise<void> {
-  writeSettings({ backup: o.backup });
+  writeSettings({ backup: o.backup, sameCredential: o.sameCredential });
   host = createPlatformHost({
     dataDir,
     host: "127.0.0.1",
@@ -537,14 +561,28 @@ describe("④ 宿主 · 工作路径:降级 / 终态", () => {
     expect(getWork(h.db!, "w1")?.status).toBe("failed");
   });
 
-  it("负样本:额度耗尽(不可重试)⇒ **不**降级 ⇒ 工作项记 `failed`", async () => {
-    await startHost({ backup: true, maxCascadeRounds: 1 });
+  it("负样本:额度耗尽 + 备用**同一份凭据** ⇒ **不**降级 ⇒ 工作项记 `failed`", async () => {
+    // 归属判断(2026-11-13):key-a = key-b = 同一个账号 —— 额度是账号级的,
+    // 换条目不换账号,治不了 ⇒ 维持不降级(这是归属判断的**保守面**)。
+    await startHost({ backup: true, sameCredential: true, maxCascadeRounds: 1 });
     h.errorText = QUOTA_TEXT;
     seedProject("w1");
     await host!.dispatchTimer.runNow();
     await until(() => getWork(h.db!, "w1")?.status === "failed");
-    expect(failoverNotices().length, "额度是账号级的,换一家治不了").toBe(0);
+    expect(failoverNotices().length, "同凭据换了也没用").toBe(0);
     expect(getWork(h.db!, "w1")?.status).toBe("failed");
+  });
+
+  it("正样本:额度耗尽 + 备用**不同凭据** ⇒ 降级(归属判断放行)⇒ 不记 failed", async () => {
+    // key-a ≠ key-b = 两个账号 —— A 家额度耗尽,切到 B 家是**有效的**。
+    // 这正是 AGENTS.md「额度/鉴权不降级……但如果用户配了另一个账户的 provider,
+    // 这条就不对了」备案的那一格。
+    await startHost({ backup: true, maxCascadeRounds: 1 });
+    h.errorText = QUOTA_TEXT;
+    seedProject("w1");
+    await host!.dispatchTimer.runNow();
+    await until(() => failoverNotices().some((c) => c.includes("备用 provider")));
+    expect(getWork(h.db!, "w1")?.status, "降级 ⇒ 活还在(不记 failed)").not.toBe("failed");
   });
 
   it("负样本:还有别的回合在跑 ⇒ **不**降级(换 provider 要改进程级 env)", async () => {
@@ -735,13 +773,22 @@ describe("⑥ 变异自检 · 判据没有静默失效", () => {
     expect(broken({ failure: rateLimit, ...base, toolCalls: 1 }).degrade).toBe(true);
   });
 
-  it("变异 ②:去掉「不可重试就不降级」⇒ **额度也降级了** ⇒ 真断言必须变红", async () => {
-    // 真判据:额度 ⇒ 不降级(额度是账号级的,换 provider 治不了)。
+  it("变异 ②:去掉「额度没有不同凭据就不降级」⇒ **同凭据额度也降级了** ⇒ 真断言必须变红", async () => {
+    // 真判据:额度 + 无不同凭据 ⇒ 不降级(换了也没用)。
     expect(decideFailover({ failure: quota, ...base }).degrade).toBe(false);
     const broken = await mutatedDecideFailover([
-      [/if \(!input\.failure\.retryable\) \{/, "if (false) {"],
+      [/if \(!input\.failure\.retryable && !\(quotaLike && input\.hasDifferentCredential === true\)\) \{/, "if (false) {"],
     ]);
     expect(broken({ failure: quota, ...base }).degrade).toBe(true);
+  });
+
+  it("变异 ③:抹掉归属例外(hasDifferentCredential 恒 false)⇒ **不同凭据的额度也不降了** ⇒ 真断言必须变红", async () => {
+    // 真判据:额度 + 不同凭据 ⇒ 放行降级。
+    expect(decideFailover({ failure: quota, ...base, hasDifferentCredential: true }).degrade).toBe(true);
+    const broken = await mutatedDecideFailover([
+      [/input\.hasDifferentCredential === true/, "false"],
+    ]);
+    expect(broken({ failure: quota, ...base, hasDifferentCredential: true }).degrade).toBe(false);
   });
 
   it("变异 ③:去掉「还有别的回合在跑就不降级」⇒ **误伤别的回合** ⇒ 真断言必须变红", async () => {

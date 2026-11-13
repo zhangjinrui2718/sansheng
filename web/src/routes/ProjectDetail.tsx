@@ -64,7 +64,7 @@ import { blockerMeta } from "@/lib/entityMeta";
 import { MetadataStrip } from "@/components/ui/MetadataStrip";
 import { RelationsRail } from "@/components/relations/RelationsRail";
 import { DashboardCards } from "@/components/dashboard/DashboardCards";
-import { countCards, nextThing } from "@/lib/dashboard";
+import { countCards, nextThing, costWarning } from "@/lib/dashboard";
 import type { RelationContext } from "@/lib/relations";
 import { useAppLocation, paramOf } from "@/lib/route";
 
@@ -774,6 +774,14 @@ export function ProjectDetailPage() {
                           : `最近一笔 ${fmtTime(u.updatedAt)}`}
                       </span>
                     </div>
+                    {(() => {
+                      const warn = costWarning(u.totals.input + u.totals.output);
+                      return warn !== null ? (
+                        <div className="mt-1.5">
+                          <Flag tone="amber">{warn}</Flag>
+                        </div>
+                      ) : null;
+                    })()}
                   </div>
 
                   {u.byAgent.length > 0 && (

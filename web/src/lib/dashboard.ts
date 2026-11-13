@@ -255,3 +255,24 @@ export function countCards(facts: CountCardFacts, projectId: string | null): Cou
     },
   ];
 }
+
+// ── 成本参考线(Wave 9,2026-11-13)────────────────────────────
+//
+// 「成本没有上界」是 KNOWN_GAPS(用户裁决:先只做 observation,**不加闸门**)。
+// 这一条不动它 —— 只在花费**超过参考线**时多一句可见的提醒。
+// 参考线是**代码内常量**,不是配置:不假装有一个「可调预算」的开关。
+
+/** 最近 7 天的 token 参考线(输入+输出,不含 cacheRead)。 */
+export const WEEKLY_TOKEN_REFERENCE = 1_000_000;
+
+/**
+ * 成本提醒文案;**没超线返回 `null`**(不渲染任何东西 ——
+ * 一切正常时多一行字就是噪音)。
+ */
+export function costWarning(weeklyTokens: number): string | null {
+  if (weeklyTokens <= WEEKLY_TOKEN_REFERENCE) return null;
+  return (
+    `最近 7 天 ${weeklyTokens.toLocaleString()} token,已过参考线 ${WEEKLY_TOKEN_REFERENCE.toLocaleString()}。` +
+    "成本没有上界 —— 这里只提醒,不拦截。"
+  );
+}

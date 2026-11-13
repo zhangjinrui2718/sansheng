@@ -21,7 +21,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { PRIORITY, countCards, nextThing } from "../../web/src/lib/dashboard";
+import { PRIORITY, countCards, nextThing, costWarning } from "../../web/src/lib/dashboard";
 import type { DashboardFacts, NextThingKey } from "../../web/src/lib/dashboard";
 import { DashboardCards } from "../../web/src/components/dashboard/DashboardCards";
 import { toHash } from "../../web/src/lib/route";
@@ -315,5 +315,23 @@ describe("接线:项目页降级为仪表盘", () => {
     const files = [chatRightRail, agentPanel, acceptanceDock, clientQuestionDock];
     const count = files.filter((f) => f.includes("useProjectDetail(")).length;
     expect(count).toBe(1);
+  });
+});
+
+// ── 成本参考线(Wave 9,2026-11-13)────────────────────────────────
+//
+// 「成本没有上界」是 KNOWN_GAPS:这一条**不是闸门**,只是超线后多一句可见提醒。
+// 钉三格:超线 ⇒ 有文案;没超线 ⇒ null(不渲染任何东西,一切正常不加字);
+// 文案必须带「只提醒,不拦截」—— 不许把参考线说成预算。
+describe("成本参考线(costWarning)", () => {
+  it("超过 100 万 ⇒ 有提醒,且明说『只提醒,不拦截』", () => {
+    const t = costWarning(1_000_001);
+    expect(t).not.toBeNull();
+    expect(t!).toContain("1,000,001");
+    expect(t!).toContain("只提醒,不拦截");
+  });
+  it("没超线 ⇒ null(一切正常时不多一个字)", () => {
+    expect(costWarning(1_000_000)).toBeNull();
+    expect(costWarning(0)).toBeNull();
   });
 });

@@ -524,9 +524,9 @@ dev/prod + CI/CD」,09:54 业务经理只回了一句「我先看下你之前留
 ### 还没做的(如实记)
 
 - **per-session provider**:降级是平台级的,一个项目里的所有会话一起换;
-- **降级的 env 竞态**:忙闩检查覆盖了「别的回合在跑」这个窗口;`syncActiveProviderApiKeyEnv` 改的是进程级 env,理论上还有一个「回合刚开始、还没进 `runningTurns`」的窗口;
-- **额度/鉴权不降级**:这是刻意的(额度是账户级的),但如果用户配了**另一个账户**的 provider,这条就不对了 —— 判据现在只看错误分类,不看 provider 归属;
-- **降级落库可观测**:降级事实目前只落在 `session_messages`(一条 `⚠️ 供应商` 通知),**没有**结构化表 ⇒ 「这一周降级了几次、切了几家」无从统计(要读面就得 migration);
+- ~~**降级的 env 竞态**~~:**已核实闭合**(2026-11-13)—— 两条回合入口的忙闩都在第一个 `await` 之前**同步**置位(聊天路径 `handleUserMessage` 的 `hub.setBusy`;工作路径 `hub.acquireTurn` 在 key 空闲时同步 `busy.set`),`otherTurnRunning` 读的就是那份表,不存在「刚启动看不见」的窗口;钉子在 `tests/platform/busy-latch-granularity.test.ts`(「acquireTurn 同步占闩」);
+- ~~**额度/鉴权不降级(不看归属)**~~:**已修**(2026-11-13)—— `decideFailover` 增加归属判断:quota/auth 故障时,若候选里有**不同凭据**(`apiKey` 不同 = 不同账号,`hasDifferentCredentialOf`)的 provider ⇒ 照常走后面的门降级;同凭据 ⇒ 维持不降级。夹具轴:`provider-failure.test.ts` 的 `sameCredential`(回归 36 条,含变异 ②③);
+- ~~**降级落库可观测**~~:**读面已补**(2026-11-13)—— `GET /api/diagnostics/provider-failover`(从 `⚠️ 供应商` 会话消息聚合,近 20 条,设置页「供应商切换历史」默认折叠)。**结构化表仍没有**(KNOWN_GAPS 第 5 条照旧成立:这是审计聚合,不是遥测);
 - **自动切回原 provider**:不做(要么靠健康探测、要么靠墙钟启发式,本项目两条都拒绝);
 - **运行期证据**:`auto_retry_start` 只证到**源码级**(`agent-session.d.ts` 的事件定义 + `agent-session.js` 的发射点),**没做过一次真机 429**。
 
