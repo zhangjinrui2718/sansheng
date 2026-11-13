@@ -45,6 +45,11 @@ export interface SchedulerDeps {
   readonly now: () => number;
   /** 广播事件(WS 未连接时是无害的空操作) */
   readonly broadcast: (ev: ServerEvent) => void;
+  /**
+   * 桌面通知(缺省不弹)。**只在集合变化且有超时时**被调用(与广播同一个门),
+   * 因为它服务的时刻是「你不在屏幕前」—— 界面等你看才亮,通知不需要。
+   */
+  readonly notify?: (title: string, message: string) => void;
   /** 扫描间隔,缺省 60 秒 */
   readonly intervalMs?: number;
   /** 日志 */
@@ -128,6 +133,13 @@ export function startScheduler(deps: SchedulerDeps): Scheduler {
         `scheduler: ${report.total} 条提问已超时(` +
           report.projects.map((p) => `${p.projectName}:${p.askIds.length}`).join(" · ") +
           `)—— 只告知,不自动升级`,
+      );
+      // 与广播同一个门(集合变化才到这)⇒ 不会每分钟刷屏。全部答完(回到 0)
+      // **不弹** —— 恢复是常态,弹了只会教人忽略通知。
+      deps.notify?.(
+        "三生 · 角色提问超时",
+        `${report.total} 条角色间的提问过了截止时间还没人回:` +
+          report.projects.map((p) => `${p.projectName} ${p.askIds.length} 条`).join(" · "),
       );
     }
     return report;

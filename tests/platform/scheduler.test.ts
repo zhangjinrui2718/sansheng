@@ -201,6 +201,50 @@ describe("startScheduler · 只推变化,不刷屏", () => {
     s.stop();
     expect(s.stats().ticks).toBe(before);
   });
+
+  // ── 桌面通知(2026-11-13 接线)─────────────────────────────────
+  //
+  // 服务对象是「你不在屏幕前的时候」:集合变化且有超时 ⇒ 弹;集合没变 ⇒ 不弹
+  // (签名门就是去重);全部答完(回到 0)⇒ **不弹** —— 恢复是常态,
+  // 弹了只会教人忽略通知(与 scheduler.ts 文件头「噪音放大器」同一担心)。
+  it("notify:集合变化且有超时 ⇒ 弹一次;没变 ⇒ 不弹;清零 ⇒ 不弹", () => {
+    const notes: string[] = [];
+    const a = mkAsk({ deadlineAt: T0 + 1000 });
+    const s = startScheduler({
+      db, now: () => T0 + 5000,
+      broadcast: () => {},
+      notify: (title, message) => notes.push(`${title}|${message}`),
+      log: () => {},
+    });
+    // 启动 tick:第一条超时出现 ⇒ 弹
+    expect(notes).toHaveLength(1);
+    expect(notes[0]).toContain("角色提问超时");
+    expect(notes[0]).toContain("项目一 1 条");
+    // 集合没变 ⇒ 不弹
+    s.tick();
+    expect(notes).toHaveLength(1);
+    // 全部答完(回到 0)⇒ 不弹(恢复是常态)
+    db.prepare(`UPDATE asks SET status = 'answered' WHERE id = ?`).run(a);
+    const r = s.tick();
+    expect(r.total).toBe(0);
+    expect(notes).toHaveLength(1);
+    // 新的超时接在后面出现 ⇒ 再弹(这正是「不该被去重吞掉」的那一格)
+    mkAsk({ id: "ask_late", deadlineAt: T0 + 1000 });
+    s.tick();
+    expect(notes).toHaveLength(2);
+    s.stop();
+  });
+
+  it("notify 缺省不传 ⇒ 不弹也不炸(依赖可选,测试里不必处处 stub)", () => {
+    mkAsk({ deadlineAt: T0 + 1000 });
+    const s = startScheduler({
+      db, now: () => T0 + 5000,
+      broadcast: () => {},
+      log: () => {},
+    });
+    expect(() => s.tick()).not.toThrow();
+    s.stop();
+  });
 });
 
 // ── fixed-delay 兜底定时器的**心跳**(2026-10-06)────────────────────

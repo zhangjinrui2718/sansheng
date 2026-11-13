@@ -74,10 +74,12 @@ knowledge_fts = FTS5(seg), content='knowledge_chunks', content_rowid='chunk_rowi
 | **T3 回合边界** | `host/serve.ts` 的 `housekeepingCommit`(成功/失败/超时/被中断**四条路都到**) | `reindexProjectKnowledge(projectId)`:重扫该项目的工件与消息,upsert 变化、删除消失的 |
 | **T5 启动/定时** | `host/serve.ts` 启动(与 `syncOrgForExistingProjects` 同一处) | `reindexAllKnowledge()`:补跑存量 + 检出 drift |
 
-**幂等**:`(source_kind, source_id, seq)` upsert + `sha256` 比对;**水位线落库**(不存内存 ——
-批次 20 那六个补丁的根因就是"刚才发生了什么"放在了内存里)。
+**幂等**:`(source_kind, source_id, seq)` UNIQUE upsert + `sha256` **和** `tier` 比对(030 起 `tier` 进判据,否则正文没变的存量行会永远停在 `NULL`);
+**没有水位线**(2026-11-13 复核:全仓无此物,设计当初许诺的「水位线落库」**未实现**)——
+幂等只靠上面的 UNIQUE 锚点 + 哈希比对,`pending` / `lagMs` 在**读时现算**(`transport/views.ts` 的 `toKnowledgeOverview`),不落任何进度状态。
 housekeeping 里那一次是**同步**的(与它现有的提交/回填同一纪律),且**失败不许把回合收尾打挂**:
-`try/catch` + 复用 `reportWorkspaceProblem` 的"同一条只播一次"。
+`reindexKnowledgeQuietly` 的 `try/catch` + **只落 `log.error`,不上平台通知**(2026-11-13 复核:设计当初写的「复用 `reportWorkspaceProblem`」**刻意没做** —— 那条通知的语义是「提交失败 / 有文件没进版本库」,语料重扫失败塞进去等于让通知撒谎)。
+**代价如实记**:语料故障对用户不可见,只能翻日志;自愈靠「下一个回合边界 / 下次启动重扫」。
 
 ## §6 读口
 

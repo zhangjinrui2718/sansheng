@@ -83,7 +83,7 @@
 ```
 src/cli/                 CLI 入口(index.ts + paths.ts)
 src/platform/cli/        smoke / run 两个子命令的实现
-src/platform/host/       常驻宿主:serve / scheduler / reset
+src/platform/host/       常驻宿主:serve / scheduler / reset / notify(桌面通知,见下「桌面通知」一节)
 src/platform/transport/  传输:http(API)/ hub(WS 广播)/ views
 src/platform/runtime/    boot session turn execution assembly promptAssembly pendingWork
                          projectContext dispatcher org sdkAdapter rework
@@ -1696,3 +1696,12 @@ npm run check:design      # 设计一致性 E1–E14
 - `docs/TROUBLESHOOTING.md` 已于批次 19 改成一份**「已失效」说明**:原文描述旧系统(读 `blackboards` / `conversations`,那两张表已被 `011_drop_legacy.sql` DROP),配套的 `scripts/diagnose.mjs` 与 `npm run diagnose` 已删除。**不要照着它排查**,它现在只做两件事:标出失效原因、把仍然成立的教训指回本文。原文逐字在 git 历史里:`git show e3d2812:docs/TROUBLESHOOTING.md`。
 - `docs/PRODUCT-DESIGN-2026-10-02.md`、`docs/CODE-REVIEW-2026-10-01.md`、`docs/AGENT-AUDIT-2026-10-03.md`、`docs/SECURITY-NOTES.md`、`MIGRATION-HANDOFF.md` 是**带日期的历史记录**(描述当时发生了什么):里面的路径、测试名、表名多已不存在。当历史读,**不要当操作手册**;也不要改它们 —— 改了是篡改。
 - `MIGRATION-HANDOFF.md` 是 pi → DSH 的迁移记录;`docs/pi-memory/` 是旧记忆全量归档。
+
+## 桌面通知(2026-11-13 · `src/platform/host/notify.ts`)
+
+审计发现 `node-notifier` 在 package.json 里**声明零读者**(2026-10-02 起躺了六个星期),同一次审计还发现 `overdue_asks` 是断头路(调度器在广播、契约类型在、前端无人听)。这两条一起修:
+
+- **弹什么**:① 角色提问超时(调度器,集合变化且有超时时;**清零不弹** —— 恢复是常态);② provider 降级(从谁切到谁);③ provider 刹车暂停(key 固定,多项目先后撞上只弹一张)。
+- **三条纪律**(notify.ts 文件头):fire-and-forget(失败只落日志,绝不打挂调用方)· 同 key 去重 10 分钟(刹车是进程级的,播报点是每项目各自的)· 「该不该弹」是调用方的判据,这里只管「怎么弹」。
+- ⚠️ **调度器的通知不走去重窗口**(key 用 `now()`):它的「集合签名」门就是去重 —— 在通知层再去重会把「新超时接在旧超时 5 分钟后出现」吞掉。
+- ⚠️ **前端事件读者哨兵**:`overdue_asks` 的教训是「契约+广播+注释都在,唯独没人听」。回归:`tests/web/overdue-asks-reader.test.ts`(消费语义:当前项目推两个 revision、别的项目只推 `projectsRevision`、**不动 `activityRevision`**)· `tests/platform/notify.test.ts`(5 条)· `tests/platform/scheduler.test.ts`(通知门 2 条)。

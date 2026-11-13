@@ -32,6 +32,7 @@ import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Server } from "node:http";
 import type Database from "better-sqlite3";
+import { notifyDesktop } from "./notify.js";
 import type { AgentSession, AgentSessionEvent } from "@earendil-works/pi-coding-agent";
 import { bootPlatform, type BootedPlatform } from "../runtime/boot.js";
 import { createPlatformSession, type CreateSessionFn } from "../runtime/session.js";
@@ -1173,6 +1174,11 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
       // 同 `announceDrain`:平台通知不属于任何封套。
       originSource: null, triggerKind: null,
     });
+    // 桌面通知:key 挂在「本次切换的两个 provider」上 —— 同一对之间 10 分钟内
+    // 不重复弹(三处项目的 internal 会话各播各的,弹一张就够)。
+    notifyDesktop(`provider-failover:${from}->${to}`, "三生 · 供应商已切换",
+      `从 ${from} 切到 ${to}(原因:${reason});受影响的工作项会被重新派发。`,
+      (l) => log.muted(l));
   }
 
   // ── provider 全局刹车:通知(批次 31)─────────────────────────
@@ -1197,6 +1203,11 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
       createdAt: now(),
       originSource: null, triggerKind: null,
     });
+    // 桌面通知:key 固定 —— 刹车是进程级的,多个项目各自第一次撞上刹车时
+    // 这里会先后被调到,同 key 去重保证只弹一张(10 分钟窗口)。
+    notifyDesktop("provider-brake", "三生 · 自动派发已暂停",
+      `连续 provider 故障(限流/断网类),刹车约 ${waitSeconds} 秒后自动重试。`,
+      (l) => log.muted(l));
   }
 
   // ── 常驻会话(键 = 上下文 + agent)────────────────────────────
@@ -3073,6 +3084,12 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
     now,
     broadcast: (ev) => hub.broadcast(ev),
     log: (l) => log.muted(l),
+    // 桌面通知(node-notifier 在 package.json 里躺了很久,2026-11-13 接上):
+    // 超时提问发生在你不在屏幕前的时候,界面等你看才亮,通知不需要。
+    // ⚠️ key 用 now() —— 去重不该发生在这里:调度器自己的「集合签名」门就是
+    // 去重(变化才叫到这);如果这里再去重,「新超时接在旧超时 5 分钟后出现」
+    // 会被 10 分钟窗口吞掉。
+    notify: (title, message) => notifyDesktop(`scheduler:${now()}`, title, message, (l) => log.muted(l)),
     ...(opts.schedulerIntervalMs !== undefined
       ? { intervalMs: opts.schedulerIntervalMs }
       : {}),

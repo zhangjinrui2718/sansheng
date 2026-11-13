@@ -1602,6 +1602,20 @@ export const useChatStore = create<ChatState>((set, get) => ({
         return;
       }
 
+      case "overdue_asks": {
+        // 调度器每 60s 扫一次超时的角色间提问,集合**变化时**才广播这一条
+        // (scheduler.ts)。它曾经是一条断头路:契约、广播、注释都在,前端没人听
+        // (2026-11-13 接上)。它改变的是「内部协作」那份列表(`useProjectAsks`
+        // 读 `projectRevision`),不动运行态 —— 谁在跑与超时无关。
+        const pid = e.projectId;
+        const active = get().projectId;
+        set((s) => ({
+          projectsRevision: s.projectsRevision + 1,
+          projectRevision: s.projectRevision + (pid === active ? 1 : 0),
+        }));
+        return;
+      }
+
       case "error": {
         // 带 projectId 的错误只对那个项目有意义:别的项目的面板不该被刷成错误态。
         if (e.projectId !== undefined && e.projectId !== get().projectId) return;
