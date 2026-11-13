@@ -62,6 +62,7 @@ import type {
   ProjectSummary,
   ProjectUsageResponse,
   RepoCommitsView,
+  ProviderFailoverResponse,
   WorkView,
   WorkspaceView,
 } from "@shared/types/platform";
@@ -185,6 +186,20 @@ export function putSettings(
 
 export function getProviders(): Promise<{ providers: ProviderInfo[] }> {
   return request<{ providers: ProviderInfo[] }>("/providers");
+}
+
+/**
+ * 供应商切换 / 刹车的近期历史(`GET /api/diagnostics/provider-failover`,
+ * 设置页那个默认折叠的「供应商切换历史」段用它)。
+ *
+ * ⚠️ **审计聚合,不是结构化遥测** —— 后端把 `session_messages` 里 `⚠️ 供应商`
+ * 前缀的平台通知按首行捞出来(至多 20 条,新的在前)。「降级无结构化落库」
+ * 在「已知不实之处」里如实记着,这条读面不改变它。
+ * ⚠️ 调用方**必须懒加载**(展开折叠段才拉):它是低频诊断信息,
+ * 不值得为它常驻一次请求。
+ */
+export function listProviderFailovers(): Promise<ProviderFailoverResponse> {
+  return request<ProviderFailoverResponse>("/diagnostics/provider-failover");
 }
 
 // ── 项目 ────────────────────────────────────────────────────────

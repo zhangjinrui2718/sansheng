@@ -30,6 +30,7 @@ import {
 import { listChanges, type ChangeRequestRow } from "../storage/repo/changes.js";
 import {
   listSessions, listSessionMessages, normalizeMessageLimit, isSessionMessageKind,
+  listProviderNotices,
   type SessionMessageRow,
 } from "../storage/repo/sessions.js";
 import { getAgent } from "../storage/repo/agents.js";
@@ -65,6 +66,7 @@ import type {
   ProjectSummary, ProjectUsageView, UsageByWorkView,
   SessionMessageView, TurnTrigger, TurnUsageView,
   UsageByAgentView, WorkView,
+  ProviderFailoverEntryView, ProviderFailoverKind,
 } from "@shared/types/platform.js";
 
 // ── 小工具 ──────────────────────────────────────────────────────
@@ -1262,4 +1264,51 @@ export function listKnowledgeChunkViews(
     return nameCache.get(id) ?? null;
   };
   return rows.map((c) => toKnowledgeChunkView(db, c, materializeChunk(db, reader, c), projectName));
+}
+
+// ── 诊断:供应商切换历史(审计聚合;`GET /api/diagnostics/provider-failover`)
+//
+// ⚠️ **不是结构化遥测** —— 数据源是 `session_messages` 里 `⚠️ 供应商` 前缀的
+// 平台通知,「降级无结构化落库」(About 页 KNOWN_GAPS)在这条读面存在之后
+// **仍然为真**。派生判据(首行前缀)与前端 `platformNotices.ts` 同源。
+
+/** 正文首行(到第一个 `\n` 为止;没有换行就是全文)。 */
+function firstLineOf(content: string): string {
+  const i = content.indexOf("\n");
+  return i === -1 ? content : content.slice(0, i);
+}
+
+/**
+ * 从通知**首行**派生它是哪一类(纯函数,导出给测试钉)。
+ *
+ * ⚠️ 判据是**首行里有没有那两个短语**,不是精确全等 —— 生产者
+ * (`host/serve.ts` 的两个 announce)在措辞里带插值(从谁切到谁、等多少秒),
+ * 全等判据会在下一次文案微调时静默漏行。两处短语都取自当前文案的**固定骨架**:
+ *   · failover:「已从 X 切到备用 provider Y(原因:R)…」
+ *   · brake:「…自动派发已暂停,预计约 N 秒后自动重试…」
+ * 都不匹配 ⇒ `other`,**不丢行**(丢行 = 把真实发生的故障藏起来)。
+ */
+export function providerNoticeKindOf(firstLine: string): ProviderFailoverKind {
+  if (firstLine.includes("已从") && firstLine.includes("切到")) return "failover";
+  if (firstLine.includes("已暂停")) return "brake";
+  return "other";
+}
+
+/** 最近的供应商通知 → 视图(新的在前;至多 `limit` 条,缺省 20)。 */
+export function listProviderFailoverEntries(
+  db: Database.Database,
+  limit = 20,
+): ProviderFailoverEntryView[] {
+  return listProviderNotices(db, limit).map((r) => {
+    const summary = firstLineOf(r.content);
+    return {
+      projectId: r.projectId,
+      sessionId: r.sessionId,
+      createdAt: r.createdAt,
+      kind: providerNoticeKindOf(summary),
+      // ⚠️ 首行自带 `⚠️ 供应商:` 前缀 —— 原样给出,不在这里剥:
+      // 这条读面给的是**审计痕迹**,剥前缀等于把「这是平台通知」抹掉。
+      summary,
+    };
+  });
 }

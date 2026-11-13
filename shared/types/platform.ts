@@ -2096,6 +2096,14 @@ export function eventProjectId(ev: ServerEvent): string | null {
 //                                                q 空 = 最近索引的块(浏览);q 有 = FTS 检索。
 //                                                ⚠️ 块可能 `state: "drifted" | "unavailable"`
 //                                                —— **不是 ok 就都不是空正文**。
+//   ── 诊断(只读;本地信任模型,与其余 GET 同)──
+//   GET    /api/diagnostics/provider-failover → ProviderFailoverResponse
+//                                                供应商切换 / 刹车的**近 20 条**历史。
+//                                                ⚠️ 它是 `session_messages` 里平台通知
+//                                                (`⚠️ 供应商` 前缀)的**审计聚合**,
+//                                                **不是结构化遥测** —— 「降级无结构化
+//                                                落库」在「已知不实之处」里如实记着,
+//                                                这条读面不改变它。
 //
 // 查询参数:
 //   /api/projects?status=draft|active|paused|done|abandoned
@@ -2236,6 +2244,42 @@ export interface KnowledgeChunkView {
   tier: "primary" | "material" | null;
   /** `tier === null` 时那一句人话说明;有值时是 `null` */
   tierNote: string | null;
+}
+
+// ── 诊断:供应商切换历史(GET /api/diagnostics/provider-failover)──
+//
+// ⚠️ **这是审计聚合,不是结构化遥测。** 数据源是 `session_messages` 里
+// `kind='system'`、首行前缀 `⚠️ 供应商` 的平台通知(生产者:`host/serve.ts`
+// 的 `announceProviderFailover` / `announceProviderBrakePaused`)。平台
+// **没有**结构化的降级表,「已知不实之处」里那条「降级没有结构化落库」
+// 在这条读面存在之后**仍然为真** —— 读面只是把已有痕迹按前缀捞出来。
+//
+// `kind` 从**正文首行**派生(与前端 `platformNotices.ts` 认前缀同一条判据):
+//   · 「已从 … 切到 …」  ⇒ `failover`(批次 30 的降级播报)
+//   · 「已暂停」          ⇒ `brake`(批次 31 的限流全局刹车)
+//   · 都不是              ⇒ `other` —— ⚠️ **不丢行**:将来若有第三种
+//     `⚠️ 供应商` 通知,静默滤掉它等于把一条真实发生的故障藏起来;
+//     如实标 `other` 并原样给出首行。
+export type ProviderFailoverKind = "failover" | "brake" | "other";
+
+/** 一条供应商通知(设置页「供应商切换历史」折叠段的一行)。 */
+export interface ProviderFailoverEntryView {
+  /** 通知落在哪个项目的内部会话;`null` = 理论上可能,读面不编造 */
+  projectId: string | null;
+  sessionId: string;
+  createdAt: number;
+  /** 从正文首行派生(见上);派生判据与 `platformNotices.ts` 同源 */
+  kind: ProviderFailoverKind;
+  /**
+   * 正文**首行**(到第一个 `\n` 为止,含 `⚠️ 供应商:` 前缀)。
+   * 首行之后的续行不在这里 —— 那是给项目页「组织运行态」的正文,不是摘要。
+   */
+  summary: string;
+}
+
+/** `GET /api/diagnostics/provider-failover` 的响应。新的在前;至多 20 条。 */
+export interface ProviderFailoverResponse {
+  entries: ProviderFailoverEntryView[];
 }
 
 // 注意:`SettingsPublic` / `ProviderInfo` **不在这里重定义** —— 它们在

@@ -33,6 +33,7 @@ import type Database from "better-sqlite3";
 import { openPlatformMemoryDb } from "../../src/platform/storage/index.js";
 import { insertProject } from "../../src/platform/storage/repo/projects.js";
 import { insertAgent } from "../../src/platform/storage/repo/agents.js";
+import { insertArtifact } from "../../src/platform/storage/repo/artifacts.js";
 import { appendSessionMessage, insertSession } from "../../src/platform/storage/repo/sessions.js";
 import { createPlatformApp, type HttpDeps } from "../../src/platform/transport/http.js";
 import type { AgentConversationsResponse } from "@shared/types/platform.js";
@@ -250,6 +251,53 @@ describe("成员页 · 他说了什么:全文读面", () => {
     expect(body.messages).toEqual([]);
     expect(body.sessionId).toBeNull();
     expect(body.truncated).toBe(false);
+  });
+
+  it("⚠️ 真机现场钉住(2026-11-13):他是成员但零发言,项目里有交付线 ⇒ **200 空答案,不是 404**", async () => {
+    // 现场形状与真机一致:项目里有主对话 + 一条交付线(channel=client、
+    // title 从交付物兜底),甲方与业务经理都说过话,**只有 wk 一句没有**。
+    // 这正是成员页出现过「对话内容读不到!(HTTP 404…)」红块的那一格 ——
+    // 「他还没说过话」是**真实的答案**,把它报成 404,界面就会把「没有」
+    // 渲染成「读不到」(「空 ≠ 读不到」与 /api/intake/messages 同一条纪律)。
+    // 上面的 fetchAgent 自带 `expect(res.status).toBe(200)` —— 那条断言就是本判据。
+    insertArtifact(db, {
+      id: "a-交付物", projectId: P, conversationId: null, kind: "deliverable",
+      status: "open", authorAgentId: "bm", title: "第二版交付物",
+      bodyPath: "artifacts/a-交付物.html", bodySha256: "f".repeat(64), bodyBytes: 3,
+      metadataJson: null, createdAt: clock, updatedAt: clock,
+    });
+    insertSession(db, {
+      id: "s-交付", projectId: P, createdAt: clock + 2,
+      kind: "thread", channel: "client", deliverableArtifactId: "a-交付物",
+    });
+    msg(null, "user", "甲方在主对话里说的话", MAIN);
+    msg("bm", "assistant", "业务经理的话", MAIN);
+    msg(null, "user", "甲方在交付线上的话", "s-交付");
+
+    const body = await fetchAgent("wk");
+    expect(body.lines, "他一条线都没上过 ⇒ 空线头").toEqual([]);
+    expect(body.messages, "零发言是真实答案,不是错误").toEqual([]);
+    expect(body.sessionId).toBeNull();
+
+    // 负样本自检:这些消息**真的在库里**(否则上面的「空」是空转)
+    const truth = db
+      .prepare(`SELECT COUNT(*) AS n FROM session_messages m
+                 JOIN project_sessions s ON s.id = m.session_id
+                WHERE s.project_id = ?`)
+      .get(P) as { n: number };
+    expect(truth.n, "项目里明明有别人的消息").toBe(3);
+  });
+
+  it("⚠️ agent 坐标不存在 ⇒ 404,且是**协议封套**(2026-11-13 前这里静默回 200 空 —— 查无此人被伪装成「他还没说过话」)", async () => {
+    // 刻意改语义的记录:旧行为(200 + 空 lines/messages)对成员页与「他零发言」
+    // 长得一模一样,把「地址指向空气」说成了「真话」。现在坐标不存在必须 404,
+    // 而且**必须带 error 封套** —— 前端对「不是协议形状的 404」只有一条
+    // 「HTTP 404 Not Found」通用兜底,看不出真原因(真机那次红块就是兜底文案)。
+    const res = await app().request(`/api/projects/${P}/agents/agent-不存在/conversations`);
+    expect(res.status).toBe(404);
+    const body = (await res.json()) as { error: { code: string; message: string } };
+    expect(body.error.code).toBe("not_found");
+    expect(body.error.message).toContain("agent-不存在");
   });
 
   it("**跨项目隔离**:别的项目的线与消息都不出现", async () => {

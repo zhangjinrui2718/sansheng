@@ -58,6 +58,7 @@ import {
   toMessageView, toProjectUsageView,
   toWorkView,
   toKnowledgeOverview, listKnowledgeChunkViews,
+  listProviderFailoverEntries,
   type LiveCollectOptions, type LiveRuntimeSnapshot,
 } from "./views.js";
 import { buildMatchQuery } from "../knowledge/query.js";
@@ -707,17 +708,35 @@ export function createPlatformApp(deps: HttpDeps): Hono {
    * `?sessionId=` 选哪条线(不传 = 第一条,主对话优先);`?limit=` 调窗口。
    * 选了**他真没有消息的线**时端点不报错 —— 那个 id 对他没意义,端点会退回
    * 第一条线并在 `sessionId` 里说清它选了哪条(界面照着显示,不静默换一个)。
+   *
+   * ── 坐标与答案的分界(2026-11-13)─────────────────────────────────
+   *
+   * **404 只给「地址指向空气」**:项目不存在 / agent 这行根本没有。
+   * 「**他是成员,但一条发言都没有**」(项目里只有甲方与别的角色说过话、
+   * 交付线上只有别人的记录)是**一个真实的答案**,照常 200 + 空的
+   * `lines` / `messages` —— 把它报成 404,成员页会把它渲染成「读不到」
+   * 的红块,而那是在把「他还没说过话」说成「这一次请求失败了」。
+   * (空与读不到的分界与 `/api/intake/messages` 同一条纪律。)
    */
   app.get("/api/projects/:id/agents/:agentId/conversations", (c) => {
     const id = c.req.param("id");
     if (getProjectRow(db, id) === null) return c.json(err("not_found", "项目不存在", 404).body, 404);
+    // ⚠️ **agent 坐标必须真实存在** —— `agents` 表里没有这一行,这个地址就是
+    // 指向空气的;200 + 空列表会把「查无此人」伪装成「他还没说过话」(两者
+    // 在读面上长得一样,但一个是地址错了,一个是真话)。错误必须是**这份
+    // JSON 封套**:前端的通用兜底(`HTTP 404 Not Found`)只在响应体不是
+    // 协议形状时出现 —— 那正是「路都不存在」的形状,不该由坐标错触发了。
+    const agentId = c.req.param("agentId");
+    if (getAgent(db, agentId) === null) {
+      return c.json(err("not_found", `成员 ${agentId} 不存在`, 404).body, 404);
+    }
     const raw = Number(c.req.query("limit"));
     const limit = Number.isFinite(raw) && raw > 0
       ? Math.min(Math.floor(raw), AGENT_CONVERSATION_LIMIT_MAX)
       : AGENT_CONVERSATION_LIMIT;
     const sessionId = c.req.query("sessionId");
     return c.json(
-      agentConversations(db, id, c.req.param("agentId"), sessionId ?? null, limit),
+      agentConversations(db, id, agentId, sessionId ?? null, limit),
     );
   });
 
@@ -1684,6 +1703,19 @@ app.get("/api/client-questions", (c) => c.json(listAllClientQuestions(db)));
         },
       ),
     });
+  });
+
+  // ── 诊断:供应商切换历史(只读;本地信任模型与其余 GET 相同,无鉴权)──
+  //
+  // ⚠️ **审计聚合,不是结构化遥测**:数据源是 `session_messages` 里
+  // `kind='system'`、首行前缀 `⚠️ 供应商` 的平台通知(生产者是
+  // `host/serve.ts` 的 `announceProviderFailover` / `announceProviderBrakePaused`)。
+  // 「降级没有结构化落库」在 About 页「已知不实之处」里如实记着,这条读面
+  // **不改变**那条事实 —— 它只是给已有痕迹一个读者。
+  // 派生判据(`kind` 从正文首行认)在 `views.ts` 的 `providerNoticeKindOf`,
+  // 与前端 `platformNotices.ts` 认前缀是同一条纪律。
+  app.get("/api/diagnostics/provider-failover", (c) => {
+    return c.json({ entries: listProviderFailoverEntries(db) });
   });
 
   return app;

@@ -702,3 +702,58 @@ export function listAgentSessionMessages(
     .all(sessionId, agentId, n) as RawMessage[];
   return rows.reverse().map(toSessionMessageRow);
 }
+
+// ── 供应商通知:审计聚合(不是结构化遥测)────────────────────────
+//
+// provider 故障「看得见」的那一半(批次 30 / 31)落的是 `session_messages`:
+// `kind='system'`、`agent_id` 为 NULL、**首行前缀 `⚠️ 供应商`**(生产者是
+// `host/serve.ts` 的 `announceProviderFailover` / `announceProviderBrakePaused`,
+// 全库只有它们两处写这个前缀)。
+//
+// ⚠️ **平台没有结构化的降级表** —— 「降级无结构化记录」在「已知不实之处」
+// (About 页 `KNOWN_GAPS`)里如实记着,本函数**不改变**那条事实:它只是把
+// 已有审计痕迹按前缀聚合成一个读面(与前端 `platformNotices.ts` 认前缀是
+// 同一条判据)。前缀改了,这里与前端一起失效 —— 那是刻意的:事实来源是
+// 消息正文本身,不是第二份结构。
+//
+// ⚠️ 次序与 {@link listSessionMessages} 同一把尺:`created_at DESC, id DESC`
+// (同一毫秒不可排序,`id` 只做第二键把「同毫秒」变成有稳定答案的位置)。
+export const PROVIDER_NOTICE_LIMIT = 20;
+
+export interface ProviderNoticeRow {
+  sessionId: string;
+  /**
+   * `null` = 理论上可能(接待会话没有项目)。现役的两个生产者只写项目内部
+   * 会话(`ensureSession(db, projectId, …)`),所以实际不会是它 —— 但**读面
+   * 不编造**:类型如实留 `null`,由上层决定怎么显示,不在此处悄悄丢行。
+   */
+  projectId: string | null;
+  content: string;
+  createdAt: number;
+}
+
+/**
+ * 最近的 provider 通知(`⚠️ 供应商` 前缀的 `system` 消息),新的在前。
+ *
+ * 跨项目、跨会话聚合 —— 这是有意的:诊断读面问的是「provider 什么时候出过
+ * 问题」,那个问题不归属任何一个项目。上限缺省 {@link PROVIDER_NOTICE_LIMIT}
+ * (设置页那个折叠段的口径,「近 20 条」),调用方给更小的值就取更少。
+ */
+export function listProviderNotices(
+  db: Database.Database,
+  limit = PROVIDER_NOTICE_LIMIT,
+): ProviderNoticeRow[] {
+  const n = limit > 0 ? Math.floor(limit) : 0;
+  if (n === 0) return [];
+  return db
+    .prepare(
+      `SELECT m.session_id AS sessionId, s.project_id AS projectId,
+              m.content AS content, m.created_at AS createdAt
+         FROM session_messages m
+         JOIN project_sessions s ON s.id = m.session_id
+        WHERE m.kind = 'system' AND m.content LIKE '⚠️ 供应商:%'
+        ORDER BY m.created_at DESC, m.id DESC
+        LIMIT ?`,
+    )
+    .all(n) as ProviderNoticeRow[];
+}

@@ -1,10 +1,13 @@
 import { useEffect, useMemo, useState } from "react";
 import { Help } from "@/components/ui/Help";
 import { Disclosure } from "@/components/ui/primitives";
+import { DataState, remoteListOf } from "@/components/ui/DataState";
 import { useSettingsStore } from "@/stores/settings";
-import { resetData } from "@/lib/api";
+import { errorMessage, listProviderFailovers, resetData } from "@/lib/api";
 import { invalidateHarnessCache } from "@/lib/data";
+import { fmtTime } from "@/lib/vocab";
 import type { ProviderConfig, ThinkingLevel } from "@shared/types/settings";
+import type { ProviderFailoverEntryView, ProviderFailoverKind } from "@shared/types/platform";
 
 /** 编辑中的 provider 草稿。apiKey="" 表示「不改动」(服务端会保留旧真值) */
 interface DraftProvider {
@@ -277,6 +280,8 @@ export function SettingsPanel() {
         })}
       </div>
 
+      <ProviderFailoverHistory />
+
       <section className="sansheng-card-elevated p-4">
         <h2 className="font-serif mb-3" style={{ color: "var(--bone)", fontSize: 14, letterSpacing: ".04em" }}>
           全局
@@ -314,6 +319,115 @@ export function SettingsPanel() {
       {/* —— 危险区:M2 重置按钮 —— */}
       <ResetSection />
     </div>
+  );
+}
+
+// ── 供应商切换历史(只读诊断;默认折叠 + 懒加载)──────────────────
+//
+// 数据源是 `session_messages` 里 `⚠️ 供应商` 前缀的平台通知(批次 30 的
+// provider 降级与批次 31 的限流刹车写进去的),**没有**结构化的降级表 ——
+// 「降级无结构化落库」在 About 页「已知不实之处」里如实记着,这一段
+// 不改变它,它只是给已有审计痕迹一个读者。
+
+/** kind 的一行话。`other` 不猜:前缀认识、短语不认识的通知,如实说「其他」。 */
+export function providerFailoverKindLabel(kind: ProviderFailoverKind): string {
+  if (kind === "failover") return "已切换";
+  if (kind === "brake") return "已暂停";
+  return "其他";
+}
+
+/**
+ * 懒加载判据(收成一处,测试钉这里):**展开了、且还没拉到过**。
+ * `loaded` 把成功与失败都算「拉过」—— 失败后自动重试只会反复打一个
+ * 刚刚故障过的端点;要看更新,刷新页面即可(这是审计记录,不是运行态)。
+ */
+export function providerFailoverShouldFetch(expanded: boolean, loaded: boolean): boolean {
+  return expanded && !loaded;
+}
+
+/** 列表本体(纯展示,导出给测试):一行 = 时间 · 类别 · 通知首行原文。 */
+export function ProviderFailoverEntries({
+  entries,
+}: {
+  entries: readonly ProviderFailoverEntryView[];
+}) {
+  if (entries.length === 0) {
+    return <div className="ss-note">还没有切换记录 —— 供应商一直在好好干活。</div>;
+  }
+  return (
+    <div className="flex flex-col gap-1">
+      {entries.map((e, i) => (
+        <div
+          key={`${e.sessionId}-${e.createdAt}-${i}`}
+          style={{ fontSize: 12, lineHeight: "20px", color: "var(--bone-dim)" }}
+        >
+          <span style={{ color: "var(--bone)" }}>{fmtTime(e.createdAt)}</span>
+          {" · "}
+          {providerFailoverKindLabel(e.kind)}
+          {" · "}
+          {e.summary}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function ProviderFailoverHistory() {
+  const [expanded, setExpanded] = useState(false);
+  const [entries, setEntries] = useState<readonly ProviderFailoverEntryView[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+
+  // 懒加载:第一次展开才发请求(设置页不值得为一段低频诊断信息常驻一次请求)。
+  // 收起再展开**不**重复拉 —— 「还没拉到过」这个判据挡住了它。
+  useEffect(() => {
+    if (!providerFailoverShouldFetch(expanded, entries !== null || error !== null)) return;
+    let cancelled = false;
+    setLoading(true);
+    listProviderFailovers()
+      .then((res) => {
+        if (!cancelled) setEntries(res.entries);
+      })
+      .catch((e) => {
+        if (!cancelled) setError(errorMessage(e));
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [expanded, entries, error]);
+
+  const fetched = entries !== null || error !== null;
+  // 展开了但 effect 还没跑的这一帧也算「加载中」—— 否则会闪一帧空态,
+  // 而「还没查」被渲染成「查过了,没有」正是 DataState 要治的那个病。
+  const state = remoteListOf(entries ?? [], loading || (expanded && !fetched), error);
+
+  return (
+    <section className="sansheng-card-elevated p-4">
+      {/* ⚠️ 判据挂 **click**,不挂原生 toggle:React 18 的 toggle 监听只直接挂
+          在真正带 onToggle 的那个元素上(nonDelegatedEvents,不委托到根),
+          包装层永远接不到。click 从 <summary> 一路冒泡到这里,鼠标与键盘
+          (Enter 的激活行为也派发 click)都走它。handler 里读到的 `open` 是
+          点击**前**的值 —— 所以「还是 false」的这次 click 就是「正要展开」
+          的那一次;点开之后再点(收起)与点正文都不置位。 */}
+      <div
+        onClick={(e) => {
+          const d = (e.target as HTMLElement).closest("details");
+          if (d !== null && !d.open) setExpanded(true);
+        }}
+      >
+        <Disclosure summary="供应商切换历史(近 20 条)">
+          <DataState what="切换记录" state={state} variant="note">
+            {(rows) => <ProviderFailoverEntries entries={rows} />}
+          </DataState>
+          <p className="ss-note" style={{ marginTop: 6 }}>
+            平台通知的审计聚合,不是结构化遥测。
+          </p>
+        </Disclosure>
+      </div>
+    </section>
   );
 }
 
