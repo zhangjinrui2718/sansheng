@@ -398,3 +398,87 @@ describe("工具:knowledge_search / knowledge_read", () => {
     expect(text).toContain("既不是 primary 也不是 material");
   });
 });
+
+// ── 项目隔离(2026-11-14,设计 §7 的可见性门)──────────────────────
+//
+// 曾经的缺口(KNOWN_GAPS #1):语料**跨项目全局可读** —— 项目 A 的甲方原文
+// 会被项目 B 的角色检索到。工具口现在必传调用者所在项目(repo 的 `projectId`
+// 过滤早已在,缺的是工具口这一传)。这里钉住四格:
+//   · A 的上下文检索 ⇒ 只有 A 的块;
+//   · B 的上下文检索 ⇒ 只有 B 的块(互相看不见,数据**都在**——负样本对照在 repo 层);
+//   · 接待会话(无项目)⇒ 如实回答「没有可检索的语料」,绝不退化为全局搜索;
+//   · knowledge_read 拿别家 chunkId ⇒ not_found 且明说隔离(不暴露存在性)。
+describe("项目隔离:工具口只看得见自己项目的语料", () => {
+  function addP2Corpus(): void {
+    insertProject(db, { id: "p2", name: "另一家的语音机器人", client: "乙", goal: "g2", status: "active", createdAt: clock });
+    const bodyPath = `artifacts/a_p2.md`;
+    const abs = join(workRoot, "projects", "p2", bodyPath);
+    mkdirSync(dirname(abs), { recursive: true });
+    const body = "另一家客户的语音机器人方案,关键词:外呼队列与合规审查。";
+    writeFileSync(abs, body, "utf8");
+    insertArtifact(db, {
+      id: "a_p2", projectId: "p2", conversationId: null, kind: "note", status: ARTIFACT_STATUSES[0]!,
+      authorAgentId: "rw", title: "语音机器人方案", bodyPath,
+      bodySha256: createHash("sha256").update(body).digest("hex"),
+      bodyBytes: Buffer.byteLength(body), metadataJson: null, createdAt: clock, updatedAt: clock,
+    });
+    const sessionId = `s_p2`;
+    insertSession(db, { id: sessionId, projectId: "p2", createdAt: clock });
+    appendSessionMessage(db, {
+      id: "m_p2", sessionId, agentId: null, kind: "user",
+      content: "乙方的原话:先做合规审查,再做外呼。", createdAt: clock, originSource: null, triggerKind: null,
+    });
+    reindexProjectKnowledge(
+      { db, now: () => clock, newId, workspace: createGitWorkspace(), workspaceRoot: workRoot },
+      "p2",
+    );
+  }
+
+  it("A 的上下文检索 ⇒ 只命中 A 的块(B 的关键词检索不到 B 的内容)", async () => {
+    addMessage("m1", "甲方原话:做电话催收外呼,要合规审查。");
+    reindex();
+    addP2Corpus();
+    const text = okText(await call("knowledge_search", { query: "合规审查" }, ctx()));
+    // A 自己的语料命中(B 项目的同词内容不出现)
+    expect(text).toContain("p1");
+    expect(text).not.toContain("p2");
+    expect(text).not.toContain("乙方");
+    // repo 层负样本对照:不带 projectId 的检索**看得见两个项目** ——
+    // 数据都在,隔离是工具口那一传带来的(不是索引漏了 B)。
+    const both = searchKnowledgeChunks(db, buildMatchQuery("合规审查")!);
+    expect(both.some((h) => h.chunk.projectId === "p1")).toBe(true);
+    expect(both.some((h) => h.chunk.projectId === "p2")).toBe(true);
+  });
+
+  it("B 的上下文检索 ⇒ 只命中 B 的块", async () => {
+    addMessage("m1", "甲方原话:做电话催收外呼。");
+    reindex();
+    addP2Corpus();
+    const p2 = loadProjectForAuthz(db, "p2")!;
+    const text = okText(await call("knowledge_search", { query: "合规审查" }, ctx({ project: p2 })));
+    expect(text).toContain("乙方");
+    expect(text).not.toContain("p1");
+  });
+
+  it("接待会话(无项目)⇒ 授权层先拒(denied + 指引立项),绝不退化为全局搜索", async () => {
+    // 第一道门在授权层:`knowledge.read` 不进 `INTAKE_CAPABILITIES`。工具内的
+    // `ctx.project === null` 守卫是纵深防御的第二道(不经 dispatch 直调才到达)。
+    addMessage("m1", "甲方原话:做电话催收外呼。");
+    reindex();
+    addP2Corpus();
+    const e = errOf(await call("knowledge_search", { query: "合规审查" }, ctx({ project: null })));
+    expect(e.code).toBe("denied");
+    expect(e.message).toContain("接待");
+  });
+
+  it("knowledge_read 拿别家的 chunkId ⇒ not_found 且明说隔离", async () => {
+    addMessage("m1", "甲方原话:做电话催收外呼,要合规审查。");
+    addP2Corpus();
+    const p2Chunk = db
+      .prepare(`SELECT id FROM knowledge_chunks WHERE project_id = 'p2' LIMIT 1`)
+      .get() as { id: string };
+    const r = errOf(await call("knowledge_read", { chunkId: p2Chunk.id }, ctx()));
+    expect(r.code).toBe("not_found");
+    expect(r.message).toContain("按项目隔离");
+  });
+});

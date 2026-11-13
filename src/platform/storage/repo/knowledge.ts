@@ -374,7 +374,11 @@ export function searchKnowledgeChunks(
   opts: {
     readonly limit?: number;
     readonly kind?: KnowledgeSourceKind;
-    /** 只在这个项目里搜(记忆页按项目过滤;工具口不过滤 = 全局共享语料) */
+    /**
+     * 只在这个项目里搜。**工具口必传**(2026-11-14 起:`tools/knowledge.ts`
+     * 传调用者所在项目 —— 项目隔离);记忆页的人读面按查询参数过滤,
+     * 不传 = 全部(那是**甲方本人**的观测面,单一用户可以跨项目看)。
+     */
     readonly projectId?: string;
   } = {},
 ): KnowledgeHit[] {

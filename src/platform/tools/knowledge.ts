@@ -95,7 +95,7 @@ const knowledgeSearch: PlatformTool = {
   name: "knowledge_search",
   capability: "knowledge.read",
   description:
-    "检索**项目语料**(所有角色的对话正文 + 工件正文 + 中间产出)。" +
+    "检索**本项目语料**(本项目的对话正文 + 工件正文 + 中间产出;按项目隔离,别的项目的语料检索不到)。" +
     "**与 memory_search 不是一回事**:记忆记的是关于**用户**的偏好/事实(短片段、会淡忘);" +
     "这里查的是**项目里实际写过什么**(正文语料、按来源可追溯)。" +
     "回答「之前那个方案里怎么写的」「谁交付过什么」「上次讨论的结论是什么」之前查这里," +
@@ -128,8 +128,19 @@ const knowledgeSearch: PlatformTool = {
     }
 
     const limit = Math.min(Math.max(readNumber(args, "limit") ?? SEARCH_LIMIT_DEFAULT, 1), SEARCH_LIMIT_MAX);
+    // ⚠️ **项目隔离(2026-11-14)**:只检索**调用者所在项目**的语料 ——
+    // 项目 A 的甲方原文不许被项目 B 的角色检索到(设计 §7 的那道可见性门)。
+    // `ctx.project === null` 只可能是接待会话(那里 `knowledge.read` 本来就不在
+    // `INTAKE_CAPABILITIES` 里,这是纵深防御的第二道),照实回答,不搜全局。
+    if (ctx.project === null) {
+      return ok(
+        "接待阶段还没有项目 —— 语料按项目隔离,此刻没有可检索的语料。" +
+          "先立项,项目内再检索。",
+      );
+    }
     const hits = searchKnowledgeChunks(ctx.db, match, {
       limit,
+      projectId: ctx.project.id,
       ...(kindRaw !== undefined ? { kind: kindRaw as KnowledgeSourceKind } : {}),
     });
     if (hits.length === 0) {
@@ -165,13 +176,25 @@ const knowledgeRead: PlatformTool = {
   capability: "knowledge.read",
   description:
     "按 chunkId 读取知识语料里的**一个片段全文**(先用 knowledge_search 拿到 chunkId)。" +
-    "它读的是索引记的那一段,不是整份工件 —— 要整份工件用 board_read。一次只读一条:内容是正文,直接进你的上下文。",
+    "只读**你所在项目**的片段。它读的是索引记的那一段,不是整份工件 —— 要整份工件用 board_read。一次只读一条:内容是正文,直接进你的上下文。",
   parameters: Type.Object({
     chunkId: Type.String({ description: "knowledge_search 返回的 chunkId(形如 chk_xxx)" }),
   }),
   async run(args, ctx): Promise<ToolResult> {
     const id = requireString(args, "chunkId");
     if (!id.ok) return id.result;
+
+    // ⚠️ **项目隔离(2026-11-14)**:chunkId 是「地址」,而地址可能是别的项目的 ——
+    // 与 search 同一道门:`ctx.project` 之外的语料一律不可读(不暴露存在性:
+    // 对调用者来说它与「没有这条」长得一样)。
+    const chunk = getKnowledgeChunk(ctx.db, id.value);
+    if (chunk !== null && (ctx.project === null || chunk.projectId !== ctx.project.id)) {
+      return fail(
+        "not_found",
+        `chunkId=${id.value} 不属于你所在的项目(语料按项目隔离)。` +
+          "在你自己的项目里重新 knowledge_search 一次。",
+      );
+    }
 
     const m = materializer(ctx, id.value);
     if (m === null) {

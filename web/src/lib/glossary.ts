@@ -244,9 +244,9 @@ export interface KnownGap {
 
 export const KNOWN_GAPS: readonly KnownGap[] = [
   {
-    what: "知识语料跨项目全局可读",
-    why: "语料表没有 tainted / 项目隔离列;tier 只是排序权重,不是可见性边界",
-    where: "docs/DESIGN-KNOWLEDGE.md §7 · migrations/030_knowledge_tier.sql",
+    what: "语料的 tainted 标记不存在",
+    why: "平台判不了「这段文字是不是从外网抓来的」(§7.1:没有写入口就不建列)。工具检索已按项目隔离(2026-11-14);人的读面仍可跨项目浏览 —— 单一甲方的观测面,by design",
+    where: "docs/DESIGN-KNOWLEDGE.md §7.1 · tools/knowledge.ts",
   },
   {
     what: "成本只有观测,没有上界",
@@ -264,9 +264,9 @@ export const KNOWN_GAPS: readonly KnownGap[] = [
     where: "src/platform/host/serve.ts 的 decideFailover / failoverCandidatesOf",
   },
   {
-    what: "降级没有结构化记录",
-    why: "只落一条「⚠️ 供应商」会话消息 —— 一周降级了几次没有表可查",
-    where: "src/platform/host/serve.ts 的 announceProviderFailover",
+    what: "降级没有结构化表",
+    why: "读面已有(设置页,从「⚠️ 供应商」会话消息聚合)—— 但它是审计聚合,不是遥测;要按项目/按周统计还是得一张表",
+    where: "GET /api/diagnostics/provider-failover · src/platform/storage/repo/sessions.ts",
   },
   {
     what: "MCP 没有界面,连接状态读不到",

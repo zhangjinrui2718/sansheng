@@ -646,7 +646,7 @@ dev/prod + CI/CD」,09:54 业务经理只回了一句「我先看下你之前留
   (四态含义 / `GLOSSARY` 全表 / **已知不实之处**)。
   ⚠️ **它不是第七个页签** —— 导航恒 6 项,入口是顶栏末尾那个 `?`(`TopBar` 的 `NavTab label="?"`)。
   「已知不实之处」的数据在 `lib/glossary.ts` 的 `KNOWN_GAPS`(**每条必须带 `where` 落点**),
-  现在 7 条(语料跨项目全局可读 · 成本无上界 · 进行中依赖 WS · 降级是平台级 · 降级无结构化记录 ·
+  现在 7 条(语料 tainted 标记不存在 · 成本无上界 · 进行中依赖 WS · 降级是平台级 · 降级无结构化表 ·
   MCP 无界面且连接状态读不到 · 已收口项目的提问不再排队)。回归 `tests/web/about-page.test.ts`(12 条)。
 - 变异自检脚本:`.probe/mutation-wave0b.py`(6 条,全部实测变红)。
   ⚠️ **它不用 `git checkout --` 复原** —— 新增文件还没入库时会报 `pathspec … did not match`,
@@ -1108,9 +1108,13 @@ M8 工作项列表复活 · M9 页面自己判档位 · M10 卡片不是链接)�
   ⚠️ **平台判定的是「定稿 vs 原始材料」,不是「内容从哪来」** —— 语料只收工件正文与
   `user`/`assistant` 消息(工具结果根本不进语料),「worker 把抓来的网页粘进产出」在库里
   与「它自己写的段落」长得一样。**任何声称「已识别外部内容」的字段都是假话。**
-- **可见性缺口如实记**:P1 是**跨项目全局可读**,没有 `tainted` / scope 列(闭集里每个值都要有真写入口)
-  —— 那是 P2 第一件事(设计 §7/§8)。**tier 是排序权重,不是可见性边界**:
-  跨项目全局可读这件事一个字没变。收口之后 `knowledge.read` **仍然可用**(与 `memory.*` 同理)。
+- **可见性(2026-11-14 已收口一半)**:**工具面按调用者所在项目隔离**(`tools/knowledge.ts`
+  的 search/read 都传 `ctx.project`;接待会话在授权层就被拒 —— `knowledge.read` 不进
+  `INTAKE_CAPABILITIES`,工具内的 null 守卫是第二道)。**人的读面保持全局**
+  (记忆页是单一甲方的观测面,by design)。**scope 列决定不建**:`project_id` 就是 scope,
+  而「global」没有写入口(闭集每值须有真写入口,025 纪律);`tainted` 也没有写入口
+  (平台判不了外部内容,§7.1)⇒ 同样不建 —— 已改为 KNOWN_GAPS 新条目。
+  **tier 是排序权重,不是可见性边界**(不变)。收口之后 `knowledge.read` **仍然可用**(与 `memory.*` 同理)。
 - **读面(2026-10-08 补)**:记忆页第三段「知识语料」= `GET /api/knowledge`(量级 / 时效 /
   机制状态)+ `GET /api/knowledge/chunks?q=&projectId=&limit=`(`q` 有值=检索、没值=按时间浏览)。
   状态判据在 `web/src/lib/knowledgeState.ts` 的 `corpusStatus`(纯函数 + 单测):
