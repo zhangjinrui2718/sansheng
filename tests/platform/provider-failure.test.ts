@@ -49,6 +49,8 @@ import type { CreateSessionFn } from "../../src/platform/runtime/session.js";
 
 /** 限流原文(逐字 —— 改了就测不到真机那一形态)。 */
 const RATE_LIMIT_TEXT = "429 Too Many Requests — rate limit exceeded";
+/** 鉴权原文(分类成 auth ⇒ 不可重试、任何轴都不刹车 ⇒ 必然终态)。 */
+const AUTH_TEXT = '{"type":"error","error":{"type":"authentication_error","message":"invalid x-api-key"}}';
 /** 额度原文:真机那条(分类成 quota ⇒ **不可重试** ⇒ 不降级)。 */
 const QUOTA_TEXT =
   '{"type":"error","error":{"type":"rate_limit_error","message":"已达到 Token Plan 用量上限：请升级 Token Plan 套餐或购买积分补充用量。 (2056)"}}';
@@ -519,12 +521,12 @@ describe("③ 宿主 · 聊天路径:provider 故障要上屏", () => {
 // ── ④ 工作路径 ──────────────────────────────────────────────────
 
 describe("④ 宿主 · 工作路径:降级 / 终态", () => {
-  it("正样本:没有备用 provider ⇒ 工作项记 `failed`,并写出 `work_failed` 事件", async () => {
+  it("正样本:没有备用 provider + 鉴权故障 ⇒ 工作项记 `failed`,并写出 `work_failed` 事件", async () => {
     await startHost({ backup: false });
-    // 批次31改夹具:rate_limit 无备用现在走**刹车路径**(不记 failed,见
-    // provider-brake.test.ts);「failed + work_failed 事件」这条判据改用
-    // 额度原文(quota 仍走终态)保留。
-    h.errorText = QUOTA_TEXT;
+    // 批次31改夹具:rate_limit 无备用现在走**刹车路径**;2026-11-14 双轴化之后
+    // quota 也走**长轴刹车**(不记 failed)。「failed + work_failed 事件」这条
+    // 判据改用**鉴权原文** —— auth 任何轴都不进(配置问题等不好),必然终态。
+    h.errorText = AUTH_TEXT;
     seedProject("w1");
     await host!.dispatchTimer.runNow();
     await until(() => getWork(h.db!, "w1")?.status === "failed");
@@ -561,16 +563,17 @@ describe("④ 宿主 · 工作路径:降级 / 终态", () => {
     expect(getWork(h.db!, "w1")?.status).toBe("failed");
   });
 
-  it("负样本:额度耗尽 + 备用**同一份凭据** ⇒ **不**降级 ⇒ 工作项记 `failed`", async () => {
-    // 归属判断(2026-11-13):key-a = key-b = 同一个账号 —— 额度是账号级的,
-    // 换条目不换账号,治不了 ⇒ 维持不降级(这是归属判断的**保守面**)。
+  it("额度耗尽 + 备用**同一份凭据** ⇒ 不降级 ⇒ **quota 长轴刹车**(不记 failed,探测式恢复)", async () => {
+    // 归属判断(2026-11-13):key-a = key-b = 同一个账号 —— 换条目不换账号,治不了
+    // ⇒ 不降级。2026-11-14 双轴化:不降级的 quota 不再记 failed,改走长轴刹车
+    // (停下来探测恢复;恢复后自动续跑 —— 终态没人唤起,与用户裁决矛盾)。
     await startHost({ backup: true, sameCredential: true, maxCascadeRounds: 1 });
     h.errorText = QUOTA_TEXT;
     seedProject("w1");
     await host!.dispatchTimer.runNow();
-    await until(() => getWork(h.db!, "w1")?.status === "failed");
-    expect(failoverNotices().length, "同凭据换了也没用").toBe(0);
-    expect(getWork(h.db!, "w1")?.status).toBe("failed");
+    await until(() => failoverNotices().some((c) => c.includes("额度已用完")));
+    expect(getWork(h.db!, "w1")?.status, "长轴刹车不记 failed").not.toBe("failed");
+    expect(failoverNotices().some((c) => c.includes("备用 provider")), "同凭据不降级 ⇒ 无切换通知").toBe(false);
   });
 
   it("正样本:额度耗尽 + 备用**不同凭据** ⇒ 降级(归属判断放行)⇒ 不记 failed", async () => {

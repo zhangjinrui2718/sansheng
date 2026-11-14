@@ -24,7 +24,7 @@ MUTATIONS = [
         "src/platform/runtime/providerBrake.ts",
         "  if (!BRAKEABLE_KINDS.has(kind)) {",
         "  if (false) {",
-        "quota/auth 也能触发刹车(额度问题等不好,不该刹)⇒ ⓪ 负样本红",
+        "auth 也进短轴刹车(配置问题等不好,不该刹)⇒ ⓪ auth 负样本红(2026-11-14:quota 已改走长轴,不再是这条变异的对象)",
     ),
     (
         "M2",
@@ -43,8 +43,8 @@ MUTATIONS = [
     (
         "M4",
         "src/platform/host/serve.ts",
-        "          if (failure.retryable && !turn.timedOut && !aborted) {",
-        "          if (failure.retryable && !aborted) {",
+        "          if ((failure.retryable || failure.kind === \"quota\") && !turn.timedOut && !aborted) {",
+        "          if ((failure.retryable || failure.kind === \"quota\") && !aborted) {",
         "超时也算 provider 故障(自动重跑卡死行为不是等能治的)⇒ ⑥-2 红",
     ),
     (
@@ -71,9 +71,30 @@ MUTATIONS = [
     (
         "M8",
         "src/platform/host/serve.ts",
-        "          if (note.episode) {\n            announceProviderBrakePaused(projectId, note.brakedUntilAt);\n          } else {",
-        "          if (false) {\n            announceProviderBrakePaused(projectId, note.brakedUntilAt);\n          } else {",
-        "工作路径的刹车通知不落库(⚠️ 供应商 首行没了)⇒ ⑥-1 的通知断言红",
+        "          if (note.episode) {\n            announceProviderBrakePaused(projectId, note.brakedUntilAt, note.axis ?? \"short\");\n          } else {",
+        "          if (false) {\n            announceProviderBrakePaused(projectId, note.brakedUntilAt, note.axis ?? \"short\");\n          } else {",
+        "工作路径的刹车通知不落库(⚠️ 供应商 首行没了)⇒ ③ 的通知断言红",
+    ),
+    (
+        "M9",
+        "src/platform/runtime/providerBrake.ts",
+        "    quotaFailureStreak += 1;",
+        "    quotaFailureStreak = 0;",
+        "长轴退避不增长(streak 恒 0 ⇒ 永远 30min 一档)⇒ ⓪ 长轴退避测试红",
+    ),
+    (
+        "M10",
+        "src/platform/runtime/providerBrake.ts",
+        "    quotaBrakedUntilAt = now + cooldownMs;",
+        "    quotaBrakedUntilAt = 0;",
+        "quota 根本不进刹车(旧裁决还魂 ⇒ 工作项又会记 failed)⇒ ⓪/③ 红",
+    ),
+    (
+        "M11",
+        "src/platform/runtime/providerBrake.ts",
+        "  return now < brakedUntilAt || now < quotaBrakedUntilAt;",
+        "  return now < brakedUntilAt;",
+        "刹车门无视长轴(quota 退避期内照派)⇒ ③ 探测恢复测试红",
     ),
 ]
 

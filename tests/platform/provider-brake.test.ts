@@ -25,6 +25,7 @@ import { createPlatformHost, type PlatformHost } from "../../src/platform/host/s
 import { attachHub } from "../../src/platform/transport/hub.js";
 import { listProviders, providerEnvKey } from "../../src/platform/infra/providers.js";
 import {
+  brakeStateForTest,
   clear as clearProviderBrake,
   configureProviderBrake,
   isBraked as providerBrakeIsBraked,
@@ -39,7 +40,7 @@ import type { CreateSessionFn } from "../../src/platform/runtime/session.js";
 
 /** 限流原文(逐字 —— 改了就测不到真机那一形态)。 */
 const RATE_LIMIT_TEXT = "429 Too Many Requests — rate limit exceeded";
-/** 额度原文:真机那条(分类成 quota ⇒ **不可重试** ⇒ 不刹车、照旧记 failed)。 */
+/** 额度原文:真机那条(分类成 quota ⇒ 2026-11-14 起**进长轴刹车**,探测式恢复)。 */
 const QUOTA_TEXT =
   '{"type":"error","error":{"type":"rate_limit_error","message":"已达到 Token Plan 用量上限：请升级 Token Plan 套餐或购买积分补充用量。 (2056)"}}';
 
@@ -63,6 +64,7 @@ describe("⓪ providerBrake 纯函数", () => {
     clearProviderBrake();
     // 恢复默认档位(上一条测试可能用 ServeOptions 覆盖过进程级常量)。
     configureProviderBrake({ baseCooldownMs: 30_000, maxCooldownMs: 480_000 });
+    configureProviderBrake({ quotaBaseCooldownMs: 30 * 60_000, quotaMaxCooldownMs: 24 * 60 * 60_000 });
   });
 
   it("可重试的三类(rate_limit / network / server)刹车;第一次失败 = 新 episode", () => {
@@ -73,11 +75,40 @@ describe("⓪ providerBrake 纯函数", () => {
     expect(providerBrakeIsBraked(1000 + 30_000)).toBe(false);
   });
 
-  it("额度与鉴权(quota / auth)不刹车 —— 账号问题等不好,烧预算→升级才是对的", () => {
-    expect(noteProviderFailure("quota", 1000).cooldownMs).toBe(0);
-    expect(providerBrakeIsBraked(1000)).toBe(false);
+  it("quota 进**长轴**刹车(2026-11-14 双轴化):30min → 2h → 8h → 24h 封顶", () => {
+    // 用户裁决(2026-11-14):额度是账户级的,但充值/计费周期滚动后**会恢复** ——
+    // 所以额度不该把工作项记成 failed(终态没人再唤起),该停下来等恢复;
+    // 恢复信号 = 冷却到期后放行的**探测回合**成功 ⇒ 清刹车全部续跑。
+    const note = noteProviderFailure("quota", 1000);
+    expect(note.axis).toBe("quota");
+    expect(note.episode).toBe(true);
+    expect(note.cooldownMs).toBe(30 * 60_000);
+    expect(providerBrakeIsBraked(1001)).toBe(true);
+    expect(providerBrakeIsBraked(1000 + 30 * 60_000)).toBe(false);
+    // 长轴退避(episode 内 streak 不清零,与短轴同一形状)
+    expect(noteProviderFailure("quota", 1001).cooldownMs).toBe(2 * 60 * 60_000);
+    expect(noteProviderFailure("quota", 1002).cooldownMs).toBe(8 * 60 * 60_000);
+    expect(noteProviderFailure("quota", 1003).cooldownMs).toBe(24 * 60 * 60_000);
+    expect(noteProviderFailure("quota", 1004).cooldownMs).toBe(24 * 60 * 60_000);
+  });
+
+  it("鉴权(auth)任何轴都不刹车 —— 配置问题等不好,烧预算→升级才是对的", () => {
     expect(noteProviderFailure("auth", 1001).cooldownMs).toBe(0);
     expect(providerBrakeIsBraked(1001)).toBe(false);
+  });
+
+  it("两条轴相互独立:短轴刹车不影响 quota 计数;成功一起清零", () => {
+    noteProviderFailure("rate_limit", 2000); // 短轴:30s
+    const q = noteProviderFailure("quota", 2001); // 长轴:30min
+    expect(q.axis).toBe("quota");
+    expect(providerBrakeIsBraked(2002)).toBe(true);
+    const st = brakeStateForTest();
+    expect(st.failureStreak).toBe(1);
+    expect(st.quotaFailureStreak).toBe(1);
+    clearProviderBrake();
+    expect(brakeStateForTest().failureStreak).toBe(0);
+    expect(brakeStateForTest().quotaFailureStreak).toBe(0);
+    expect(providerBrakeIsBraked(2003)).toBe(false);
   });
 
   it("退避档位 30s → 2min → 8min,封顶 8 分钟(episode 内 streak 不清零)", () => {
@@ -265,6 +296,7 @@ function writeSettings(): void {
 async function startHost(o: {
   brakeBaseMs?: number;
   brakeMaxMs?: number;
+  quotaBrakeBaseMs?: number;
   turnWallClockMs?: number;
   maxRounds?: number;
   useTool?: boolean;
@@ -286,6 +318,9 @@ async function startHost(o: {
           providerBrakeBaseCooldownMs: o.brakeBaseMs,
           providerBrakeMaxCooldownMs: o.brakeMaxMs,
         }
+      : {}),
+    ...(o.quotaBrakeBaseMs !== undefined
+      ? { providerQuotaBrakeBaseCooldownMs: o.quotaBrakeBaseMs }
       : {}),
     createSession: makeCreateSession(h),
   });
@@ -433,29 +468,48 @@ describe("② 冷却到期自动恢复派发(不需要任何人动手)", () => {
 });
 
 // ══════════════════════════════════════════════════════════════════
-// ③ 负样本:quota / auth 不刹车 —— 烧预算、记 failed、立刻能再派发
+// ③ quota 走**长轴**(2026-11-14 双轴化)—— 不记 failed、预算不烧、
+//   探测式恢复:冷却到期放行一次探测,通了清刹车全部续跑,没通退避加档。
+//   (旧行为「quota 记 failed 烧预算」随用户裁决废除 —— 终态没人再唤起,
+//   与「额度恢复以后这些任务还都能唤起来」直接矛盾。)
 // ══════════════════════════════════════════════════════════════════
 
-describe("③ 负样本:额度类故障不刹车(纪律没被改坏)", () => {
-  it("quota ⇒ 工作项记 failed、预算照烧、下一轮 tick 照常派发", async () => {
-    await startHost();
+describe("③ quota 长轴:先停下来,恢复后自动续跑", () => {
+  it("quota ⇒ 不记 failed、预算清零、播「额度已用完」、派发暂停", async () => {
+    await startHost({ quotaBrakeBaseMs: 3_600_000 }); // 长轴第一档 1 小时:测试内不等到期
     h.errorText = QUOTA_TEXT;
     seedProject("w1");
     await host!.dispatchTimer.runNow();
-    await until(() => getWork(h.db!, "w1")?.status === "failed");
-    expect(getWork(h.db!, "w1")?.status).toBe("failed");
-    expect(providerBrakeIsBraked(Date.now()), "额度类不许进退避").toBe(false);
-    expect(brakeNotices().length, "额度类不许播刹车通知").toBe(0);
-    expect(workFailedEvents(), "quota 的 failed 必须留 work_failed 事件").toBeGreaterThan(0);
-    // 「预算照烧」在账本上的可见形态是**行被 pruned**,不是「attempts 停在 1」:
-    // 工作项终态 ⇒ 待办消失 ⇒ `pruneAttempts` 作废整行预算(dispatcher 的文档化
-    // 语义「待办消失即预算作废」);而刹车路径工作项留在 in_progress ⇒ 待办还在
-    // ⇒ 行还在(attempts=0)。这就是两条路径在库里的分界。
-    expect(workLedger(), "终态 ⇒ 待办消失 ⇒ 预算行被 pruned(作废,而非保留)").toBeUndefined();
-
-    // 不在刹车期 ⇒ 第二轮 tick 立刻能派发(work_failed ⇒ BM 的汇报待办绕过合并窗)。
+    await until(() => brakeNotices().some((c) => c.includes("额度已用完")));
+    expect(getWork(h.db!, "w1")?.status, "长轴路径不记 failed(终态没人唤起)").toBe("in_progress");
+    expect(providerBrakeIsBraked(Date.now()), "quota 进长轴 ⇒ 在刹车").toBe(true);
+    expect(workFailedEvents(), "长轴路径不许写 work_failed").toBe(0);
+    expect(workLedger()?.attempts, "刹车 ⇒ 预算重置(attempts=0)").toBe(0);
+    // 还在刹车窗内 ⇒ 下一轮 runNow 不派发
+    const before = h.turns.length;
     await host!.dispatchTimer.runNow();
-    expect(h.turns.length, "没有刹车 ⇒ 下一轮照常叫醒").toBeGreaterThan(1);
+    expect(h.turns.length, "刹车期内不许派发").toBe(before);
+  });
+
+  it("探测式恢复:到期放行探测 ⇒ 仍失败退避加档 ⇒ 恢复后清刹车全部续跑", async () => {
+    await startHost({ quotaBrakeBaseMs: 200 });
+    h.errorText = QUOTA_TEXT;
+    seedProject("w1");
+    await host!.dispatchTimer.runNow(); // 第一枪:quota 失败 ⇒ 长轴 200ms
+    expect(getWork(h.db!, "w1")?.status).toBe("in_progress");
+    await sleep(250); // 过第一档冷却
+    await host!.dispatchTimer.runNow(); // **探测**:仍 quota ⇒ streak+1,退避加档(800ms)
+    expect(providerBrakeIsBraked(Date.now()), "探测仍失败 ⇒ 退避加档").toBe(true);
+    const turnsAfterProbe = h.turns.length;
+    await host!.dispatchTimer.runNow(); // 刹车窗内 ⇒ 不派发
+    expect(h.turns.length, "加档期内不许派发").toBe(turnsAfterProbe);
+    await sleep(850); // 过第二档
+    h.errorText = ""; // **额度恢复了**
+    await host!.dispatchTimer.runNow(); // 探测成功 ⇒ 清刹车
+    expect(providerBrakeIsBraked(Date.now()), "成功 ⇒ 刹车解除").toBe(false);
+    await host!.dispatchTimer.runNow(); // 续跑:正常回合照常派发
+    expect(h.turns.length, "恢复后活儿自动续上").toBeGreaterThan(turnsAfterProbe);
+    expect(getWork(h.db!, "w1")?.status, "恢复 ⇒ 不停在 failed").not.toBe("failed");
   });
 });
 

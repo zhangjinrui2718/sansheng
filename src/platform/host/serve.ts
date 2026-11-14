@@ -313,6 +313,10 @@ export interface ServeOptions {
   readonly providerBrakeBaseCooldownMs?: number;
   /** **provider 全局刹车**的封顶冷却(毫秒)。默认 8 分钟;必须 ≥ base。 */
   readonly providerBrakeMaxCooldownMs?: number;
+  /** **quota 长轴**的第一档冷却(毫秒)。默认 30 分钟(额度恢复的最小单位是充值/周期滚动,分钟级探测无意义)。 */
+  readonly providerQuotaBrakeBaseCooldownMs?: number;
+  /** **quota 长轴**的封顶冷却(毫秒)。默认 24 小时;必须 ≥ base。 */
+  readonly providerQuotaBrakeMaxCooldownMs?: number;
   /**
    * **合并唤醒**的两个旋钮(见 `runtime/dispatcher.ts` 的 `collectTodos`)。
    *
@@ -534,11 +538,13 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
   const now = booted.now;
   const newId = booted.newId;
 
-  // provider 全局刹车(批次 31):冷却常量的覆盖入口 —— 默认值集中在
-  // `providerBrake.ts`,这里只把 `ServeOptions` 的两个旋钮接过去(缺省 = 不覆盖)。
+  // provider 全局刹车(批次 31 建立短轴;2026-11-14 双轴化):冷却常量的覆盖入口 ——
+  // 默认值集中在 `providerBrake.ts`,这里只把 `ServeOptions` 的四个旋钮接过去(缺省 = 不覆盖)。
   configureProviderBrake({
     baseCooldownMs: opts.providerBrakeBaseCooldownMs,
     maxCooldownMs: opts.providerBrakeMaxCooldownMs,
+    quotaBaseCooldownMs: opts.providerQuotaBrakeBaseCooldownMs,
+    quotaMaxCooldownMs: opts.providerQuotaBrakeMaxCooldownMs,
   });
 
   /**
@@ -1216,25 +1222,40 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
   // 恢复是常态、暂停才是异常,恢复播报只会把「组织运行态」淹掉;界面上
   // 的证据是暂停通知 + 接下来真的有活儿在跑。
 
-  /** 机制仿 {@link announceProviderFailover}:internal 会话 + agent_id NULL + 「⚠️ 供应商」前缀。 */
-  function announceProviderBrakePaused(projectId: string, brakedUntilAt: number): void {
+  /**
+   * 机制仿 {@link announceProviderFailover}:internal 会话 + agent_id NULL + 「⚠️ 供应商」前缀。
+   * 两条轴的文案不同:**短轴** = 限流/断网,窗口自己会好;**长轴(quota)** = 额度用完,
+   * 探测式恢复 —— 冷却到期后自动放行一次探测,通了全部续跑,不用人来重启。
+   */
+  function announceProviderBrakePaused(
+    projectId: string,
+    brakedUntilAt: number,
+    axis: "short" | "quota" = "short",
+  ): void {
     const waitSeconds = Math.max(1, Math.round((brakedUntilAt - now()) / 1000));
+    const waitHuman =
+      waitSeconds >= 3600
+        ? `约 ${Math.round(waitSeconds / 3600)} 小时`
+        : `约 ${Math.max(1, Math.round(waitSeconds / 60))} 分钟`;
     const sessionId = ensureSession(db, projectId, now(), newId, "internal");
+    const cause = axis === "quota" ? "额度已用完(quota)" : "连续 provider 故障(限流/断网类)";
+    const resume =
+      axis === "quota"
+        ? `将按退避节奏自动探测恢复(最长退避到 24 小时一次);额度一恢复,停着的活会自动续跑,无需人工干预。`
+        : `预计${waitHuman}后自动重试(provider 恢复后无需人工干预)。`;
     appendSessionMessage(db, {
       id: newId("m"),
       sessionId,
       agentId: null,
       kind: "system",
-      content:
-        `⚠️ 供应商:连续遇到 provider 故障(限流/断网类),自动派发已暂停,` +
-        `预计约 ${waitSeconds} 秒后自动重试(provider 恢复后无需人工干预)。`,
+      content: `⚠️ 供应商:${cause},自动派发已暂停,${resume}`,
       createdAt: now(),
       originSource: null, triggerKind: null,
     });
     // 桌面通知:key 固定 —— 刹车是进程级的,多个项目各自第一次撞上刹车时
     // 这里会先后被调到,同 key 去重保证只弹一张(10 分钟窗口)。
     notifyDesktop("provider-brake", "三生 · 自动派发已暂停",
-      `连续 provider 故障(限流/断网类),刹车约 ${waitSeconds} 秒后自动重试。`,
+      `${cause};${resume}`,
       (l) => log.muted(l));
   }
 
@@ -2091,16 +2112,20 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
           // 并让「叫醒三次」的预算真被烧掉一次 —— 外部在拒绝时烧掉那个
           // **给人用**的预算才是对的)。
           providerRejected = true;
-          // ── 全局刹车(批次 31):降不了 + 可重试 ⇒ 进退避,暂停自动派发 ──
-          // quota / auth / unknown **不刹车**(账号/配置问题,等不好;烧预算 →
-          // 升级 → 业务经理向甲方交代才是对的)。episode 第一次 ⇒ 播一条
-          // 「自动派发已暂停」;episode 内延长冷却只记日志(同一条只播一次)。
+          // ── 全局刹车(批次 31 建立短轴;2026-11-14 双轴化)──────────
+          // 降不了 ⇒ 进退避,暂停自动派发:限流/断网/5xx 走**短轴**(30s→8min,
+          // 窗口自己会好);**quota 走长轴**(30min→24h,探测式恢复:额度这类
+          // 账户级故障在充值/周期滚动后会恢复,恢复信号 = 探测回合成功 ⇒ 清刹车
+          // 全部续跑。2026-11-13 前的「额度等不好」裁决被用户表述推翻)。
+          // auth / unknown **任何轴都不进**(配置问题等不好;烧预算 → 升级 →
+          // 业务经理向甲方交代才是对的)。episode 第一次 ⇒ 播一条「已暂停」;
+          // episode 内延长冷却只记日志(同一条只播一次)。
           // ⚠️ 超时 / 被中断**不算 provider 故障**(那是自己的纪律在管):
           // 不触发刹车(自动重跑卡死行为 / 用户决定,都不是「等一等」能治的)。
-          if (failure.retryable && !turn.timedOut && !aborted) {
+          if ((failure.retryable || failure.kind === "quota") && !turn.timedOut && !aborted) {
             const note = noteProviderBrake(failure.kind, now());
             if (note.episode && projectId !== null) {
-              announceProviderBrakePaused(projectId, note.brakedUntilAt);
+              announceProviderBrakePaused(projectId, note.brakedUntilAt, note.axis ?? "short");
               log.warn(
                 `platform: provider 刹车启动 —— 自动派发暂停约 ` +
                   `${Math.max(1, Math.round((note.brakedUntilAt - now()) / 1000))}s` +
@@ -2386,7 +2411,7 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
             },
           });
         } else if (
-          failure.retryable &&
+          (failure.retryable || failure.kind === "quota") &&
           execution.turn.toolCalls.length === 0 &&
           !execution.turn.timedOut &&
           !aborted
@@ -2401,11 +2426,11 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
           // 归零,刹车到期后定时器自动重派。
           //
           // ⚠️ 有工具调用 ⇒ 仍走下面的终态分支(副作用后重跑不安全,不许放宽);
-          // quota / auth ⇒ 同样走终态(账号/配置问题,等不好)。
+          // auth ⇒ 同样走终态(配置问题,等不好);quota(零工具调用)⇒ 长轴刹车。
           providerBrakePaused = true;
           const note = noteProviderBrake(failure.kind, now());
           if (note.episode) {
-            announceProviderBrakePaused(projectId, note.brakedUntilAt);
+            announceProviderBrakePaused(projectId, note.brakedUntilAt, note.axis ?? "short");
           } else {
             log.muted(
               `platform: provider 刹车延长 —— 退避至 ` +
