@@ -31,7 +31,7 @@ import { openPlatformMemoryDb } from "../../src/platform/storage/index.js";
 
 const SESSION_SRC = readFileSync("src/platform/runtime/agentRuntime/pi/session.ts", "utf8");
 const SDK_ADAPTER_SRC = readFileSync("src/platform/runtime/agentRuntime/pi/toolsAdapter.ts", "utf8");
-const PI_CONFIG_SRC = readFileSync("src/platform/mcp/piConfig.ts", "utf8");
+const PI_CONFIG_SRC = readFileSync("src/platform/runtime/agentRuntime/pi/mcpConfig.ts", "utf8");
 
 /** 去掉块注释与行注释 —— 注释里的反面教材不算命中。 */
 function stripComments(src: string): string {
@@ -210,7 +210,7 @@ describe("mcp-wiring · 「声称有、实际没有」的三条自查", () => {
       expect(httpSrc).not.toContain(`/api/${forbidden}`);
     }
     // 连接状态字段恒为 unavailable,且它只出现在 wiring / 视图里,不作为一个可读的状态
-    expect(readFileSync("src/platform/mcp/piConfig.ts", "utf8")).toContain('"unavailable"');
+    expect(readFileSync("src/platform/runtime/agentRuntime/pi/mcpConfig.ts", "utf8")).toContain('"unavailable"');
   });
 
   it("③ 授权**只影响新建会话**,所以不在门铃清单里(叫醒没有用)", () => {

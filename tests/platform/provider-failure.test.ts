@@ -30,7 +30,7 @@ import { WebSocketServer, WebSocket } from "ws";
 import type { AgentSession, AgentSessionEvent } from "@earendil-works/pi-coding-agent";
 import { createPlatformHost, decideFailover, failoverCandidatesOf, type PlatformHost , hasDifferentCredentialOf } from "../../src/platform/host/serve.js";
 import { attachHub } from "../../src/platform/transport/hub.js";
-import { listProviders, providerEnvKey } from "../../src/platform/infra/providers.js";
+import { listProviders, providerEnvKey } from "../../src/platform/runtime/agentRuntime/pi/providers.js";
 import { ensureOrg, ensureProjectOrg } from "../../src/platform/runtime/org.js";
 import { insertProject } from "../../src/platform/storage/repo/projects.js";
 import { getWork, insertWork } from "../../src/platform/storage/repo/works.js";
@@ -727,7 +727,7 @@ describe("⑥ 变异自检 · 判据没有静默失效", () => {
    * **真的重新 import 它**、**真的跑一遍行为断言** —— 判据改坏之后,那些断言
    * 必须当场变红。
    *
-   * ⚠️ 副本必须放在**同一个目录**里:它有相对 import(`../infra/providers.js`),
+   * ⚠️ 副本必须放在**同一个目录**里:它有相对 import(`../../agentRuntime/pi/providers.js`),
    * 放到别处会解析不到。
    */
   const serveSource = (): string =>

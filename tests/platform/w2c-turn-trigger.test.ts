@@ -39,7 +39,7 @@ import { ensureProjectOrg } from "../../src/platform/runtime/org.js";
 import {
   drainProject, type DrainTurnReport, type DrainWorkReport, type TodoKind,
 } from "../../src/platform/runtime/dispatcher.js";
-import { listProviders } from "../../src/platform/infra/providers.js";
+import { listProviders } from "../../src/platform/runtime/agentRuntime/pi/providers.js";
 import {
   createPlatformHost, detectUnannouncedTurn, type PlatformHost,
 } from "../../src/platform/host/serve.js";

@@ -29,7 +29,7 @@ import { WebSocket, type WebSocketServer } from "ws";
 import type { AgentSession, AgentSessionEvent } from "@earendil-works/pi-coding-agent";
 import { createPlatformHost, type PlatformHost } from "../../src/platform/host/serve.js";
 import { attachHub } from "../../src/platform/transport/hub.js";
-import { listProviders } from "../../src/platform/infra/providers.js";
+import { listProviders } from "../../src/platform/runtime/agentRuntime/pi/providers.js";
 import type { CreateSessionFn } from "../../src/platform/runtime/agentRuntime/pi/session.js";
 import type { IntakeLiveView } from "@shared/types/platform.js";
 

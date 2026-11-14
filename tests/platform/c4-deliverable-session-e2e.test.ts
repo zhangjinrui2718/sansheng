@@ -38,7 +38,7 @@ import type Database from "better-sqlite3";
 import type { AgentSession, AgentSessionEvent } from "@earendil-works/pi-coding-agent";
 import { createPlatformHost, type PlatformHost } from "../../src/platform/host/serve.js";
 import { attachHub } from "../../src/platform/transport/hub.js";
-import { listProviders } from "../../src/platform/infra/providers.js";
+import { listProviders } from "../../src/platform/runtime/agentRuntime/pi/providers.js";
 import { insertAgent } from "../../src/platform/storage/repo/agents.js";
 import { insertProject, addMember } from "../../src/platform/storage/repo/projects.js";
 import { insertWork, markWorkReviewed } from "../../src/platform/storage/repo/works.js";

@@ -48,7 +48,7 @@
  * 甲方可见。要人(项目经理)介入才能继续,这是对的失效方向。
  */
 import type Database from "better-sqlite3";
-import type { AgentSession, AgentSessionEvent } from "@earendil-works/pi-coding-agent";
+import type { RuntimeEvent, RuntimeSession } from "./agentRuntime/types.js";
 import {
   getWork, updateWorkStatus, isTerminalWorkStatus, type WorkRow,
 } from "../storage/repo/works.js";
@@ -146,7 +146,7 @@ export interface ExecutionResult {
 }
 
 export interface RunWorkOptions {
-  readonly session: AgentSession;
+  readonly session: RuntimeSession<RuntimeEvent>;
   readonly db: Database.Database;
   readonly workId: string;
   /** 收尾等待的上界(透传给 `runTurn.timeoutMs`)。**不是**回合时长上界 */
@@ -171,7 +171,7 @@ export interface RunWorkOptions {
    * 是跑完打印报告),但常驻宿主下它意味着用户盯着一个没有反应的屏幕。
    * 抛错的处理与 `runTurn` 一致:观察者出错不影响回合。
    */
-  readonly onEvent?: (ev: AgentSessionEvent) => void;
+  readonly onEvent?: (ev: RuntimeEvent) => void;
   /**
    * **这条回合跑在哪条会话里**(`project_sessions.id`)—— 透传给
    * `runTurn.sessionId`,写进 `turn_usage.session_id`。

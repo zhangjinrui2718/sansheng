@@ -50,8 +50,8 @@
  */
 import type { LoadedMcpConfig, McpServerEntry } from "@earendil-works/pi-coding-agent";
 import type { McpServerConfig } from "@earendil-works/pi-coding-agent";
-import type { McpSolution, SolvedMcpServer } from "./solve.js";
-import { withResolvedSecrets, type SecretStore } from "./secrets.js";
+import type { McpSolution, SolvedMcpServer } from "../../../mcp/solve.js";
+import { withResolvedSecrets, type SecretStore } from "../../../mcp/secrets.js";
 
 /** `servers.json` 的路径在 `wiring` / 日志里要报出来,而 pi 只吃 `{ source }`。 */
 export const MCP_CONFIG_SOURCE = "sansheng:harness/mcp/servers.json";

@@ -33,7 +33,7 @@ import { fileURLToPath } from "node:url";
 import type { Server } from "node:http";
 import type Database from "better-sqlite3";
 import { notifyDesktop } from "./notify.js";
-import type { AgentSession, AgentSessionEvent } from "@earendil-works/pi-coding-agent";
+import type { RuntimeEvent, RuntimeSession } from "../runtime/agentRuntime/types.js";
 import { bootPlatform, type BootedPlatform } from "../runtime/boot.js";
 import { createPlatformSession, type CreateSessionFn } from "../runtime/agentRuntime/pi/session.js";
 import { runTurn, type TurnResult, type ToolCallRecord } from "../runtime/turn.js";
@@ -80,7 +80,7 @@ import {
   providerEnvKey,
   resolveModel,
   syncActiveProviderApiKeyEnv,
-} from "../infra/providers.js";
+} from "../runtime/agentRuntime/pi/providers.js";
 import {
   classifyProviderFailure,
   describeProviderFailure,
@@ -294,7 +294,7 @@ export interface ServeOptions {
    * 与 `turnTimeoutMs` **不是同一个东西**,这也是它必须单独有一个旋钮的理由:
    *   - `turnTimeoutMs` 护的是「`prompt()` resolve 之后等 `agent_settled` 那段」,
    *     **不打断** `prompt()` 自己;
-   *   - `turnWallClockMs` 到点会真的调 `AgentSession.abort()` 打断这个回合。
+   *   - `turnWallClockMs` 到点会真的调 `RuntimeSession<RuntimeEvent>.abort()` 打断这个回合。
    *
    * Wave 1 把判定与打断做完了,但**运行期只能吃默认值** —— 宿主没有把它接出去,
    * 于是「调了上界」与「它根本没生效」在真机上长得一样。这里补上那条线。
@@ -1269,7 +1269,7 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
   //
   // 上下文里的 `null` 仍然是**接待会话**(第一个项目之前),不引入哨兵值;
   // 编码成键只在池子内部用。
-  const sessions = new Map<string, AgentSession>();
+  const sessions = new Map<string, RuntimeSession<RuntimeEvent>>();
 
   /**
    * 该上下文里**主对话**的 id —— 排空器触发的回合与内部角色的工作会话都用它。
@@ -1363,7 +1363,7 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
    * 那是「死接线」的教科书形态 —— 代码看起来齐全,功能从来没有过。
    *
    * 修法不是「给 AbortController 加一个 set」:SDK 的取消入口是
-   * `AgentSession.abort()`(`AbortController` 根本传不进 `session.prompt`),
+   * `RuntimeSession<RuntimeEvent>.abort()`(`AbortController` 根本传不进 `session.prompt`),
    * 所以登记的就是**那个会话自己的 abort**。
    *
    * ⚠️ **键是 `(上下文, agent)`(用 `pooledKey`),不是 `projectId`。**
@@ -1682,7 +1682,7 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
   type SessionAcquire =
     | {
         readonly ok: true;
-        readonly session: AgentSession;
+        readonly session: RuntimeSession<RuntimeEvent>;
         /**
          * **这条会话是刚建出来的**(没命中常驻池)—— 2026-10-07 真机事故补。
          *
@@ -1872,13 +1872,13 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
      *
      * 它存在的理由就是上面那段:`abort()` 需要一个真实的会话,而会话要等 await。
      */
-    let sessionRef: AgentSession | null = null;
+    let sessionRef: RuntimeSession<RuntimeEvent> | null = null;
     const abortThisTurn = (): void => {
       aborted = true;
       const s = sessionRef;
       // 会话还没建出来 ⇒ **意图留着**,兑现点在下面 `if (aborted)` 那一支。
       if (s === null) return;
-      // `AgentSession.abort()` 是 async 且会等到 agent 真正 idle。这里**不 await**:
+      // `RuntimeSession<RuntimeEvent>.abort()` 是 async 且会等到 agent 真正 idle。这里**不 await**:
       // WS 的消息处理器不该被一次取消阻塞住。但失败要留现场(7-N),不许静默。
       void s.abort().catch((err: unknown) => {
         log.error(
@@ -3255,7 +3255,7 @@ function channelForAgent(db: Database.Database, agentId: string): SessionChannel
 }
 
 function bridge(
-  ev: AgentSessionEvent,
+  ev: RuntimeEvent,
   projectId: string | null,
   sessionId: string,
   messageId: string,
@@ -3265,19 +3265,18 @@ function bridge(
   thinkBuf: string[],
 ): void {
   if (ev.type === "message_update") {
-    const u = ev.assistantMessageEvent;
     // **两条流永不混流** —— 7-I 的现场是判据写成了不存在的 "thinking",
     // 于是内部推理落进了正文被展示给用户
-    if (u.type === "text_delta" && typeof u.delta === "string") {
-      textBuf.push(u.delta);
-      hub.emitDelta(projectId, sessionId, messageId, u.delta);
-    } else if (u.type === "thinking_delta" && typeof u.delta === "string") {
-      thinkBuf.push(u.delta);
-      hub.emitThinking(projectId, sessionId, messageId, u.delta);
+    if (ev.deltaKind === "text" && typeof ev.delta === "string") {
+      textBuf.push(ev.delta);
+      hub.emitDelta(projectId, sessionId, messageId, ev.delta);
+    } else if (ev.deltaKind === "thinking" && typeof ev.delta === "string") {
+      thinkBuf.push(ev.delta);
+      hub.emitThinking(projectId, sessionId, messageId, ev.delta);
     }
     return;
   }
-  if (ev.type === "tool_execution_start") {
+  if (ev.type === "tool_start") {
     // `tool_start` 也能建轮(前端),所以它同样要带说话人 —— 与 `bridge` 的
     // `message_start` 用的是同一个 agent(见 §2.10.2)
     hub.emitToolStart(projectId, sessionId, messageId, {
@@ -3285,7 +3284,7 @@ function bridge(
     }, agentId);
     return;
   }
-  if (ev.type === "tool_execution_end") {
+  if (ev.type === "tool_end") {
     hub.emitToolEnd(projectId, sessionId, messageId, {
       id: ev.toolCallId, name: ev.toolName, result: ev.result, isError: ev.isError === true,
     });

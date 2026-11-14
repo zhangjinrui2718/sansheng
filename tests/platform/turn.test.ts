@@ -127,15 +127,14 @@ function fakeSession(
 
 // 事件构造小工具(只填 runTurn 真正读的字段)
 const textDelta = (delta: string) =>
-  ({ type: "message_update", message: {}, assistantMessageEvent: { type: "text_delta", delta } }) as unknown as AgentSessionEvent;
+  ({ type: "message_update", message: {}, deltaKind: "text", delta }) as RuntimeEvent;
 const thinkDelta = (delta: string) =>
-  ({ type: "message_update", message: {}, assistantMessageEvent: { type: "thinking_delta", delta } }) as unknown as AgentSessionEvent;
+  ({ type: "message_update", message: {}, deltaKind: "thinking", delta }) as RuntimeEvent;
 const toolStart = (id: string, name: string, args: unknown) =>
-  ({ type: "tool_execution_start", toolCallId: id, toolName: name, args }) as unknown as AgentSessionEvent;
+  ({ type: "tool_start", toolCallId: id, toolName: name, args }) as RuntimeEvent;
 const toolEnd = (id: string, name: string, result: unknown, extras: { isError?: boolean } = {}) =>
-  ({
-    type: "tool_execution_end", toolCallId: id, toolName: name, result, isError: extras.isError ?? false,
-  }) as unknown as AgentSessionEvent;
+  ({ type: "tool_end", toolCallId: id, toolName: name, result, isError: extras.isError ?? false,
+  }) as RuntimeEvent;
 
 async function turn(
   script: Parameters<typeof fakeSession>[0],

@@ -40,7 +40,7 @@ import { WebSocket, type WebSocketServer } from "ws";
 import type { AgentSession, AgentSessionEvent } from "@earendil-works/pi-coding-agent";
 import { createPlatformHost, type PlatformHost } from "../../src/platform/host/serve.js";
 import { attachHub } from "../../src/platform/transport/hub.js";
-import { listProviders } from "../../src/platform/infra/providers.js";
+import { listProviders } from "../../src/platform/runtime/agentRuntime/pi/providers.js";
 import { ensureOrg, ensureProjectOrg } from "../../src/platform/runtime/org.js";
 import { insertProject } from "../../src/platform/storage/repo/projects.js";
 import {
@@ -233,7 +233,7 @@ function makeCreateSession(h: Harness): CreateSessionFn {
                 role: "assistant", model: "fake-model",
                 usage: { input: 7, output: 3, cacheRead: 5 },
               },
-            } as unknown as AgentSessionEvent);
+            } as RuntimeEvent);
           }
         } finally {
           h.inflight--;

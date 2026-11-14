@@ -23,7 +23,7 @@ import { WebSocketServer, WebSocket } from "ws";
 import type { AgentSession, AgentSessionEvent } from "@earendil-works/pi-coding-agent";
 import { createPlatformHost, type PlatformHost } from "../../src/platform/host/serve.js";
 import { attachHub } from "../../src/platform/transport/hub.js";
-import { listProviders, providerEnvKey } from "../../src/platform/infra/providers.js";
+import { listProviders, providerEnvKey } from "../../src/platform/runtime/agentRuntime/pi/providers.js";
 import {
   brakeStateForTest,
   clear as clearProviderBrake,

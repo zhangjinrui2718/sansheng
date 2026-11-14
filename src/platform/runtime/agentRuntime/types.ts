@@ -43,6 +43,11 @@ export interface RuntimeSession<E extends RuntimeSessionEventBase = RuntimeSessi
   abort(): Promise<void>;
   /** 释放(池化清理时调用;模型与扩展的资源一并释放)。 */
   dispose(): void | Promise<void>;
+  /**
+   * 可选诊断面:「声明工具面 vs 运行时激活面」的对账(冒烟命令用)。
+   * 适配器可不实现 —— 它不是任何链路的一环。
+   */
+  getActiveToolNames?: () => readonly string[];
 }
 
 /**
@@ -68,3 +73,31 @@ export interface RuntimeSessionRequest {
 export type RuntimeSessionFactory<E extends RuntimeSessionEventBase = RuntimeSessionEventBase> = (
   req: RuntimeSessionRequest,
 ) => Promise<RuntimeSession<E>>;
+
+// ── 事件词表(A2,2026-11-14)───────────────────────────────────
+//
+// 平台自己的运行时事件词:runTurn **只认这一份**,不再出现任何具体运行时的
+// 事件类型。翻译在适配器里做(pi: `pi/events.ts` 的 `normalizeSessionEvent`,
+// 未消费的方言事件在那里被丢弃 —— 丢弃是适配器的决定,不是平台的猜测)。
+//
+// ⚠️ 两条刻意的「不翻译」:
+//   · `message_end.message` 保持 `unknown` —— usage/role/stopReason 的**值形状**
+//     容错读取(`usageSnapshotOf` 一系)是平台已有的判据,T1 教训:把字段名
+//     变成编译期断言,SDK 改名时我们会把账读成全零而毫无现场;
+//   · `tool_end.result` 保持适配器方言(工具结果的封套是适配器与运行时的
+//     工具协议;平台侧的结构化读取有局部窄化与注释)。
+export type RuntimeEvent =
+  | { type: "message_update"; deltaKind: "text" | "thinking" | "other"; delta?: unknown }
+  | { type: "message_end"; message: unknown }
+  | { type: "tool_start"; toolCallId: string; toolName: string; args: unknown }
+  | {
+      type: "tool_end";
+      toolCallId: string;
+      toolName: string;
+      result: unknown;
+      isError: unknown;
+    }
+  | { type: "auto_retry_start" }
+  | { type: "auto_retry_end" }
+  | { type: "agent_settled" }
+  | { type: "agent_end" };

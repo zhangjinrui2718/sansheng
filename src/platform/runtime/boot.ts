@@ -21,7 +21,7 @@
 import { join } from "node:path";
 import { Keyring } from "../infra/keyring.js";
 import { SettingsStore, type ProviderConfig, type Settings } from "../infra/settings.js";
-import { resolveModel, syncActiveProviderApiKeyEnv } from "../infra/providers.js";
+import { resolveModel, syncActiveProviderApiKeyEnv } from "./agentRuntime/pi/providers.js";
 import { openPlatformDb } from "../storage/db.js";
 import { SqliteMemory } from "../memory/sqliteMemory.js";
 import { createLoggingClientChannel } from "../client/port.js";

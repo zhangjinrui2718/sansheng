@@ -31,7 +31,7 @@ import { insertProject } from "../../src/platform/storage/repo/projects.js";
 import { insertWork } from "../../src/platform/storage/repo/works.js";
 import { getArtifact, insertArtifact } from "../../src/platform/storage/repo/artifacts.js";
 import { createGitWorkspace } from "../../src/platform/workspace/git.js";
-import { listProviders } from "../../src/platform/infra/providers.js";
+import { listProviders } from "../../src/platform/runtime/agentRuntime/pi/providers.js";
 import type { ServerEvent } from "../../shared/types/platform.js";
 
 // ── 夹具:一个只记录「拿到什么提示词 / 什么 cwd」的假会话 ──────────

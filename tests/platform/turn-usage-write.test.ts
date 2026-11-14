@@ -101,7 +101,7 @@ function fakeSession(
       };
       script(emit);
       if (opts.promptRejects !== undefined) throw opts.promptRejects;
-      emit({ type: "agent_settled" } as unknown as AgentSessionEvent);
+      emit({ type: "agent_settled" } as RuntimeEvent);
     },
     async abort() {},
     dispose() {},
@@ -154,7 +154,7 @@ const assistantMessage = (usage: RawUsage, model = "claude-sonnet-4-20250514") =
 });
 
 const msgStart = (usage: RawUsage, model?: string): AgentSessionEvent =>
-  ({ type: "message_start", message: assistantMessage(usage, model) }) as unknown as AgentSessionEvent;
+  ({ type: "message_start", message: assistantMessage(usage, model) }) as RuntimeEvent;
 const msgUpdate = (usage: RawUsage, delta: string, model?: string): AgentSessionEvent =>
   ({
     type: "message_update",
@@ -162,14 +162,14 @@ const msgUpdate = (usage: RawUsage, delta: string, model?: string): AgentSession
     // 真事件上 partial 也带同一份 usage(实测);这里一并复现,免得「读点挪到
     // message_update 也拿得到值」这种假象被漏掉。
     assistantMessageEvent: { type: "text_delta", delta, partial: assistantMessage(usage, model) },
-  }) as unknown as AgentSessionEvent;
+  }) as RuntimeEvent;
 const msgEnd = (usage: RawUsage, model?: string): AgentSessionEvent =>
-  ({ type: "message_end", message: assistantMessage(usage, model) }) as unknown as AgentSessionEvent;
+  ({ type: "message_end", message: assistantMessage(usage, model) }) as RuntimeEvent;
 /** 第二 / 第三次投递:**同一个对象**。 */
 const turnEnd = (usage: RawUsage): AgentSessionEvent =>
-  ({ type: "turn_end", turnIndex: 0, message: assistantMessage(usage), toolResults: [], messageEntryId: "e1", toolResultEntryIds: [] }) as unknown as AgentSessionEvent;
+  ({ type: "turn_end", turnIndex: 0, message: assistantMessage(usage), toolResults: [], messageEntryId: "e1", toolResultEntryIds: [] }) as RuntimeEvent;
 const agentEnd = (usage: RawUsage): AgentSessionEvent =>
-  ({ type: "agent_end", messages: [assistantMessage(usage)] }) as unknown as AgentSessionEvent;
+  ({ type: "agent_end", messages: [assistantMessage(usage)] }) as RuntimeEvent;
 
 // ── 读库小工具 ──────────────────────────────────────────────────
 
@@ -316,7 +316,7 @@ describe("T3 ★ 核心负样本 · 「事件时刻快照」与「回合结束�
   it("负样本:没有任何 usage 键的 assistant message_end **不记一笔 0**", async () => {
     await turn((emit) => {
       // provider 连 usage 键都没给(与「给了但全零」不同 —— 后者见下一条)
-      emit({ type: "message_end", message: { role: "assistant", model: "m" } } as unknown as AgentSessionEvent);
+      emit({ type: "message_end", message: { role: "assistant", model: "m" } } as RuntimeEvent);
     });
     expect(rows("p1")).toHaveLength(0);
   });

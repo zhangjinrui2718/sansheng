@@ -87,8 +87,7 @@
  * **同时累加两条会把同一份用量算两遍**。所以只认 `message_end` 一条,
  * 在回合结束时**求和写一行**(表是回合级的,见 `migrations/018`)。
  */
-import type { AgentSession, AgentSessionEvent } from "@earendil-works/pi-coding-agent";
-import type { AssistantMessage } from "@earendil-works/pi-ai";
+import type { RuntimeEvent, RuntimeSession } from "./agentRuntime/types.js";
 import { randomUUID } from "node:crypto";
 import { log } from "../../shared/log.js";
 import type Database from "better-sqlite3";
@@ -313,7 +312,7 @@ export interface TurnTimeoutScene {
 }
 
 export interface RunTurnOptions {
-  readonly session: AgentSession;
+  readonly session: RuntimeSession<RuntimeEvent>;
   readonly db: Database.Database;
   readonly agentId: string;
   /**
@@ -373,7 +372,7 @@ export interface RunTurnOptions {
    */
   readonly abortGraceMs?: number;
   /** 逐事件观察(调试/日志)。抛错会被吞掉,不影响回合 */
-  readonly onEvent?: (ev: AgentSessionEvent) => void;
+  readonly onEvent?: (ev: RuntimeEvent) => void;
   /**
    * **这条回合跑在哪条会话里**(`project_sessions.id`),写进 `turn_usage.session_id`。
    *
@@ -453,7 +452,7 @@ export const DEFAULT_ABORT_GRACE_MS = 15_000;
  *
  * 返回 `null` = 已经发出且没有失败(或还在收尾中)。
  */
-export async function requestSessionAbort(session: AgentSession): Promise<string | null> {
+export async function requestSessionAbort(session: RuntimeSession): Promise<string | null> {
   try {
     await session.abort();
     return null;
@@ -463,57 +462,6 @@ export async function requestSessionAbort(session: AgentSession): Promise<string
 }
 
 const delay = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
-
-/** 事件类型收窄 —— 避免为读字段而上宽断言。 */
-function isMessageUpdate(
-  ev: AgentSessionEvent,
-): ev is Extract<AgentSessionEvent, { type: "message_update" }> {
-  return ev.type === "message_update";
-}
-function isToolStart(
-  ev: AgentSessionEvent,
-): ev is Extract<AgentSessionEvent, { type: "tool_execution_start" }> {
-  return ev.type === "tool_execution_start";
-}
-function isToolEnd(
-  ev: AgentSessionEvent,
-): ev is Extract<AgentSessionEvent, { type: "tool_execution_end" }> {
-  return ev.type === "tool_execution_end";
-}
-
-/**
- * 把 `message_end` 里的消息收窄到 **assistant** 消息。
- *
- * ⚠️ **为什么需要它**:`message_end.message` 的类型是 `AgentMessage` = 四类消息的并集
- * (`system` / `user` / `assistant` / `tool_result`)。`stopReason` 与 `errorMessage`
- * **只存在于 assistant 消息**上 ⇒ 不收窄就读不出来。
- *
- * 判据用 `role === "assistant"` —— 那是四类消息各自的判别字段,不是猜的。
- *
- * ⚠️ 消息类型**从事件类型推出来**(`Extract<…>["message"]`),不从
- * `@earendil-works/pi-agent-core` 直接 import —— 那是 pi 的**传递依赖**,
- * 直接 import 它会把一个**没在 package.json 里声明**的包拉进依赖图。
- * (`@earendil-works/pi-ai` 不一样:它是三生的**直接依赖**,package.json 里
- * 列着,所以上面那行 `import type { AssistantMessage }` 是合法的。)
- */
-type MessageEndMessage = Extract<AgentSessionEvent, { type: "message_end" }>["message"];
-
-function isAssistantMessage(msg: MessageEndMessage): msg is AssistantMessage {
-  return msg.role === "assistant";
-}
-/**
- * 收窄到 `message_end`。
- *
- * ⚠️ **读点只有这一个,不许挪到 `message_start` / `message_update`**:
- * 那两处事件上的 usage 键**在、值全零**(T1 探针实测)。挪过去的表现不是
- * 「报错」,而是「每一行都是 0」—— `tests/platform/turn-usage-write.test.ts`
- * 里有一条变异验证钉着它(把读点改过去,那条测试必须红)。
- */
-function isMessageEnd(
-  ev: AgentSessionEvent,
-): ev is Extract<AgentSessionEvent, { type: "message_end" }> {
-  return ev.type === "message_end";
-}
 
 /**
  * usage 里的一个 token 数。
@@ -848,7 +796,13 @@ export async function runTurn(opts: RunTurnOptions): Promise<TurnResult> {
    */
   let textSinceLastTool = false;
 
-  const unsub = opts.session.subscribe((ev: AgentSessionEvent) => {
+  const unsub = opts.session.subscribe((ev: RuntimeEvent) => {
+    try {
+      process.stdout.write(`DEBUG_EV ${opts.agentId} ${JSON.stringify(ev).slice(0, 140)}\n`);
+      opts.onEvent?.(ev);
+    } catch (e) {
+      process.stdout.write(`DEBUG_EV_ERR ${opts.agentId} ${String(e)}\n`);
+    }
     try {
       opts.onEvent?.(ev);
     } catch {
@@ -856,15 +810,14 @@ export async function runTurn(opts: RunTurnOptions): Promise<TurnResult> {
       // 会污染语义,所以只保证不影响主流程。
     }
 
-    if (isMessageUpdate(ev)) {
-      const u = ev.assistantMessageEvent;
+    if (ev.type === "message_update") {
       // 7-I 的现场:thinking 增量曾被当成正文展示(判据写成了不存在的
       // "thinking")。这里**显式分开**,两者永不混流。
-      if (u.type === "text_delta" && typeof u.delta === "string") {
-        text.push(u.delta);
+      if (ev.deltaKind === "text" && typeof ev.delta === "string") {
+        text.push(ev.delta);
         textSinceLastTool = true;
-      } else if (u.type === "thinking_delta" && typeof u.delta === "string") {
-        thinking.push(u.delta);
+      } else if (ev.deltaKind === "thinking" && typeof ev.delta === "string") {
+        thinking.push(ev.delta);
       }
       return;
     }
@@ -877,20 +830,22 @@ export async function runTurn(opts: RunTurnOptions): Promise<TurnResult> {
     //
     // 这里读出来的是**值的快照**(`usageSnapshotOf` 只取三个数字),
     // 所以「事件时刻」这个前提是机器保证的,不依赖任何后来才读的引用。
-    if (isMessageEnd(ev)) {
+    if (ev.type === "message_end") {
       const snap = usageSnapshotOf(ev.message);
       if (snap !== null) usageCalls.push(snap);
       // ── provider 故障的**唯一**读点 ────────────────────────────
-      // `stopReason:"error"` + 非空 `errorMessage` = 这一条 assistant 消息
-      // 被 provider 拒绝了。分类判据在 `providerFailure.ts`(纯函数,单一真相),
-      // 这里**不许**自己再判一次「是不是限流」。
+      // assistant 消息上 `stopReason:"error"` + 非空 `errorMessage` =
+      // 这一条消息被 provider 拒绝了。分类判据在 `providerFailure.ts`
+      // (纯函数,单一真相),这里**不许**自己再判一次「是不是限流」。
+      // 结构化窄化(message: unknown —— 值形状容错,见 usageSnapshotOf)。
+      const m = ev.message as { role?: unknown; stopReason?: unknown; errorMessage?: unknown };
       if (
-        isAssistantMessage(ev.message) &&
-        ev.message.stopReason === "error" &&
-        typeof ev.message.errorMessage === "string" &&
-        ev.message.errorMessage.trim() !== ""
+        m.role === "assistant" &&
+        m.stopReason === "error" &&
+        typeof m.errorMessage === "string" &&
+        m.errorMessage.trim() !== ""
       ) {
-        providerError = classifyProviderFailure(ev.message.errorMessage);
+        providerError = classifyProviderFailure(m.errorMessage);
         logProviderFailure(`turn: ${opts.agentId} 的回合被 provider 拒绝`, providerError);
       }
       return;
@@ -907,7 +862,7 @@ export async function runTurn(opts: RunTurnOptions): Promise<TurnResult> {
       return;
     }
 
-    if (isToolStart(ev)) {
+    if (ev.type === "tool_start") {
       inflight.set(ev.toolCallId, {
         name: ev.toolName,
         startedAt: Date.now(),
@@ -916,7 +871,7 @@ export async function runTurn(opts: RunTurnOptions): Promise<TurnResult> {
       return;
     }
 
-    if (isToolEnd(ev)) {
+    if (ev.type === "tool_end") {
       const started = inflight.get(ev.toolCallId);
       toolCalls.push({
         name: ev.toolName,

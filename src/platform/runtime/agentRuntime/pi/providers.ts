@@ -27,7 +27,7 @@
  */
 import { getBuiltinModel, builtinProviders, getBuiltinModels, type BuiltinProvider } from "@earendil-works/pi-ai/providers/all";
 import type { Model } from "@earendil-works/pi-ai";
-import { log } from "../../shared/log.js";
+import { log } from "../../../../shared/log.js";
 
 function hasBaseUrl(m: Model<any>): m is Model<any> & { baseUrl?: string } {
   return !!m && typeof m === "object" && "baseUrl" in m;

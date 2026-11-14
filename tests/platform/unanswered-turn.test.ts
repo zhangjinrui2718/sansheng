@@ -74,13 +74,13 @@ function fakeSession(
 }
 
 const textDelta = (delta: string) =>
-  ({ type: "message_update", message: {}, assistantMessageEvent: { type: "text_delta", delta } }) as unknown as AgentSessionEvent;
+  ({ type: "message_update", message: {}, deltaKind: "text", delta }) as RuntimeEvent;
 const thinkDelta = (delta: string) =>
-  ({ type: "message_update", message: {}, assistantMessageEvent: { type: "thinking_delta", delta } }) as unknown as AgentSessionEvent;
+  ({ type: "message_update", message: {}, deltaKind: "thinking", delta }) as RuntimeEvent;
 const toolStart = (id: string, name: string, args: unknown) =>
-  ({ type: "tool_execution_start", toolCallId: id, toolName: name, args }) as unknown as AgentSessionEvent;
+  ({ type: "tool_start", toolCallId: id, toolName: name, args }) as RuntimeEvent;
 const toolEnd = (id: string, name: string, result: unknown) =>
-  ({ type: "tool_execution_end", toolCallId: id, toolName: name, result, isError: false }) as unknown as AgentSessionEvent;
+  ({ type: "tool_end", toolCallId: id, toolName: name, result, isError: false }) as RuntimeEvent;
 
 /**
  * 往库里写一句话。

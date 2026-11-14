@@ -92,8 +92,8 @@ const saidDone = (msg = "干完了") =>
   fakeSession(({ emit }) => {
     emit({
       type: "message_update", message: {},
-      assistantMessageEvent: { type: "text_delta", delta: msg },
-    } as unknown as AgentSessionEvent);
+      deltaKind: "text", delta: msg ,
+    } as RuntimeEvent);
   });
 
 async function run(workId: string, session: AgentSession): Promise<ExecutionResult> {
@@ -246,11 +246,10 @@ describe("runWorkItem · 产出与现场", () => {
   it("**带回工具调用现场**(7-N:见不到现场等于没有现场)", async () => {
     const w = mkWork();
     const r = await run(w.id, fakeSession(({ emit }) => {
-      emit({ type: "tool_execution_start", toolCallId: "c1", toolName: "board_write", args: { kind: "note" } } as unknown as AgentSessionEvent);
-      emit({
-        type: "tool_execution_end", toolCallId: "c1", toolName: "board_write",
+      emit({ type: "tool_start", toolCallId: "c1", toolName: "board_write", args: { kind: "note" } } as RuntimeEvent);
+      emit({ type: "tool_end", toolCallId: "c1", toolName: "board_write",
         result: { content: [{ type: "text", text: "已写工件" }], details: { ok: true } }, isError: false,
-      } as unknown as AgentSessionEvent);
+      } as RuntimeEvent);
     }));
     expect(r.turn.toolCalls).toHaveLength(1);
     expect(r.turn.toolCalls[0]!.name).toBe("board_write");
@@ -407,10 +406,9 @@ describe("runWorkItem · 墙钟超时后的处置(不静默、留现场)", () =>
   it("打断瞬间正在跑的工具进现场(事后分得清「原地打转」与「真在跑长活」)", async () => {
     const w = mkWork();
     const s = hangingSession(({ emit }) => {
-      emit({
-        type: "tool_execution_start", toolCallId: "c1", toolName: "bash",
+      emit({ type: "tool_start", toolCallId: "c1", toolName: "bash",
         args: { command: "curl https://help.aliyun.com/document_detail/..." },
-      } as unknown as AgentSessionEvent);
+      } as RuntimeEvent);
     });
     const r = await runWithWallClock(w.id, s.session);
     expect(r.turn.timeout?.interruptedTool?.name).toBe("bash");
@@ -438,10 +436,9 @@ describe("runWorkItem · 墙钟超时后的处置(不静默、留现场)", () =>
   it("报告写清「上界 / 打断 / 处置」—— 不静默(7-N)", async () => {
     const w = mkWork();
     const s = hangingSession(({ emit }) => {
-      emit({
-        type: "tool_execution_start", toolCallId: "c1", toolName: "bash",
+      emit({ type: "tool_start", toolCallId: "c1", toolName: "bash",
         args: { command: "curl 文档" },
-      } as unknown as AgentSessionEvent);
+      } as RuntimeEvent);
     });
     const rep = renderExecutionReport(await runWithWallClock(w.id, s.session));
     expect(rep).toContain("墙钟上界");
@@ -575,7 +572,7 @@ const usageEnd = (input: number, output: number, cacheRead: number) =>
         cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
       },
     },
-  }) as unknown as AgentSessionEvent;
+  }) as RuntimeEvent;
 
 describe("runWorkItem · 用量落库归属", () => {
   it("★ `workId` 透传进 `runTurn` ⇒ `turn_usage.work_id` 不是 NULL", async () => {

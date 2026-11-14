@@ -20,7 +20,7 @@ import { insertProject, addMember } from "../../src/platform/storage/repo/projec
 import { mcpDir, serversPath } from "../../src/platform/mcp/config.js";
 import { mcpForDataDir } from "../../src/platform/mcp/grants.js";
 import { solveMcpFor, mcpPattern } from "../../src/platform/mcp/solve.js";
-import { toLoadedMcpConfig } from "../../src/platform/mcp/piConfig.js";
+import { toLoadedMcpConfig } from "../../src/platform/runtime/agentRuntime/pi/mcpConfig.js";
 import { solveToolset, type Agent, type Project } from "../../src/platform/harness/authorize.js";
 import { ROLE_SPECS } from "../../src/platform/identity/role.js";
 import { dispatch } from "../../src/platform/tools/registry.js";

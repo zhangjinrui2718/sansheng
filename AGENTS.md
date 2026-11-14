@@ -88,6 +88,11 @@ src/platform/transport/  传输:http(API)/ hub(WS 广播)/ views
 src/platform/runtime/    boot session turn execution assembly promptAssembly pendingWork
                          projectContext dispatcher org sdkAdapter rework
                          (rework.ts = 「退回给谁」的判据,质检返工与甲方拒收共用)
+src/platform/runtime/agentRuntime/  AgentRuntime 端口(types.ts:RuntimeSession /
+                         RuntimeEvent / RuntimeSessionFactory)+ `pi/` 适配器
+                         (session 工厂 / events 翻译 / toolsAdapter / mcpConfig /
+                         providers)—— 换运行时 = 在这里加一个适配器目录(见下
+                         「AgentRuntime 端口」一节)
 src/platform/tools/      工具层:14 个文件、41 个平台工具定义 + registry.ts 的 dispatch()
 src/platform/mcp/        MCP:server 目录 / secret 存储 / 角色授权 / 求解 / pi 配置转换(见下「MCP」一节)
 src/platform/codeservice/ 代码服务:port.ts(端口)+ git.ts(真实现,盘上核对仓库)
@@ -1704,6 +1709,48 @@ npm run check:design      # 设计一致性 E1–E14
 - **角色**:communicator / planner / executor / critic / harness_manager / memory / reflection;以及 **`worker`**(2026-10-08 已一分为二,见「五个角色」)。
 - **机制**:`ROLE_CEILING` / `FACTORY_SETS` / `LEGACY_TOOL_SETS` / `enabledTools` / `MessageBus` / `BlackboardScope` / `orchestrator` / `kernel` / `completeSimple` / `toolLoop` / `PI_OFFLINE` / `blackboards` 表 / `fragments_vec`。
 - 这些名字在 `src/` 里**只剩注释里的历史说明**,没有任何活代码。看到它们说明你在读注释,不是接口。
+
+## AgentRuntime 端口:运行时可替换(2026-11-13/14 · Wave A)
+
+**用户原话**:「我希望这个 harness 是一整套,未来比如现在用的是 pi,未来换 DS、
+换 Coze 或者换其他的什么,都能快速做适配。」
+
+### 现状(A1+A2 已落地)
+
+pi 的耦合已**全部收编**进 `src/platform/runtime/agentRuntime/pi/` 五个文件
+(session 工厂与 4 个内部坑 / events 翻译 / toolsAdapter 工具壳 / mcpConfig /
+providers),全仓 grep `@earendil-works` 在 `src/` 里**只命中这个目录**
+(`tools/briefs.ts` 一句注释除外)。端口 = `agentRuntime/types.ts`
+(`RuntimeSession` / `RuntimeEvent` / `RuntimeSessionFactory`),**禁止 import
+任何具体运行时**。
+
+- **turn.ts / execution.ts / serve.ts 只认 `RuntimeEvent`**(平台自己的事件词表:
+  text/thinking delta、message_end、tool_start/end、agent_settled/agent_end、
+  auto_retry_*)。pi 方言的翻译在 `pi/events.ts`(`normalizeSessionEvent`)——
+  它是**全仓唯一**读 pi 事件形状的地方;未消费的方言事件在适配器里丢弃。
+- **宽容读取**:`message_end.message` / `tool_end.result` 保持 unknown,
+  值形状容错读法(T1 教训:字段名不进编译期断言);翻译器对裸事件不抛
+  (归 other)。
+- **DI 缝的方言约定**:`ServeOptions.createSession`(测试注入缝)说的是
+  **pi 方言**(返回 `AgentSession`)—— 因为它替换的是 pi 工厂本身;
+  `createPlatformSession` 在出口统一 `wrapPiSession` 翻译。⇒ 宿主级测试的
+  假会话**继续说 pi 方言**(夹具不用改),直调 runTurn 的测试说 RuntimeEvent。
+- **A2 的教训(差点冤枉夹具)**:换词后 8 个宿主测试红,根因不是夹具,是
+  **包装器把宿主注入的 RuntimeEvent 方言事件当 pi 方言二次翻译**——
+  裸 `message_update` 让翻译器读了 `assistantMessageEvent.type` 抛错。
+  修法 = 翻译器宽容读取 + 宿主夹具保持 pi 方言;插桩(DEBUG_EV/EMIT/SUB)
+  一上,时序与方言立刻现形。⚠️ 插桩要写 `process.stdout.write`
+  (console.log 会被测试的 spy 吞掉)。
+
+### 还没做的(如实记)
+
+- **模型目录仍来自 pi-ai**(`pi/providers.ts` 的 `resolveModel` /
+  `builtinProviders`):换运行时 = 新适配器自带目录;平台自建 model registry
+  (顺带消灭 `scripts/patch-model-catalog.mjs` 这笔 postinstall 债)是 B 波,
+  未做。
+- **`thinkingLevel` 仍是「存了没接线」**(settings 里有、没传给会话)。
+- **`pi/providers.ts` / `mcpConfig.ts` 的 provider id 闭合集** = pi-ai 的
+  builtinProviders —— 新运行时若无同名录,要做 id 映射。
 
 ## 历史文档(读之前先知道它描述的是什么)
 

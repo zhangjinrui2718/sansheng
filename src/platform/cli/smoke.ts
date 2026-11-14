@@ -29,17 +29,14 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type {
-  AgentSession,
-  AgentSessionEvent,
-} from "@earendil-works/pi-coding-agent";
 import { bootPlatform } from "../runtime/boot.js";
 import { createPlatformSession } from "../runtime/agentRuntime/pi/session.js";
+import type { RuntimeEvent, RuntimeSession } from "../runtime/agentRuntime/types.js";
 import { planAgentSession } from "../runtime/assembly.js";
 import { insertAgent } from "../storage/repo/agents.js";
 import { insertProject, addMember } from "../storage/repo/projects.js";
 import { ROLE_SPECS, PROJECT_ROLES, type ProjectRole, type Specialization } from "../identity/role.js";
-import { describeMcpSolution } from "../mcp/piConfig.js";
+import { describeMcpSolution } from "../runtime/agentRuntime/pi/mcpConfig.js";
 
 export interface PlatformSmokeOptions {
   /** 真实数据目录(读 provider 配置) */
@@ -248,10 +245,10 @@ function seedDemoData(booted: ReturnType<typeof bootPlatform>): void {
 /**
  * 读 SDK 实际激活的工具名。
  *
- * `getActiveToolNames()` 是 AgentSession 的公开方法 —— 它比我们自己的记账可信,
+ * `getActiveToolNames()` 是 RuntimeSession 的公开方法 —— 它比我们自己的记账可信,
  * 因为它反映的是 **isAllowedTool 过滤之后**真正挂上去的东西。
  */
-function readActiveTools(session: AgentSession): string[] | null {
+function readActiveTools(session: RuntimeSession): string[] | null {
   const fn = (session as { getActiveToolNames?: unknown }).getActiveToolNames;
   if (typeof fn !== "function") return null;
   const names: unknown = (fn as () => unknown).call(session);
@@ -260,15 +257,15 @@ function readActiveTools(session: AgentSession): string[] | null {
 
 /** `message_update` 事件收窄 —— 避免为了读一个 delta 就上宽断言。 */
 function isMessageUpdate(
-  ev: AgentSessionEvent,
-): ev is Extract<AgentSessionEvent, { type: "message_update" }> {
+  ev: RuntimeEvent,
+): ev is Extract<RuntimeEvent, { type: "message_update" }> {
   return ev.type === "message_update";
 }
 
 /**
  * 给 session 发一句话并收齐助手文本。
  *
- * 用 `subscribe` 收流式事件 —— AgentSession 的形态就是事件流。
+ * 用 `subscribe` 收流式事件 —— RuntimeSession 的形态就是事件流。
  *
  * **只认 `text_delta`**:7-I 的现场是「thinking 增量全掉进 textDeltas,最终被当成
  * 正式回复展示给用户」(会话 conv_murnhpls_oha6,12 条消息 thinking 列长度全 0
@@ -277,17 +274,17 @@ function isMessageUpdate(
  * 这里显式排除它。
  */
 async function askAndCollect(
-  session: AgentSession,
+  session: RuntimeSession<RuntimeEvent>,
   prompt: string,
   timeoutMs: number,
 ): Promise<string> {
   const chunks: string[] = [];
   let settled = false;
 
-  const unsub = session.subscribe((ev: AgentSessionEvent) => {
-    if (isMessageUpdate(ev)) {
-      const u = ev.assistantMessageEvent;
-      if (u.type === "text_delta" && typeof u.delta === "string") chunks.push(u.delta);
+  const unsub = session.subscribe((ev: RuntimeEvent) => {
+    if (ev.type === "message_update") {
+      // **只认 text 增量**(7-I:thinking 曾混进正文)。
+      if (ev.deltaKind === "text" && typeof ev.delta === "string") chunks.push(ev.delta);
       return;
     }
     if (ev.type === "agent_settled" || ev.type === "agent_end") settled = true;

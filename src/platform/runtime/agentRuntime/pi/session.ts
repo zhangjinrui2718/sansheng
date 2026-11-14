@@ -33,7 +33,8 @@ import {
   type ResourceLoader,
 } from "@earendil-works/pi-coding-agent";
 import type { Model } from "@earendil-works/pi-ai";
-import type { RuntimeSession, RuntimeSessionEventBase } from "../types.js";
+import type { RuntimeSession, RuntimeSessionEventBase, RuntimeEvent } from "../types.js";
+import { normalizeSessionEvent } from "./events.js";
 
 /**
  * 平台侧的模型类型别名。**只在这一处定义。**
@@ -53,7 +54,7 @@ import {
 import { classifyToolset, toSdkTools } from "./toolsAdapter.js";
 import { composeSystemPrompt } from "../../promptAssembly.js";
 import { dispatch } from "../../../tools/registry.js";
-import { toLoadedMcpConfig } from "../../../mcp/piConfig.js";
+import { toLoadedMcpConfig } from "./mcpConfig.js";
 import { log } from "../../../../shared/log.js";
 
 /**
@@ -81,6 +82,27 @@ function isBindableSession(s: unknown): s is AgentSession & BindableSession {
 }
 
 /** `createAgentSession` 的最小结构类型 —— 只声明我们用到的字段,便于注入假货。 */
+/**
+ * 把 pi 的裸会话包成端口的 `RuntimeSession<RuntimeEvent>`(A2):subscribe 在
+ * **边界上翻译**事件方言(`normalizeSessionEvent`),平台侧从此只见 RuntimeEvent。
+ * `getActiveToolNames` 是 pi 特有的诊断面(冒烟命令的声明面/激活面对账用),
+ * 作为可选旁路暴露 —— 不进端口。
+ */
+export function wrapPiSession(pi: AgentSession): RuntimeSession<RuntimeEvent> {
+  return {
+    subscribe(fn: (ev: RuntimeEvent) => void): () => void {
+      return pi.subscribe((ev: AgentSessionEvent) => {
+        const r = normalizeSessionEvent(ev);
+        if (r !== null) fn(r);
+      });
+    },
+    prompt: (input: unknown) => pi.prompt(input as never),
+    abort: () => pi.abort(),
+    dispose: () => pi.dispose(),
+    getActiveToolNames: () => pi.getActiveToolNames(),
+  };
+}
+
 export interface CreateSessionFn {
   (opts: {
     cwd?: string;
@@ -125,7 +147,7 @@ export type PlatformSessionFailure =
 export type PlatformSessionResult =
   | {
       readonly ok: true;
-      readonly session: AgentSession;
+      readonly session: RuntimeSession<RuntimeEvent>;
       /** 规划结果 —— 诊断/审计要它(算出了什么、挡下了什么) */
       readonly plan: AgentSessionPlan;
       /** 实际交给 SDK 的两条通道(测试与诊断断言这个) */
@@ -328,9 +350,10 @@ export async function createPlatformSession(
 
   const grantedServers = plan.mcp.servers.filter((s) => s.granted).map((s) => s.name);
 
+  // 6. 包成端口会话:事件方言在边界上翻译(A2),平台侧只见 RuntimeEvent。
   return {
     ok: true,
-    session: created.session,
+    session: wrapPiSession(created.session),
     plan,
     wiring: {
       allowlist: [...split.unifiedAllowlist],
