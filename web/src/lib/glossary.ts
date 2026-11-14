@@ -53,6 +53,7 @@ export type GlossaryId =
   | "artifact.drift"
   | "work.artifacts"
   | "harness.gates"
+  | "harness.toolset"
   | "client-question.closed"
   | "settings.workdir"
   | "code-service.ignored"
@@ -205,6 +206,11 @@ export const GLOSSARY: Record<GlossaryId, GlossaryEntry> = {
     line: "三道门,只减不增",
     basis: "harness/authorize.ts 的 solveToolset(求解期)与 authorizeCall(调用期)",
     source: "ROLE_SPECS[].ceiling ∧ harness/tools/{role}.json ∧ 执行点",
+  },
+  "harness.toolset": {
+    line: "集合文件由人直接编辑",
+    basis: "transport/http.ts 的 harness 段:集合文件本批无写面;harness/toolSet.ts 读盘收窄",
+    source: "GET /api/harness 的 toolSet 与 strayToolSetFiles",
   },
   "client-question.closed": {
     line: "已收口项目的提问,不再等",

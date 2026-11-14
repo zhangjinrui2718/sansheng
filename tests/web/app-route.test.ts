@@ -31,9 +31,13 @@ describe("parseHash — 地址 → 状态", () => {
     expect(parseHash("#/")).toEqual({ route: "chat", params: {} });
   });
 
-  it("六个页签 + 关于都能解析(闭合集合与 ROUTES 同源)", () => {
+  it("六个页签 + 关于 + harness 管理都能解析(闭合集合与 ROUTES 同源)", () => {
     for (const r of ROUTES) expect(parseHash(`#/${r}`).route).toBe(r);
-    expect(ROUTES).toHaveLength(7); // 6 个页签 + about(? 打开),不是 7 个页签
+    // 2026-11-14:7 → 8。「harness」回场,但**没有页签**(导航恒 6 项的用户裁决
+    // 不变):它是一个跨角色的管理一屏(`routes/HarnessManage.tsx`),入口在成员页
+    // harness 卡的 aside 链接上;地址要能解析才能被分享(TopBar 的 TABS 里没有它,
+    // 哨兵在 tests/web/harness-manage.test.ts)。
+    expect(ROUTES).toHaveLength(8); // 6 个页签 + about(? 打开)+ harness(无页签)
   });
 
   it("查询串进 params,且已解码", () => {

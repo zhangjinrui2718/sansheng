@@ -30,6 +30,11 @@
  *  3. **所有请求经 `lib/api.ts`**:`/api/config` 与 `/api/health` 也不再裸 fetch。
  *  4. 项目列表的加载收在这里(所有路由都挂着)并按 `projectsRevision` 重拉,
  *     各页面只读 store,不各自拉一份。
+ *  5. **「Harness 管理」回场(2026-11-14)但仍然没有页签** —— 它是一个跨角色的
+ *     管理一屏(`routes/HarnessManage.tsx`:左列 5 角色 + 右列三段),入口在成员页
+ *     的 harness 卡上(`RoleHarnessDisclosure` 的 aside 链接,带当前角色参数)。
+ *     与 2026-10-06 删掉的顶层「Harness 站」不是一回事:那一刀删的是「平级的一站 +
+ *     一行角色页签」,导航恒 6 项的用户裁决不变;这次只加一条**可分享的地址**。
  */
 import { useEffect, useState } from "react";
 import type { ReactNode } from "react";
@@ -44,6 +49,7 @@ import { WorksPage } from "./routes/Works";
 import { MembersPage } from "./routes/Members";
 import { MemoryPage } from "./routes/Memory";
 import { AboutPage } from "./routes/About";
+import { HarnessManagePage } from "./routes/HarnessManage";
 import { useSettingsStore, activeProviderOf } from "./stores/settings";
 import { useChatStore } from "./stores/chat";
 import { initAppSocket } from "./lib/appSocket";
@@ -174,6 +180,8 @@ export function App() {
         page(<MembersPage />)
       ) : route === "about" ? (
         <AboutPage />
+      ) : route === "harness" ? (
+        page(<HarnessManagePage />)
       ) : route === "memory" ? (
         page(<MemoryPage />)
       ) : (

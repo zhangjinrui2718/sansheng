@@ -77,8 +77,24 @@ const BASELINE: Record<string, number> = {
   "components/deliverable/DeliveryVerdictActions.tsx": 276,
   "components/deliverable/HtmlReport.tsx": 113,
   "components/members/AgentConversations.tsx": 256,
-  "components/members/RoleHarness.tsx": 1051,
+  // 2026-11-14:1051 → 332。编辑器 / 纯判据 / 告警与工具面段落 / 有状态工作台
+  // 搬去 `components/harness/`(那边逐文件登记),本文件只剩成员页那张卡的形状
+  // 与入口链接 —— 是搬家,不是删文案。
+  "components/members/RoleHarness.tsx": 332,
   "components/members/ToolTable.tsx": 84,
+  // ── 2026-11-14:「Harness 管理」(routes/HarnessManage.tsx)把可复用件抽成
+  //    components/harness/ 四份 —— 逐文件登记:
+  //    judgments 144(纯判据,大部分是从 RoleHarness 搬来的措辞)+ PromptUnitEditor
+  //    395(编辑器,逐字搬来)+ Blocks 265(告警 / 工具面 / 常量,逐字搬来;
+  //    净新增的是「路径 / allow / deny」三行与「直接编辑文件」一句 —— 旧版这些
+  //    信息在悬停里,现在摆上看得见的地方)+ 工作台 0。
+  "components/harness/Blocks.tsx": 265,
+  "components/harness/PromptUnitEditor.tsx": 395,
+  "components/harness/judgments.ts": 144,
+  "components/harness/useHarnessWorkspace.ts": 0,
+  //    HarnessManage 139:新页面的屏上字数(段落标题 / 全局状态 / 左列与三段骨架;
+  //    状态词全部来自共享判据,这里没有第二套)。四项合计 +245 = 总量基线的增量。
+  "routes/HarnessManage.tsx": 139,
   "components/relations/RelationsRail.tsx": 9,
   // 2026-11-13:供应商切换历史折叠段(343 → 397,+54,逐项斟酌过:摘要 9 +
   // 空态 17 + kind 标签 8 + `what` 4 + 「审计聚合,非结构化遥测」一句 16)。
@@ -141,8 +157,11 @@ describe("可见文字预算:屏上的中文只许减不许增", () => {
       }
     }
     expect(over.join("\n")).toBe("");
-    // 2026-11-13:9,270 → 9,324(+54,供应商切换历史折叠段;明细见 BASELINE 那条)
-    expect(total).toBeLessThanOrEqual(9346);
+    // 2026-11-13:9,270 → 9,346(+76,供应商切换历史折叠段;明细见 BASELINE 那条)
+    // 2026-11-14:9,346 → 9,591(+245,全部来自「Harness 管理」:新页面 +139,
+    // 共享 ToolSurface 把旧悬停里的路径 / allow / deny 摆上看得见的地方 +106;
+    // 其余都是搬家(RoleHarness −719 在四个新文件里原样记账),明细见 BASELINE)
+    expect(total).toBeLessThanOrEqual(9591);
   });
 
   it("② 基线表覆盖所有文件(不许有文件悄悄逃出仪器)", () => {

@@ -40,7 +40,12 @@ export type Route =
   | "settings"
   /* 「关于」不是第七个页签(导航恒 6 项,见 `TopBar` 的 `TABS`)—— 它由顶栏末尾
      那个 `?` 打开:一块说明书不该和六个工作区抢位置。 */
-  | "about";
+  | "about"
+  /* 「Harness 管理」同样**没有页签**(2026-11-14 回场,不是翻 2026-10-06 那笔账:
+     那一笔删的是「顶层平级的一站 + 一行角色页签」,用户裁决仍然成立)。它是一个
+     跨角色的管理一屏(`routes/HarnessManage.tsx`),入口在成员页的 harness 卡上
+     (`RoleHarnessDisclosure` 的 aside 链接),深链接 `#/harness?role=…` 可分享。 */
+  | "harness";
 
 /** 闭合集合 —— 解析与序列化共用,写错一个值 tsc 会报。 */
 export const ROUTES: readonly Route[] = [
@@ -51,6 +56,7 @@ export const ROUTES: readonly Route[] = [
   "memory",
   "settings",
   "about",
+  "harness",
 ];
 
 export interface AppLocation {

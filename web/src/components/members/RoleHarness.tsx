@@ -20,7 +20,7 @@
  *     正是用户一直在让我清理的重复。「一次只渲染一个角色」这条判据因此**改由
  *     成员页签承担**,断言在 `tests/web/members-activity.test.ts` 里。
  *   - **保留并导出**:`HarnessRolePane`(它现在就是**某个角色的 harness 面板**
- *     本身 —— 一次只画一个角色)、`roleIssueCount`(四类需要注意的处数之和,
+ *     本体 —— 一次只画一个角色)、`roleIssueCount`(四类需要注意的处数之和,
  *     现在挂在**成员页签**的告警角标上)、`sharedUnitOwners`(跨角色算「共用于
  *     N 个角色」)、`failureOf` / `OpState`(保存与恢复的失败读数)。
  *   - **新增 `RoleHarnessSection`** —— 自足的、有状态的那一层:它自己取整份
@@ -116,157 +116,66 @@
  *     换成三列表格 —— 类型(能力的中文分组)/ 名称 / 作用(工具注册表里写给模型的
  *     原文说明)。数据来自 `RoleHarnessView.toolBriefs`(`tools/briefs.ts` 转写),
  *     **前端不另写一张中文名表** —— 那会得到第二份会漂开的「这个工具是干嘛的」。
+ *
+ * ── 2026-11-14:抽出共享层 +「Harness 管理」页回场 ────────────────────
+ *
+ * 跨角色的「Harness 管理」页(`routes/HarnessManage.tsx`,**路由有、页签没有**
+ * —— 导航恒 6 项)与成员页这张卡要的是**同一批事实与同一个编辑器**。所以可复用件
+ * 抽到 `components/harness/` 下,**本文件改为引用同一份**(不是抄一份):
+ *
+ *   - `harness/judgments.ts` —— 纯判据(`roleIssueCount` / `sharedUnitOwners` /
+ *     `harnessStatusText` / `toolCountText` / `toolSetStateDetail` / `OpState` /
+ *     `failureOf`),本文件 re-export 它们以保住老 import 路径;
+ *   - `harness/PromptUnitEditor.tsx` —— 编辑器(500 字预览 / 编辑区 / 两段式确认);
+ *   - `harness/Blocks.tsx` —— 告警(`MissingUnitsAlert` / `ToolSetAlerts`)、
+ *     工具面(`ToolSurface`)与代码内常量(`RoleConstants`)三段;
+ *   - `harness/useHarnessWorkspace.ts` —— `RoleHarnessSection` 的有状态层
+ *     (取整份视图 + 草稿 + 备份数 + 回读值入口)。
+ *
+ * 本文件留下的只有**这个页面的形状**:卡片头(标题 + 角色名 + 告警 Pill + 状态
+ * 摘要 + 默认折叠的配置)与 `embedded` 规矩 —— 那是成员页这张卡的判据,判据在
+ * `tests/web/harness-by-role.test.ts`。卡片头新增一个**入口链接**(真 `<a href>`,
+ * 带当前角色参数)指向管理页;入口链接是导航,不是数据,所以不取数也在。
  */
-import { useCallback, useEffect, useMemo, useState } from "react";
-import type {
-  HarnessView, ProjectRole, PromptUnitView, RoleHarnessView,
-} from "@shared/types/platform";
-import {
-  Disclosure,
-  EmptyState,
-  Flag,
-  KV,
-  Pill,
-  RedInline,
-  RedMeta,
-  Section,
-} from "@/components/ui/primitives";
-import { ToolTable } from "@/components/members/ToolTable";
-import { Help } from "@/components/ui/Help";
-import {
-  ApiError,
-  errorMessage,
-  getHarness,
-  listPromptUnitBackups,
-  resetPromptUnit,
-  updatePromptUnit,
-} from "@/lib/api";
-import { ROLE_LABEL } from "@/lib/vocab";
+import { useMemo } from "react";
+import type { HarnessView, ProjectRole, RoleHarnessView } from "@shared/types/platform";
+import { Disclosure, EmptyState, Flag, Pill, Section } from "@/components/ui/primitives";
 import { DataState, remoteOf } from "@/components/ui/DataState";
+import {
+  MissingUnitsAlert,
+  RoleConstants,
+  ToolSetAlerts,
+  ToolSurface,
+} from "@/components/harness/Blocks";
+import { PromptUnitEditor } from "@/components/harness/PromptUnitEditor";
+import {
+  harnessStatusText,
+  missingUnits,
+  roleIssueCount,
+  sharedUnitOwners,
+  toolSetStateDetail,
+} from "@/components/harness/judgments";
+import { useHarnessWorkspace } from "@/components/harness/useHarnessWorkspace";
+import { ROLE_LABEL } from "@/lib/vocab";
+import { toHash, toRoute } from "@/lib/route";
 
-/**
- * 提示词单元默认画多少个字(超过就只给前这么多,由「展开全部」补全)。
- *
- * 用户点名的数字(原话:「可以截断前 500 个字」)。**按字数**而不是按行数:
- * 旧形状的 `Clamp lines={2}` 在不同窗口宽度下截掉的内容不一样,而「截掉的是哪一截」
- * 正是用户判断要不要展开的唯一依据。
- */
-export const UNIT_PREVIEW_CHARS = 500;
-
-/** 一次保存 / 恢复的结果。`failed` 带上 `validIds` —— 后端在 `unknown_unit` 时给。 */
-export type OpState =
-  | { kind: "idle" }
-  | { kind: "busy"; what: "save" | "reset" }
-  | { kind: "ok"; text: string }
-  | { kind: "failed"; message: string; validIds?: string[] };
-
-export function failureOf(e: unknown): OpState {
-  const message = errorMessage(e);
-  if (e instanceof ApiError) {
-    return {
-      kind: "failed",
-      message: `${e.code}: ${message}`,
-      ...(e.validIds !== undefined ? { validIds: e.validIds } : {}),
-    };
-  }
-  return { kind: "failed", message };
-}
-
-/**
- * 每个单元被**哪些角色**声明(显示名)。
- *
- * 为什么要它:同一个文件被多个角色声明是**正常**的(`ROLE_SPECS[].promptUnits`
- * 里 `collaboration.ask` 3 处、`collaboration.convene` 2 处),但页面上它会在
- * 每个角色的面板里各出现一次、长得跟「三份不同的文件」一样。标注出来之后:
- * 「我改的是那个共用文件,会影响这几个角色」是**看得见**的。
- *
- * ⚠️ 它要的是**整份** harness 视图(所有角色),不是当前这一个角色 ——
- * 只拿着一个角色算不出「共用于几个角色」。
- */
-export function sharedUnitOwners(
-  roles: readonly RoleHarnessView[],
-): Map<string, string[]> {
-  const owners = new Map<string, string[]>();
-  for (const r of roles) {
-    for (const u of r.promptUnits) {
-      const cur = owners.get(u.id);
-      if (cur === undefined) owners.set(u.id, [r.displayName]);
-      else if (!cur.includes(r.displayName)) cur.push(r.displayName);
-    }
-  }
-  return owners;
-}
-
-/** 一个角色身上**需要注意**的处数(成员页签上的告警角标)。四类互不重叠,直接相加。 */
-export function roleIssueCount(role: RoleHarnessView): number {
-  return (
-    role.promptUnits.filter((u) => !u.loaded).length +
-    (role.toolSet.state === "invalid" ? 1 : 0) +
-    role.blockedByCeiling.length +
-    role.unknownTools.length
-  );
-}
-
-/**
- * 集合文件状态的三种读法。**卡片头与面板摘要行共用同一处实现** —— 两个地方各写
- * 一份的话,「文件无效」在某一边被漏掉时不会有任何东西红。
- */
-function toolSetStateLabel(state: RoleHarnessView["toolSet"]["state"]): string {
-  return state === "ok"
-    ? "生效中"
-    : state === "absent"
-      ? "无文件 · 按 ceiling 全集(出厂行为)"
-      : "文件无效 · 已退化成 ceiling 全集";
-}
-
-/**
- * 「角色 harness」那张卡**卡片头**上一行状态摘要的正文。
- *
- * 为什么要抽成一个纯函数:它是**折叠状态下唯一能读到的判据**(用户要的正是
- * 「不展开就知道这个角色正不正常」),因此必须能被测试直接断言;抽出来也保证
- * 「求解不了(组织未播种)≠ 0 个」这条判据只有**一处**实现,不会与面板里的
- * 摘要行分叉。
- *
- * ⚠️ `toolsSolved === false` 的措辞是「求解不了(组织未播种)」,不是「0 个」——
- * 前者是「算不出来」(库里连这个角色的 agent 行都没有),后者是「一个都没有」。
- * 判据是 `=== false` 而不是 `!toolsSolved`:字段缺失(前端比后端新)必须退化回
- * 显示计数,否则会把「旧后端没这个字段」误报成「组织未播种」。
- */
-export function harnessStatusText(role: RoleHarnessView): string {
-  const loaded = role.promptUnits.filter((u) => u.loaded).length;
-  return (
-    `单元 ${loaded}/${role.promptUnits.length} 已加载 · ` +
-    `能力 ${role.ceiling.length} 项 · ` +
-    (role.toolsSolved !== false
-      ? `实得工具 ${role.tools.length} 个`
-      : "实得工具 求解不了(组织未播种)") +
-    ` · 集合文件 ${toolSetStateLabel(role.toolSet.state)}`
-  );
-}
-
-/**
- * ④ 块里「实得工具」那一行的正文。三态与摘要行(`harnessStatusText`)**同一套判据**,
- * 不在这里另立一套:
- *
- *   `toolsSolved === false`  = **算不出来**(库里连这个角色的 agent 行都没有);
- *   求解过了且 `tools.length === 0` = **真的是 0 个**(接待阶段的合法形状);
- *   其余 = 计数。
- *
- * ⚠️ 前两种在屏幕上**不许长成一个样**:0 是一个事实,「算不出来」是一个缺口。
- * 本项目的真机现场就是这两件事长得一模一样(2026-10-05,见 `harnessStatusText`)。
- */
-function toolCountText(role: RoleHarnessView): string {
-  if (role.toolsSolved === false) return "求解不了(组织未播种)";
-  if (role.tools.length === 0) return "0 个(过完三道门确实一个都没有)";
-  return `${role.tools.length} 个`;
-}
-
-/**
- * ⚠️ 卡片头上那段解释**已从悬停改成 `?`**(`helpId="harness.card"`,正文在
- * `lib/glossary.ts`)。原来那句 `HARNESS_CARD_HINT` 是一整段悬停正文 —— 触屏读不到、
- * 「未来 harness 配置就放这里」这件事跟着一句没人会触发的话一起消失。
- * 现在:一行话在 `?` 里,判据指向 `ROLE_SPECS.ceiling` / `harness/write.ts`。
- */
+// ── 兼容再导出:老 import 路径(`@/components/members/RoleHarness`)继续成立 ──
+// 判据的实现搬去了 `components/harness/`,但成员页与两份既有测试仍从这里 import
+// —— re-export 是**同一份实现**的另一个门牌,不是第二份事实。
+export {
+  failureOf,
+  harnessStatusText,
+  roleIssueCount,
+  sharedUnitOwners,
+} from "@/components/harness/judgments";
+export type { OpState } from "@/components/harness/judgments";
+export {
+  PromptUnitEditor,
+  PromptUnitEditForm,
+  UNIT_PREVIEW_CHARS,
+  unitPreview,
+} from "@/components/harness/PromptUnitEditor";
+export { useHarnessWorkspace } from "@/components/harness/useHarnessWorkspace";
 
 /**
  * 一个角色的 harness 面板。顺序刻意是**「我能不能用 → 我能改什么 → 代码内常量」**:
@@ -304,13 +213,12 @@ export function HarnessRolePane({
   /** 嵌进外层「角色 harness」卡片(默认 `false` = 独立的 Section + 卡片) */
   embedded?: boolean;
 }) {
-  const loaded = role.promptUnits.filter((u) => u.loaded).length;
-  const missing = role.promptUnits.filter((u) => !u.loaded);
-  // 面板摘要行比卡片头多一个「收掉 N 个」(只有 state = ok 才有意义);
-  // 状态的三种读法本身共用 `toolSetStateLabel`,两处不会分叉。
-  const toolSetLabel =
-    toolSetStateLabel(role.toolSet.state) +
-    (role.toolSet.state === "ok" ? ` · 收掉 ${role.toolSet.removedByToolSet.length} 个` : "");
+  // 「缺失」的公式只有一处(`missingUnits`,与角标/管理页同源)。
+  const missing = missingUnits(role);
+  const loaded = role.promptUnits.length - missing.length;
+  // 摘要行的「集合文件」一格:状态 + (只有 ok 时)「收掉 N 个」—— 判据在
+  // `toolSetStateDetail`,面板摘要行与管理页的工具面共用,两处不会分叉。
+  const toolSetLabel = toolSetStateDetail(role);
 
   // 里面那一段内容(摘要行 / 告警 / 提示词单元 / 工具面与常量)。两种外壳共用它。
   const body = (
@@ -374,44 +282,10 @@ export function HarnessRolePane({
         )}
       </div>
 
-      {/* ② 告警:红的在前。四类都不会静默 —— 这是纪律,不是装饰。 */}
-      {missing.length > 0 && (
-        <Flag tone="cinnabar">
-          <span className="ss-meta">
-            有 {missing.length} 个单元声明了但盘上没有文件 —— 这几条职责从没告诉过 agent:
-          </span>
-          <span className="ss-body">{missing.map((u) => u.id).join(" · ")}</span>
-        </Flag>
-      )}
-
-      {role.toolSet.state === "invalid" && (
-        <Flag tone="cinnabar">
-          <span className="ss-meta">集合文件无效,当前没有生效(权限按 ceiling 全集):</span>
-          <span className="ss-body">{role.toolSet.problem}</span>
-          <span className="ss-meta font-mono">{role.toolSet.path}</span>
-        </Flag>
-      )}
-
-      {role.blockedByCeiling.length > 0 && (
-        <Flag tone="cinnabar">
-          <span className="ss-meta">超出架构上界(集合文件写了但被 ceiling 拒绝):</span>
-          <span className="ss-body">{role.blockedByCeiling.join(" · ")}</span>
-        </Flag>
-      )}
-
-      {role.unknownTools.length > 0 && (
-        <Flag tone="cinnabar">
-          <span className="ss-meta">集合文件里有不存在的工具名(已丢弃):</span>
-          <span className="ss-body">{role.unknownTools.join(" · ")}</span>
-        </Flag>
-      )}
-
-      {role.toolSet.removedByToolSet.length > 0 && (
-        <Flag tone="mute">
-          <span className="ss-meta">被集合文件收掉(ceiling 给了、文件没要):</span>
-          <span className="ss-body">{role.toolSet.removedByToolSet.join(" · ")}</span>
-        </Flag>
-      )}
+      {/* ② 告警:红的在前。四类都不会静默 —— 这是纪律,不是装饰。
+          两条告警组件在 `harness/Blocks.tsx`,成员卡与管理页共用同一份措辞。 */}
+      <MissingUnitsAlert missing={missing} />
+      <ToolSetAlerts role={role} />
 
       {/* ③ 提示词单元:这一块才是用户在找的东西,所以它排在常量前面 */}
       <div className="flex flex-col">
@@ -435,67 +309,11 @@ export function HarnessRolePane({
         )}
       </div>
 
-      {/* ④ 改不了的东西折起来 —— 它们重要,但不该占首屏 */}
+      {/* ④ 改不了的东西折起来 —— 它们重要,但不该占首屏。
+          两段共用 `harness/Blocks.tsx`:管理页把它们**摊开**成两节,这里**折起来**。 */}
       <Disclosure summary={`工具面与代码内常量(改不了)· 能力 ${role.ceiling.length} 项`}>
-        <div className="flex flex-col">
-          <KV
-            label="能力"
-            value={`${role.ceiling.length} 项 · 代码内常量,改不了`}
-            title="架构上界 · 集合文件与界面都突破不了它"
-          />
-          <KV
-            label="可写"
-            value={`${role.writeKinds.join(" · ") || "不可写"} · 代码内常量,改不了`}
-            title="代码内常量,不是可编辑文件 · 这里只能改提示词"
-          />
-          <KV
-            label="边界拒"
-            value={role.boundaryDeny.length > 0 ? role.boundaryDeny.join(" · ") : "—"}
-            title="明示这个角色拿不到哪些工具。同样是代码内常量,这里改不了。"
-          />
-          <KV
-            label="实得工具"
-            value={toolCountText(role)}
-            title="已过三道门 · 下表逐条给出类型 / 名称 / 作用"
-          >
-            <Help id="harness.gates" />
-          </KV>
-          {/* ── 工具表(类型 / 名称 / 作用)────────────────────────────
-              用户的原话:「工具 做一个表格,按照类型、名称、作用来,现在搞一对英文
-              名称的 list,完全不知道都有些啥」。所以 `tools` 那一串英文名不再直接
-              画出来 —— 逐条给类型(能力的中文分组)、名称与作用(注册表里写给模型的
-              原文说明,由 `tools/briefs.ts` 转写)。
-
-              ⚠️ `toolBriefs` 缺席(旧后端)时**退化回老形状**那一串英文名,
-              **不许**把「这一份读面没带说明」显示成「没有工具」—— 那与本项目反复
-              栽的「把不知道显示成 0」是同一种错。 */}
-          {role.toolBriefs !== undefined && role.toolBriefs.length > 0 ? (
-            <ToolTable briefs={role.toolBriefs} />
-          ) : role.tools.length > 0 ? (
-            <KV
-              label="工具名单"
-              value={role.tools.join(" · ")}
-              title="视图没带工具说明(后端比前端旧)· 只能给出名字"
-            />
-          ) : null}
-          <KV
-            label="集合文件"
-            value={toolSetLabel}
-            title={
-              `${role.toolSet.path}\n\nstate = ${role.toolSet.state}` +
-              "\n只有 ok 会真的收窄工具面;absent / invalid 都按 ceiling 全集求解。" +
-              (role.toolSet.allow.length > 0 ? `\n\n文件里的 allow:${role.toolSet.allow.join(" · ")}` : "") +
-              (role.toolSet.deny.length > 0 ? `\n文件里的 deny:${role.toolSet.deny.join(" · ")}` : "")
-            }
-          />
-          <div className="flex flex-wrap gap-1" style={{ marginTop: 6 }}>
-            {role.ceiling.map((c) => (
-              <span key={c} className="ss-pill" data-tone="bone">
-                {c}
-              </span>
-            ))}
-          </div>
-        </div>
+        <RoleConstants role={role} />
+        <ToolSurface role={role} />
       </Disclosure>
     </>
   );
@@ -538,6 +356,10 @@ export function HarnessRolePane({
  * (在 `<details>` 外面,不展开也读得到)+ 默认折叠的配置。卡片本体只能有**一处**
  * 真相,所以标题与角色名在这里,`HarnessRolePane` 嵌进来时用 `embedded` 关掉
  * 它自己那一份外壳。
+ *
+ * ⚠️ 2026-11-14:卡片头的 aside 里多了一个**入口链接**(「打开 Harness 管理 →」,
+ * 真 `<a href>` 带当前角色参数)—— 成员页这张卡是管理页的入口之一;链接是导航,
+ * 不是数据,所以与告警 Pill 一样在折叠状态下也读得到。
  */
 export function RoleHarnessDisclosure({
   role,
@@ -596,14 +418,26 @@ export function RoleHarnessDisclosure({
       // 连「什么能改、什么改不了」一起说清 —— 否则用户会去找一个不存在的开关。
       helpId="harness.card"
       aside={
-        issues > 0 ? (
-          <Pill
-            tone="cinnabar"
-            title={`harness 有 ${issues} 处要注意 —— 与成员页签角标同源`}
+        <div className="flex items-center gap-1.5">
+          {issues > 0 && (
+            <Pill
+              tone="cinnabar"
+              title={`harness 有 ${issues} 处要注意 —— 与成员页签角标同源`}
+            >
+              {issues} 处需要注意
+            </Pill>
+          )}
+          {/* 入口:跨角色的「Harness 管理」页(2026-11-14)。⚠️ 真 `<a href>`(地址由
+              `toHash` 序列化,不手拼)—— 右键复制 / 中键开新标签 / 浏览器后退三件
+              全靠它;带当前角色参数,过去就落在这个角色上。 */}
+          <a
+            className="sansheng-button"
+            style={{ padding: "3px 8px", fontSize: 11 }}
+            href={toHash(toRoute("harness", { role }))}
           >
-            {issues} 处需要注意
-          </Pill>
-        ) : undefined
+            打开 Harness 管理 →
+          </a>
+        </div>
       }
     >
       <article className="sansheng-card p-3 flex flex-col gap-3">
@@ -694,16 +528,10 @@ export function RoleHarnessDisclosure({
  * 地方」)。所以它不再是「某个成员面板的第五块」,而是**这个角色**配置面的落点;
  * 调用点见 `routes/Members.tsx`。
  *
- * 为什么必须要**整份**视图:面板上「共用于 N 个角色」要跨角色数
- * (`sharedUnitOwners`),只拿当前角色的那一条算不出来。
- *
- * 为什么它自己取数而不是复用页面的 `useHarnessRoles()`:面板要能独立成立
- * (成员页只把 `role` 交给它)。⚠️ 已知代价(报告里也写了):页面那一份走
- * `lib/data.ts` 的**模块级缓存**(`loadHarnessOnce`),这一份走 `getHarness()`
- * 直取 ⇒ 在面板里保存之后,页面用来画**页签角标**的 `roleIssueCount` 仍是
- * 进入页面那一刻的旧数(要刷新才跟上)。面板自己显示的正文是回读值,不受影响。
- * 反过来,`loadHarnessOnce` 的缓存失效由 `project_opened` / 「重置数据」触发 ——
- * 那也是页面那一份刷新的时候。
+ * ⚠️ 2026-11-14:取数 / 草稿 / 备份份数 / 回读值入口这层**有状态的东西**搬去了
+ * `harness/useHarnessWorkspace.ts`(管理页共用同一个 hook);这里只剩组合
+ * (hook ⇒ `RoleHarnessDisclosure`)。`onHarnessSaved` 的语义不变:页面用它把
+ * `useHarnessRoles({ revision })` 推一格,让页签角标跟上刚保存的内容。
  */
 export function RoleHarnessSection({
   role,
@@ -719,467 +547,21 @@ export function RoleHarnessSection({
    * 页面用它把 `useHarnessRoles({ revision })` 推一格 —— 那一份是页签角标
    * (`roleIssueCount`)的来源,而它读的是模块级缓存 ⇒ 不通知的话,刚补上的缺单元
    * 仍会顶着「N 处需要注意」不放(见 `lib/data.ts` 里 `revision` 的说明)。
-   *
-   * ⚠️ 名字保留了 `onHarnessSaved`(2026-10-06 第三刀从 `MemberPane` 搬到**这里**):
-   * 它以前是 `MemberPane` 的一个 prop,harness 搬出来单独成卡之后页面**直接**把它
-   * 接在 `<RoleHarnessSection>` 上 —— 同一条接线(`setHarnessRevision`)、同一个
-   * 读者(`applyContent`),只是换了个位置,不是死参数。
    */
   onHarnessSaved?: () => void;
 }) {
-  const [view, setView] = useState<HarnessView | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [loading, setLoading] = useState(true);
-  /**
-   * 编辑中的正文,**按 unit id 存**。
-   *
-   * 为什么按 unit id 而不是每个 textarea 各存一份:同一个单元会被多个角色声明 ——
-   * `collaboration.ask` 同时属于项目经理 / 工程师 / 质检。若各存各的,
-   * 在 A 角色改完保存,B 角色那张卡还会显示旧正文,用户会以为「没生效」。
-   * 一份草稿 + 一份盘上正文(`unit.content`)就避免了这种自相矛盾。
-   */
-  const [drafts, setDrafts] = useState<Record<string, string>>({});
-  /** 每个单元的备份份数。`-1` = 查不到(如实显示成「—」,不显示 0)。 */
-  const [backups, setBackups] = useState<Record<string, number>>({});
-
-  const refreshBackups = useCallback((unitId: string) => {
-    listPromptUnitBackups(unitId)
-      .then((r) => setBackups((b) => ({ ...b, [unitId]: r.backups.length })))
-      .catch(() => setBackups((b) => ({ ...b, [unitId]: -1 })));
-  }, []);
-
-  useEffect(() => {
-    let cancelled = false;
-    getHarness()
-      .then((v) => {
-        if (cancelled) return;
-        setView(v);
-        setError(null);
-        const ids = [...new Set(v.roles.flatMap((r) => r.promptUnits.map((u) => u.id)))];
-        setDrafts(Object.fromEntries(v.roles.flatMap((r) => r.promptUnits.map((u) => [u.id, u.content]))));
-        for (const id of ids) refreshBackups(id);
-      })
-      .catch((e: unknown) => {
-        if (!cancelled) setError(errorMessage(e));
-      })
-      .finally(() => {
-        if (!cancelled) setLoading(false);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [refreshBackups]);
-
-  /**
-   * 保存 / 恢复成功后**唯一的**状态入口。参数只有 `content` —— 也就是后端回读的
-   * 那一份。这里刻意不接受「入参正文」,从类型上就堵住「界面显示入参」的可能。
-   */
-  const applyContent = useCallback(
-    (unitId: string, content: string) => {
-      setDrafts((d) => ({ ...d, [unitId]: content }));
-      setView((v) =>
-        v === null
-          ? v
-          : {
-              ...v,
-              roles: v.roles.map((r) => ({
-                ...r,
-                promptUnits: r.promptUnits.map((u) =>
-                  u.id === unitId ? { ...u, content, chars: content.length, loaded: true } : u,
-                ),
-              })),
-            },
-      );
-      refreshBackups(unitId);
-      // 盘上的正文变了 ⇒ 让页面那一份(页签角标的来源)重取
-      onHarnessSaved?.();
-    },
-    [refreshBackups, onHarnessSaved],
-  );
-
+  const ws = useHarnessWorkspace({ onApplied: onHarnessSaved });
   return (
     <RoleHarnessDisclosure
       role={role}
-      view={view}
-      loading={loading}
-      error={error}
-      drafts={drafts}
-      backups={backups}
+      view={ws.view}
+      loading={ws.loading}
+      error={ws.error}
+      drafts={ws.drafts}
+      backups={ws.backups}
       defaultOpen={defaultOpen}
-      onDraftChange={(unitId, next) => setDrafts((d) => ({ ...d, [unitId]: next }))}
-      onApplied={applyContent}
+      onDraftChange={ws.onDraftChange}
+      onApplied={ws.applyContent}
     />
-  );
-}
-
-function PromptUnitEditor({
-  unit,
-  value,
-  backups,
-  sharedWith,
-  onChange,
-  onApplied,
-}: {
-  unit: PromptUnitView;
-  /** 当前草稿(父层持有,同一个 unit id 的多个角色共用一份) */
-  value: string;
-  /** 备份份数;undefined = 还没查到,-1 = 查不到 */
-  backups: number | undefined;
-  /** 声明了这个单元的**全部**角色显示名(多于一个 = 共用同一个文件) */
-  sharedWith: readonly string[];
-  onChange: (next: string) => void;
-  /** 保存 / 恢复成功 —— 参数是后端**回读**到的正文 */
-  onApplied: (content: string) => void;
-}) {
-  const [op, setOp] = useState<OpState>({ kind: "idle" });
-  const [confirming, setConfirming] = useState(false);
-  /** 「展开全部」:默认只给前 {@link UNIT_PREVIEW_CHARS} 个字 */
-  const [expanded, setExpanded] = useState(false);
-  /** 「编辑」:默认不给 textarea —— 一屏里不再有十几段长正文 */
-  const [editing, setEditing] = useState(false);
-
-  const edited = value !== unit.content;
-  const busy = op.kind === "busy";
-  /** 预览读数(纯函数,500 字边界在 `tests/web/harness-by-role.test.ts` 里钉住)。 */
-  const preview = unitPreview(unit.content);
-
-  async function save() {
-    if (busy) return;
-    setOp({ kind: "busy", what: "save" });
-    try {
-      const res = await updatePromptUnit(unit.id, value);
-      // 只认响应里的 content(回读值),不认刚才发出去的那份。
-      onApplied(res.content);
-      setOp({
-        kind: "ok",
-        text:
-          `已保存 · 盘上 ${res.content.length} 字符` +
-          (res.backupPath !== undefined ? " · 已备份" : " · 首次创建,无旧文件可备份"),
-      });
-    } catch (e) {
-      setOp(failureOf(e));
-    }
-  }
-
-  async function doReset() {
-    if (busy) return;
-    setConfirming(false);
-    setOp({ kind: "busy", what: "reset" });
-    try {
-      const res = await resetPromptUnit(unit.id);
-      onApplied(res.content);
-      setOp({ kind: "ok", text: `已恢复出厂 · 盘上 ${res.content.length} 字符` });
-    } catch (e) {
-      setOp(failureOf(e));
-    }
-  }
-
-  return (
-    <div className="py-1.5" style={{ borderTop: "1px solid var(--ink-3)" }}>
-      {/* ── 摘要行:默认只显示这一行(以前每个单元都摊开一个 textarea)── */}
-      <div className="flex items-center gap-2 flex-wrap">
-        {/* loaded=false 是最重要的一个信号:红色,不是灰色。 */}
-        {unit.loaded ? (
-          <Pill tone="bamboo">已加载</Pill>
-        ) : (
-          <Pill tone="cinnabar" title="声明了这个单元,但盘上没有对应文件 —— 这条职责从没告诉过 agent">
-            缺失
-          </Pill>
-        )}
-        <span className="ss-body" style={{ color: "var(--bone-dim)" }}>
-          {unit.id}
-        </span>
-        {/* 共用文件:改了会影响这几个角色 —— 写在用户看得见的地方 */}
-        {sharedWith.length > 1 && (
-          <Pill
-            tone="cyan"
-            title={`这是同一个文件,被 ${sharedWith.length} 个角色声明:${sharedWith.join(" · ")}。改它会影响这几个角色。`}
-          >
-            共用于 {sharedWith.length} 个角色
-          </Pill>
-        )}
-        {edited && <Pill tone="amber" title="编辑框里的内容和盘上的不一致">未保存</Pill>}
-        <span className="ss-meta ml-auto" title="盘上正文的字符数(GET /api/harness 报的)">
-          {unit.chars} 字符
-        </span>
-        <span
-          className="ss-meta"
-          title="历史备份份数 · 后端只留最近 10 份"
-        >
-          备份 {backups === undefined ? "…" : backups < 0 ? "—" : backups}
-        </span>
-      </div>
-
-      {/* ── 正文预览:默认只给**前 500 个字** ────────────────────────────
-          用户的原话:「提示词单元可以收起,不要展示那么长,我觉得可以截断前 500 个
-          字,然后两个按钮,一个按钮展开全部,一个按钮编辑」。
-
-          为什么按**字数**而不是按行数(旧形状是 `Clamp lines={2}`):提示词单元是
-          markdown 段落,「两行」在不同窗口宽度下截掉的内容不一样 —— 而「截掉的是哪
-          一截」正是用户判断要不要展开的唯一依据。按字数截断在哪都一样。
-          正文按**原文**画(mono + pre-wrap):它是盘上那个 .md 的字节,
-          渲染成 markdown 会把 `#` / `**` 这些「单元里到底写了什么」的痕迹抹掉。 */}
-      {unit.content.length > 0 && !editing && (
-        <div
-          style={{
-            marginTop: 2,
-            whiteSpace: "pre-wrap",
-            overflowWrap: "anywhere",
-            fontFamily: "monospace",
-            fontSize: 11,
-            lineHeight: 1.6,
-            color: "var(--bone-dim)",
-          }}
-        >
-          {expanded ? unit.content : preview.text}
-          {!expanded && preview.truncated && (
-            <span className="ss-meta">
-              {"\n"}… 还有 {preview.hidden} 字符没显示(上面是前 {UNIT_PREVIEW_CHARS} 个)
-            </span>
-          )}
-        </div>
-      )}
-
-      {/* ── 两个按钮:展开全部 / 编辑 ──────────────────────────────────
-          ⚠️ 「展开全部」只在真被截断时出现 —— 短正文上给一个按了没反应的按钮
-          是装饰,不是入口(负样本在 `tests/web/harness-by-role.test.ts`)。 */}
-      <div className="flex items-center gap-2 flex-wrap" style={{ marginTop: 4 }}>
-        {preview.truncated && (
-          <button
-            type="button"
-            className="sansheng-button"
-            style={{ padding: "2px 10px", fontSize: 11 }}
-            title={
-              expanded
-                ? `收起到前 ${UNIT_PREVIEW_CHARS} 个字`
-                : `展开全部 ${unit.chars} 字符`
-            }
-            onClick={() => setExpanded((v) => !v)}
-          >
-            {expanded ? "收起" : "展开全部"}
-          </button>
-        )}
-        <button
-          type="button"
-          className="sansheng-button"
-          style={{ padding: "2px 10px", fontSize: 11 }}
-          title={
-            editing
-              ? "收起编辑区(改动会留在上面)"
-              : unit.loaded
-                ? "直接改正文;改完要点保存才写盘"
-                : "盘上还没有这个文件;存下去即首次创建"
-          }
-          onClick={() => setEditing((v) => !v)}
-        >
-          {editing ? "收起编辑" : "编辑"}
-        </button>
-        {!editing && !unit.loaded && (
-          <span className="ss-meta">盘上还没有这个文件 —— 点「编辑」写下它的第一条正文</span>
-        )}
-      </div>
-
-      {/* 编辑区**默认不出现** —— 一屏里不再有十几段长正文。
-          打开后仍是完整的老行为(回读值当状态、两段式确认、失败原样显示)。 */}
-      {editing && (
-        <PromptUnitEditForm
-          unit={unit}
-          value={value}
-          busy={busy}
-          confirming={confirming}
-          op={op}
-          edited={edited}
-          onChange={onChange}
-          onSave={() => void save()}
-          onReset={() => void doReset()}
-          onConfirmReset={() => setConfirming(true)}
-          onCancelConfirm={() => setConfirming(false)}
-          onDiscard={() => {
-            onChange(unit.content);
-            setOp({ kind: "idle" });
-          }}
-        />
-      )}
-    </div>
-  );
-}
-
-/**
- * 一个单元的**正文预览读数**(纯函数)。
- *
- * 判据只有一条:**默认只画前 {@link UNIT_PREVIEW_CHARS} 个字**,而且「被截掉了多少」
- * 是算出来的、不是猜的(`hidden`)。抽成纯函数是为了能在 SSR 之外直接断言 500 这个
- * 边界(499 / 500 / 501 三个样本),而不是只看一个长正文的渲染结果。
- */
-export function unitPreview(content: string): {
-  /** 折叠态该画的正文 */
-  text: string;
-  /** 是不是真的被截断了(= 该不该出现「展开全部」) */
-  truncated: boolean;
-  /** 没显示出来的字符数 */
-  hidden: number;
-} {
-  if (content.length <= UNIT_PREVIEW_CHARS) return { text: content, truncated: false, hidden: 0 };
-  return {
-    text: content.slice(0, UNIT_PREVIEW_CHARS),
-    truncated: true,
-    hidden: content.length - UNIT_PREVIEW_CHARS,
-  };
-}
-
-/**
- * 编辑区(纯 props:不取数、不持状态、不调接口)。
- *
- * 为什么把它从 `PromptUnitEditor` 里**分出来并导出**:默认态**不该出现 textarea**,
- * 而「不该出现」这条断言在 SSR 里很容易变成空转(整块没渲染也照样通过)。
- * 分出来之后,同一个渲染路径可以被单独喂一份「编辑中」的 props ⇒ 那条负样本
- * 有一个**真会画出 textarea 的正样本**作对照(本项目对空转检查的固定处置,
- * 同 `HarnessRolePane` / `RoleHarnessDisclosure` 那一刀)。
- *
- * 异步与确认态仍在 `PromptUnitEditor` 里(`op` / `confirming` 作为 props 传进来),
- * 所以「回读值当状态」「两段式确认」「失败原样显示」三条老行为一条都没变。
- */
-export function PromptUnitEditForm({
-  unit,
-  value,
-  busy,
-  confirming,
-  op,
-  edited,
-  onChange,
-  onSave,
-  onReset,
-  onConfirmReset,
-  onCancelConfirm,
-  onDiscard,
-}: {
-  unit: PromptUnitView;
-  value: string;
-  busy: boolean;
-  confirming: boolean;
-  op: OpState;
-  /** 编辑框里的内容与盘上不一致(「未保存」pill 与「放弃改动」按钮的判据) */
-  edited: boolean;
-  onChange: (next: string) => void;
-  onSave: () => void;
-  onReset: () => void;
-  onConfirmReset: () => void;
-  onCancelConfirm: () => void;
-  onDiscard: () => void;
-}) {
-  return (
-    <div className="flex flex-col gap-1.5" style={{ marginTop: 6 }}>
-      <div className="ss-meta font-mono truncate" title={unit.path}>
-        {unit.path}
-      </div>
-      <textarea
-        value={value}
-        rows={12}
-        spellCheck={false}
-        disabled={busy}
-        onChange={(e) => onChange(e.target.value)}
-        aria-label={`${unit.id} 正文`}
-        placeholder={
-          unit.loaded ? undefined : "这个单元在盘上还没有文件 —— 存下去就是它的第一次创建(没有旧内容可备份)。"
-        }
-        style={{
-          background: "var(--ink-1)",
-          border: "1px solid var(--ink-3)",
-          borderRadius: 6,
-          padding: "6px 8px",
-          fontFamily: "monospace",
-          fontSize: 11,
-          lineHeight: 1.6,
-          color: "var(--bone)",
-          outline: "none",
-          resize: "vertical",
-          width: "100%",
-          minHeight: 160,
-        }}
-      />
-
-      <div className="flex items-center gap-2 flex-wrap">
-        <button
-          type="button"
-          className="sansheng-button-primary"
-          style={{ padding: "4px 12px", fontSize: 12 }}
-          disabled={busy || !edited}
-          title={edited ? "写盘(改前自动备份;保存后显示后端回读的正文)" : "内容与盘上一致,无需保存"}
-          onClick={onSave}
-        >
-          {op.kind === "busy" && op.what === "save" ? "保存中…" : "保存"}
-        </button>
-
-        {confirming ? (
-          <>
-            <button
-              type="button"
-              className="sansheng-button"
-              style={{ padding: "4px 12px", fontSize: 12, color: "var(--cinnabar)", borderColor: "var(--cinnabar)" }}
-              disabled={busy}
-              onClick={onReset}
-            >
-              {op.kind === "busy" && op.what === "reset" ? "恢复中…" : "确认恢复出厂"}
-            </button>
-            <button
-              type="button"
-              className="sansheng-button"
-              style={{ padding: "4px 12px", fontSize: 12 }}
-              disabled={busy}
-              onClick={onCancelConfirm}
-            >
-              取消
-            </button>
-            <RedMeta>会丢弃本单元的全部改动(当前内容先落一份备份)</RedMeta>
-          </>
-        ) : (
-          <button
-            type="button"
-            className="sansheng-button"
-            style={{ padding: "4px 12px", fontSize: 12 }}
-            disabled={busy}
-            title="写回出厂副本 · 不是删文件(删了单元会「未装载」)"
-            onClick={onConfirmReset}
-          >
-            恢复出厂
-          </button>
-        )}
-
-        {edited && (
-          <button
-            type="button"
-            className="sansheng-button"
-            style={{ padding: "4px 12px", fontSize: 12 }}
-            disabled={busy}
-            onClick={onDiscard}
-          >
-            放弃改动
-          </button>
-        )}
-
-        <span className="ss-meta ml-auto">
-          单次请求,没有自动保存 —— 不点保存就不会写盘
-        </span>
-      </div>
-
-      {op.kind === "ok" && (
-        <span className="ss-meta" style={{ color: "var(--jade)" }}>
-          {op.text}
-        </span>
-      )}
-
-      {op.kind === "failed" && (
-        // ⚠️ 同样的理由:这里在卡片本体的 `article` 里,不再套第二层
-        // `sansheng-card`(失败提示本来就该是红色小字,不是另一张卡)。
-        <RedInline>
-          <div>操作失败:{op.message}</div>
-          {op.validIds !== undefined && op.validIds.length > 0 && (
-            <div style={{ marginTop: 4 }}>
-              后端说这个 id 不认识。合法 id:{op.validIds.join(" · ")}
-            </div>
-          )}
-        </RedInline>
-      )}
-    </div>
   );
 }
