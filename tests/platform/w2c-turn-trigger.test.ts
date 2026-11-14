@@ -44,7 +44,7 @@ import {
   createPlatformHost, detectUnannouncedTurn, type PlatformHost,
 } from "../../src/platform/host/serve.js";
 import type { TurnTrigger } from "@shared/types/platform.js";
-import type { CreateSessionFn } from "../../src/platform/runtime/session.js";
+import type { CreateSessionFn } from "../../src/platform/runtime/agentRuntime/pi/session.js";
 
 /**
  * 027 起正文住文件:测试里仍从「想写的正文」造出**落点三列** ——

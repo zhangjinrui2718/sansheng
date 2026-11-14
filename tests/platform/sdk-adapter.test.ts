@@ -30,7 +30,7 @@ import { SqliteMemory } from "../../src/platform/memory/sqliteMemory.js";
 import {
   buildToolContext, planAgentSession, type RuntimeDeps,
 } from "../../src/platform/runtime/assembly.js";
-import { toSdkTools, paramNames, adapterToolNames, classifyToolset } from "../../src/platform/runtime/sdkAdapter.js";
+import { toSdkTools, paramNames, adapterToolNames, classifyToolset } from "../../src/platform/runtime/agentRuntime/pi/toolsAdapter.js";
 import { solveToolset } from "../../src/platform/harness/authorize.js";
 import {
   dispatch, TOOL_INDEX, ALL_PLATFORM_TOOLS, notYetBuiltToolNames,
@@ -383,7 +383,7 @@ describe("paramNames · 参数清单渲染(8-F:工具协议段必须渲染参数
 
 describe("适配壳纪律 · 机器检查", () => {
   const SRC = readFileSync(
-    join(import.meta.dirname, "../../src/platform/runtime/sdkAdapter.ts"),
+    join(import.meta.dirname, "../../src/platform/runtime/agentRuntime/pi/toolsAdapter.ts"),
     "utf8",
   );
 

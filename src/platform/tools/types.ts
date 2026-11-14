@@ -165,7 +165,7 @@ export type ToolResult =
        * 才能把接待会话的消息迁进新项目、并让前端切过去。从 `text` 里正则抠 id
        * 是脆的(改一个字就静默失效);回调注入则要在 `ToolRunContext` 上开一个
        * 事件通道。这里走的是**已经存在的那条结构化通道**:适配壳
-       * (`runtime/sdkAdapter.ts`)把它原样放进 SDK 的 `details`,
+       * (`agentRuntime/pi/toolsAdapter.ts`)把它原样放进 SDK 的 `details`,
        * 而 `runTurn` 已经在读 `details`(判工具成败就是靠它)。
        */
       readonly data?: Readonly<Record<string, unknown>>;

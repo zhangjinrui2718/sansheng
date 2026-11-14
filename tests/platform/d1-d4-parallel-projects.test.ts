@@ -41,7 +41,7 @@ import { ensureOrg, ensureProjectOrg } from "../../src/platform/runtime/org.js";
 import { insertProject } from "../../src/platform/storage/repo/projects.js";
 import { insertWork } from "../../src/platform/storage/repo/works.js";
 import { insertBlocker } from "../../src/platform/storage/repo/blockers.js";
-import type { CreateSessionFn } from "../../src/platform/runtime/session.js";
+import type { CreateSessionFn } from "../../src/platform/runtime/agentRuntime/pi/session.js";
 
 // ── 夹具 ────────────────────────────────────────────────────────
 

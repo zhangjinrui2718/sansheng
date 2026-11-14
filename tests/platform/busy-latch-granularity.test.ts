@@ -47,7 +47,7 @@ import {
   getWork, insertWork, isTerminalWorkStatus, updateWorkStatus,
 } from "../../src/platform/storage/repo/works.js";
 import { insertAsk } from "../../src/platform/storage/repo/asks.js";
-import type { CreateSessionFn } from "../../src/platform/runtime/session.js";
+import type { CreateSessionFn } from "../../src/platform/runtime/agentRuntime/pi/session.js";
 
 /**
  * 这批用例里**故意卡住回合**是常态:套件的默认 5 秒上界会抢在断言之前触发,

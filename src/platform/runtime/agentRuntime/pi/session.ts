@@ -29,9 +29,11 @@
 import {
   createAgentSession, DefaultResourceLoader,
   createMcpExtension, createToolSearchExtension,
-  type AgentSession, type ExtensionFactory, type LoadedMcpConfig, type ResourceLoader,
+  type AgentSession, type AgentSessionEvent, type ExtensionFactory, type LoadedMcpConfig,
+  type ResourceLoader,
 } from "@earendil-works/pi-coding-agent";
 import type { Model } from "@earendil-works/pi-ai";
+import type { RuntimeSession, RuntimeSessionEventBase } from "../types.js";
 
 /**
  * 平台侧的模型类型别名。**只在这一处定义。**
@@ -47,12 +49,12 @@ export type PlatformModel = Model<any>;
 import {
   buildToolContext, planAgentSession,
   type AgentSessionPlan, type RuntimeDeps,
-} from "./assembly.js";
-import { classifyToolset, toSdkTools } from "./sdkAdapter.js";
-import { composeSystemPrompt } from "./promptAssembly.js";
-import { dispatch } from "../tools/registry.js";
-import { toLoadedMcpConfig } from "../mcp/piConfig.js";
-import { log } from "../../shared/log.js";
+} from "../../assembly.js";
+import { classifyToolset, toSdkTools } from "./toolsAdapter.js";
+import { composeSystemPrompt } from "../../promptAssembly.js";
+import { dispatch } from "../../../tools/registry.js";
+import { toLoadedMcpConfig } from "../../../mcp/piConfig.js";
+import { log } from "../../../../shared/log.js";
 
 /**
  * `bindExtensions` 的收窄。
@@ -345,3 +347,10 @@ export async function createPlatformSession(
     },
   };
 }
+
+// ── 端口符合性(Wave A1)────────────────────────────────────────
+// 编译期证明:pi 的 AgentSession 满足端口的 RuntimeSession 面(事件方言 E =
+// AgentSessionEvent)。断言坏掉 ⇒ 换运行时或改 AgentSession 面时这里先红。
+export type AgentSessionConformsToRuntimeSession = AgentSession extends RuntimeSession<AgentSessionEvent>
+  ? true
+  : false;

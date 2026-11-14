@@ -35,7 +35,7 @@ import type Database from "better-sqlite3";
 import { notifyDesktop } from "./notify.js";
 import type { AgentSession, AgentSessionEvent } from "@earendil-works/pi-coding-agent";
 import { bootPlatform, type BootedPlatform } from "../runtime/boot.js";
-import { createPlatformSession, type CreateSessionFn } from "../runtime/session.js";
+import { createPlatformSession, type CreateSessionFn } from "../runtime/agentRuntime/pi/session.js";
 import { runTurn, type TurnResult, type ToolCallRecord } from "../runtime/turn.js";
 import { runWorkItem } from "../runtime/execution.js";
 import { ORG, ensureOrg, orgReady, syncOrgForExistingProjects } from "../runtime/org.js";

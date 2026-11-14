@@ -21,7 +21,7 @@
 import { join } from "node:path";
 import type Database from "better-sqlite3";
 import { bootPlatform, type BootedPlatform } from "../runtime/boot.js";
-import { createPlatformSession } from "../runtime/session.js";
+import { createPlatformSession } from "../runtime/agentRuntime/pi/session.js";
 import { runWorkItem, renderExecutionReport } from "../runtime/execution.js";
 import { getAgent, listAgents } from "../storage/repo/agents.js";
 import { ensureOrg, ensureProjectOrg, pickWorker } from "../runtime/org.js";

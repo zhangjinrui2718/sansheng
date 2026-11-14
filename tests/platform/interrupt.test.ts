@@ -33,7 +33,7 @@ import { createPlatformHost, type PlatformHost } from "../../src/platform/host/s
 import { attachHub } from "../../src/platform/transport/hub.js";
 import { listProviders } from "../../src/platform/infra/providers.js";
 import { factoryToolset, type ProjectRole } from "../../src/platform/identity/role.js";
-import type { CreateSessionFn } from "../../src/platform/runtime/session.js";
+import type { CreateSessionFn } from "../../src/platform/runtime/agentRuntime/pi/session.js";
 
 let dataDir: string;
 let host: PlatformHost | undefined;

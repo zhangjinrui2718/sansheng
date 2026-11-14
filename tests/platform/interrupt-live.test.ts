@@ -30,7 +30,7 @@ import type { AgentSession, AgentSessionEvent } from "@earendil-works/pi-coding-
 import { createPlatformHost, type PlatformHost } from "../../src/platform/host/serve.js";
 import { attachHub } from "../../src/platform/transport/hub.js";
 import { listProviders } from "../../src/platform/infra/providers.js";
-import type { CreateSessionFn } from "../../src/platform/runtime/session.js";
+import type { CreateSessionFn } from "../../src/platform/runtime/agentRuntime/pi/session.js";
 import type { IntakeLiveView } from "@shared/types/platform.js";
 
 let dataDir: string;

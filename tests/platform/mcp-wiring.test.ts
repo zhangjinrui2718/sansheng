@@ -22,15 +22,15 @@
  */
 import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
-import { classifyToolset } from "../../src/platform/runtime/sdkAdapter.js";
+import { classifyToolset } from "../../src/platform/runtime/agentRuntime/pi/toolsAdapter.js";
 import { solveMcpFor } from "../../src/platform/mcp/solve.js";
 import { mcpPattern } from "../../src/platform/mcp/solve.js";
 import type { RuntimeDeps } from "../../src/platform/runtime/assembly.js";
 import type { Agent, Project } from "../../src/platform/harness/authorize.js";
 import { openPlatformMemoryDb } from "../../src/platform/storage/index.js";
 
-const SESSION_SRC = readFileSync("src/platform/runtime/session.ts", "utf8");
-const SDK_ADAPTER_SRC = readFileSync("src/platform/runtime/sdkAdapter.ts", "utf8");
+const SESSION_SRC = readFileSync("src/platform/runtime/agentRuntime/pi/session.ts", "utf8");
+const SDK_ADAPTER_SRC = readFileSync("src/platform/runtime/agentRuntime/pi/toolsAdapter.ts", "utf8");
 const PI_CONFIG_SRC = readFileSync("src/platform/mcp/piConfig.ts", "utf8");
 
 /** 去掉块注释与行注释 —— 注释里的反面教材不算命中。 */
@@ -41,7 +41,7 @@ function stripComments(src: string): string {
 const SESSION_CODE = stripComments(SESSION_SRC);
 
 /**
- * 检查器:`src/platform/runtime/session.ts` 里 MCP 扩展装上了没有。
+ * 检查器:`src/platform/runtime/agentRuntime/pi/session.ts` 里 MCP 扩展装上了没有。
  *
  * 它是**纯函数**(吃源码字符串),所以变异自检可以把改坏的源码喂回去。
  */

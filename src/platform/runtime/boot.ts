@@ -32,7 +32,7 @@ import { mcpForDataDir, resolveAllGrants, strayMcpFiles } from "../mcp/grants.js
 import { resolveMcpCatalog, mcpDir } from "../mcp/config.js";
 import { keyringSecretStore } from "../mcp/secrets.js";
 import { log } from "../../shared/log.js";
-import type { PlatformModel } from "./session.js";
+import type { PlatformModel } from "./agentRuntime/pi/session.js";
 import type { RuntimeDeps } from "./assembly.js";
 import type { WorkspacePort } from "../workspace/port.js";
 

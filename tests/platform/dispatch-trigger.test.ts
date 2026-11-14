@@ -30,7 +30,7 @@ import { insertAgent } from "../../src/platform/storage/repo/agents.js";
 import { insertProject, addMember } from "../../src/platform/storage/repo/projects.js";
 import { insertWork } from "../../src/platform/storage/repo/works.js";
 import { ensureProjectOrg } from "../../src/platform/runtime/org.js";
-import type { CreateSessionFn } from "../../src/platform/runtime/session.js";
+import type { CreateSessionFn } from "../../src/platform/runtime/agentRuntime/pi/session.js";
 
 let dataDir: string;
 let host: PlatformHost | undefined;

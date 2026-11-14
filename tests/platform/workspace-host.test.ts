@@ -25,7 +25,7 @@ import type { WebSocket } from "ws";
 import type { AgentSession, AgentSessionEvent } from "@earendil-works/pi-coding-agent";
 import type Database from "better-sqlite3";
 import { createPlatformHost, type PlatformHost } from "../../src/platform/host/serve.js";
-import type { CreateSessionFn } from "../../src/platform/runtime/session.js";
+import type { CreateSessionFn } from "../../src/platform/runtime/agentRuntime/pi/session.js";
 import { ensureOrg, ensureProjectOrg } from "../../src/platform/runtime/org.js";
 import { insertProject } from "../../src/platform/storage/repo/projects.js";
 import { insertWork } from "../../src/platform/storage/repo/works.js";

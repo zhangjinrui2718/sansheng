@@ -21,8 +21,8 @@ import {
   insertProject, addMember, updateProject, closeProject, removeMember,
 } from "../../src/platform/storage/repo/projects.js";
 import { SqliteMemory } from "../../src/platform/memory/sqliteMemory.js";
-import { createPlatformSession, type CreateSessionFn } from "../../src/platform/runtime/session.js";
-import { classifyToolset } from "../../src/platform/runtime/sdkAdapter.js";
+import { createPlatformSession, type CreateSessionFn } from "../../src/platform/runtime/agentRuntime/pi/session.js";
+import { classifyToolset } from "../../src/platform/runtime/agentRuntime/pi/toolsAdapter.js";
 import { planAgentSession, type RuntimeDeps } from "../../src/platform/runtime/assembly.js";
 import { TOOL_INDEX } from "../../src/platform/tools/registry.js";
 import type { ProjectRole, Specialization } from "../../src/platform/identity/role.js";

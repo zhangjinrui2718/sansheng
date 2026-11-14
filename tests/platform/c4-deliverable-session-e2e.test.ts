@@ -43,7 +43,7 @@ import { insertAgent } from "../../src/platform/storage/repo/agents.js";
 import { insertProject, addMember } from "../../src/platform/storage/repo/projects.js";
 import { insertWork, markWorkReviewed } from "../../src/platform/storage/repo/works.js";
 import { insertArtifact } from "../../src/platform/storage/repo/artifacts.js";
-import type { CreateSessionFn } from "../../src/platform/runtime/session.js";
+import type { CreateSessionFn } from "../../src/platform/runtime/agentRuntime/pi/session.js";
 import type { SessionMessageView } from "@shared/types/platform.js";
 
 /**

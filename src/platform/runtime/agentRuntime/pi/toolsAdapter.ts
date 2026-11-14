@@ -33,9 +33,9 @@
  * 「字面量到底能不能用」由端到端测试证明,不由类型证明。
  */
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
-import type { PlatformTool, ToolResult } from "../tools/types.js";
-import { isSdkToolName, type SdkToolName, type ToolName } from "../harness/capability.js";
-import { TOOL_INDEX } from "../tools/registry.js";
+import type { PlatformTool, ToolResult } from "../../../tools/types.js";
+import { isSdkToolName, type SdkToolName, type ToolName } from "../../../harness/capability.js";
+import { TOOL_INDEX } from "../../../tools/registry.js";
 
 /** 本地恒等标记 —— 与 nativeTools.ts 同一个理由(见文件头 ②)。 */
 function sdkTool<T extends ToolDefinition>(t: T): T {

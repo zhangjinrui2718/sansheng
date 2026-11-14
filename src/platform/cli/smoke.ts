@@ -34,7 +34,7 @@ import type {
   AgentSessionEvent,
 } from "@earendil-works/pi-coding-agent";
 import { bootPlatform } from "../runtime/boot.js";
-import { createPlatformSession } from "../runtime/session.js";
+import { createPlatformSession } from "../runtime/agentRuntime/pi/session.js";
 import { planAgentSession } from "../runtime/assembly.js";
 import { insertAgent } from "../storage/repo/agents.js";
 import { insertProject, addMember } from "../storage/repo/projects.js";

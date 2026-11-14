@@ -36,7 +36,7 @@ import { insertProject } from "../../src/platform/storage/repo/projects.js";
 import { getWork, insertWork } from "../../src/platform/storage/repo/works.js";
 import { listSessions, listSessionMessages } from "../../src/platform/storage/repo/sessions.js";
 import { listAttempts } from "../../src/platform/storage/repo/dispatch.js";
-import type { CreateSessionFn } from "../../src/platform/runtime/session.js";
+import type { CreateSessionFn } from "../../src/platform/runtime/agentRuntime/pi/session.js";
 
 /** 限流原文(逐字 —— 改了就测不到真机那一形态)。 */
 const RATE_LIMIT_TEXT = "429 Too Many Requests — rate limit exceeded";
