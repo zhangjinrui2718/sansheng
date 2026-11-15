@@ -798,12 +798,6 @@ export async function runTurn(opts: RunTurnOptions): Promise<TurnResult> {
 
   const unsub = opts.session.subscribe((ev: RuntimeEvent) => {
     try {
-      process.stdout.write(`DEBUG_EV ${opts.agentId} ${JSON.stringify(ev).slice(0, 140)}\n`);
-      opts.onEvent?.(ev);
-    } catch (e) {
-      process.stdout.write(`DEBUG_EV_ERR ${opts.agentId} ${String(e)}\n`);
-    }
-    try {
       opts.onEvent?.(ev);
     } catch {
       // 观察者出错不该毁掉回合一 —— 但也不能静默:记进 thinking 之外的地方
