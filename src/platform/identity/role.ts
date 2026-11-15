@@ -188,7 +188,8 @@ export type PromptUnitId =
   | "quality_reviewer.protocol"
   | "collaboration.ask"
   | "collaboration.convene"
-  | "change.propose";
+  | "change.propose"
+  | "methodology.core";
 
 /**
  * 一个角色的完整规格 = 架构上界 + 写面白名单 + 客户可见性 + 边界可见性。
@@ -270,7 +271,8 @@ export const ROLE_SPECS: Readonly<Record<ProjectRole, RoleSpec>> = {
     // 各自是「一份 HTML 报告 / 一个代码服务」的**产出的那个人**。
     // 质检仍然只写 `review_finding`,执行角色的 `evidence` 仍然是「执行产出」。
     writeKinds: ["work_brief", "decision", "note", "deliverable"],
-    promptUnits: [
+    promptUnits: [  "methodology.core",
+
       "project_manager.core", "project_manager.protocol",
       "collaboration.ask", "collaboration.convene",
     ],
@@ -312,7 +314,8 @@ export const ROLE_SPECS: Readonly<Record<ProjectRole, RoleSpec>> = {
     // `deliverable` 一直是「整合完了」这个结构化事实的载体,而**执行者自己
     // 就是产出它的那个人**:一份报告是研究工写出来的,不是项目经理替它写的。
     writeKinds: ["evidence", "hypothesis", "work_brief", "note", "deliverable"],
-    promptUnits: [
+    promptUnits: [  "methodology.core",
+
       "research_worker.core", "research_worker.protocol",
       "collaboration.ask", "change.propose",
     ],
@@ -345,7 +348,8 @@ export const ROLE_SPECS: Readonly<Record<ProjectRole, RoleSpec>> = {
       "work.report",
     ],
     writeKinds: ["evidence", "hypothesis", "work_brief", "note", "deliverable"],
-    promptUnits: [
+    promptUnits: [  "methodology.core",
+
       "coding_worker.core", "coding_worker.protocol",
       "collaboration.ask", "change.propose",
     ],

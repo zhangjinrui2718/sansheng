@@ -1523,9 +1523,9 @@ allowlist 拦不住它);**刻意不给 `projectConfig`**(pi 默认还会读 `<cw
 
 ## 提示词(harness)
 
-- 单元内容在 `harness/system_prompts/`,**14 个唯一单元**;构建时由 `scripts/copy-harness.mjs` 拷进 `dist/harness/`(出厂副本)。
+- 单元内容在 `harness/system_prompts/`,**15 个唯一单元**(2026-11-15 +`methodology.core`:三个干活角色共享的方法论);构建时由 `scripts/copy-harness.mjs` 拷进 `dist/harness/`(出厂副本)。
 - 运行时从**数据目录**读:`<dataDir>/harness/system_prompts/{unitId}.md`(`src/platform/runtime/promptAssembly.ts`)。
-- 角色→单元的声明在 `ROLE_SPECS[].promptUnits`:5 个角色共 **19 处声明**、14 个唯一单元。跨角色共享的有**三个** —— `collaboration.ask`(4 个角色)、`collaboration.convene`(2 个角色)、`change.propose`(2 个角色)。
+- 角色→单元的声明在 `ROLE_SPECS[].promptUnits`:5 个角色共 **22 处声明**、15 个唯一单元。跨角色共享的有**四个** —— `collaboration.ask`(4 个角色)、`collaboration.convene`(2 个角色)、`change.propose`(2 个角色)、`methodology.core`(3 个干活角色,2026-11-15 起)。
 - **角色中文名的第三处写法已彻底删掉**(2026-10-08):`runtime/promptAssembly.ts` 曾有一张
   `ROLE_NAME`,先写着 `Worker(执行者)`、后写着「质检审查员」(而 `ORG` 是「质检」)——
   现在**没有那张表了**,系统提示里的「# 你的角色:X」直接调 `roleDisplayName()`。
