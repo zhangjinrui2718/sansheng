@@ -88,7 +88,8 @@ const BASELINE: Record<string, number> = {
   //    395(编辑器,逐字搬来)+ Blocks 265(告警 / 工具面 / 常量,逐字搬来;
   //    净新增的是「路径 / allow / deny」三行与「直接编辑文件」一句 —— 旧版这些
   //    信息在悬停里,现在摆上看得见的地方)+ 工作台 0。
-  "components/harness/Blocks.tsx": 265,
+  "components/harness/Blocks.tsx": 337,
+  "components/harness/HistoryPanel.tsx": 41,
   "components/harness/PromptUnitEditor.tsx": 395,
   "components/harness/judgments.ts": 144,
   "components/harness/useHarnessWorkspace.ts": 0,
@@ -161,7 +162,7 @@ describe("可见文字预算:屏上的中文只许减不许增", () => {
     // 2026-11-14:9,346 → 9,591(+245,全部来自「Harness 管理」:新页面 +139,
     // 共享 ToolSurface 把旧悬停里的路径 / allow / deny 摆上看得见的地方 +106;
     // 其余都是搬家(RoleHarness −719 在四个新文件里原样记账),明细见 BASELINE)
-    expect(total).toBeLessThanOrEqual(9591);
+    expect(total).toBeLessThanOrEqual(9704);
   });
 
   it("② 基线表覆盖所有文件(不许有文件悄悄逃出仪器)", () => {

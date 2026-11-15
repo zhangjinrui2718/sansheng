@@ -36,7 +36,8 @@ import type {
 import { DataState, remoteOf } from "@/components/ui/DataState";
 import { EmptyState, Flag, PageHeader, Pill, Section } from "@/components/ui/primitives";
 import { PromptUnitEditor } from "@/components/harness/PromptUnitEditor";
-import { RoleConstants, ToolSurface, ToolSetAlerts } from "@/components/harness/Blocks";
+import { RoleConstants, ToolSurface, ToolSetAlerts, ToolSetEditor } from "@/components/harness/Blocks";
+import { UnitHistoryPanel } from "@/components/harness/HistoryPanel";
 import {
   harnessGlobalIssues,
   harnessStatusText,
@@ -137,8 +138,10 @@ export function RoleDetailPane({
   requested,
   drafts,
   backups,
+  historyRev,
   onDraftChange,
   onApplied,
+  onToolSetSaved,
 }: {
   /** 选中角色;`null` = 视图里没有角色 / 视图为空(两种情况在下面分开说) */
   role: RoleHarnessView | null;
@@ -147,9 +150,13 @@ export function RoleDetailPane({
   requested: string | null;
   drafts: Readonly<Record<string, string>>;
   backups: Readonly<Record<string, number>>;
+  /** git 历史的变更代数 —— 保存 / 回滚后 +1,逼着重新拉 */
+  historyRev: number;
   onDraftChange: (unitId: string, next: string) => void;
   /** 保存 / 恢复成功 —— 参数是后端**回读**到的正文 */
   onApplied: (unitId: string, content: string) => void;
+  /** 工具面写面成功(父级刷新 harness 视图) */
+  onToolSetSaved?: () => void;
 }) {
   const owners = useMemo(() => sharedUnitOwners(view.roles), [view]);
 
@@ -191,26 +198,43 @@ export function RoleDetailPane({
         ) : (
           <div className="flex flex-col">
             {role.promptUnits.map((u) => (
-              <PromptUnitEditor
-                key={u.id}
-                unit={u}
-                value={drafts[u.id] ?? u.content}
-                backups={backups[u.id]}
-                sharedWith={owners.get(u.id) ?? []}
-                onChange={(v) => onDraftChange(u.id, v)}
-                onApplied={(content) => onApplied(u.id, content)}
-              />
+              <div key={u.id} className="flex flex-col gap-1">
+                <PromptUnitEditor
+                  unit={u}
+                  value={drafts[u.id] ?? u.content}
+                  backups={backups[u.id]}
+                  sharedWith={owners.get(u.id) ?? []}
+                  onChange={(v) => onDraftChange(u.id, v)}
+                  onApplied={(content) => onApplied(u.id, content)}
+                />
+                {/* git 历史(2026-11-15):查看旧版 / 回滚到此版。
+                    onRestored 走 applyContent —— 回读值当状态,写面规矩③。 */}
+                <UnitHistoryPanel
+                  unitId={u.id}
+                  rev={historyRev}
+                  onRestored={(content) => onApplied(u.id, content)}
+                />
+              </div>
             ))}
           </div>
         )}
       </Section>
 
-      {/* ② 工具面:实得工具数 · 集合文件状态与路径 · 越权被拒清单(只读)。
-          集合文件本批无写面 —— 注明「直接编辑文件」(出处 harness.toolset)。 */}
+      {/* ② 工具面:状态只读 + 勾选编辑器(2026-11-15 起有写面)。
+          absent ⇒ 全集默认勾;invalid ⇒ 编辑器不给动(先恢复出厂/手改坏文件)。 */}
       <Section title="工具面" helpId="harness.toolset">
         <div className="flex flex-col gap-2">
           <ToolSurface role={role} />
           <ToolSetAlerts role={role} />
+          {role.toolSet.state !== "invalid" && (
+            <ToolSetEditor
+              role={role.role}
+              factoryTools={[...role.tools, ...role.toolSet.removedByToolSet]}
+              currentEffective={role.tools}
+              currentState={role.toolSet.state}
+              onSaved={() => onToolSetSaved?.()}
+            />
+          )}
         </div>
       </Section>
 
@@ -222,7 +246,7 @@ export function RoleDetailPane({
   );
 }
 
-export function HarnessManagePage() {
+export function HarnessManagePage({ onToolSetSaved }: { onToolSetSaved?: () => void } = {}) {
   const ws = useHarnessWorkspace();
   const { loc, setParam } = useAppLocation();
   /** 深链接 `#/harness?role=…` —— 选中态住在地址里,不在组件 state。 */
@@ -255,8 +279,10 @@ export function HarnessManagePage() {
                   requested={requested}
                   drafts={ws.drafts}
                   backups={ws.backups}
+                  historyRev={ws.historyRev}
                   onDraftChange={ws.onDraftChange}
                   onApplied={ws.applyContent}
+                  onToolSetSaved={onToolSetSaved}
                 />
               </div>
             </>

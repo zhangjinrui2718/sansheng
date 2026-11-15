@@ -38,6 +38,8 @@ export interface HarnessWorkspace {
   drafts: Record<string, string>;
   /** 每个单元的备份份数。`-1` = 查不到(如实显示成「—」,不显示 0)。 */
   backups: Record<string, number>;
+  /** git 历史的变更代数 —— 保存 / 回滚成功后 +1,逼 UnitHistoryPanel 重拉 */
+  historyRev: number;
   onDraftChange: (unitId: string, next: string) => void;
   /** 保存 / 恢复成功 —— 参数只有 `content`,也就是后端回读的那一份。 */
   applyContent: (unitId: string, content: string) => void;
@@ -53,6 +55,8 @@ export function useHarnessWorkspace(options?: {
   const [loading, setLoading] = useState(true);
   const [drafts, setDrafts] = useState<Record<string, string>>({});
   const [backups, setBackups] = useState<Record<string, number>>({});
+  /** git 历史的变更代数 —— 保存 / 回滚成功后 +1,逼 UnitHistoryPanel 重拉 */
+  const [historyRev, setHistoryRev] = useState(0);
 
   const refreshBackups = useCallback((unitId: string) => {
     listPromptUnitBackups(unitId)
@@ -103,6 +107,7 @@ export function useHarnessWorkspace(options?: {
             },
       );
       refreshBackups(unitId);
+      setHistoryRev((r) => r + 1);
       // 盘上的正文变了 ⇒ 丢掉标签页级缓存,别的读者(成员页页签角标、对话页的
       // clientFacing 判据)下次挂载时才会重取。
       invalidateHarnessCache();
@@ -115,5 +120,50 @@ export function useHarnessWorkspace(options?: {
     setDrafts((d) => ({ ...d, [unitId]: next }));
   }, []);
 
-  return { view, loading, error, drafts, backups, onDraftChange, applyContent };
+  return { view, loading, error, drafts, backups, onDraftChange, applyContent, historyRev };
+}
+
+
+// ── git 历史(2026-11-15)───────────────────────────────────────
+//
+// harness 目录 git 化之后的读面:按单元过滤提交列表,给管理页的「历史」段。
+// 加载时机 = 角色选中时拉一次;回滚/保存后由调用方 bump `rev` 重拉。
+
+import { getHarnessHistory, type HarnessCommitEntryView } from "@/lib/api";
+
+export function useUnitHistory(unitId: string | null, rev: number): {
+  entries: HarnessCommitEntryView[];
+  loading: boolean;
+  error: string | null;
+} {
+  const [entries, setEntries] = useState<HarnessCommitEntryView[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (unitId === null) {
+      setEntries([]);
+      setError(null);
+      return;
+    }
+    let alive = true;
+    setLoading(true);
+    getHarnessHistory(`system_prompts/${unitId}.md`)
+      .then((r) => {
+        if (!alive) return;
+        setEntries(r.entries);
+        setLoading(false);
+      })
+      .catch((e: unknown) => {
+        if (!alive) return;
+        setEntries([]);
+        setLoading(false);
+        setError(e instanceof Error ? e.message : String(e));
+      });
+    return () => {
+      alive = false;
+    };
+  }, [unitId, rev]);
+
+  return { entries, loading, error };
 }

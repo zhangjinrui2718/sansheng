@@ -621,6 +621,73 @@ export function listPromptUnitBackups(
   );
 }
 
+// ── harness git 历史 + 工具面写面(2026-11-15)───────────────────
+//
+// `<dataDir>/harness/` 是 git 仓库:单元保存 / 恢复出厂 / 工具面写面成功后
+// 整目录 commit 一发。这里的四个函数是它的前端读面与写面。
+
+/** 一条 harness git 提交(sha / 时间 / 消息 / 触碰的文件)。 */
+export interface HarnessCommitEntryView {
+  sha: string;
+  at: number;
+  message: string;
+  files: string[];
+}
+
+/** 提交历史(新的在前)。`path` 可选 —— 只看触到某文件的提交。 */
+export function getHarnessHistory(
+  path?: string,
+): Promise<{ ok: boolean; entries: Array<{ sha: string; at: number; message: string; files: string[] }>; problem?: string }> {
+  const q = path !== undefined ? `?path=${encodeURIComponent(path)}` : "";
+  return request<{ ok: boolean; entries: Array<{ sha: string; at: number; message: string; files: string[] }> }>(
+    `/harness/history${q}`,
+  );
+}
+
+/** 读某个提交里的一份文件原文(「查看此版」)。 */
+export function getHarnessFileAt(
+  sha: string,
+  path: string,
+): Promise<{ sha: string; path: string; content: string }> {
+  return request<{ sha: string; path: string; content: string }>(
+    `/harness/file-at?sha=${encodeURIComponent(sha)}&path=${encodeURIComponent(path)}`,
+  );
+}
+
+/** 回滚一份文件到某个提交。回滚本身也会成为一条新历史(可再回滚)。 */
+export function restoreHarnessFile(
+  sha: string,
+  path: string,
+): Promise<{ ok: boolean; path: string; content: string }> {
+  return request<{ ok: boolean; path: string; content: string }>("/harness/restore", {
+    method: "POST",
+    body: JSON.stringify({ sha, path }),
+  });
+}
+
+/**
+ * 写某角色的工具集合文件(L2)。`allow` 是白名单(未勾选 = 不在工具面);
+ * `deny` 传 `[]`(UI 的勾选模型用 allow 表达一切)。
+ * 写成功 ⇒ state 变 ok、工具面当场收窄(下一回合建立即生效)。
+ */
+export function saveToolSet(
+  role: string,
+  allow: string[],
+): Promise<{ ok: boolean; content: string }> {
+  return request<{ ok: boolean; content: string }>(
+    `/harness/tools/${encodeURIComponent(role)}`,
+    { method: "PUT", body: JSON.stringify({ allow, deny: [] }) },
+  );
+}
+
+/** 恢复出厂 = 删文件回到 absent(ceiling 全集),不是写空文件。 */
+export function resetToolSet(role: string): Promise<{ ok: boolean }> {
+  return request<{ ok: boolean }>(`/harness/tools/${encodeURIComponent(role)}/reset`, {
+    method: "POST",
+    body: JSON.stringify({ confirm: "reset" }),
+  });
+}
+
 // ── 记忆画像(结构化摘要,与 fragments 互补)──────────────────────
 //
 // 两层:**片段**是流水式记录(「用户说过 X」),**画像**是当前的结构化摘要

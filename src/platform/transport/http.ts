@@ -42,10 +42,13 @@ import { resolveClientQuestion } from "../tools/client.js";
 import { ensureOrg, ensureProjectOrg, orgReady, roleDisplayName } from "../runtime/org.js";
 import { loadPromptUnits, unitPath } from "../runtime/promptAssembly.js";
 import { solveToolset } from "../harness/authorize.js";
+import { commitAll, history as harnessHistory, restoreFrom, showAt } from "../harness/vcs.js";
+import { clearToolSetFile, writeToolSetFile } from "../harness/toolSet.js";
+import { join as pathJoin } from "node:path";
 import { toolBriefs } from "../tools/briefs.js";
 import { resolveToolSet, strayToolSetFiles, toolSetDir } from "../harness/toolSet.js";
 import { loadProjectForAuthz } from "../storage/repo/projects.js";
-import { ROLE_SPECS, PROJECT_ROLES, type ProjectRole } from "../identity/role.js";
+import { ROLE_SPECS, PROJECT_ROLES, isProjectRole, type ProjectRole } from "../identity/role.js";
 import { getAgent, listAgents } from "../storage/repo/agents.js";
 import {
   listAllClientQuestions,
@@ -1274,6 +1277,11 @@ app.get("/api/client-questions", (c) => c.json(listAllClientQuestions(db)));
       );
     }
     // 规矩③:返回的是**回读**到的正文
+    // git 化(2026-11-15):写成功即整目录提交一发 —— 历史在 git 里,不在备份列表里
+    const vcsRes = commitAll(pathJoin(deps.dataDir, "harness"), `prompt: 保存 ${unitId}`);
+    if (!vcsRes.ok) {
+      console.warn(`harness: git 提交失败(保存 ${unitId})—— 写入本身已生效:${vcsRes.detail ?? ""}`);
+    }
     return c.json({
       ok: true,
       content: r.content,
@@ -1294,12 +1302,115 @@ app.get("/api/client-questions", (c) => c.json(listAllClientQuestions(db)));
         r.reason === "unknown_unit" ? 404 : 500,
       );
     }
+    const vcsRes = commitAll(pathJoin(deps.dataDir, "harness"), `prompt: 恢复出厂 ${unitId}`);
+    if (!vcsRes.ok) {
+      console.warn(`harness: git 提交失败(恢复出厂 ${unitId})—— 恢复本身已生效:${vcsRes.detail ?? ""}`);
+    }
     return c.json({ ok: true, content: r.content });
   });
 
   app.get("/api/harness/units/:unitId/backups", (c) =>
     c.json({ backups: listBackups(deps.dataDir, c.req.param("unitId")) }),
   );
+
+  // ── harness 的 git 历史(A2',2026-11-15)────────────────────────
+  //
+  // `<dataDir>/harness/` 自 2026-11-15 起是一个 git 仓库:单元保存 / 恢复出厂 /
+  // 工具面写面成功后都会整目录 commit 一发。这里的三个端点是它的读面与回滚面:
+  //   · history:提交列表(可按 path 过滤到单个单元 / 单个角色的集合文件);
+  //   · file-at:读某个提交里的文件原文(「查看此版」);
+  //   · restore:把文件回滚到某个提交(「回滚到此版」),回滚本身也会成为一条
+  //     新历史 —— 回滚可再回滚。
+  //
+  // ⚠️ 失败不抛:git 不可用(只读盘 / 没装)时 harness 读写照常工作,
+  //    只是没有历史 —— 与 `vcs.ts` 文件头同一条纪律。
+
+  app.get("/api/harness/history", (c) => {
+    const path = c.req.query("path");
+    const limit = Number(c.req.query("limit") ?? 30);
+    const r = harnessHistory(pathJoin(deps.dataDir, "harness"), {
+      ...(path !== undefined && path !== "" ? { relPath: path } : {}),
+      ...(Number.isFinite(limit) ? { limit } : {}),
+    });
+    return c.json({ ok: r.ok, entries: r.entries, ...(r.detail !== undefined ? { problem: r.detail } : {}) });
+  });
+
+  app.get("/api/harness/file-at", (c) => {
+    const sha = c.req.query("sha") ?? "";
+    const path = c.req.query("path") ?? "";
+    if (sha === "" || path === "") {
+      return c.json(err("invalid_args", "需要 sha 与 path 两个查询参数").body, 400);
+    }
+    const r = showAt(pathJoin(deps.dataDir, "harness"), sha, path);
+    if (!r.ok) {
+      return c.json({ error: { code: "not_found", message: r.detail ?? "读取失败" } }, 404);
+    }
+    return c.json({ sha, path, content: r.content });
+  });
+
+  app.post("/api/harness/restore", async (c) => {
+    const body = (await c.req.json().catch(() => null)) as
+      | { sha?: unknown; path?: unknown }
+      | null;
+    if (body === null || typeof body.sha !== "string" || typeof body.path !== "string") {
+      return c.json(err("invalid_args", "请求体需要 { sha: string, path: string }").body, 400);
+    }
+    const root = pathJoin(deps.dataDir, "harness");
+    const r = restoreFrom(root, body.sha, body.path);
+    if (!r.ok) {
+      return c.json({ error: { code: "restore_failed", message: r.detail ?? "回滚失败" } }, 400);
+    }
+    const vcsRes = commitAll(root, `回滚 ${body.path} 到 ${body.sha.slice(0, 8)}`);
+    if (!vcsRes.ok) {
+      console.warn(`harness: 回滚后 git 提交失败 —— 回滚本身已生效:${vcsRes.detail ?? ""}`);
+    }
+    return c.json({ ok: true, path: body.path, content: r.content });
+  });
+
+  // ── toolSet L2 写面(2026-11-15)─────────────────────────────────
+  //
+  // 「本批不提供写面」到此为止:集合文件现在可以**在界面上**收窄/恢复。
+  // 语义与 toolSet.ts 文件头一致:
+  //   · 写入合法 ⇒ state 变 `ok`,工具面**当场收窄**(下一回合建立即生效);
+  //   · 恢复出厂 = **删文件回到 absent**(ceiling 全集)—— 不是写一个空文件;
+  //   · 写成功即整目录 commit(git 历史覆盖工具面改动)。
+  // 校验:role 闭合注册表 + parseToolSetFile 形状 + 工具名 ∈ ALL_TOOLS ——
+  // 拼写错误在写面拒绝,而不是静默无效。
+
+  app.put("/api/harness/tools/:role", async (c) => {
+    const role = c.req.param("role");
+    if (!isProjectRole(role)) {
+      return c.json({ error: { code: "unknown_role", message: `未知角色「${role}」` } }, 404);
+    }
+    const body = await c.req.json().catch(() => null);
+    const r = writeToolSetFile(deps.dataDir, role, body, deps.now());
+    if (!r.ok) {
+      const status = r.reason === "unknown_role" ? 404 : r.reason === "unknown_tool" || r.reason === "invalid_shape" ? 400 : 500;
+      return c.json({ error: { code: r.reason ?? "write_failed", message: r.detail ?? "写入失败" } }, status);
+    }
+    const vcsRes = commitAll(pathJoin(deps.dataDir, "harness"), `toolset: 更新 ${role} 工具面`);
+    if (!vcsRes.ok) {
+      console.warn(`harness: 工具面写入后 git 提交失败(写入本身已生效):${vcsRes.detail ?? ""}`);
+    }
+    return c.json({ ok: true, content: r.content });
+  });
+
+  app.post("/api/harness/tools/:role/reset", async (c) => {
+    const role = c.req.param("role");
+    if (!isProjectRole(role)) {
+      return c.json({ error: { code: "unknown_role", message: `未知角色「${role}」` } }, 404);
+    }
+    const r = clearToolSetFile(deps.dataDir, role, deps.now());
+    if (!r.ok) {
+      return c.json({ error: { code: r.reason ?? "reset_failed", message: r.detail ?? "恢复出厂失败" } }, 500);
+    }
+    const vcsRes = commitAll(pathJoin(deps.dataDir, "harness"), `toolset: ${role} 恢复出厂(回到 ceiling 全集)`);
+    if (!vcsRes.ok) {
+      console.warn(`harness: 工具面恢复出厂后 git 提交失败:${vcsRes.detail ?? ""}`);
+    }
+    return c.json({ ok: true });
+  });
+
 
   // ── MCP(外部工具)· 2026-10-16 ──────────────────────────────────
   //

@@ -19,7 +19,7 @@
  *     不标注用户会去找一个不存在的开关(RoleHarness 文件头的规矩③)。
  */
 import type { RoleHarnessView } from "@shared/types/platform";
-import { Flag, KV } from "@/components/ui/primitives";
+import { Flag, KV, RedMeta } from "@/components/ui/primitives";
 import { Help } from "@/components/ui/Help";
 import { ToolTable } from "@/components/members/ToolTable";
 import { toolCountText, toolSetStateDetail } from "@/components/harness/judgments";
@@ -151,6 +151,133 @@ export function RoleConstants({ role }: { role: RoleHarnessView }) {
             {c}
           </span>
         ))}
+      </div>
+    </div>
+  );
+}
+
+// ── ToolSetEditor:工具面(L2 集合文件)的勾选编辑器(2026-11-15)────
+//
+// 后端 PUT /api/harness/tools/:role(写面,校验+生效)与 POST …/reset
+// (回到 ceiling 全集)。勾选模型:**勾上 = 在工具面里**;未勾 = 不在
+// (allow 白名单语义,deny 由后端保持)。初始状态:
+//   · state=absent ⇒ 全部勾上(ceiling 全集);
+//   · state=ok ⇒ 按当前 allow 勾;
+//   · state=invalid ⇒ 不给编辑,先把坏文件恢复出厂/手改(编辑器面板会说明)。
+// 「未知工具名」后端会拒(ALL_TOOLS 校验),这里只列实得/被收窄过的工具名,
+// 不会出现未知名。
+
+import { useState } from "react";
+import { saveToolSet, resetToolSet, errorMessage } from "@/lib/api";
+
+export function ToolSetEditor({
+  role,
+  factoryTools,
+  currentEffective,
+  currentState,
+  onSaved,
+}: {
+  role: string;
+  /** 出厂工具全集(L1 ceiling 展开后的名字)—— 勾选的对象 */
+  factoryTools: readonly string[];
+  /** 当前生效的工具面(state=ok 时 = allow ∩ 非 deny;absent 时 = 全集) */
+  currentEffective: readonly string[];
+  /** absent = 没有集合文件;ok = 有;invalid = 文件坏了 */
+  currentState: "absent" | "ok" | "invalid";
+  /** 保存 / 恢复出厂成功后回调(父级刷新视图) */
+  onSaved: () => void;
+}) {
+  const [checked, setChecked] = useState<ReadonlySet<string>>(
+    () => new Set(currentState === "absent" ? factoryTools : currentEffective),
+  );
+  const [busy, setBusy] = useState<string | null>(null);
+  const [note, setNote] = useState<string | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+
+  const toggle = (name: string): void => {
+    setChecked((prev) => {
+      const next = new Set(prev);
+      if (next.has(name)) next.delete(name);
+      else next.add(name);
+      return next;
+    });
+  };
+
+  const save = (): void => {
+    setBusy("save");
+    setErr(null);
+    saveToolSet(role, [...checked].sort())
+      .then(() => {
+        setBusy(null);
+        setNote("已保存,下一回合建立时生效。");
+        onSaved();
+      })
+      .catch((e: unknown) => {
+        setBusy(null);
+        setErr(errorMessage(e));
+      });
+  };
+
+  const factoryReset = (): void => {
+    setBusy("reset");
+    setErr(null);
+    resetToolSet(role)
+      .then(() => {
+        setBusy(null);
+        setNote("已恢复出厂:回到 ceiling 全集。");
+        setChecked(new Set(factoryTools));
+        onSaved();
+      })
+      .catch((e: unknown) => {
+        setBusy(null);
+        setErr(errorMessage(e));
+      });
+  };
+
+  return (
+    <div className="flex flex-col gap-1.5">
+      <div className="ss-note">
+        勾选 = 在工具面里;未勾 = 收窄掉(效果在「实得工具」里立即可见)。
+        出厂全集 {factoryTools.length} 个 · 当前勾选 {checked.size} 个。
+      </div>
+      <div className="grid gap-1" style={{ gridTemplateColumns: "repeat(2, minmax(0, 1fr))" }}>
+        {factoryTools.map((t) => (
+          <label key={t} className="ss-body flex items-center gap-1.5" style={{ cursor: "pointer" }}>
+            <input
+              type="checkbox"
+              checked={checked.has(t)}
+              onChange={() => toggle(t)}
+              disabled={busy !== null}
+            />
+            {t}
+          </label>
+        ))}
+      </div>
+      <div className="flex items-center gap-2 flex-wrap">
+        <button
+          type="button"
+          className="sansheng-button"
+          onClick={save}
+          disabled={busy !== null}
+        >
+          {busy === "save" ? "保存中…" : "保存工具面"}
+        </button>
+        <button
+          type="button"
+          className="sansheng-button ss-link"
+          onClick={factoryReset}
+          disabled={busy !== null}
+        >
+          {busy === "reset" ? "恢复中…" : "恢复出厂全集"}
+        </button>
+        {err !== null && (
+          <RedMeta>{err}</RedMeta>
+        )}
+        {note !== null && (
+          <span className="ss-meta" style={{ color: "var(--ok)" }}>
+            {note}
+          </span>
+        )}
       </div>
     </div>
   );

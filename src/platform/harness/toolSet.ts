@@ -44,8 +44,19 @@
  * 把 role 参数从别处透传进来。写面(若将来加)必须复用同一条判定,见
  * `harness/write.ts` 规矩①。
  */
-import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
-import { join, resolve, sep } from "node:path";
+import {
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  renameSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
+import { join, dirname, resolve, sep } from "node:path";
+import { ALL_TOOLS } from "./capability.js";
 import { log } from "../../shared/log.js";
 import { PROJECT_ROLES, isProjectRole, type ProjectRole } from "../identity/role.js";
 import type { ToolSetFile } from "./authorize.js";
@@ -276,4 +287,129 @@ export function strayToolSetFiles(dataDir: string): readonly string[] {
       }
     })
     .sort();
+}
+
+// ── 写面(2026-11-15)────────────────────────────────────────────
+//
+// 读写源配对:resolveToolSet 是读,这里是写。写之前过**四道校验**:
+//   ① role 来自闭合注册表(与 toolSetPath 同一道防线路径穿越);
+//   ② 形状经 parseToolSetFile(allow/deny 都是字符串数组);
+//   ③ 逐个工具名 ∈ ALL_TOOLS(拼写错误在这里拒绝,而不是静默无效 ——
+//      solveToolset 对未知名的处置是「reported but tolerated」,写面更严是
+//      对的:写错了立刻知道,而不是「改了没效果」);
+//   ④ 备份是写的前置(write.ts 规矩②,失败就拒绝写)。
+//
+// 「恢复出厂」对 L2 的语义 = **删文件回到 absent**(ceiling 全集),不是写
+// 一个空文件:`{"allow":[],"deny":[]}` 是「一个工具都没有」的用户意图,
+// 与「回到出厂全集」完全不同 —— 见文件头 fail-closed 一节。
+
+
+const KNOWN_TOOLS: ReadonlySet<string> = new Set(ALL_TOOLS);
+
+export interface ToolSetWriteResult {
+  readonly ok: boolean;
+  readonly reason?: "unknown_role" | "invalid_shape" | "unknown_tool" | "backup_failed" | "write_failed";
+  readonly detail?: string;
+  /** 回读的正文(报成功 = 真生效,write.ts 规矩③同源) */
+  readonly content?: string;
+}
+
+function toolBackupDir(dataDir: string): string {
+  return join(dataDir, "harness", "backups", "tools");
+}
+
+export function writeToolSetFile(
+  dataDir: string,
+  role: ProjectRole,
+  raw: unknown,
+  now: number,
+): ToolSetWriteResult {
+  if (!isProjectRole(role)) {
+    return { ok: false, reason: "unknown_role", detail: `未知角色「${String(role)}」` };
+  }
+  const parsed = parseToolSetFile(raw);
+  if (!parsed.ok) {
+    return { ok: false, reason: "invalid_shape", detail: parsed.detail };
+  }
+  for (const name of [...parsed.file.allow, ...parsed.file.deny]) {
+    if (!KNOWN_TOOLS.has(name)) {
+      return {
+        ok: false,
+        reason: "unknown_tool",
+        detail: `未知工具名「${name}」—— 工具名必须来自 ALL_TOOLS(内置 + 平台)`,
+      };
+    }
+  }
+
+  const target = toolSetPath(dataDir, role);
+  const existed = existsSync(target);
+  if (existed) {
+    const dir = toolBackupDir(dataDir);
+    try {
+      mkdirSync(dir, { recursive: true });
+      let bak = join(dir, `${role}.${now}.bak`);
+      let n = 1;
+      while (existsSync(bak)) bak = join(dir, `${role}.${now}.${n++}.bak`);
+      copyFileSync(target, bak);
+    } catch (err) {
+      return {
+        ok: false,
+        reason: "backup_failed",
+        detail: `备份失败,已中止写入:${err instanceof Error ? err.message : String(err)}`,
+      };
+    }
+  }
+
+  const tmp = `${target}.tmp`;
+  try {
+    mkdirSync(dirname(target), { recursive: true });
+    writeFileSync(tmp, JSON.stringify(parsed.file, null, 2) + "\n", "utf8");
+    // 原子替换(tmp 与 target 同目录 —— rename 不会跨盘)
+    renameSync(tmp, target);
+  } catch (err) {
+    try { rmSync(tmp, { force: true }); } catch { /* 清理失败无所谓 */ }
+    return { ok: false, reason: "write_failed", detail: err instanceof Error ? err.message : String(err) };
+  }
+
+  // 回读 —— 报成功 = 真生效(write.ts 规矩③同源)
+  let readBack: string;
+  try {
+    readBack = readFileSync(target, "utf8");
+  } catch (err) {
+    return { ok: false, reason: "write_failed", detail: `写后回读失败:${err instanceof Error ? err.message : String(err)}` };
+  }
+  if (readBack !== JSON.stringify(parsed.file, null, 2) + "\n") {
+    return { ok: false, reason: "write_failed", detail: "写后回读的内容与提交的不一致" };
+  }
+  return { ok: true, content: readBack };
+}
+
+/**
+ * 恢复出厂(L2 语义)= **删文件回到 absent**(ceiling 全集)。
+ * 与提示词单元的「恢复出厂 = 写回出厂字节」不同:工具面的出厂状态就是
+ * 「没有集合文件」,删除才是恢复默认。删前仍留备份(与提示词同纪律)。
+ */
+export function clearToolSetFile(dataDir: string, role: ProjectRole, now: number): ToolSetWriteResult {
+  if (!isProjectRole(role)) {
+    return { ok: false, reason: "unknown_role", detail: `未知角色「${String(role)}」` };
+  }
+  const target = toolSetPath(dataDir, role);
+  if (existsSync(target)) {
+    const dir = toolBackupDir(dataDir);
+    try {
+      mkdirSync(dir, { recursive: true });
+      let bak = join(dir, `${role}.${now}.bak`);
+      let n = 1;
+      while (existsSync(bak)) bak = join(dir, `${role}.${now}.${n++}.bak`);
+      copyFileSync(target, bak);
+    } catch (err) {
+      return {
+        ok: false,
+        reason: "backup_failed",
+        detail: `备份失败,已中止删除:${err instanceof Error ? err.message : String(err)}`,
+      };
+    }
+    rmSync(target, { force: true });
+  }
+  return { ok: true, content: "" };
 }

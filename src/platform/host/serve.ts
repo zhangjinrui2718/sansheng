@@ -33,6 +33,7 @@ import { fileURLToPath } from "node:url";
 import type { Server } from "node:http";
 import type Database from "better-sqlite3";
 import { notifyDesktop } from "./notify.js";
+import { commitAll as commitHarnessSnapshot } from "../harness/vcs.js";
 import type { RuntimeEvent, RuntimeSession } from "../runtime/agentRuntime/types.js";
 import { bootPlatform, type BootedPlatform } from "../runtime/boot.js";
 import { createPlatformSession, type CreateSessionFn } from "../runtime/agentRuntime/pi/session.js";
@@ -3312,6 +3313,12 @@ export async function runPlatformServe(opts: ServeOptions): Promise<{ close: () 
   log.ok(
     `  提示词单元:已落盘 ${seed.seeded.length} / 已在位 ${seed.alreadyPresent.length} / 出厂副本缺失 ${seed.factoryMissing.length}`,
   );
+  // harness 目录 git 化(2026-11-15):seed 落盘后把初始状态提交一发 ——
+  // 历史/回滚的前置。失败不抛(harness 读写照常,只是没有历史)。
+  if (seed.seeded.length > 0) {
+    const vcsRes = commitHarnessSnapshot(join(opts.dataDir, "harness"), `seed: 补齐 ${seed.seeded.length} 个提示词单元`);
+    if (!vcsRes.ok) console.warn(`  ⚠ harness git 初始化失败:${vcsRes.detail ?? ""}`);
+  }
   // 出厂副本缺失要**说出来**:少拷一个单元时除了这行,没有任何别的地方会提到它,
   // 而它的后果是某个 agent 静默地少一条规矩。不警告 = 把构建期的疏忽
   // 推迟成运行期无法归因的「它怎么不知道这条」。
