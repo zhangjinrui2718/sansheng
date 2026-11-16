@@ -71,7 +71,3 @@
 
 ⚠️ **这五步的顺序就是它的价值**:跳过第一步直接实现,是所有返工的源头;
 指标在实现后才补,是所有"我觉得做好了"争论的源头。
-
-__zcode_status=$?
-if [ "$__zcode_status" -eq 0 ]; then pwd -P > '/var/folders/rm/kg3j0vq55rzc0pm_097z4gq00000gn/T/zcode-e75dd80e-0596-4821-bae3-1ff57dc71723-cwd'; fi
-exit "$__zcode_status"
