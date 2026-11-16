@@ -43,7 +43,10 @@ beforeEach(() => {
   seq = 0;
   clock = 1_700_000_000_000;
   insertAgent(db, { id: "bm", role: "business_manager", specialization: null, displayName: "业务经理", createdAt: clock });
-  insertProject(db, { id: "p1", name: "塔防", client: "甲", goal: GOAL, status: "active", createdAt: clock });
+  insertProject(db, {
+    id: "p1", name: "塔防", client: "甲", goal: GOAL,
+    acceptanceCriteria: [ANCHOR], status: "active", createdAt: clock,
+  });
   addMember(db, "p1", "bm", clock);
   project = loadProjectForAuthz(db, "p1")!;
   mkdirSync(join(dir, "system_prompts"), { recursive: true });
@@ -140,7 +143,7 @@ describe("② 判据锚点:问题必须引用目标原文", () => {
     const r = await call({ question: "问题", blocks: "守住" });
     expect(r.ok).toBe(false);
     expect(r.code).toBe("goal_anchor");
-    expect(r.message).toContain("锚定");
+    expect(r.message).toContain("锚点太短");
   });
 
   it("锚点与目标原文对不上 ⇒ 拒绝,并指引先把判据写进目标", async () => {

@@ -167,6 +167,12 @@ export interface ProjectSummary {
   client: string;
   goal: string;
   /**
+   * 结构化验收判据(migration 031;以终为始的工程化)。空数组 = 还没有
+   * 结构化判据 —— 判据躺在 goal 文本里。质检逐条审、ask_client 锚点引用
+   * 的都是这份数据。
+   */
+  acceptanceCriteria: string[];
+  /**
    * 生命周期状态。**`awaiting_acceptance`(待收货)是派生值**,判据见
    * {@link ProjectLifecycleStatus} —— 库里的 `projects.status` 仍然是 `active`。
    */

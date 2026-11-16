@@ -46,7 +46,7 @@ interface Turn {
 interface Harness {
   readonly turns: Turn[];
   /** 非 null 时,接待会话的那一回合真的调一次 `project_open`(走 customTools) */
-  openProject: { name: string; client: string; goal: string } | null;
+  openProject: { name: string; client: string; goal: string; criteria?: string[] } | null;
 }
 
 const PROJECT_ID_RE = /项目 ID:`([^`]+)`/;
@@ -233,7 +233,7 @@ describe("① project_open ⇒ 目录 + 仓 + 首次提交", () => {
     const started = await startHost();
     const db = started.booted.deps.db;
     const client = attachFakeClient(started.hub);
-    h.openProject = { name: "量化系统", client: "甲方", goal: "把回测跑起来" };
+    h.openProject = { name: "量化系统", client: "甲方", goal: "把回测跑起来", criteria: ["把回测跑起来"] };
 
     client.send({ type: "send", projectId: null, content: "我想做一个量化系统" });
 

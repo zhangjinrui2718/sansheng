@@ -91,6 +91,7 @@ export async function runPlatformRun(opts: PlatformRunOptions): Promise<boolean>
         name: opts.task.slice(0, 40),
         client: "(未指定)",
         goal: opts.task,
+        acceptanceCriteria: [opts.task],
         status: "active",
         createdAt: at,
       });

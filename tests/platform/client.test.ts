@@ -94,7 +94,7 @@ beforeEach(() => {
   ids.wk = mk("research_worker").id;
   ids.qa = mk("quality_reviewer").id;
 
-  insertProject(db, { id: "p1", name: "测试", client: "甲", goal: "交付一个能玩的测试项目,验收判据见目标原文", status: "active", createdAt: clock });
+  insertProject(db, { id: "p1", name: "测试", client: "甲", goal: "交付一个能玩的测试项目,验收判据见目标原文", acceptanceCriteria: ["交付一个能玩的测试项目"], status: "active", createdAt: clock });
   for (const id of Object.values(ids)) addMember(db, "p1", id, clock);
   project = loadProjectForAuthz(db, "p1")!;
 });

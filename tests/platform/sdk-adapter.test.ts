@@ -280,7 +280,7 @@ describe("假 SDK 契约测试 · 装配 → 调用 → 结果 全链", () => {
 
   it("业务经理经适配壳成功立项", async () => {
     const r = await callViaAdapter(ids.bm, "project_open", {
-      name: "经适配壳的项目", client: "甲", goal: "验证接线",
+      name: "经适配壳的项目", client: "甲", goal: "验证接线", criteria: ["验证接线可复现"],
     });
     expect(r.text).toContain("已立项");
     // details 是**结构化**的成败信号 —— 不是 null。

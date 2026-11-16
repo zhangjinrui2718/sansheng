@@ -67,6 +67,12 @@ const projectOpen: PlatformTool = {
     name: Type.String({ description: "项目名(简短可辨识)" }),
     client: Type.String({ description: "甲方标识" }),
     goal: Type.String({ description: "要达成的目标(与甲方对齐后的结论,不是原始诉求)" }),
+    criteria: Type.Array(Type.String({ description: "一条可检验的验收判据" }), {
+      description:
+        "验收判据(每条**可机械检验**:数字 / 动作 / 可打开验证)。以终为始的工程化 —— " +
+        "质检逐条审、交付自检逐条对照、甲方的追问都会锚定到判据。至少一条;写不出可检验判据 = 还没跟甲方对齐",
+      minItems: 1,
+    }),
     parentProjectId: Type.Optional(Type.String({
       description:
         "上一个版本的 project id —— **仅当这次是同一个交付物的演进**。留空 = 一个全新的项目。",
@@ -79,6 +85,26 @@ const projectOpen: PlatformTool = {
     if (!client.ok) return client.result;
     const goal = requireString(args, "goal");
     if (!goal.ok) return goal.result;
+
+    // 验收判据(以终为始的工程化):逐条非空、去重;至少一条。
+    // 没有判据的项目 = 「做完没做完」只能凭感觉 —— 这个门把那种项目挡在立项外。
+    const criteriaRaw = args["criteria"];
+    if (!Array.isArray(criteriaRaw) || criteriaRaw.length === 0) {
+      return fail("invalid_args", "criteria 必须是至少一条的验收判据数组(每条可检验)", [
+        "示例:[\"交付一份自包含 HTML,双击离线可开\"]",
+      ]);
+    }
+    const seenCriteria = new Set<string>();
+    const criteria: string[] = [];
+    for (const c of criteriaRaw) {
+      if (typeof c !== "string" || c.trim() === "") {
+        return fail("invalid_args", "验收判据不能是空串");
+      }
+      const trimmed = c.trim();
+      if (seenCriteria.has(trimmed)) continue;
+      seenCriteria.add(trimmed);
+      criteria.push(trimmed);
+    }
 
     const id = ctx.newId("pj");
     const at = ctx.now();
@@ -95,6 +121,7 @@ const projectOpen: PlatformTool = {
     const version = parentId === null ? 1 : (getProjectRow(ctx.db, parentId)?.version ?? 0) + 1;
     insertProject(ctx.db, {
       id, name: name.value, client: client.value, goal: goal.value,
+      acceptanceCriteria: criteria,
       status: "active", createdAt: at, version, parentProjectId: parentId,
     });
     // 立项人自动成为项目成员 —— 否则业务经理建完项目反而不在里面。
@@ -216,6 +243,9 @@ const projectRead: PlatformTool = {
       `- 甲方:${row.client}`,
       `- 状态:${row.status}`,
       `- 目标:${row.goal}`,
+      ...row.acceptanceCriteria.length > 0
+        ? ["- 验收判据(逐条):", ...row.acceptanceCriteria.map((c, i) => `  ${i + 1}. ${c}`)]
+        : [],
       "",
       `## 成员(${roster.length})`,
       ...roster.map((m) => `- ${m.displayName} · ${m.role}${m.specialization ? "/" + m.specialization : ""} (${m.id})`),

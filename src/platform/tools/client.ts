@@ -98,22 +98,30 @@ const askClient: PlatformTool = {
 
     // goal 不在 authz 视图里(loadProjectForAuthz 只带 id/name/status/assignments)
     // —— 从仓储行直接拿目标原文,锚点校验要对着它做
-    const goal = getProjectRow(ctx.db, proj.project.id)?.goal ?? "";
+    // 锚点升级(2026-11-15,结构化判据):blocks 必须命中**某条结构化验收判据**
+    // (归一化包含判定)—— 与目标无关的问题不配打扰甲方。空判据(含旧项目
+    // 未补)⇒ 拒并指引;BM 持 project.update,能自己补判据再问。
+    const row = getProjectRow(ctx.db, proj.project.id);
+    const criteria = row?.acceptanceCriteria ?? [];
     const norm = (x: string): string =>
       x
         .toLowerCase()
         .replace(/[\s\p{P}\p{S}]+/gu, "")
         .trim();
-    const goalNorm = norm(goal);
     const anchorNorm = norm(blocksRaw.value);
-    if (anchorNorm.length < ANCHOR_MIN_CHARS || (goalNorm !== "" && !goalNorm.includes(anchorNorm))) {
+    if (anchorNorm.length < ANCHOR_MIN_CHARS) {
       return fail(
         "goal_anchor",
-        "问题必须锚定项目目标里的验收判据原文(blocks 字段引用 ≥10 字连续片段)。" +
-          (goalNorm !== "" && goalNorm.includes(anchorNorm.slice(0, 10))
-            ? "引用再完整一些。"
-            : "与当前目标的原文对不上 —— 若判据还没写进目标,先用 project_update 补上,再来提问。" +
-              "不要为「与目标无关」的事打扰甲方。"),
+        `锚点太短:blocks 需引用某条验收判据的原文(≥${ANCHOR_MIN_CHARS} 字连续片段)—— 说清这条问题卡住的是哪条判据`,
+      );
+    }
+    const hit = criteria.some((c) => norm(c).includes(anchorNorm) || anchorNorm.includes(norm(c)));
+    if (!hit) {
+      return fail(
+        "goal_anchor",
+        criteria.length === 0
+          ? "这个项目还没有结构化验收判据 —— 先用 project_update 补判据,再让问题锚定到判据原文。与目标无关的问题,不要打扰甲方"
+          : `锚点与任何一条验收判据都对不上(共 ${criteria.length} 条)—— 用 project_read 读判据原文,再引用;与判据无关的问题,不要打扰甲方`,
       );
     }
 

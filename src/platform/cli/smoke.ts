@@ -236,6 +236,7 @@ function seedDemoData(booted: ReturnType<typeof bootPlatform>): void {
     name: "冒烟演示项目",
     client: "演示甲方",
     goal: "验证平台接线在真模型下成立",
+    acceptanceCriteria: ["真模型回答可见", "工具声明与 SDK 激活一致"],
     status: "active",
     createdAt: at,
   });

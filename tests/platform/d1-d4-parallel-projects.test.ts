@@ -147,6 +147,7 @@ function makeCreateSession(h: Harness): CreateSessionFn {
               } as unknown as AgentSessionEvent);
               const result = await open.execute("tc_open", {
                 name: "在项目里立的新项目", client: "甲方", goal: "验证全局门铃",
+                criteria: ["验证全局门铃可复现"],
               });
               emit({
                 type: "tool_execution_end", toolCallId: "tc_open", toolName: "project_open",

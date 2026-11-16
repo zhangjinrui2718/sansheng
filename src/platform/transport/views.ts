@@ -693,6 +693,7 @@ export function toProjectSummary(db: Database.Database, row: ProjectRow): Projec
     name: row.name,
     client: row.client,
     goal: row.goal,
+    acceptanceCriteria: row.acceptanceCriteria,
     status: lifecycleOf(row, acceptance),
     createdAt: row.createdAt,
     counts: {

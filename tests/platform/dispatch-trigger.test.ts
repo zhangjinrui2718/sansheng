@@ -113,6 +113,7 @@ function makeCreateSession(db: () => import("better-sqlite3").Database): CreateS
           } as unknown as AgentSessionEvent);
           const result = await open.execute("tc_open", {
             name: "语音机器人调研", client: "甲方", goal: "给出三条技术路线的对比与选型建议",
+            criteria: ["交付对比与选型建议,依据可溯源"],
           });
           emit({
             type: "tool_execution_end", toolCallId: "tc_open", toolName: "project_open",

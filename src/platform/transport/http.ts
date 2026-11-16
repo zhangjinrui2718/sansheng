@@ -396,12 +396,16 @@ export function createPlatformApp(deps: HttpDeps): Hono {
 
   app.post("/api/projects", async (c) => {
     const body = (await c.req.json().catch(() => null)) as {
-      name?: unknown; client?: unknown; goal?: unknown;
+      name?: unknown; client?: unknown; goal?: unknown; criteria?: unknown;
     } | null;
     if (body === null) return c.json(err("invalid_body", "请求体不是合法 JSON").body, 400);
     const name = typeof body.name === "string" ? body.name.trim() : "";
     const goal = typeof body.goal === "string" ? body.goal.trim() : "";
-    if (name === "") return c.json(err("invalid_args", "name 不能为空").body, 400);
+    // 验收判据(2026-11-15,结构化):HTTP 立项不强制(网页表的演进另批),
+    // 缺省把 goal 整体作为单条判据 —— 空判据比没有判据更糟(伪结构)。
+    const criteria: string[] = Array.isArray(body.criteria)
+      ? body.criteria.filter((x: unknown): x is string => typeof x === "string" && x.trim() !== "").map((x: string) => x.trim())
+      : goal !== "" ? [goal] : [];
     if (goal === "") {
       // 立项而不写目标 = 下游所有人都会做出一堆自感觉良好但甲方不要的东西。
       // 这不是格式校验,是设计 1 §1「收敛诉求」那条规矩的接口面落点。
@@ -417,6 +421,7 @@ export function createPlatformApp(deps: HttpDeps): Hono {
       name,
       client: typeof body.client === "string" && body.client.trim() !== "" ? body.client.trim() : "(未指定)",
       goal,
+      acceptanceCriteria: criteria,
       status: "active",
       createdAt: at,
     });

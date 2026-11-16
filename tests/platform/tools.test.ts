@@ -179,7 +179,7 @@ describe("派发器 · 四道拦截", () => {
 
   it("角色 ceiling 不含该能力 → denied(即便工具存在)", () => {
     // 研究工没有 project.open
-    const e = errOf(call(ids.wkAlgo, "project_open", { name: "x", client: "y", goal: "z" }));
+    const e = errOf(call(ids.wkAlgo, "project_open", { name: "x", client: "y", goal: "z", criteria: ["判据 z"] }));
     expect(e.code).toBe("denied");
     expect(e.message).toContain("架构上界");
   });
@@ -205,7 +205,7 @@ describe("派发器 · 四道拦截", () => {
 
 describe("BC1 工具 · project_*", () => {
   it("project_open 建项目并把自己加为成员", () => {
-    const r = call(ids.bm, "project_open", { name: "新项目", client: "甲方A", goal: "交付 X" });
+    const r = call(ids.bm, "project_open", { name: "新项目", client: "甲方A", goal: "交付 X", criteria: ["交付 X 可验收"] });
     const text = okText(r);
     const pid = text.match(/已立项 (\S+?)「/)?.[1];
     expect(pid).toBeDefined();
@@ -649,7 +649,7 @@ describe("BC4 工具 · change_*", () => {
 describe("端到端 · 立项 → 拆解 → 干活 → 阻塞 → 变更 → 审查", () => {
   it("各角色各司其职跑通一条链(业务经理 / 项目经理 / 研究工 / 质检)", () => {
     // 业务经理立项
-    const pid = okText(call(ids.bm, "project_open", { name: "真项目", client: "甲方", goal: "交付" }))
+    const pid = okText(call(ids.bm, "project_open", { name: "真项目", client: "甲方", goal: "交付", criteria: ["交付 X 可验收"] }))
       .match(/已立项 (\S+?)「/)![1]!;
     // 立项人进项目;其余成员由 boot 逻辑加(这里手工补,BC1 还没有 member 管理工具)
     for (const id of [ids.pm, ids.wkAlgo, ids.qa]) addMember(db, pid, id, clock);
@@ -740,7 +740,12 @@ describe("派发器 · 接待会话(project === null)", () => {
   it("接待模式下可用的工具照常工作:project_open 能立项", () => {
     const r = dispatch(
       "project_open",
-      { name: "接待会话里立的项目", client: "甲方", goal: "验证第一个项目之前的立项" },
+      {
+        name: "接待会话里立的项目",
+        client: "甲方",
+        goal: "验证第一个项目之前的立项",
+        criteria: ["验证第一个项目之前的立项可复现"],
+      },
       intakeCtxFor(ids.bm!),
     );
     if (r instanceof Promise) throw new Error("project_open 是同步工具");

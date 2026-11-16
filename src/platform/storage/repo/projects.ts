@@ -13,6 +13,8 @@ export interface ProjectRow {
   name: string;
   client: string;
   goal: string;
+  /** 结构化验收判据(migration 031;JSON 数组)。空数组 = 还没有结构化判据 */
+  acceptanceCriteria: string[];
   status: ProjectStatus;
   createdAt: number;
   closedAt: number | null;
@@ -68,17 +70,32 @@ interface RawProject {
   closed_at: number | null;
   version: number;
   parent_project_id: string | null;
+  /** JSON 数组(031 起写入);迁移前的库副本没有这一列 —— 读取侧用兜底 */
+  acceptance_criteria?: string;
 }
 
 function rowToProject(raw: RawProject): ProjectRow {
   if (!isProjectStatus(raw.status)) {
     throw new Error(`projects 表里出现未定义状态「${raw.status}」(id=${raw.id})`);
   }
+  // 判据解析容错(031):坏 JSON / 类型不对 ⇒ 空数组并**不抛** ——
+  // 一个判据存坏了不该让项目详情页打不开;空数组 =「还没有结构化判据」,
+  // 调用方(ask_client 锚点闸)按各自的口径如实呈现。
+  let acceptanceCriteria: string[] = [];
+  try {
+    const parsed: unknown = JSON.parse(raw.acceptance_criteria ?? "[]");
+    if (Array.isArray(parsed)) {
+      acceptanceCriteria = parsed.filter((x): x is string => typeof x === "string");
+    }
+  } catch {
+    /* 坏值按空数组处理 */
+  }
   return {
     id: raw.id,
     name: raw.name,
     client: raw.client,
     goal: raw.goal,
+    acceptanceCriteria,
     status: raw.status,
     createdAt: raw.created_at,
     closedAt: raw.closed_at,
@@ -104,10 +121,12 @@ export function insertProject(
 ): void {
   db.prepare(
     `INSERT INTO projects
-       (id, name, client, goal, status, created_at, closed_at, version, parent_project_id)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       (id, name, client, goal, acceptance_criteria, status, created_at, closed_at, version, parent_project_id)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
-    row.id, row.name, row.client, row.goal, row.status, row.createdAt,
+    row.id, row.name, row.client, row.goal,
+    JSON.stringify(row.acceptanceCriteria ?? []),
+    row.status, row.createdAt,
     row.closedAt ?? null, row.version ?? 1, row.parentProjectId ?? null,
   );
 }
@@ -133,7 +152,7 @@ export function listProjects(db: Database.Database, status?: ProjectStatus): Pro
 export function updateProject(
   db: Database.Database,
   id: string,
-  fields: { name?: string; goal?: string; status?: "active" | "paused" },
+  fields: { name?: string; goal?: string; acceptanceCriteria?: string[]; status?: "active" | "paused" },
 ): void {
   // ⚠️ **这一段是 2026-10-06 补上的**,而函数头注释**早就写着**「终态走
   // `closeProject`」—— 也就是说:不变式**写在注释里四年,没人在代码里执行它**。
@@ -159,6 +178,10 @@ export function updateProject(
   const vals: unknown[] = [];
   if (fields.name !== undefined) { sets.push("name = ?"); vals.push(fields.name); }
   if (fields.goal !== undefined) { sets.push("goal = ?"); vals.push(fields.goal); }
+  if (fields.acceptanceCriteria !== undefined) {
+    sets.push("acceptance_criteria = ?");
+    vals.push(JSON.stringify(fields.acceptanceCriteria));
+  }
   if (fields.status !== undefined) { sets.push("status = ?"); vals.push(fields.status); }
   if (sets.length === 0) return;
   vals.push(id);
