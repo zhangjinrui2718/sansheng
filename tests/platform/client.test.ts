@@ -94,7 +94,7 @@ beforeEach(() => {
   ids.wk = mk("research_worker").id;
   ids.qa = mk("quality_reviewer").id;
 
-  insertProject(db, { id: "p1", name: "测试", client: "甲", goal: "g", status: "active", createdAt: clock });
+  insertProject(db, { id: "p1", name: "测试", client: "甲", goal: "交付一个能玩的测试项目,验收判据见目标原文", status: "active", createdAt: clock });
   for (const id of Object.values(ids)) addMember(db, "p1", id, clock);
   project = loadProjectForAuthz(db, "p1")!;
 });
@@ -169,7 +169,7 @@ describe("能力面已完整(BC5 接线前置)", () => {
 
 describe("R1 · 甲方那道门只有一个把手", () => {
   it("业务经理可以 ask_client", async () => {
-    const t = okText(await call(ids.bm, "ask_client", { question: "要不要做 X?" }));
+    const t = okText(await call(ids.bm, "ask_client", { question: "要不要做 X?", blocks: "交付一个能玩的测试项目" }));
     expect(t).toContain("已向甲方提问");
   });
 
@@ -180,7 +180,7 @@ describe("R1 · 甲方那道门只有一个把手", () => {
 
   for (const key of ["pm", "wk", "qa"] as const) {
     it(`${key} 调 ask_client → 被 ceiling 门拦下`, async () => {
-      const e = errOf(await call(ids[key], "ask_client", { question: "我要打扰甲方" }));
+      const e = errOf(await call(ids[key], "ask_client", { question: "我要打扰甲方", blocks: "交付一个能玩的测试项目" }));
       expect(e.code).toBe("denied");
       expect(e.message).toContain("架构上界");
       expect(channel.asked, "被拦下的调用不该投递到通道").toEqual([]);
@@ -200,6 +200,7 @@ describe("ask_client · 先落工件再投递", () => {
   it("建 client_question 工件(open)并投递到通道", async () => {
     const t = okText(await call(ids.bm, "ask_client", {
       question: "要不要加这个功能?",
+      blocks: "交付一个能玩的测试项目",
       options: ["加(成本 2 天)", "不加(需求方不满)"],
       lean: "倾向加,但想听你的排期判断",
     }));
@@ -233,7 +234,7 @@ describe("ask_client · 先落工件再投递", () => {
 
   it("**投递失败时工件保留** —— 那是「本该问但没问成」的现场", async () => {
     channel.failNextAsk = new Error("传输层挂了");
-    const e = errOf(await call(ids.bm, "ask_client", { question: "关键问题" }));
+    const e = errOf(await call(ids.bm, "ask_client", { question: "关键问题", blocks: "交付一个能玩的测试项目" }));
     expect(e.code).toBe("internal");
     expect(e.message).toContain("已登记但未送达");
 
@@ -246,7 +247,7 @@ describe("ask_client · 先落工件再投递", () => {
   it("未注入通道 → 如实报装配错误,不假装成功", async () => {
     // 显式传 undefined —— ctxFor 在 spread 之前就设了 client,解构掉字段再 spread
     // 是没用的(它会被重新加回来)
-    const e = errOf(await call(ids.bm, "ask_client", { question: "x" }, { client: undefined }));
+    const e = errOf(await call(ids.bm, "ask_client", { question: "x", blocks: "交付一个能玩的测试项目" }, { client: undefined }));
     expect(e.code).toBe("internal");
     expect(e.message).toContain("甲方通道未注入");
     expect(channel.asked, "装配错误时不该发生投递").toEqual([]);
@@ -257,7 +258,7 @@ describe("ask_client · 先落工件再投递", () => {
 
 describe("resolveClientQuestion · 答复与提问走同一条落库路径", () => {
   async function askOne(): Promise<string> {
-    const t = okText(await call(ids.bm, "ask_client", { question: "要不要做 X?", lean: "倾向做" }));
+    const t = okText(await call(ids.bm, "ask_client", { question: "要不要做 X?", blocks: "交付一个能玩的测试项目", lean: "倾向做" }));
     return t.match(/\((\S+?)\)/)![1]!;
   }
 

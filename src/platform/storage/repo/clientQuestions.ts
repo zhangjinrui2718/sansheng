@@ -174,3 +174,22 @@ export function consumeClientAnswers(
     )
     .run(at, consumedBy, projectId).changes;
 }
+
+/**
+ * 某项目**未获答复**的甲方提问数(open 工件 + 未消费)。
+ *
+ * 「甲方打扰闸」(2026-11-15)的判据读数:ask_client 在闸门处调它 ——
+ * 并发上限卡的是**同时挂着等回答**的条数,不是项目生命周期内的累计次数
+ * (累计预算会卡死长项目;并发上限卡住的只是「此刻挂在甲方那里的」)。
+ */
+export function countOpenClientQuestions(db: Database.Database, projectId: string): number {
+  const r = db
+    .prepare(
+      `SELECT COUNT(*) AS n
+         FROM client_questions cq
+         JOIN artifacts a ON a.id = cq.question_artifact_id
+        WHERE cq.project_id = ? AND a.status = 'open'`,
+    )
+    .get(projectId) as { n: number };
+  return r.n;
+}

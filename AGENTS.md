@@ -1710,6 +1710,29 @@ npm run check:design      # 设计一致性 E1–E14
 - **机制**:`ROLE_CEILING` / `FACTORY_SETS` / `LEGACY_TOOL_SETS` / `enabledTools` / `MessageBus` / `BlackboardScope` / `orchestrator` / `kernel` / `completeSimple` / `toolLoop` / `PI_OFFLINE` / `blackboards` 表 / `fragments_vec`。
 - 这些名字在 `src/` 里**只剩注释里的历史说明**,没有任何活代码。看到它们说明你在读注释,不是接口。
 
+## 甲方打扰闸:提问必须锚定目标 + 并发上限(2026-11-15 · 机制)
+
+> **用户裁决**:「BM 需要针对提问严格控制对用户的打扰,根据项目的目标判断是否需要追问用户」。
+
+此前 `ask_client` 是**出站即达**(没有任何机制门),只靠工具描述里的自律条款。
+现在两道机制门在 **`ask_client` 工具内部**(不是提示词层):
+
+1. **并发上限 2**:同项目未答提问挂满即拒(`open_question_limit`)—— 卡住的是
+   「此刻挂在甲方那里的」,不是生命周期累计(长项目不受惩罚)。答掉一条名额即腾出。
+2. **判据锚点必填**:新增必填参数 `blocks` —— 必须引用**项目目标原文**的 ≥10 字
+   连续片段(归一化后包含判定)。与目标对不上 ⇒ `goal_anchor` 拒绝,并指引
+   「先用 project_update 把判据写进目标」(BM 持 project.update,它自己能修)。
+   通过后锚点前置进提问正文:`【卡住的判据:…】` —— 甲方在待答卡片上第一眼
+   看到卡住的是哪条判据,不用自己脑补问题与目标的关系。
+
+- **tell_client 不受闸门影响**(单向播报不占提问名额 —— 打扰预算只管
+  「等甲方拍板」的问题);
+- 拒绝消息就是给 BM 的自查指引(等作答 / 补目标 / tell_client 说明情况);
+- 常量集中在 `tools/client.ts` 文件头(`MAX_OPEN_CLIENT_QUESTIONS = 2` /
+  `ANCHOR_MIN_CHARS = 10`);
+- 回归:`tests/platform/client-ask-gate.test.ts`(7 条:上限/腾出/tell 不受限/
+  缺锚点/短锚点/对不上/通过带锚点头)。
+
 ## AgentRuntime 端口:运行时可替换(2026-11-13/14 · Wave A)
 
 **用户原话**:「我希望这个 harness 是一整套,未来比如现在用的是 pi,未来换 DS、

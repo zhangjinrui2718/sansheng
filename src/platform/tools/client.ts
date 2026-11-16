@@ -23,7 +23,12 @@ import {
   insertArtifact, getArtifact, setArtifactStatus, addArtifactLink,
   listArtifacts, type ArtifactStatus,
 } from "../storage/repo/artifacts.js";
-import { recordClientQuestion, markClientQuestionAnswered } from "../storage/repo/clientQuestions.js";
+import { getProjectRow } from "../storage/repo/projects.js";
+import {
+  recordClientQuestion,
+  markClientQuestionAnswered,
+  countOpenClientQuestions,
+} from "../storage/repo/clientQuestions.js";
 import type { ClientChannel } from "../client/port.js";
 import type { WorkspacePort } from "../workspace/port.js";
 import {
@@ -35,13 +40,32 @@ import { fail, ok, requireProject, requireString, readString, readStringArray,
 const OPEN: ArtifactStatus = "open";
 const ACCEPTED: ArtifactStatus = "accepted";
 
+/**
+ * 甲方打扰闸的常量(2026-11-15,集中在文件头)。
+ *
+ * **并发上限 2**:一个项目同时挂 2 条未答提问已到「打扰」的感知阈值 ——
+ * 挂满后再问一律拒,先等作答。不是累计预算:长项目按生命周期累计会把
+ * 合法提问卡死,卡住的只是「此刻挂在甲方那里的」。
+ * **锚点 ≥10 字**:目标原文的连续片段(归一化后),杜绝「随口 paraphrase」。
+ */
+const MAX_OPEN_CLIENT_QUESTIONS = 2;
+const ANCHOR_MIN_CHARS = 10;
+
 const askClient: PlatformTool = {
   name: "ask_client",
   capability: "client.ask",
   description:
-    "向甲方提问。**这是你唯一能直接接触用户的动词** —— 其余角色遇到不确定的事必须来找你,不能自己打扰甲方。提问前先自问:这条真的需要用户拍板吗?能自己判断的直接判断,能问上游的先问上游。给候选项比开放式提问更容易得到可执行的答复。",
+    "向甲方提问。**这是你唯一能直接接触用户的动词** —— 其余角色遇到不确定的事必须来找你,不能自己打扰甲方。" +
+    "两道打扰闸(2026-11-15):① 每个项目同时最多挂 2 条未答提问 —— 挂满后再问会被拒,先等甲方作答或用 tell_client 说明情况;" +
+    "② 问题必须**锚定项目目标里的验收判据原文**(blocks 字段引用 ≥10 字连续片段)—— 与目标无关的问题不配打扰甲方。" +
+    "提问前先自问:这条真的需要用户拍板吗?能自己判断的直接判断,能问上游的先问上游。给候选项比开放式提问更容易得到可执行的答复。",
   parameters: Type.Object({
     question: Type.String({ description: "问什么(具体到一个可回答的问题)" }),
+    blocks: Type.String({
+      description:
+        "这条问题卡住了目标里的哪条验收判据 —— **必须引用项目目标里的原文**(≥10 字连续片段,含标点亦可)。" +
+        "与目标无关的问题会被拒绝:打扰甲方是有预算的,预算只花在卡住判据的问题上",
+    }),
     options: Type.Optional(Type.Array(Type.String(), {
       description: "候选项(带各自代价)。强烈建议给 —— 开放式提问的答复往往不可执行",
     })),
@@ -61,13 +85,57 @@ const askClient: PlatformTool = {
     }
     const question = requireString(args, "question");
     if (!question.ok) return question.result;
+
+    // ── 甲方打扰闸(2026-11-15)──────────────────────────────────
+    // 两道都是**机制**,不靠提示词自律:
+    //   ① 并发上限:同项目未答提问挂满(2 条)即拒 —— 打扰有硬预算;
+    //   ② 判据锚点:问题必须引用项目目标原文的 ≥10 字连续片段 ——
+    //      与目标无关的问题不配打扰甲方。归一化(去空白/标点、小写)后做
+    //      包含判定;引用不要求逐字,但必须是目标里真实存在的连续文字。
+    // 拒绝时的消息就是给 BM 的自查指引:等作答 / 撤销(ask 取消)/ 补目标。
+    const blocksRaw = requireString(args, "blocks");
+    if (!blocksRaw.ok) return blocksRaw.result;
+
+    // goal 不在 authz 视图里(loadProjectForAuthz 只带 id/name/status/assignments)
+    // —— 从仓储行直接拿目标原文,锚点校验要对着它做
+    const goal = getProjectRow(ctx.db, proj.project.id)?.goal ?? "";
+    const norm = (x: string): string =>
+      x
+        .toLowerCase()
+        .replace(/[\s\p{P}\p{S}]+/gu, "")
+        .trim();
+    const goalNorm = norm(goal);
+    const anchorNorm = norm(blocksRaw.value);
+    if (anchorNorm.length < ANCHOR_MIN_CHARS || (goalNorm !== "" && !goalNorm.includes(anchorNorm))) {
+      return fail(
+        "goal_anchor",
+        "问题必须锚定项目目标里的验收判据原文(blocks 字段引用 ≥10 字连续片段)。" +
+          (goalNorm !== "" && goalNorm.includes(anchorNorm.slice(0, 10))
+            ? "引用再完整一些。"
+            : "与当前目标的原文对不上 —— 若判据还没写进目标,先用 project_update 补上,再来提问。" +
+              "不要为「与目标无关」的事打扰甲方。"),
+      );
+    }
+
+    const openCount = countOpenClientQuestions(ctx.db, proj.project.id);
+    if (openCount >= MAX_OPEN_CLIENT_QUESTIONS) {
+      return fail(
+        "open_question_limit",
+        `本项目的未答提问已有 ${openCount} 条(上限 ${MAX_OPEN_CLIENT_QUESTIONS})。` +
+          "先等甲方作答;若确属紧急需要甲方知道的情况,用 tell_client 播报(单向,不占提问名额)。",
+      );
+    }
+
     const options = readStringArray(args, "options") ?? [];
     const lean = readString(args, "lean");
 
     const id = ctx.newId("q");
     // 台账用的标题 —— 提问的正文标题就是问题本身(它要被读面显示成一条 open 的提问)
     const questionTitle = question.value;
+    // 锚点前置(打扰闸②):甲方在待答卡片上第一眼看到「卡住的是哪条判据」,
+    // 引文来自目标原文 —— 判据与问题的关联不需要甲方自己脑补。
     const questionBody =
+      `【卡住的判据:${blocksRaw.value}】\n` +
       question.value +
       (options.length > 0 ? `\n\n候选:\n${options.map((o) => `- ${o}`).join("\n")}` : "") +
       (lean !== undefined ? `\n\n倾向:${lean}` : "");

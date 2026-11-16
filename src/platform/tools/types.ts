@@ -152,6 +152,8 @@ export type ToolErrorCode =
   | "invalid_args" // 参数不合法
   | "not_found" // 目标不存在
   | "conflict" // 状态冲突(重复关闭、非法迁移、成环)
+  | "goal_anchor" // 提问未锚定项目目标(打扰闸,2026-11-15)
+  | "open_question_limit" // 并发提问挂满(打扰闸,2026-11-15)
   | "internal"; // 意外错误
 
 export type ToolResult =
