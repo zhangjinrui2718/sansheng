@@ -109,7 +109,7 @@ import {
 } from "../storage/repo/projects.js";
 import {
   listWorks, getWork, listWorksPendingReview, markWorkReviewed, updateWorkStatus,
-  isTerminalWorkStatus, type WorkRow, type WorkStatus,
+  isTerminalWorkStatus, DEFAULT_WORK_PRIORITY, type WorkRow, type WorkStatus,
 } from "../storage/repo/works.js";
 import { blockersForWork, listBlockers } from "../storage/repo/blockers.js";
 import { latestReviewVerdict, latestVerdictsByWork } from "../storage/repo/reviewVerdicts.js";
@@ -396,6 +396,15 @@ export interface DriverTodo {
    * (例如 `answer_ask:a1+a2`:集合变了 key 就变,预算是新的)。
    */
   readonly targetState: number | null;
+  /**
+   * 这条工作项的**显式优先级**(migration 032;0 = 最紧急 … 9 = 最低,缺省 3)。
+   *
+   * 只有 `execute_work` 待办带它。排序时插在「待办种类优先级」与 key 字典序
+   * **之间**:同一种待办里数字小的先派;同优先级内 key 字典序(= 加列前的
+   * 现有次序)不变。没有这个字段的待办取缺省值后排在一起 —— 排序行为与
+   * 加列前完全一致,「缺省 3」不是一次新的判断,是「没判断过」的表达。
+   */
+  readonly workPriority?: number;
   /** 已经叫醒过几次(来自库里的预算账本) */
   readonly attempts: number;
   /** 人读的一行 */
@@ -1030,6 +1039,9 @@ export const RULES: readonly Rule[] = [
           out.push({
             agentId: m.agentId, role: m.role, kind: "execute_work",
             key: `execute_work:${w.id}`, target: w.id, refs: [w.id], targetState: w.updatedAt,
+            // migration 032:显式优先级随行带上,排序判据在 collectTodos 的比较器里
+            // (这里是唯一的携带点,不许在别处再排一遍 —— 排序只有一处)。
+            workPriority: w.priority,
             label: `执行工作项 ${w.id}「${w.title}」`,
           });
         }
@@ -2135,8 +2147,17 @@ export function collectTodos(opts: CollectTodosOptions): TodoBoard {
     projectId,
     attempts: ledger.get(t.key)?.attempts ?? 0,
   }));
+  // ── 排序(migration 032 之后是三段)───────────────────────────────
+  //   ① 待办种类优先级(PRIORITY,数字小的先跑)—— 不变;
+  //   ② **工作项显式优先级**(只有 execute_work 待办带它):同一种待办内,
+  //      数字小的先派;没有该字段的待办取缺省 3,行为与加列前一致;
+  //   ③ key 字典序 —— **同优先级内的现有次序**,刻意保留(「先来的先跑」
+  //      在同档位内仍是确定性的,不因为加了一列就丢掉)。
   const sorted = withAttempts.sort(
-    (a, b) => PRIORITY[a.kind] - PRIORITY[b.kind] || a.key.localeCompare(b.key),
+    (a, b) =>
+      PRIORITY[a.kind] - PRIORITY[b.kind] ||
+      (a.workPriority ?? DEFAULT_WORK_PRIORITY) - (b.workPriority ?? DEFAULT_WORK_PRIORITY) ||
+      a.key.localeCompare(b.key),
   );
 
   return {

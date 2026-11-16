@@ -10,12 +10,13 @@ import {
   addMember, loadProjectRoster, isProjectStatus,
 } from "../storage/repo/projects.js";
 import {
-  insertWork, getWork, listWorks, updateWorkStatus, assignWork,
+  insertWork, getWork, listWorks, updateWorkStatus, assignWork, setWorkPriority,
   setWorkDeps, checkWorkTransition, listDeps, listDependents, depState, isWorkStatus,
+  clampWorkPriority, DEFAULT_WORK_PRIORITY, WORK_PRIORITY_MAX, WORK_PRIORITY_MIN,
   WORK_STATUSES, type WorkStatus, type WorkStatusChange,
 } from "../storage/repo/works.js";
 import { getAgent } from "../storage/repo/agents.js";
-import { listArtifacts } from "../storage/repo/artifacts.js";
+import { insertArtifact, listArtifacts } from "../storage/repo/artifacts.js";
 import { deliveryAcceptance } from "../storage/repo/deliveryVerdicts.js";
 import { ensureProjectOrg } from "../runtime/org.js";
 import { EXECUTOR_ROLES, isExecutorRole } from "../identity/role.js";
@@ -24,6 +25,9 @@ import {
   fail, ok, requireProject, requireString, readString, readNumber,
   type PlatformTool, type ToolRunContext, type ToolResult,
 } from "./types.js";
+import {
+  workspaceAccess, writeArtifactBody, WORKSPACE_ASSEMBLY_PROBLEM,
+} from "./artifactBody.js";
 
 // ── 小工具 ──────────────────────────────────────────────────────
 
@@ -36,6 +40,40 @@ function loadWorkOrFail(ctx: ToolRunContext, workId: string): { id: string } | T
 
 function isToolResult(v: unknown): v is ToolResult {
   return typeof v === "object" && v !== null && "ok" in v;
+}
+
+/**
+ * priority 入参的**严格**读法(migration 032)。
+ *
+ * 与 `readDepsArg` 同一条纪律:`readNumber` 会把「提供了但不是数」静默折成
+ * `undefined` = 「没提供」,于是「改优先级」的调用会静默变成「什么都不改」——
+ * 模型以为改好了,库里没动。这里区分三件事:**没提供**(`undefined`)/
+ * **提供了但不是有限数**(结构化拒绝,回灌取值域,8-F)/
+ * **合法**(clamp 到 0–9 交给写口 —— 越界收进边界,非整数取最近的整数)。
+ */
+type PriorityArg =
+  | { readonly ok: true; readonly value: number | undefined }
+  | { readonly ok: false; readonly result: ToolResult };
+
+function readPriorityArg(args: Readonly<Record<string, unknown>>): PriorityArg {
+  const raw = args["priority"];
+  if (raw === undefined) return { ok: true, value: undefined };
+  if (typeof raw !== "number" || !Number.isFinite(raw)) {
+    return {
+      ok: false,
+      result: fail(
+        "invalid_args",
+        `priority 必须是数字(收到 ${JSON.stringify(raw)})。取值 ` +
+          `${WORK_PRIORITY_MIN}–${WORK_PRIORITY_MAX}:0 = 最紧急,${WORK_PRIORITY_MAX} = 最低,` +
+          `缺省 ${DEFAULT_WORK_PRIORITY}。越界的值会被收进边界,非整数取最近的整数`,
+        [
+          `${WORK_PRIORITY_MIN}–${WORK_PRIORITY_MAX}(0 = 最紧急)`,
+          `缺省 ${DEFAULT_WORK_PRIORITY}`,
+        ],
+      ),
+    };
+  }
+  return { ok: true, value: clampWorkPriority(raw) };
 }
 
 /** 工作项摘要行 —— 列表与详情统一格式,避免两处漂移。
@@ -298,6 +336,118 @@ const projectUpdate: PlatformTool = {
   },
 };
 
+// ── 收口复盘工件(不断更新的工程化)─────────────────────────────────
+//
+// 「复盘」此前只存在于模型的自述里:收口那句话说完,项目就成了终态,而
+// 「这个项目做成了什么、放弃了什么、一共花了多久」散在工作项 / 提问 / 工件
+// 各处,读者要自己拼。project_close 成功后平台自动落一条 `note` 工件 ——
+// 判据全部来自**库里的结构化行**,平台不替模型总结内容,只把计数摆在一起。
+//
+// ── 失败形态:收口在前,复盘在后 ─────────────────────────────────
+//
+// 收口**已经**发生(上一句不可回滚),所以复盘写不成**不回滚收口**,
+// 只降级成文本告警 —— 与 `meeting_conclude` 同一条纪律;但**绝不插一行
+// 指向不存在正文的记录**(先文件后插行,`tools/artifactBody.ts` §4.3):
+// 写文件失败 ⇒ 一行都不插,否则得到「有索引无内容」,而那与「文件被删」
+// 在读面上不可区分。
+
+const RETRO_DAY_MS = 86_400_000;
+
+/** 复盘的计数字段。**全部来自库里的结构化列**,没有一项来自模型自述。 */
+function projectRetroStats(db: ToolRunContext["db"], pid: string) {
+  const works = listWorks(db, pid);
+  const cancelled = works.filter((w) => w.status === "cancelled");
+  const askRows = db
+    .prepare(`SELECT status, COUNT(*) AS n FROM asks WHERE project_id = ? GROUP BY status`)
+    .all(pid) as Array<{ status: string; n: number }>;
+  const askTotal = askRows.reduce((acc, r) => acc + r.n, 0);
+  const askAnswered = askRows.find((r) => r.status === "answered")?.n ?? 0;
+  // 与 project_list 的交付物计数同一条 SQL(全 kind='deliverable',不分状态):
+  // 两处数字漂开是最难查的一类病,所以判据只有一处写法。
+  const deliverables = (
+    db.prepare(`SELECT COUNT(*) AS n FROM artifacts WHERE project_id = ? AND kind = 'deliverable'`)
+      .get(pid) as { n: number }
+  ).n;
+  return { works, done: works.filter((w) => w.status === "done").length, cancelled, askTotal, askAnswered, deliverables };
+}
+
+function renderProjectRetro(
+  project: { readonly id: string; readonly name: string; readonly createdAt: number; readonly closedAt: number | null },
+  outcome: "done" | "abandoned",
+  reason: string | undefined,
+  stats: ReturnType<typeof projectRetroStats>,
+): string {
+  const lines = [
+    `# 复盘:${project.name}`,
+    "",
+    `- 项目:\`${project.id}\` · 收口方式:${outcome === "done" ? "交付完成(done)" : "放弃(abandoned)"}` +
+      (reason !== undefined ? ` — ${reason}` : ""),
+    `- 工作项:完成 ${stats.done} 条 · 取消 ${stats.cancelled.length} 条(共 ${stats.works.length} 条)`,
+    `- 提问(ask):共 ${stats.askTotal} 条,已答复 ${stats.askAnswered} 条`,
+    `- 交付物:${stats.deliverables} 份`,
+    `- 历时:${project.closedAt === null ? "(closed_at 读不到)" : renderRetroDuration(project.createdAt, project.closedAt)}` +
+      `(${new Date(project.createdAt).toISOString()} → ` +
+      `${project.closedAt === null ? "?" : new Date(project.closedAt).toISOString()})`,
+  ];
+  // 「未做 / 已知限制」只从被取消的工作项里找(取消 = 这块范围不要了,§2.8)。
+  // 一条都没有 ⇒ 这一节整段不出现 —— 「没有取消」是事实,不是缺一节。
+  if (stats.cancelled.length > 0) {
+    lines.push(
+      "",
+      "## 未做 / 已知限制(被取消的工作项)",
+      ...stats.cancelled.map((w) => `- ${w.title}(\`${w.id}\`)`),
+    );
+  }
+  return lines.join("\n");
+}
+
+/** 历时天数:一位小数以内,整日不带小数点(`3 天`、`2.5 天`)。 */
+function renderRetroDuration(createdAt: number, closedAt: number): string {
+  const days = (closedAt - createdAt) / RETRO_DAY_MS;
+  const rounded = Math.round(days * 10) / 10;
+  return `约 ${rounded} 天`;
+}
+
+/**
+ * 写复盘工件。成功返回工件 id;失败返回 `problem`(调用方翻译成告警文本,
+ * **不回滚收口、也不插行**)。
+ */
+function writeProjectRetro(
+  ctx: ToolRunContext,
+  pid: string,
+  outcome: "done" | "abandoned",
+  reason: string | undefined,
+): { readonly artifactId: string } | { readonly problem: string } {
+  const project = getProjectRow(ctx.db, pid);
+  if (project === null) return { problem: `收口后读不到项目行 ${pid}` };
+  const at = ctx.now();
+  const stats = projectRetroStats(ctx.db, pid);
+  const title = `复盘:${project.name}`;
+  const body = renderProjectRetro(project, outcome, reason, stats);
+  const artifactId = ctx.newId("art");
+  const access = workspaceAccess(ctx);
+  if (access === null) return { problem: WORKSPACE_ASSEMBLY_PROBLEM };
+  // 先写文件、后插行:写不成 ⇒ 一行都不插(「有索引无内容」不可与「被删」区分)。
+  const written = writeArtifactBody(access, { id: artifactId, title, deliverableType: null, content: body });
+  if (!written.ok) return { problem: written.problem };
+  insertArtifact(ctx.db, {
+    id: artifactId,
+    projectId: pid,
+    conversationId: null,
+    kind: "note",
+    status: "accepted",
+    authorAgentId: ctx.agent.id,
+    title,
+    bodyPath: written.value.bodyPath,
+    bodySha256: written.value.bodySha256,
+    bodyBytes: written.value.bodyBytes,
+    metadataJson: null,
+    createdAt: at,
+    updatedAt: at,
+  });
+  return { artifactId };
+}
+
 const projectClose: PlatformTool = {
   name: "project_close",
   capability: "project.close",
@@ -376,7 +526,12 @@ const projectClose: PlatformTool = {
       return fail("conflict", err instanceof Error ? err.message : String(err));
     }
     const reason = readString(args, "reason");
-    return ok(`项目 ${pid} 已关闭(${outcome})${reason ? ` — ${reason}` : ""}`);
+    // 收口复盘工件(本文件上方那一节):写不成只降级成告警,不回滚收口。
+    const retro = writeProjectRetro(ctx, pid, outcome, reason);
+    const retroNote = "artifactId" in retro
+      ? `\n复盘工件:${retro.artifactId}`
+      : `\n⚠️ 复盘工件未写入(项目已收尾,这次失败不回滚收口):${retro.problem}`;
+    return ok(`项目 ${pid} 已关闭(${outcome})${reason ? ` — ${reason}` : ""}${retroNote}`);
   },
 };
 
@@ -524,7 +679,9 @@ const workCreate: PlatformTool = {
   description:
     "拆解出一个工作项并**指定负责人与依赖**。负责人必填,而且只能是**执行角色**" +
     `(${EXECUTOR_ROLES.join(" / ")})—— business_manager / project_manager / ` +
-    "quality_reviewer 都不执行工作项。开工前先 board_list 查重,重复拆解是最常见也最贵的失败。",
+    "quality_reviewer 都不执行工作项。开工前先 board_list 查重,重复拆解是最常见也最贵的失败。" +
+    `要事第一:priority 给 0(最紧急)– 9(最低)的档位,缺省 ${DEFAULT_WORK_PRIORITY} —— ` +
+    "同优先级内保持创建次序,数字小的先被平台派发。",
   parameters: Type.Object({
     projectId: Type.Optional(Type.String({ description: "缺省 = 当前项目" })),
     title: Type.String(),
@@ -538,6 +695,11 @@ const workCreate: PlatformTool = {
     assigneeSpec: Type.Optional(Type.String({ description: "执行角色的领域细分:engineering | algorithm | data" })),
     dependsOn: Type.Optional(Type.Array(Type.String(), { description: "前置工作项 id" })),
     parentWorkId: Type.Optional(Type.String({ description: "父工作项(做工作分解树时给)" })),
+    priority: Type.Optional(Type.Number({
+      description:
+        `优先级:${WORK_PRIORITY_MIN}(最紧急)– ${WORK_PRIORITY_MAX}(最低),缺省 ${DEFAULT_WORK_PRIORITY}。` +
+        "排空器同优先级内保持创建次序、数字小的先派;越界收进边界,非整数取最近的整数",
+    })),
   }),
   run(args, ctx): ToolResult {
     const proj = requireProject(ctx, "work_create");
@@ -550,10 +712,12 @@ const workCreate: PlatformTool = {
     const roleError = requireExecutorRole(args);
     if (roleError !== null) return roleError;
 
-    // 依赖参数**先读后建**:参数形状不对时不该先造出一条没有依赖的工作项。
+    // 参数**先读后建**:形状不对时不该先造出一条没有依赖的工作项。
     const depsArg = readDepsArg(args);
     if (!depsArg.ok) return depsArg.result;
     const deps = depsArg.value ?? [];
+    const priorityArg = readPriorityArg(args);
+    if (!priorityArg.ok) return priorityArg.result;
 
     const resolved = resolveAssignee(
       ctx.db, pid, args["assigneeRole"], args["assigneeSpec"],
@@ -573,6 +737,7 @@ const workCreate: PlatformTool = {
       insertWork(ctx.db, {
         id, projectId: pid, parentWorkId: parentWorkId ?? null,
         title: title.value, goal: goal.value, status: "open",
+        ...(priorityArg.value !== undefined ? { priority: priorityArg.value } : {}),
         assigneeAgentId: resolved.agentId, createdAt: at, updatedAt: at,
       });
     } catch (err) {
@@ -590,6 +755,7 @@ const workCreate: PlatformTool = {
 
     return ok(
       `已创建 ${id}「${title.value}」→ 负责 ${resolved.agentId}` +
+        (priorityArg.value !== undefined ? `\n优先级:${priorityArg.value}` : "") +
         (depResult.added.length > 0 ? `\n前置:${depResult.added.join(", ")}` : ""),
     );
   },
@@ -599,13 +765,15 @@ const workUpdate: PlatformTool = {
   name: "work_update",
   capability: "work.update",
   description:
-    "改工作项的**状态**或**依赖边**(至少给一个)。" +
+    "改工作项的**状态**、**依赖边**或**优先级**(至少给一个)。" +
     `状态闭集:${WORK_STATUSES.join(" | ")},而且**迁移必须合法**:` +
     "open / in_progress / blocked 三态互通、也都能直接到任一终态;" +
     "done 只能退回 in_progress(审查后打回重做);failed 只能退回 in_progress(重试);" +
     "cancelled 是**终态,没有出边** —— 范围重新需要时新建一条,不要复活旧的。" +
     "`dependsOn` 是**整体替换**(给 [] = 清空依赖),环检测与 work_create 同一套;" +
     "**改依赖不需要「取消旧的 + 新建一份」**。" +
+    `priority(${WORK_PRIORITY_MIN}–${WORK_PRIORITY_MAX},数字小 = 更紧急)改的是派发次序 —— ` +
+    "要事有变时改它,而不是取消重建。" +
     "**状态变更是 report 的前置** —— 只口头汇报不落库,进度就只存在于对话里。",
   parameters: Type.Object({
     workId: Type.String(),
@@ -615,6 +783,11 @@ const workUpdate: PlatformTool = {
         description: "整体替换这条工作项的前置工作项 id 集合(给 [] 清空依赖)",
       }),
     ),
+    priority: Type.Optional(Type.Number({
+      description:
+        `优先级:${WORK_PRIORITY_MIN}(最紧急)– ${WORK_PRIORITY_MAX}(最低)。` +
+        "排空器数字小的先派;越界收进边界,非整数取最近的整数",
+    })),
   }),
   run(args, ctx): ToolResult {
     const workId = requireString(args, "workId");
@@ -628,17 +801,19 @@ const workUpdate: PlatformTool = {
     }
     const depsArg = readDepsArg(args);
     if (!depsArg.ok) return depsArg.result;
-    if (statusArg === undefined && depsArg.value === undefined) {
+    const priorityArg = readPriorityArg(args);
+    if (!priorityArg.ok) return priorityArg.result;
+    if (statusArg === undefined && depsArg.value === undefined && priorityArg.value === undefined) {
       return fail(
         "invalid_args",
-        "work_update 至少要给 status 或 dependsOn 之一 —— 两个都不给等于什么都不改",
+        "work_update 至少要给 status、dependsOn、priority 之一 —— 都不给等于什么都不改",
       );
     }
 
     const before = getWork(ctx.db, workId.value)!;
     const status = statusArg as WorkStatus | undefined;
 
-    // ── 顺序:先判(纯读)→ 再写依赖 → 最后写状态 ──
+    // ── 顺序:先判(纯读)→ 再写依赖/优先级 → 最后写状态 ──
     // 先判一次迁移合法性(用写口那同一个 `checkWorkTransition`,规则不复制),
     // 于是「状态非法」时**一个字节都不写** —— 否则会留下「依赖改了、状态没改」
     // 这种事后看不出来的半成品。
@@ -660,6 +835,18 @@ const workUpdate: PlatformTool = {
       lines.push(
         `依赖已整体替换:${r.deps.length > 0 ? r.deps.join(", ") : "(无前置)"}` +
           `(新增 ${r.added.length} · 移除 ${r.removed.length})`,
+      );
+    }
+
+    if (priorityArg.value !== undefined) {
+      const r = setWorkPriority(ctx.db, workId.value, priorityArg.value, ctx.now());
+      // not_found 在这里理论不可达(loadWorkOrFail 已确认存在),但不许用 `!`
+      // 糊过去 —— 写口是结构化的,调用方也结构化接。
+      if (!r.ok) return fail("not_found", r.message);
+      lines.push(
+        r.changed
+          ? `优先级:${r.from} → ${r.to}(数字小 = 更紧急,先被派发)`
+          : `(优先级已经是「${r.to}」,没有变化)`,
       );
     }
 
@@ -769,6 +956,7 @@ const workRead: PlatformTool = {
           `- 项目:${w.projectId}`,
           `- 负责:${w.assigneeAgentId}`,
           `- 父项:${w.parentWorkId ?? "(顶层)"}`,
+          `- 优先级:${w.priority}(0=最紧急 … 9=最低;数字小的先被派发)`,
           `- 目标:${w.goal}`,
           "",
           `## 前置依赖(${deps.length})`,

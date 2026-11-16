@@ -127,6 +127,9 @@ export function toWorkView(db: Database.Database, row: WorkRow, name: (id: strin
     status: row.status,
     assigneeAgentId: row.assigneeAgentId,
     assigneeName: name(row.assigneeAgentId),
+    // migration 032:显式优先级原样透出(0=最高 … 9=最低;列 NOT NULL DEFAULT 3,
+    // 这里不做任何换算 —— 换算是判据,判据只有一个落点:排空器的 collectTodos)。
+    priority: row.priority,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
     dependsOn: listDeps(db, row.id),

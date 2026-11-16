@@ -255,18 +255,20 @@ Blocker        open → acknowledged → resolved | deferred | rejected
 |---|---|
 | 重启不需要「补写待办」 | `collectTodos` 的入参只有 `(db, projectId, now, 预算上限)`,不读任何进程内状态(`runtime/dispatcher.ts`) |
 | 同一时刻可以从库重算 | 全部判据都是 SQL / repo 查询(下表)。⚠️ 2026-11-13 复核:`TODO_KINDS` 已到 **18 个**(首版是 8 个;清单以 `runtime/dispatcher.ts` 的 `TODO_KINDS` 为准,**文档不逐条复制**) |
-| 「刚才发生了什么」不能参与判定 | `NUDGE_CAPABILITIES`(`dispatcher.ts:152`)只敲门铃,不携带状态 |
+| 「刚才发生了什么」不能参与判定 | `NUDGE_CAPABILITIES`(`runtime/dispatcher.ts`;行号已漂,以符号检索为准)只敲门铃,不携带状态 |
 
 | TodoKind | 判据从哪来(载体) | 载体是实体还是机制 |
 |---|---|---|
 | `answer_ask` | `asks` WHERE to_agent=我 AND status=open | 实体 |
 | `attend_meeting` | `meeting_participants` WHERE agent=我 AND stance IS NULL | 实体 |
 | `review_change` | `change_requests` 非终态 × 我持 `change.review` | 实体 |
-| `fix_work_assignment` | `works` 非终态 AND 负责人不存在/非 worker(`dispatcher.ts:210`) | 实体 |
+| `fix_work_assignment` | `works` 非终态 AND 负责人不存在/**不是执行角色**(`dispatcher.ts` 的 `strandedWorks`;2026-11-16:「非 worker」已随 026 的执行角色拆分改口,行号已漂) | 实体 |
 | `decompose_project` | 该项目 `works` **零行** AND project active | **空集判据** |
-| `execute_work` | `works` 分派给我 AND `depsSatisfied`(`works.ts:396`) | 实体 |
-| `review_work` | `works.status='done' AND review_state='pending'`(`works.ts:223`) | 实体 |
-| `report_downstream` | `dispatch_events` WHERE consumed_at IS NULL(`dispatcher.ts:280`) | **技术机制** |
+| `execute_work` | `works` 分派给我 AND `depsSatisfied`(`repo/works.ts` 同名函数) | 实体 |
+| `review_work` | `works.status='done' AND review_state='pending'`(`repo/works.ts` 的 `listWorksPendingReview`) | 实体 |
+| `report_downstream` | `dispatch_events` WHERE consumed_at IS NULL(`dispatcher.ts` 的 `report_downstream_events` 规则) | **技术机制** |
+
+> ⚠️ **2026-11-16:上两表首版写的裸行号全部已漂,本批转成「文件 + 符号」;判定源头以 `runtime/dispatcher.ts` 的 `RULES` / `collectRuleFacts` 为准。** 另:`collectTodos` 的入参今天是同一个 options 对象(`CollectTodosOptions`,还带合并唤醒的两个阈值),「不读任何进程内状态」的纯度判据不变。
 
 **8 个 kind 里 7 个直接站在实体上,只有 `report_downstream` 站在机制表上** —— 这不是缺陷(它的信息「下游发生了什么还没交代」本来就是平台的事实),但它解释了为什么 §2.9 那件事(要不要唤醒业务经理)只能在这里改,而改不动「实体上的判据」。
 
@@ -288,7 +290,7 @@ dispatch_attempts   技术机制(限流账本:叫醒过几次)
 | 机制 | **outbox(待交代事件)** | `dispatch_events` / `DispatchEventKind` | **表名不改**(理由见下);改的是措辞:文档与类型里一律叫「outbox / 待交代事件」 |
 | 机制 | **限流账本** | `dispatch_attempts` / `AttemptRow` | 同上 |
 
-> **为什么建议不改表名。** 改名在 SQLite 上等于**重建表**(012 那条路,它的注释里记着这条路会静默删数据),还要同步索引、`INTENTIONAL_REBUILDS` 登记(`tests/platform/migrations.test.ts:42`)与真机库。**收益是措辞,成本是一次数据迁移** —— 不对等。所以结论是**分层命名,不动表名**:领域层用 `Todo`,机制层在文档与类型上叫 outbox / 账本。
+> **为什么建议不改表名。** 改名在 SQLite 上等于**重建表**(012 那条路,它的注释里记着这条路会静默删数据),还要同步索引、`INTENTIONAL_REBUILDS` 登记(`src/platform/infra/migrations.ts` 的 `INTENTIONAL_REBUILDS`,由 `tests/platform/migrations.test.ts` 钉住;2026-11-16:首版写的 `tests/platform/migrations.test.ts:42` 行号已漂,以符号检索为准)与真机库。**收益是措辞,成本是一次数据迁移** —— 不对等。所以结论是**分层命名,不动表名**:领域层用 `Todo`,机制层在文档与类型上叫 outbox / 账本。
 
 ### 2.6 缺口 ①:工件与工作项之间没有边(**已落地** —— 本节保留为「为什么这么画」的记录)
 
@@ -413,7 +415,7 @@ CREATE INDEX IF NOT EXISTS idx_artifacts_work
 
 | 迁移 | 今天允许吗 | 触发它的路径 | 平台顺手维护什么 |
 |---|---|---|---|
-| `open → in_progress` | ✅ | `runWorkItem` 自动写(`execution.ts:139`) | — |
+| `open → in_progress` | ✅ | `runWorkItem` 自动写(`runtime/execution.ts`;行号已漂,以符号检索为准) | — |
 | `open / in_progress / blocked` 之间互迁 | ✅ | 模型调 `work_update` | 迁入 `blocked` → 写一条 outbox 事件 |
 | `open / in_progress / blocked → done` | ✅ | 模型调 `work_update` / `report` | `review_state = 'pending'`;outbox `work_done`;迁出 `done` 时 `review_state` 清成 `none` |
 | `open / in_progress / blocked → failed` | ✅ | 同上 | outbox `work_failed` |
@@ -423,11 +425,11 @@ CREATE INDEX IF NOT EXISTS idx_artifacts_work
 | **`failed → cancelled`**(退役;2026-10-06 真机补,判据 `repo/works.ts` 的 `WORK_TRANSITIONS`) | ✅ | PM 重新划范围时把被取代的失败项**退役**成 `cancelled` —— 没有这条边,「失败」就成了只进不出的坑:PM 拆完新范围、活干完了,**旧的 `failed` 出不来**,规则一直叫到预算用尽 | outbox `work_cancelled`(migration 015)。⚠️ 与 `cancelled: []` 不冲突:后者说「`cancelled` 自己没有出边」,这里是「**可以走进 `cancelled`**」—— 「终态不许被复活」与「终态不许被走进」是两回事 |
 | **`cancelled → 任意`**(复活) | ❌ **禁止** | — | `cancelled: []`(零出边)。「取消」是汇点:范围重新需要时要做的是**新的一件事**,不是复活旧的(§2.8) |
 
-**两条裁决写在代码里**(`repo/works.ts:98-137`),各自带理由与代价:`done → in_progress` 允许(三条理由,核心一条:**收紧它会把模型推回「取消旧的 + 新建一份」那个真机事故路径**),`cancelled` 是真终态。
+**两条裁决写在代码里**(`repo/works.ts` 的 `WORK_TRANSITIONS` 及其上下注释;2026-11-16:首版行号 `:98-137` 已漂,以符号检索为准),各自带理由与代价:`done → in_progress` 允许(三条理由,核心一条:**收紧它会把模型推回「取消旧的 + 新建一份」那个真机事故路径**),`cancelled` 是真终态。
 
 **没有做的那一半(仍然成立)**:退回重做时**已消费的 outbox 事件不会撤回**,于是「已向甲方交代过完成」与「其实还没做完」可以同时成立 —— `consumed_at` 在这一次退回上开始撒谎。两条出路都需要一笔 `dispatch_events` 重建(015 那条路),**不擅自加 `work_reopened`**(放进 CHECK 却没有写出方的取值 = 一句「本系统会发这种事件」的假话)。见 §12 #9。
 
-**给新增规则的判据(与 §2.11 衔接)**:新规则要读工作项状态时,**用 `WORK_TRANSITIONS` / `nextWorkStatuses` 表达可达性,不要自己判「是不是终态」** —— 终态的定义今天有三处(`isTerminalWorkStatus` `works.ts:44` · `checkRunnable` `execution.ts:82` · `cancelled: []`),第四处就是漂移的开始。
+**给新增规则的判据(与 §2.11 衔接)**:新规则要读工作项状态时,**用 `WORK_TRANSITIONS` / `nextWorkStatuses` 表达可达性,不要自己判「是不是终态」** —— 终态的定义今天有三处(`isTerminalWorkStatus` `repo/works.ts` · `checkRunnable` `runtime/execution.ts` · `cancelled: []`;2026-11-16:首版行号 `:44` / `:82` 已漂,以符号检索为准),第四处就是漂移的开始。
 
 ### 2.8 `cancelled` 的关系语义:取消不是失败
 
@@ -444,17 +446,19 @@ CREATE INDEX IF NOT EXISTS idx_artifacts_work
 | `in_progress` / `open` / `blocked` | 是 | 等得起 | 是(已可见) |
 | 指向的工作项不存在 | 是 | 数据损坏 | 是(已可见) |
 
-代码落点:`DepState` 是**五态**而不是布尔(`repo/works.ts:353`),`depsSatisfied` 只在 `failed` / `pending` / `missing` 非空时为假(`works.ts:396`)。
+代码落点:`DepState` 是**五态**而不是布尔(`repo/works.ts` 的 `DepState` / `depState`;2026-11-16:首版行号 `:353` 已漂,以符号检索为准),`depsSatisfied` 只在 `failed` / `pending` / `missing` 非空时为假(`repo/works.ts` 同名函数)。
 
 **「必须可见」落在三处**(不是一处):
 
 | 落点 | 渲染什么 | 位置 |
 |---|---|---|
-| `work_read` | 五种前置状态逐条列出,含「已取消(不阻塞,但你该知道)」 | `tools/project.ts:440` |
-| worker 的待办注入 | 单独一段「⚠️ 可开工,但前置里有被取消的」+ 「这不是阻塞」 | `runtime/pendingWork.ts:267` |
-| 待办字段 | `myWorksWithCancelledDeps` | `pendingWork.ts:73` |
+| `work_read` | 五种前置状态逐条列出,含「已取消(不阻塞,但你该知道)」 | `tools/project.ts` 的 `work_read`(行号已漂,以符号检索为准) |
+| worker 的待办注入 | 单独一段「⚠️ 可开工,但前置里有被取消的」+ 「这不是阻塞」 | `runtime/pendingWork.ts` 的 `renderPendingWork` |
+| 待办字段 | `myWorksWithCancelledDeps` | `pendingWork.ts`(行号已漂,以符号检索为准) |
 
 > **一处脆弱的耦合(记下来,不必现在改)**:`renderPendingWork` 的 `hasAnything` 门(`pendingWork.ts:218`)**没有**列 `myWorksWithCancelledDeps`。今天不影响结果 —— 那个字段非空时 `myOpenWorks` 必然也非空(两者同一次循环里 push,`pendingWork.ts:117`),所以那一段照样渲染。但这段可见性是**搭在别人的非空上**的;哪天 `myOpenWorks` 的判据改动,这段会**静默消失**。
+>
+> ⚠️ **2026-11-16 复核:上面这个耦合已修** —— `hasAnything` 现在**列了** `myWorksWithCancelledDeps`(`pendingWork.ts`,代码注释里记着同一句「可见性搭在别人的非空上」的警告);首版行号 `:218` / `:117` 已漂,以符号检索为准。本段保留为「为什么会修」的记录。
 
 #### 「取消 + 新建」该不该重定向依赖边
 
@@ -510,7 +514,7 @@ CREATE INDEX IF NOT EXISTS idx_artifacts_work
 
 现状精确形态(不是「每完成一条就播报」,但效果接近):
 
-- outbox 的**写入侧**只对「根工作项终态 / `failed`(与树的位置无关)/ 里程碑」写行,判定在一处(`announcementsFor`,`repo/works.ts:447`;种类表 `EVENT_KIND` 在 `:486`),中间工作项的状态迁移**静默放行** —— ⚠️ 但真机库是**扁平**结构(9 work / 9 root / 0 中间),于是**每一行都是根**,这一刀事实上没有筛掉任何东西(详见 §9.4「合并唤醒」);
+- outbox 的**写入侧**只对「根工作项终态 / `failed`(与树的位置无关)/ 里程碑」写行,判定在一处(`announcementsFor`,`repo/works.ts`;种类表 `EVENT_KIND` 同文件;2026-11-16:首版行号 `:447` / `:486` 已漂,以符号检索为准),中间工作项的状态迁移**静默放行** —— ⚠️ 但真机库是**扁平**结构(9 work / 9 root / 0 中间),于是**每一行都是根**,这一刀事实上没有筛掉任何东西(详见 §9.4「合并唤醒」);
 - `collectTodos` 只要有**一条**未消费事件,就给业务经理生成 `report_downstream` 待办(判据在 `runtime/dispatcher.ts` 的 `collectTodos`);
 - 它优先级很低(`PRIORITY` 字典里 `report_downstream` = 12,比它低的只有 `close_project` 与两条兜底;2026-11-13 更正:首版写的「优先级最低、= 7」已为假 —— 待办种类翻倍后它不再是最后一名),所以一条 `work_done` 的事件**总会在某个 tick 把业务经理叫醒一次**。
 
@@ -534,8 +538,8 @@ CREATE INDEX IF NOT EXISTS idx_artifacts_work
 两条实施路线,选一条:
 
 - **方案甲(推荐):收紧写入侧。** `updateWorkStatus` 只在「根工作项终态 / 里程碑 / severity ≥ high」时写 outbox。**理由**:它把「要不要打扰甲方」从一个**模型的自述**变成**库里的一个事实** —— 可测、可审计、可复现,与 §9.4「判定永远重新查库」同源。
-  **代价(如实记)**:outbox 从「下游事件流水」缩成「待交代队列」,`renderDownstream`(`dispatcher.ts:403`)给业务经理的现场会变窄。
-- **方案乙(不推荐):只在判定侧收窄。** 保留完整流水,只在 `collectTodos` 过滤。**为什么不行**:消费是**全量**的 —— `consumePendingDispatchEvents(db, projectId, ...)` 无差别标记该项目**全部**未消费事件(`repo/dispatch.ts:118`)。一次「可打扰」事件会把一串「不可打扰」事件一起标记为已交代,于是 `consumed_at` 这个字段开始撒谎。
+  **代价(如实记)**:outbox 从「下游事件流水」缩成「待交代队列」,`renderDownstream`(`runtime/dispatcher.ts`;行号已漂,以符号检索为准)给业务经理的现场会变窄。
+- **方案乙(不推荐):只在判定侧收窄。** 保留完整流水,只在 `collectTodos` 过滤。**为什么不行**:消费是**全量**的 —— `consumePendingDispatchEvents(db, projectId, ...)` 无差别标记该项目**全部**未消费事件(`repo/dispatch.ts` 同名函数;行号已漂,以符号检索为准)。一次「可打扰」事件会把一串「不可打扰」事件一起标记为已交代,于是 `consumed_at` 这个字段开始撒谎。
 
 #### 「谁判断」:平台定候选,业务经理定措辞
 
@@ -830,7 +834,7 @@ AGENTS.md 说工具集合文件「改完不用重启」—— 那句话对**新�
 | 用户的判断 | 实测 | 结论 |
 |---|---|---|
 | 唤醒判据是状态驱动,不是工件驱动 | `NUDGE_CAPABILITIES`(`runtime/dispatcher.ts:202-209`)列了 `project.open` / `work.*` / `collab.*` / `change.*` / `blocker.*`,**没有 `blackboard.write`**;注释把理由写死了:「`blackboard.write`(产出)**不在里面**:写工件**不产生新待办**(**工件不是待办来源**)」(`:194-196`) | ✅ **成立,而且比「没做」更强:这是刻意的** |
-| 规则散在 `collectTodos` 的 8 个分支里 | `collectTodos`(`runtime/dispatcher.ts:310`)里逐条 push;`TodoKind` 是 8 值闭集(`:110-126`) | ✅ 成立(⚠️ 本文 §2.4.2 引的 `dispatcher.ts:186` **是漂的**,实际在 `:310`) |
+| 规则散在 `collectTodos` 的 8 个分支里 | 首版:`collectTodos` 里逐条 push;`TodoKind` 是 8 值闭集(行号 `:310` / `:110-126` **已漂,以符号检索为准**)。⚠️ **2026-11-16 复核**:`TODO_KINDS` 已 **18 值**(同文件,清单以它为准);分支也已收进同文件的 `RULES` 表(18 条),`collectTodos` 改为按 `RULES` 逐条 push | ✅ 成立(2026-10-04 当时;⚠️ 本文 §2.4.2 引的 `dispatcher.ts:186` **是漂的** —— 行号一律以符号检索为准) |
 | 没有一张「工件 → 动作」的表 | `grep -rn 'RULES\|Rule\[\]' src/platform/runtime/` = **0** | ✅ 成立 |
 | 工件 kind 共 10 个,没有「交付物」 | `shared/types/platform.ts:64-74` = 10 个;`grep -rni 'deliver\|handover' src/ shared/ harness/ migrations/` = **0** | ✅ 成立 |
 | (附)「交付物」不是新词,是**回归** | 旧系统有一个 `delivery`(交付物卡)块,随计划概念一起被删 —— 注释还在:`grep -rni 'deliver\|handover' web/` 的 3 处命中全部是这段历史说明(`web/src/components/chat/MessageList.tsx:4-5` · `stores/chat.ts:39`) | ✅ 成立 |
@@ -841,7 +845,9 @@ AGENTS.md 说工具集合文件「改完不用重启」—— 那句话对**新�
 | 「没有任何地方告诉项目经理要建树」(§9.4 的归因) | `grep -rn parentWorkId harness/` = **0** 是对的,但**作用域漏了运行期任务提示词**:`decompose_project` 渲染出的正文里就有「多件产出同属**一个交付物**时,用 `parentWorkId` 把它们挂到一条根工作项下面」(`runtime/dispatcher.ts:517-518`) | ❌ **结论错**(细节与影响见 §9.4 的修正框) |
 | `bridge()` 两处、按角色分工 | 调用点确在 `serve.ts:572` 与 `:683`;但 **`runAgentTurn` 不只跑业务经理** —— `drainProject` 的 `runAgentTurn` 回调(`serve.ts:861-862`)让它同时跑**项目经理与质检** | ⚠️ **半对**:572 那条 = 业务经理(用户消息,`:347`)**+ 项目经理 + 质检**(待办);683 那条 = worker |
 
-**缺的不是「判据」,是三个环节。** `TodoKind` 的 8 个取值(`dispatcher.ts:110-126`)里**没有**「整合」「交付」;`grep -rn '整合' src/` 只命中两处**测试数据注释**(`repo/works.ts:728` · `:862`)。⇒ 流水线今天**停在质检**,后面没有东西推动它。
+> ⚠️ **2026-11-16 复核:上表与下段是 2026-10-04 的快照,逐格行号一律以符号检索为准。与今天的差异**:① `NUDGE_CAPABILITIES` 现在**含** `blackboard.write`(批次 21 起写工件也敲门铃 —— 门铃只是 nudge,判定仍重新查库);「写工件这个动作本身不产生待办」至今成立,但「工件不进判据」已被本节 §2.11.2 自己的结论取代 —— `integrate` / `handover` 的条件侧读的就是 `deliverable` 工件的存在性(§2.11.4 的 ③);② 「没有一张规则表」已为假 —— `RULES` 就在 `runtime/dispatcher.ts`(18 条,与 `TODO_KINDS` 闭合对账);③ 工件 kind 10 → **11**(`deliverable` 已进闭集,016 重建表);④ `listWorksPendingReview` / `pendingWork` / `serve.ts` 里点到的函数都还在,行号已漂。
+
+**缺的不是「判据」,是三个环节。** `TodoKind` 的 8 个取值(首版 `dispatcher.ts:110-126`;⚠️ **2026-11-16:行号已漂,`TODO_KINDS` 现 18 值**)里**没有**「整合」「交付」;`grep -rn '整合' src/` 只命中两处**测试数据注释**(`repo/works.ts:728` · `:862`)。⇒ 流水线当时**停在质检**,后面没有东西推动它。(**2026-11-16 注:「今天」已改「当时」—— 这两个缺口已补,`integrate` / `handover` 都在 `TODO_KINDS` 里。**)
 
 #### 2.11.2 张力①的结论:条件侧 = 「**工件事件**触发」+「**状态/集合**谓词收口」
 
@@ -872,14 +878,14 @@ AGENTS.md 说工具集合文件「改完不用重启」—— 那句话对**新�
 
 | 问题 | 谁判 | 判据落在哪 | 证据 |
 |---|---|---|---|
-| 这条产出**该不该审** | **规则** | `works.status='done' AND review_state='pending'` | `repo/works.ts:612-621` → 待办 `dispatcher.ts:441-448` |
-| **该叫醒谁**去审 | **规则** | 花名册里 `role='quality_reviewer'` | `dispatcher.ts:439-448` |
-| 审**过**了没有(流程上) | **规则(只看回合成不成)** | 质检那个回合**成功结束后**平台写 `review_state='done'` | `dispatcher.ts:817-820` → `repo/works.ts:632-637` |
+| 这条产出**该不该审** | **规则** | `works.status='done' AND review_state='pending'` | `repo/works.ts` 的 `listWorksPendingReview`(行号已漂,以符号检索为准) |
+| **该叫醒谁**去审 | **规则** | 花名册里 `role='quality_reviewer'` | `dispatcher.ts` 的 `RULES`(`review_done_works` 一行;行号已漂,以符号检索为准) |
+| 审**过**了没有(流程上) | **规则(只看回合成不成)** | 质检那个回合**成功结束后**平台写 `review_state='done'`。⚠️ **2026-11-16 更正:判据已翻严(021)** —— 「回合成功」不再足够,还要**存在一条 pass 结论**(`latestReviewVerdict`)才写;回合成功但没给结论 ⇒ 不消费、留 `pending` 下一 tick 重审(模型忘了下结论的失效方向从「静默认审过」翻成「多重审一次」) | `runtime/dispatcher.ts` 消费段的 `review_work` 分支 → `repo/works.ts` 的 `markWorkReviewed`(行号已漂,以符号检索为准) |
 | 审**通过**了没有(内容上) | **角色判断 —— 而且今天它的话没有任何机械读者** | 结论在 `review_finding` 的 `status`(`board_write` 的模型入参,`tools/blackboard.ts:191-194`)或正文里 | `grep -rn 'review_finding' src/` 共 **12 处**命中(含 `shared/` 的联合声明才是 13),逐条看过:**只有 `runtime/execution.ts:163` 把它列进 `ABOUT_ONLY_ARTIFACT_KINDS`**,其余是联合声明 / `writeKinds` / 注释 / 一段任务提示词(`dispatcher.ts:527`)—— **没有一处按 `status` 分叉** |
 
-**这条边界的原话就在代码里**:`markWorkReviewed` 的注释写着「**判据不是「模型有没有写 `review_finding`」**—— 那依赖模型自己建立 artifact_link,现有模型里没有保证……平台能确定的事实是:**这一份产出已经被交给质检看过一次了**」(`repo/works.ts:626-630`)。
+**这条边界的原话就在代码里**:`markWorkReviewed` 的注释写着「**判据不是「模型有没有写 `review_finding`」**—— 那依赖模型自己建立 artifact_link,现有模型里没有保证……平台能确定的事实是:**这一份产出已经被交给质检看过一次了**」(`repo/works.ts` 的 `markWorkReviewed` 头注释;2026-11-16:首版行号 `:626-630` 已漂,以符号检索为准)。
 
-**而且质检**改不动**工作项状态**:`quality_reviewer` 的 ceiling 里**没有** `work.update`(`identity/role.ts:225-236`,只有 `work.read` / `work.list`)。⇒ 「质检不通过 → 打回重做」今天**没有机械路径**。
+**而且质检**改不动**工作项状态**:`quality_reviewer` 的 ceiling 里**没有** `work.update`(`identity/role.ts`;只有 `work.read` / `work.list` —— ⚠️ 2026-11-16 复核:021 起还有 `work.review_verdict`,但**仍然没有** `work.update`,边界没松;首版行号 `:225-236` 已漂,以符号检索为准)。⇒ 「质检不通过 → 打回重做」今天**没有机械路径**。
 
 **另有一条更靠前的事实:工件的 `status` 写完之后基本**改不了**。** 唯一的生产变更点是 `setArtifactStatus`(`tools/client.ts:193`,把 `client_question` 标成 `accepted`),而那个被设计成通用变更口的 `applyArtifactStatus`(`tools/blackboard.ts:285-295`,docstring 写着「供**派发器**与测试引用」)**全仓零调用方**(`grep -rn 'applyArtifactStatus' src/ tests/ web/ shared/` 只有它自己的定义),HTTP 面上也没有改工件状态的路(`transport/http.ts` 只有 projects / settings / harness / profile / client-questions 那几个 POST/PUT)。⇒ 质检的结论是 `board_write` 的**一次创建时入参**(`tools/blackboard.ts:191-194`,默认 `open`),**没有「复审后更新上一次结论」这条路**;要表达「改判」只能新写一条工件(§12 #14)。
 
@@ -949,8 +955,8 @@ Rule = {
 
 | id | `on` | `if`(机械判据) | 动作 | `why` |
 |---|---|---|---|---|
-| `review_done_works` **(已有)** | `work_status_changed` · `tick` | `works.status='done' AND review_state='pending'`(`repo/works.ts:616`) | 叫醒**质检** → `review_work` | 「等待审查」是库里的真状态(migration 013);重启后照样查得出来 |
-| `fix_stranded_assignment` **(已有)** | `work_status_changed` · `tick` | 存在非终态工作项,其负责人**不存在或不是 worker**(`dispatcher.ts:334-341`) | 叫醒**项目经理** → `fix_work_assignment` | 真机现场:项目经理把活派给了业务经理,那条工作项至今 `open` |
+| `review_done_works` **(已有)** | `work_status_changed` · `tick` | `works.status='done' AND review_state='pending'`(`repo/works.ts` 的 `listWorksPendingReview`;行号已漂,以符号检索为准) | 叫醒**质检** → `review_work` | 「等待审查」是库里的真状态(migration 013);重启后照样查得出来 |
+| `fix_stranded_assignment` **(已有)** | `work_status_changed` · `tick` | 存在非终态工作项,其负责人**不存在或不是执行角色**(`dispatcher.ts` 的 `strandedWorks`;2026-11-16:「不是 worker」已随 026 的执行角色拆分改口,行号已漂) | 叫醒**项目经理** → `fix_work_assignment` | 真机现场:项目经理把活派给了业务经理,那条工作项至今 `open` |
 | `integrate_reviewed_subtree` **(新)** | `work_status_changed` · `artifact_inserted` · `tick` | 存在根工作项 R:①R 的后代**全部终态**(`cancelled` 按 §2.8 算**收口**,不算阻塞);②其中每条 `done` 的后代都 `review_state='done'`;③**R 上还没有 `deliverable` 工件** | 叫醒**项目经理** → `integrate` | 流水线在质检之后**没有下一环**(§2.11.1);`grep 整合 src/` 只命中测试数据注释 |
 | `handover_deliverable` **(新)** | `artifact_inserted` | 存在 `kind='deliverable'` 且 `status='accepted'` 的工件,且它**还没有**对应的交付会话(见 §2.11.6) | 叫醒**业务经理** → `handover` | 交付之后**没有下一环**;这条是「业务经理主动开一条对话」的唯一入口 |
 
@@ -972,9 +978,9 @@ Rule = {
 
 | # | 所指 | 证据 |
 |---|---|---|
-| 1 | **worker 的产出工件**(「工件就是你的交付物」) | `runtime/execution.ts:192`(拼给 worker 的任务描述) |
-| 2 | **根工作项本身**(「根工作项就是甲方能听懂的那一层(它是交付物本身)」) | `repo/works.ts:327` |
-| 3 | **项目终态**(UI 里 `projects.status='done'` 显示成「已交付」) | `web/src/lib/vocab.ts:37` |
+| 1 | **worker 的产出工件**(「工件就是你的交付物」) | `runtime/execution.ts` 拼给 worker 的任务描述(行号已漂,以符号检索为准) |
+| 2 | **根工作项本身**(「根工作项就是甲方能听懂的那一层(它是交付物本身)」) | `repo/works.ts` 的这条注释(行号已漂,以符号检索为准) |
+| 3 | **项目终态**(UI 里 `projects.status='done'`) | `web/src/lib/vocab.ts`。⚠️ **2026-11-16 更正:`done` 自 2026-10-08 起读作「已结项」,不再显示成「已交付」**(交付是 `handover` 开交付会话那一刻的事 —— 两个时刻共用一个词正是这张表要防的);「显示成已交付」是首版措辞 |
 | 4 | **新增:一份 `deliverable` 工件** | 本节 |
 
 ⇒ **文档与代码里从此不许单独写「交付物」**;一律写清是①worker 产出、②根工作项、③项目终态,还是④`deliverable` 工件。
@@ -1039,11 +1045,11 @@ ADD CONSTRAINT(含 'deliverable')  → 无错应用
 
 **备选方案 β(零重建风险,代价是一处启发式)**:不加 kind,改用 `ALTER TABLE works ADD COLUMN integrated_at INTEGER`(已实测:纯加法、成功),让 `integrate` 规则的终止判据落在**列**上。**代价**:「哪一条工件是交付物」就没有结构化答案了,`handover` 只能按「项目经理写得最晚的那一条」猜 —— 那正是本项目反复拒绝的**启发式代理**。**推荐 α(加 kind + 按上表重建),把 β 留作退路。**
 
-**⚠️ 加一个 kind 的同步面(六处,漏一处就是红灯)**:`shared/types/platform.ts:64`(协议契约)· `identity/role.ts:51`(内部联合)+ `:63`(`ARTIFACT_KINDS` 数组)· 本文 §6.1(与代码**必须逐字相同**,由 `tests/platform/design-conformance.test.ts:217` 钉住)· `DESIGN-AGENTS.md` §8 汇总表 **与**各角色段内的 `**writeKinds**` 内联声明(**E13 要求两处互相一致**)· `web/src/lib/vocab.ts:78` / `:91`(`Record<ArtifactKind, …>` —— 漏了它 `tsconfig.web.json` 会红,这是**唯一一处编译器替我们守着的**)。
+**⚠️ 加一个 kind 的同步面(六处,漏一处就是红灯)**:`shared/types/platform.ts` 的 `ArtifactKind`(协议契约)· `identity/role.ts` 的内部联合 + `ARTIFACT_KINDS` 数组 · 本文 §6.1(与代码**必须逐字相同**,由 `tests/platform/design-conformance.test.ts` 钉住)· `DESIGN-AGENTS.md` §8 汇总表 **与**各角色段内的 `**writeKinds**` 内联声明(**E13 要求两处互相一致**)· `web/src/lib/vocab.ts` 的两张 `Record<ArtifactKind, …>`(漏了它 `tsconfig.web.json` 会红,这是**唯一一处编译器替我们守着的**)。(2026-11-16:首版行号 `platform.ts:64` / `role.ts:51` / `:63` / `conformance.test.ts:217` / `vocab.ts:78` / `:91` 均已漂,一律以符号检索为准。)
 
 #### 2.11.6 交付之后:谁能建会话、建了之后甲方看到什么
 
-**判据先定:建会话是平台的事,不是模型的动词。** 四个角色的能力闭集里没有「建会话」这种东西,今天也没有任何工具能建它(§2.4.2:`ProjectSession` 的维护者一栏写的是「平台」)。⇒ **业务经理的「主动」体现在它决定了要不要交付、怎么交代;会话由平台在它那个回合成功结束后落地**(与 `markWorkReviewed` 完全同形:回合成功才记账,失败/中断就下次重来 —— `dispatcher.ts:817-820`)。
+**判据先定:建会话是平台的事,不是模型的动词。** 四个角色的能力闭集里没有「建会话」这种东西,今天也没有任何工具能建它(§2.4.2:`ProjectSession` 的维护者一栏写的是「平台」)。⇒ **业务经理的「主动」体现在它决定了要不要交付、怎么交代;会话由平台在它那个回合成功结束后落地**(与平台消费待办的纪律同形:回合成功才记账,失败/中断就下次重来 —— `runtime/dispatcher.ts` 的消费段;2026-11-16:首版引的 `dispatcher.ts:817-820` 已漂,以符号检索为准。⚠️ 另:`markWorkReviewed` 自 021 起**更严** —— 还要有 pass 结论才写,与建会话不再完全同形,见 §2.11.3 的更正)。
 
 | 问题 | 结论 |
 |---|---|
@@ -2366,9 +2372,9 @@ AgentRuntime
 
 ---
 
-## 质检返工与兜底(2026-10-07 真机事故;`TODO_KINDS` 的第 15–17 条)
+## 质检返工与兜底(2026-10-07 真机事故;`rework` / `escalate_stalled_work` / `review_undelivered_project` 三条待办)
 
-> 这一节是 `AGENTS.md`「第 15–17 条规则」展开的完整叙事 —— 规范文件是**每次会话注入**的,
+> 这一节是 `AGENTS.md`「质检返工 + 两条兜底」三条规则(`rework_failed_review` / `escalate_abandoned_todo` / `review_undelivered_project`)展开的完整叙事(2026-11-16:首版写「`TODO_KINDS` 的第 15–17 条」/「第 15–17 条规则」—— 序数会随增删漂,今天的 15–17 已是别的三条,只按 id 说话)—— 规范文件是**每次会话注入**的,
 > 有 65,536 字节的硬预算(实测顶到过 67 KB、尾部被截断),所以「判据」留在那边,
 > 「现场与推理」放这里。**两处冲突时以代码为准**(`runtime/rework.ts` 的模块头注释、
 > `dispatcher.ts` 里三条规则的 `why`,以及两个测试文件的头注释是更细的那一层)。

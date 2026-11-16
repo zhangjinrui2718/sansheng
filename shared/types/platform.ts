@@ -232,6 +232,12 @@ export interface WorkView {
   assigneeAgentId: string;
   /** 解析后的负责人名(前端不再自己拼 agent id → 名字) */
   assigneeName: string;
+  /**
+   * 显式优先级(migration 032):0 = 最紧急 … 9 = 最低,缺省 3。
+   * 排空器同种待办内数字小的先派(`runtime/dispatcher.ts` 的 `collectTodos`);
+   * 存量行恒为 3(DEFAULT,不回填)。
+   */
+  priority: number;
   createdAt: number;
   updatedAt: number;
   /** 被哪些工作项依赖(用于画 DAG 的入边) */

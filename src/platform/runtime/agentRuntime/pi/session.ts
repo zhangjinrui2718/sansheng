@@ -33,6 +33,7 @@ import {
   type ResourceLoader,
 } from "@earendil-works/pi-coding-agent";
 import type { Model } from "@earendil-works/pi-ai";
+import type { ThinkingLevel } from "@shared/types/settings.js";
 import type { RuntimeSession, RuntimeSessionEventBase, RuntimeEvent } from "../types.js";
 import { normalizeSessionEvent } from "./events.js";
 
@@ -108,6 +109,22 @@ export interface CreateSessionFn {
     cwd?: string;
     agentDir?: string;
     model?: PlatformModel;
+    /**
+     * 思考档位(settings 里 active provider 的 `thinkingLevel`,2026-11-16 接线)。
+     *
+     * SDK 侧证据(pi 1.2.0):`CreateAgentSessionOptions.thinkingLevel?: ThinkingLevel`
+     * (`pi-coding-agent/dist/core/sdk.d.ts`),类型是
+     * `"off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max"` ——
+     * 三生的 `ThinkingLevel`(`off|minimal|low|medium|high`)是它的**子集**,
+     * 原样可赋,无需换型。
+     *
+     * ⚠️ **`"off"` 必须原样传,不能「不传」**:不传会掉进 SDK 的默认链
+     * (恢复会话存档 → 读 pi 的 settings.json → 缺省 `"medium"`)—— 那不是关闭。
+     * 而 SDK 自己把 `"off"` 翻译成请求里不带 reasoning
+     * (`pi-agent-core/dist/agent.js`:`reasoning: thinkingLevel === "off" ? undefined : thinkingLevel`)。
+     * SDK 还会按模型能力收窄(`clampThinkingLevel`),平台不做能力判断。
+     */
+    thinkingLevel?: ThinkingLevel;
     tools?: string[];
     customTools?: ReturnType<typeof toSdkTools>;
     /**
@@ -129,6 +146,17 @@ export interface PlatformSessionOptions {
   readonly agentDir: string;
   /** 已解析的模型 */
   readonly model?: PlatformModel;
+  /**
+   * 思考档位(2026-11-16 接线)。
+   *
+   * 来源 = settings 里 **active provider** 的 `thinkingLevel`(它是 per-provider
+   * 字段:`shared/types/settings.ts` 的 `ProviderConfig`)。缺省 = **不传**
+   * ⇒ SDK 走自己的默认链(见 {@link CreateSessionFn} 的注释)。
+   *
+   * ⚠️ 接线余下一公里在宿主:`host/serve.ts` 的 `getOrCreateSession` 组装这里
+   * 的 opts —— 它把 active provider 的 `thinkingLevel` 带进来,本工厂才收得到。
+   */
+  readonly thinkingLevel?: ThinkingLevel;
   /** 测试 seam:替换真实 SDK 调用 */
   readonly createSession?: CreateSessionFn;
   /**
@@ -154,6 +182,13 @@ export type PlatformSessionResult =
       readonly wiring: {
         readonly allowlist: readonly string[];
         readonly customToolNames: readonly string[];
+        /**
+         * 交给 SDK 的思考档位(2026-11-16 接线)。
+         * `undefined` = 调用方没给 ⇒ SDK 走自己的默认链(恢复存档 → pi settings
+         * → `"medium"`)。**这与「off」是两回事**:off 会真的传 `"off"` 进去。
+         * 挂进 wiring 是 7-B 那一课的守卫:配置「存了但从未传给会话」必须可见。
+         */
+        readonly thinkingLevel: ThinkingLevel | undefined;
         /**
          * 真正送进系统提示的提示词单元。
          * **这两个字段是 7-B 那一课的守卫** —— 当时提示词「落地了但没人读」,
@@ -321,6 +356,10 @@ export async function createPlatformSession(
     agentDir: opts.agentDir,
     ...(resourceLoader !== undefined ? { resourceLoader } : {}),
     ...(opts.model !== undefined ? { model: opts.model } : {}),
+    // 思考档位(2026-11-16):settings 的 per-provider thinkingLevel 从这里进
+    // SDK。`"off"` 原样传(SDK 把它翻成请求里不带 reasoning);缺省不传 =
+    // SDK 自己的默认链 —— 见 CreateSessionFn.thinkingLevel 的注释与证据。
+    ...(opts.thinkingLevel !== undefined ? { thinkingLevel: opts.thinkingLevel } : {}),
     // `tools` 是**统一 allowlist**(内置 + 平台 + MCP 模式)。
     // **不能只放内置** —— SDK 的 isAllowedTool 同时对 customTools 过滤,
     // 只放内置等于把平台工具一起关掉(首跑冒烟实测 0 个激活)。
@@ -358,6 +397,7 @@ export async function createPlatformSession(
     wiring: {
       allowlist: [...split.unifiedAllowlist],
       customToolNames: customTools.map((t) => t.name),
+      thinkingLevel: opts.thinkingLevel,
       loadedPromptUnits,
       missingPromptUnits,
       systemPromptChars,

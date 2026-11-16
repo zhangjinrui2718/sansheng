@@ -51,6 +51,31 @@ export function isTerminalWorkStatus(s: WorkStatus): boolean {
   return TERMINAL.has(s);
 }
 
+// ── 显式优先级(migration 032)────────────────────────────────────
+//
+// 「要事第一」的工程化:此前工作项之间只有 `created_at` 先后(排空器里实际
+// 是 `execute_work:<id>` 的 key 字典序),「哪条先跑」全看创建顺序与 id 拼法。
+// priority 是一个显式档位:**0 = 最紧急 … 9 = 最低,缺省 3**。
+//
+// ⚠️ 取值域(0–9 的整数)在 TS 校验,不进 schema CHECK(与 022 / 030 同一条
+// 先例:闭集进 CHECK,将来放宽就得重建 `works` 表 —— 它被 `work_deps` 与
+// `artifacts.work_id` 引用,重建成本与收益完全不成比例)。
+//   · 写:`work_create` / `work_update` → `clampWorkPriority`(越界收进边界,
+//     非整数取最近的整数),`insertWork` / `setWorkPriority` 落库前再 clamp 一次;
+//   · 读:`rowToWork` 对非有限数**抛错**(与 `rowToWork` 对未定义 status 同一款
+//     fail loud —— 列是 NOT NULL,读出别的值意味着库被绕过写口改过)。
+// 排序判据的落点在 `runtime/dispatcher.ts` 的 `collectTodos`:同一种待办内
+// 数字小的先派,同优先级内保持原有次序(key 字典序)。
+export const WORK_PRIORITY_MIN = 0;
+export const WORK_PRIORITY_MAX = 9;
+export const DEFAULT_WORK_PRIORITY = 3;
+
+/** 越界收进 [0, 9],非整数取最近的整数(`2.4 → 2`、`2.6 → 3`)。 */
+export function clampWorkPriority(v: number): number {
+  const rounded = Math.round(v);
+  return Math.min(WORK_PRIORITY_MAX, Math.max(WORK_PRIORITY_MIN, rounded));
+}
+
 // ── 状态迁移表:机制,不是文档 ────────────────────────────────────
 //
 // 设计 §2.7:此前 `works.status` 只是**一个闭集 + 一个写口**,`updateWorkStatus`
@@ -209,6 +234,12 @@ export interface WorkRow {
   status: WorkStatus;
   /** 审查态(migration 013)。质检的待办由它查出来,不靠任何内存事件。 */
   reviewState: ReviewState;
+  /**
+   * 显式优先级(migration 032):0 = 最紧急 … 9 = 最低,缺省 3。
+   * 排序判据在 `runtime/dispatcher.ts` 的 `collectTodos`,不在这里 ——
+   * 本仓储对 `listWorks` 的排序保持 `created_at`(读面的既有次序,别顺手改)。
+   */
+  priority: number;
   assigneeAgentId: string;
   createdAt: number;
   updatedAt: number;
@@ -222,6 +253,7 @@ interface RawWork {
   goal: string;
   status: string;
   review_state: string;
+  priority: number;
   assignee_agent_id: string;
   created_at: number;
   updated_at: number;
@@ -234,6 +266,11 @@ function rowToWork(raw: RawWork): WorkRow {
   if (!isReviewState(raw.review_state)) {
     throw new Error(`works 表里出现未定义 review_state「${raw.review_state}」(id=${raw.id})`);
   }
+  // 列是 NOT NULL;读出非有限数意味着有人绕过写口改了库 —— 响亮报错,
+  // 不给一个「当作 3」的兜底(那会把坏数据读成正常档位,静默)。
+  if (typeof raw.priority !== "number" || !Number.isFinite(raw.priority)) {
+    throw new Error(`works 表里出现未定义 priority「${raw.priority}」(id=${raw.id})`);
+  }
   return {
     id: raw.id,
     projectId: raw.project_id,
@@ -242,6 +279,7 @@ function rowToWork(raw: RawWork): WorkRow {
     goal: raw.goal,
     status: raw.status,
     reviewState: raw.review_state,
+    priority: raw.priority,
     assigneeAgentId: raw.assignee_agent_id,
     createdAt: raw.created_at,
     updatedAt: raw.updated_at,
@@ -261,17 +299,23 @@ function initialReviewState(status: WorkStatus): ReviewState {
 /**
  * 插入用的一行。`reviewState` 可省:调用方不需要知道审查态这条内部状态 ——
  * 它由状态推导(见 `initialReviewState`),只有重建历史数据时才显式指定。
+ * `priority` 同理可省(缺省 {@link DEFAULT_WORK_PRIORITY});显式给的值在
+ * 这里再 clamp 一次,让「写口只出 0–9 的整数」不依赖每个调用方都记得 clamp。
  */
-export type NewWorkRow = Omit<WorkRow, "reviewState"> & { readonly reviewState?: ReviewState };
+export type NewWorkRow = Omit<WorkRow, "reviewState" | "priority"> & {
+  readonly reviewState?: ReviewState;
+  readonly priority?: number;
+};
 
 export function insertWork(db: Database.Database, row: NewWorkRow): void {
   db.prepare(
     `INSERT INTO works (id, project_id, parent_work_id, title, goal, status, review_state,
-                        assignee_agent_id, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                        priority, assignee_agent_id, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     row.id, row.projectId, row.parentWorkId, row.title, row.goal,
-    row.status, row.reviewState ?? initialReviewState(row.status), row.assigneeAgentId,
+    row.status, row.reviewState ?? initialReviewState(row.status),
+    clampWorkPriority(row.priority ?? DEFAULT_WORK_PRIORITY), row.assigneeAgentId,
     row.createdAt, row.updatedAt,
   );
 }
@@ -696,6 +740,40 @@ export function assignWork(
     at,
     id,
   );
+}
+
+/** 改优先级的结果。结构化拒绝(不抛)—— 与 `updateWorkStatus` 同一条纪律。 */
+export type WorkPriorityChange =
+  | {
+      readonly ok: true;
+      readonly from: number;
+      readonly to: number;
+      /** false = clamp 之后与现值相同,幂等空操作 */
+      readonly changed: boolean;
+    }
+  | { readonly ok: false; readonly reason: "not_found"; readonly message: string };
+
+/**
+ * 改显式优先级(migration 032)。**clamp 在唯一写口里再做一次** —— 与状态
+ * 迁移表落在 `updateWorkStatus` 同一条理由:散到调用方去 clamp,迟早有一条
+ * 新路漏掉。同值是幂等空操作(照实报 `changed: false`,不碰 `updated_at`)。
+ */
+export function setWorkPriority(
+  db: Database.Database,
+  id: string,
+  priority: number,
+  at: number,
+): WorkPriorityChange {
+  const before = getWork(db, id);
+  if (before === null) {
+    return { ok: false, reason: "not_found", message: `找不到工作项 ${id}` };
+  }
+  const to = clampWorkPriority(priority);
+  if (to === before.priority) {
+    return { ok: true, from: before.priority, to, changed: false };
+  }
+  db.prepare(`UPDATE works SET priority = ?, updated_at = ? WHERE id = ?`).run(to, at, id);
+  return { ok: true, from: before.priority, to, changed: true };
 }
 
 export function deleteWork(db: Database.Database, id: string): void {

@@ -703,7 +703,10 @@ describe("端到端 · 立项 → 拆解 → 干活 → 阻塞 → 变更 → �
     expect(getProjectRow(db, pid)!.status).toBe("done");
     expect(getWork(db, w)!.status).toBe("done");
     expect(getChange(db, c)!.status).toBe("accepted");
-    expect(listArtifacts(db, pid)).toHaveLength(3); // 立项书 + 证据 + 审查意见
+    // 4 条 = 立项书 + 证据 + 审查意见 + **复盘 note**(migration 批次:project_close
+    // 成功后平台自动落一条「复盘:<项目名>」的 note 工件,见 tools/project.ts;
+    // 行为判据在 tests/platform/project-retro.test.ts,这里只认总数 +1)
+    expect(listArtifacts(db, pid)).toHaveLength(4);
     expect(changesForWork(db, w)).toHaveLength(1);
   });
 });

@@ -1762,6 +1762,12 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
         agentDir: booted.settings.agentDir ?? join(opts.dataDir, "agent"),
         model: currentModel,
         dataDir: opts.dataDir,
+        // 思考档位(2026-11-16 接线):settings 里 active provider 的 thinkingLevel
+        // 是「存了但从未传给会话」的孤儿字段 —— 从这里进 SDK(off 原样传,SDK 会
+        // 按模型能力 clamp;不传会掉进 SDK 默认链,那不是关闭)。
+        ...(currentProvider !== null && currentProvider.thinkingLevel !== undefined
+          ? { thinkingLevel: currentProvider.thinkingLevel }
+          : {}),
         ...(opts.createSession !== undefined ? { createSession: opts.createSession } : {}),
       },
     );
