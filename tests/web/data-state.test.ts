@@ -233,8 +233,7 @@ describe("ratchet:四态的判据只有一处", () => {
       "routes/Members.tsx",
       "components/members/AgentConversations.tsx",
       "components/members/RoleHarness.tsx",
-      "components/client/AcceptanceDock.tsx",
-      "components/client/ClientQuestionDock.tsx",
+      "components/client/Inbox.tsx",
     ];
     const missing = files.filter((f) => {
       const hit = WEB_FILES.find((x) => x.path.endsWith(f));

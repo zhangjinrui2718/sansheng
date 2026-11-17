@@ -771,6 +771,15 @@ export function WorkDagCanvas({
                     }
                   />
                 )}
+                {n.work.reviewState === "pending" && (
+                  <span
+                    className="ss-meta"
+                    style={{ marginLeft: "auto", color: "var(--amber)" }}
+                    title="做完了,质检还没看(works.review_state = pending)"
+                  >
+                    待质检
+                  </span>
+                )}
                 {n.unlayered && (
                   <span className="ss-meta" style={{ marginLeft: "auto", color: "var(--amber)" }}>
                     环
@@ -816,42 +825,6 @@ const EDGE_KIND_LABEL: Record<WorkDagLayout["edges"][number]["kind"], string> = 
   depends_on: "前置于",
 };
 
-/** 图例:三种记号各是什么意思。样式与画布上的边**同一套 token**。 */
-export function WorkDagLegend() {
-  return (
-    <div className="flex items-center gap-3 flex-wrap ss-meta" style={{ marginTop: 6 }}>
-      <span className="flex items-center gap-1.5">
-        <svg width="18" height="6" aria-hidden="true">
-          <path d="M0 3 H18" stroke="var(--bone-mute)" strokeWidth={1} fill="none" />
-        </svg>
-        {"实线 = 拆解(子项 → 父项)"}
-      </span>
-      <span className="flex items-center gap-1.5">
-        <svg width="18" height="6" aria-hidden="true">
-          <path
-            d="M0 3 H18"
-            stroke="var(--bone-mute)"
-            strokeWidth={1}
-            strokeDasharray="4 3"
-            fill="none"
-          />
-        </svg>
-        {"虚线 = 前置依赖(前置 → 本条)"}
-      </span>
-      <span className="flex items-center gap-1.5">
-        <span className="ss-live-dot" />
-        点 = 此刻在跑
-      </span>
-    </div>
-  );
-}
-
-/**
- * 产出流程整块:画布 + 图例 + 两行必须说出口的话。
- *
- * `runtimeUnknown` 的两行小字是这一块的**诚实开关**:运行态读不到时,页面不能
- * 因为「没有点亮的节点」而看起来像「此刻一切空闲」。
- */
 export function WorkDag({
   layout,
   live,
@@ -870,7 +843,6 @@ export function WorkDag({
   return (
     <div className="flex flex-col">
       <WorkDagCanvas layout={layout} live={live} selectedId={selectedId} onSelect={onSelect} />
-      <WorkDagLegend />
       {runtimeUnknown && (
         <div className="ss-note flex items-start gap-1.5" style={{ marginTop: 4 }}>
           <span
@@ -880,11 +852,7 @@ export function WorkDag({
           />
           {/* 这一句是**多行中文**:用字符串字面量拼,免得 JSX 把换行折成空格,
               在句子中间留出一个空格(中文句子里的空格会被读成排版错误)。 */}
-          <span>
-            {"运行态读不到:这次只连上了 HTTP 读面,宿主没有接上运行期快照 —— 谁此刻在跑读不到。" +
-              "所以节点边框一律不点亮;若某个节点上出现灰色点,那只说明库里那条工作项还标着" +
-              "「进行中」,不等于此刻有回合在跑。"}
-          </span>
+          <span>运行态读不到 · 节点不点亮</span>
         </div>
       )}
       {unlayered.length > 0 && (
@@ -1701,12 +1669,14 @@ export function ArtifactsBody({
 export type WorksView = "timeline" | "deps" | "relations";
 
 export const WORKS_VIEWS: ReadonlyArray<{ key: WorksView; label: string }> = [
-  { key: "timeline", label: "推进" },
   { key: "deps", label: "依赖" },
+  { key: "timeline", label: "推进" },
   { key: "relations", label: "工件关系" },
 ];
 
-export const WORKS_VIEW_DEFAULT: WorksView = "timeline";
+/* R-C(2026-11-17,IA v4):默认视图 = **依赖 DAG** —— 用户要看的是「活的结构」
+   (谁在等谁、卡在哪),不是时间流水;推进(时间轴)退为第二视图。 */
+export const WORKS_VIEW_DEFAULT: WorksView = "deps";
 
 /** 地址参数 → 视图(认不得的值回落默认,不抛错 —— 地址是坐标,不是判据)。 */
 export const isWorksView = (v: string | null): WorksView =>

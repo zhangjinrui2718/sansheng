@@ -39,8 +39,7 @@ interface Props {
 
 /** 导航项:声明式单一来源,顺序即视觉顺序。 */
 const TABS: ReadonlyArray<{ route: Route; label: string }> = [
-  { route: "chat", label: "对话" },
-  { route: "project", label: "项目" },
+  { route: "chat", label: "工作台" },
   { route: "works", label: "工作项" },
   { route: "members", label: "成员" },
   { route: "memory", label: "记忆" },

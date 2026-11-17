@@ -241,6 +241,19 @@ export function ChatSurface() {
           <span style={{ fontSize: 13, color: "var(--bone)" }}>
             {intakeActive ? "接待 · 业务经理" : project ? project.name : "未选项目"}
           </span>
+          {/* R-B:项目页签退场后,这里是进「项目详情」的常驻入口 */}
+          {!intakeActive && projectId !== null && (
+            <a
+              href="#/project"
+              title="项目详情:最要紧的事 / 平台记录 / 成本 / 文件系统"
+              style={{
+                fontSize: 11, color: "var(--cyan)",
+                textDecoration: "underline dotted", flex: "none",
+              }}
+            >
+              详情
+            </a>
+          )}
           {/*
             当前在**哪条线**。⚠️ S-G(2026-11-17,减法):**主对话不再标线名** ——
             主对话是常态,标出来是常驻噪音;只有**交付线/自建线**(thread)才标,

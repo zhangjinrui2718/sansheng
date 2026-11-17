@@ -327,7 +327,7 @@ export function ProjectDetailPage() {
   if (!projectId) {
     return (
       <div className="ss-page">
-        <PageHeader title="项目" />
+        <PageHeader title="项目详情" />
         <EmptyState>未选项目</EmptyState>
       </div>
     );
@@ -336,23 +336,33 @@ export function ProjectDetailPage() {
   return (
     <div className="ss-page">
       <PageHeader
-        title={detail?.name ?? "项目"}
+        title="项目详情"
         hint={detail ? (detail.client ? `甲方 ${detail.client}` : undefined) : undefined}
         aside={
-          detail ? (
-            <StatStrip
-              items={[
-                { label: "状态", value: projectStatusLabel(detail.status), tone: projectStatusTone(detail.status) },
-                {
-                  label: "内部提问",
-                  value: asks.length,
-                  title: "角色之间的提问,不是问你的 —— 不需要你处理",
-                },
-                { label: "变更", value: changes.length },
-                { label: "成员", value: detail.members.length },
-              ]}
-            />
-          ) : undefined
+          <>
+            <a
+              href="#/chat"
+              className="sansheng-button"
+              style={{ padding: "2px 8px", fontSize: 11, marginRight: 8 }}
+              title="回到工作台(对话与等你表态的收件箱)"
+            >
+              ← 工作台
+            </a>
+            {detail ? (
+              <StatStrip
+                items={[
+                  { label: "状态", value: projectStatusLabel(detail.status), tone: projectStatusTone(detail.status) },
+                  {
+                    label: "内部提问",
+                    value: asks.length,
+                    title: "角色之间的提问,不是问你的 —— 不需要你处理",
+                  },
+                  { label: "变更", value: changes.length },
+                  { label: "成员", value: detail.members.length },
+                ]}
+              />
+            ) : null}
+          </>
         }
       />
 

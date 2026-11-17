@@ -63,7 +63,8 @@ const BASELINE: Record<string, number> = {
   "App.tsx": 18,
   "components/brand/Seal.tsx": 2,
   "components/chat/ChatComposer.tsx": 136,
-  "components/chat/ChatSurface.tsx": 317,
+  // 2026-11-17(IA v4 走检):317 → 329(+12,头部「详情」入口;placeholder 键位段删除)
+  "components/chat/ChatSurface.tsx": 329,
   "components/chat/Markdown.tsx": 0,
   // 2026-11-17(D3):「计划」卡 —— 新 UI(目标/判据摘要 + 拆解清单 + 确认开工),
   // 逐句斟酌过;对照的减量:AgentPanel -52、ChatRightRail -9、HistoryRail -19、
@@ -76,19 +77,21 @@ const BASELINE: Record<string, number> = {
   "components/chat/ToolCallCard.tsx": 0,
   // 2026-11-17(D5):97 → 115(+18,验收卡的「查看」入口 —— 跳工件抽屉读正文;
   // 有了它,右栏表态不再需要先去工作项页找那件货)。
-  "components/client/AcceptanceDock.tsx": 115,
   // 2026-11-17(D6):91 → 202(+111,收口提议卡 —— intent="close" 的提问渲染成
   // 「同意收口 / 先不收」两个固定动作,替代自由文本框;这是新分支,不是原卡片的加厚)。
-  "components/client/ClientQuestionCard.tsx": 202,
+  // 2026-11-17(R-A 融合):两个 dock 合并为收件箱 —— AcceptanceDock(97)与
+  // ClientQuestionDock(151)退役,Inbox 承载同一判据(类型徽章+动作)。
+  "components/client/Inbox.tsx": 111,
+  "components/client/ClientQuestionCard.tsx": 177,
   // 2026-11-17(F3):125 → 151(+26,「已答复 · 业务经理整理中」一行 + 判据注释
   // 进了 title;对照 S-A 的删减净下降)。
-  "components/client/ClientQuestionDock.tsx": 151,
   "components/dashboard/DashboardCards.tsx": 17,
   "components/deliverable/CodeService.tsx": 484,
   "components/deliverable/ContentDriftNote.tsx": 30,
   "components/deliverable/DeliveryVerdictActions.tsx": 276,
   "components/deliverable/HtmlReport.tsx": 113,
-  "components/members/AgentConversations.tsx": 256,
+  // 2026-11-17(IA v4 走检):256 → 239(描述句「只在实时流里看得见…」退场)
+  "components/members/AgentConversations.tsx": 239,
   // 2026-11-14:1051 → 332。编辑器 / 纯判据 / 告警与工具面段落 / 有状态工作台
   // 搬去 `components/harness/`(那边逐文件登记),本文件只剩成员页那张卡的形状
   // 与入口链接 —— 是搬家,不是删文案。
@@ -112,7 +115,8 @@ const BASELINE: Record<string, number> = {
   // 2026-11-13:供应商切换历史折叠段(343 → 397,+54,逐项斟酌过:摘要 9 +
   // 空态 17 + kind 标签 8 + `what` 4 + 「审计聚合,非结构化遥测」一句 16)。
   // 新功能计入基线,不是放水 —— 那一句注释性文案已压到最短。
-  "components/settings/SettingsPanel.tsx": 397,
+  // 2026-11-17(IA v4 走检):397 → 374(顶部描述句退场;cwd 帮助句压成缺省值)
+  "components/settings/SettingsPanel.tsx": 374,
   // 2026-11-17(S-A):「本项目」块删除 —— AgentPanel.tsx(52)整个移除;
   // ChatRightRail 9 → 0(右栏不再有任何屏上文案)。净 -61。
   "components/shell/ChatRightRail.tsx": 0,
@@ -120,7 +124,7 @@ const BASELINE: Record<string, number> = {
   "components/shell/HistoryRail.tsx": 255,
   // 2026-11-17(F1):37 → 56(+19,Σ 的口径悬停 —— 「本次连接以来;权威值在项目页成本段」,
   // 防止把会话内合计读成全历史)。
-  "components/shell/TopBar.tsx": 56,
+  "components/shell/TopBar.tsx": 55,
   "components/ui/DataState.tsx": 14,
   "components/ui/Help.tsx": 12,
   "components/ui/MetadataStrip.tsx": 0,
@@ -132,7 +136,8 @@ const BASELINE: Record<string, number> = {
   // 2026-11-17(D2):82 → 169(+87,「项目此刻」的片段文案生成器 projectNowOf ——
   // 「X 在跑「环节」(N 分钟)/ 在等你 N / 阻塞 N / 还有 N 个角色在跑 / 运行态读不到」;
   // 判据与屏上措辞同层(与 orgState/liveHeadline 同一条先例),词表拆出去会变成两处)。
-  "lib/data.ts": 169,
+  // 2026-11-17(IA v4 走检):169 → 105(channelNoteText 短式 + projectNowOf 的 · 串退场)
+  "lib/data.ts": 105,
   "lib/deepLink.ts": 0,
   "lib/deliverable.ts": 2,
     // 2026-11-17(D7):143 → 156(+13,环节面板的「质检 · 待质检」一格 ——
@@ -158,7 +163,9 @@ const BASELINE: Record<string, number> = {
   "routes/ProjectDetail.tsx": 678,
   // 2026-11-17(S-D):1527 → 1535(+8,视图切换的三个标签「推进/依赖/工件关系」——
   // 三图收成一画布后,切换标签是新 UI 的必需字;叠放的段落标题随之消失)。
-  "routes/Works.tsx": 1535,
+  // 2026-11-17(R-C/R-D):1535 → 1262(默认依赖 DAG;TimelineLegend/WorkDagLegend
+  // 静态图例退场,运行态说明名称式;DAG 节点增「待质检」标记)
+  "routes/Works.tsx": 1262,
   "stores/chat.ts": 111,
   "stores/settings.ts": 0,
 };

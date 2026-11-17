@@ -276,7 +276,7 @@ describe("① 工件 = 点:20 件恰好 20 个,6 件不挂环节的也在图上"
     // 在换成时间轴之前,那句话是**对的**(旧 DAG 只画挂上环节的工件);换图之后
     // 它变成了**假话**,而它偏偏写在页面正文里(正是本项目最忌的那种「屏幕上说着
     // 与事实相反的话,而看起来完全正常」)。所以钉成一条负样本。
-    const full = renderScreen();
+    const full = renderScreen({ view: "timeline" });
     expect(full, "页面还在说无环节的工件没画出来").not.toContain("不出现在上面的流程图上");
     expect(full, "改成了「已经在图上」就该看得见这句话").toContain("已在上面那张图上");
     // ⚠️ 2026-10-26(Wave 2b):断言的字面从「已经在上面那张图上」改成「已在上面那张图上」——
@@ -426,31 +426,32 @@ describe("④ 运行态 `unavailable` / `live === null` ⇒ ② 推进图一个 
     expect(countOf(off, /ss-live-dot/g)).toBe(0);
   });
 
-  it("S-D:三图 → 一画布,切换是**替换**不是叠放(默认 = 推进)", () => {
-    // 判据变更记录:2026-10-07 钉的是「工件关系图排在推进图之前」(叠放);
-    // 2026-11-17 v3 减法改成单画布 + 切换 —— 顺序判据没有载体,由本条接棒。
-    const tl = renderScreen();
+  it("S-D / R-C:三图 → 一画布,切换是**替换**不是叠放(默认 = 依赖 DAG;IA v4 用户裁决)", () => {
+    // 判据变更记录:2026-10-07 钉叠放顺序;2026-11-17 v3 改单画布切换(默认推进);
+    // 同日 IA v4 再改:**默认 = 依赖 DAG**(用户要看「活的结构」,时间流水退第二)。
+    const deps = renderScreen();
+    expect(deps).toContain(">依赖关系图<");
+    expect(deps).not.toContain(">推进图<");
+    expect(deps).not.toContain(">工件关系图<");
+    expect(deps).toContain('data-role="works-view"');
+
+    const tl = renderScreen({ view: "timeline" });
     expect(tl).toContain(">推进图<");
-    expect(tl).not.toContain(">工件关系图<");
     expect(tl).not.toContain(">依赖关系图<");
-    expect(tl).toContain('data-role="works-view"');
 
     const rel = renderScreen({ view: "relations" });
     expect(rel).toContain(">工件关系图<");
-    expect(rel).not.toContain(">推进图<");
-
-    const deps = renderScreen({ view: "deps" });
-    expect(deps).toContain(">依赖关系图<");
-    expect(deps).not.toContain(">推进图<");
-    // 负样本:别的字符串碰巧出现不算数(切片锚的自我检查)
-    expect(tl).not.toContain(">工件关系图</span>");
+    expect(rel).not.toContain(">依赖关系图<");
   });
 
   it("整页:读不到运行态时,`.ss-live-dot` 一个都不许有(默认视图只有推进图)", () => {
     // S-D 后默认视图只有推进图;工件关系图不读运行态(它压根不接 live),
     // 切到 relations 视图同样一个点都不该有。
     const html = renderScreen({ live: UNAVAILABLE });
-    expect(countOf(html, /ss-live-dot/g), "读不到运行态时整页仍有亮着的点").toBe(0);
+    expect(
+      countOf(html, /ss-live-dot(?![^>]*data-state)/g),
+      "读不到运行态时仍有亮着的点",
+    ).toBe(0);
     const rel = renderScreen({ view: "relations", live: UNAVAILABLE });
     expect(
       countOf(rel, /ss-live-dot/g),
@@ -575,7 +576,7 @@ describe("⑩ 选中联动:① 或 ② 上选中的那条 = ③ 面板显示的�
   }
 
   it("正样本:picked = 甲环节 ⇒ ① 那条 bar 标成 selected,② 出现甲环节与它的工件", () => {
-    const html = renderScreen({ picked: "w-a" });
+    const html = renderScreen({ picked: "w-a", view: "timeline" });
     const bar = tagById(html, "data-span-id", "w-a");
     expect(attrOf(bar, "data-selected"), "① 上选中的不是被选的那个环节").toBe("true");
     expect(attrOf(tagById(html, "data-span-id", "w-b"), "data-selected")).toBe("false");
@@ -587,7 +588,7 @@ describe("⑩ 选中联动:① 或 ② 上选中的那条 = ③ 面板显示的�
   });
 
   it("负样本:乙环节独有的工件标题不许出现在甲的面板里", () => {
-    const panel = panelSection(renderScreen({ picked: "w-a" }));
+    const panel = panelSection(renderScreen({ picked: "w-a", view: "timeline" }));
     expect(panel).not.toContain("乙评审三");
     expect(panel).not.toContain("乙证据三");
     expect(panel, "整个项目的工件被铺进了面板").not.toContain("整合证据五");
@@ -595,25 +596,25 @@ describe("⑩ 选中联动:① 或 ② 上选中的那条 = ③ 面板显示的�
   });
 
   it("正样本反向证明上一条不是恒真:picked = 乙环节 ⇒ 乙的工件出现、甲的消失", () => {
-    const panel = panelSection(renderScreen({ picked: "w-b" }));
+    const panel = panelSection(renderScreen({ picked: "w-b", view: "timeline" }));
     expect(panel).toContain("乙环节");
     expect(panel).toContain("乙评审三");
     expect(panel).not.toContain("甲证据一");
-    expect(attrOf(tagById(renderScreen({ picked: "w-b" }), "data-span-id", "w-b"), "data-selected")).toBe(
+    expect(attrOf(tagById(renderScreen({ picked: "w-b", view: "timeline" }), "data-span-id", "w-b"), "data-selected")).toBe(
       "true",
     );
   });
 
   it("默认选中 = 布局里第一个**有工件**的环节(不是第一条工作项)", () => {
     // 夹具里 w-root 有 2 件(dl / r7),它就是默认
-    const panel = panelSection(renderScreen({ picked: undefined }));
+    const panel = panelSection(renderScreen({ picked: undefined, view: "timeline" }));
     expect(panel).toContain("根环节");
     // 负样本:w-c(丙)不是默认
     expect(panel).not.toContain("丙证据四");
   });
 
   it("`picked === null`(用户明确取消)⇒ 面板收起,只剩名称式提示(文案裁决 2026-11-17)", () => {
-    const html = renderScreen({ picked: null });
+    const html = renderScreen({ picked: null, view: "timeline" });
     expect(html).toContain("未选环节");
     expect(tagById(html, "data-span-id", "w-a")).toContain('data-selected="false"');
   });

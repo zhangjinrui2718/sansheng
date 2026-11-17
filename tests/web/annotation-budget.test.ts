@@ -326,7 +326,9 @@ describe("注解预算(Wave 2b):悬停只留一行话,屏上不许有 markdown �
     // 2026-11-17(v3):103 → 108(+5,新 UI 的必要悬停:D3 计划卡的确认开工、
     // D5 验收卡的「查看」、D2 项目此刻的片段、F3 已答未处置行、TopBar Σ 口径 ——
     // 全部 ≤ 40 字;同时 ChatSurface 头部的供应商/模型悬停随 S-G 删除,-1 已计)。
-    expect(total).toBeLessThanOrEqual(108);
+        // 2026-11-17(IA v4):108 → 111(+3:收口提议卡动作、DAG「待质检」标记、
+    // 工作台「详情」入口 —— 全部 ≤ 40 字;退休 dock 的悬停已随文件删除对冲)。
+    expect(total).toBeLessThanOrEqual(111);
     // 自检:计数口径不是「有没有 title=」而是「字面量长度」—— 两条边界都验一遍
     expect([...'title="短"'.matchAll(/title="([^"]*)"/g)][0][1].length).toBe(1);
   });
@@ -342,7 +344,9 @@ describe("注解预算(Wave 2b):悬停只留一行话,屏上不许有 markdown �
       total += [...f.src.matchAll(/title=\{/g)].length;
     }
     expect(all.join("\n")).toBe("");
-    expect(total).toBeLessThanOrEqual(108);
+        // 2026-11-17(IA v4):108 → 111(+3:收口提议卡动作、DAG「待质检」标记、
+    // 工作台「详情」入口 —— 全部 ≤ 40 字;退休 dock 的悬停已随文件删除对冲)。
+    expect(total).toBeLessThanOrEqual(111);
     // 合成样本自检(判据自己要有「已知答案」)。样本源用 repeat 程序化构造 ——
     // 手数字数会数错(第一版就是这么红的)。
     //  正样本 —— 超长段(45 字 > 40)必须被判出来;

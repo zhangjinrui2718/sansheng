@@ -147,7 +147,7 @@ describe("scopeClientQuestions · 只显示当前项目的待答", () => {
 });
 
 describe("接线 · 面板真的用了这道筛", () => {
-  const dock = (): string => source("components/client/ClientQuestionDock.tsx");
+  const dock = (): string => source("components/client/Inbox.tsx");
   const scope = (): string => source("lib/questionScope.ts");
 
   it("面板把**筛选结果**渲染出去(不是把全局列表整个渲染)", () => {

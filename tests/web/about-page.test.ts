@@ -121,16 +121,20 @@ describe("接线 · 「关于」是 `?`,不是第七个页签", () => {
     expect(tb).toContain('onRoute("about")');
   });
 
-  it("**`TABS` 仍然恒 6 项,且里面没有 about**", () => {
+  it("**`TABS` 恒 5 项(IA v4:对话+项目合并为工作台),且里面没有 about**", () => {
+    // 判据变更记录(2026-11-17,用户裁决「完完全全重构」):对话页 + 项目页
+    // 合并为**工作台**;项目页退为「项目详情」视图(路由 #/project 保留,
+    // 从工作台头部的「详情」进入),不再是页签。
     const tb = source("components/shell/TopBar.tsx");
     const block = tb.slice(tb.indexOf("const TABS"), tb.indexOf("];", tb.indexOf("const TABS")));
     const routes = block.match(/\{ route: "/g) ?? [];
-    expect(routes.length).toBe(6);
+    expect(routes.length).toBe(5);
     expect(block).not.toContain('"about"');
+    expect(block).toContain('label: "工作台"');
     // 变异自检:把 about 塞进 TABS ⇒ 上面两条当场变红(这里模拟一次)
-    const mutated = block.replace('{ route: "chat", label: "对话" },', '{ route: "chat", label: "对话" },\n  { route: "about", label: "关于" },');
+    const mutated = block.replace('{ route: "chat", label: "工作台" },', '{ route: "chat", label: "工作台" },\n  { route: "about", label: "关于" },');
     expect(mutated).toContain('"about"');
-    expect((mutated.match(/\{ route: "/g) ?? []).length).toBe(7);
+    expect((mutated.match(/\{ route: "/g) ?? []).length).toBe(6);
   });
 
   it("`about` 是一条真的路由(union 在 lib/route.ts 里,由 App 接到分支)", () => {
