@@ -28,6 +28,7 @@ import {
   listBlockers, listBlockedWorks, isUnresolvedBlocker, type BlockerRow,
 } from "../storage/repo/blockers.js";
 import { listChanges, type ChangeRequestRow } from "../storage/repo/changes.js";
+import { listUnconsumedClientAnswers } from "../storage/repo/clientQuestions.js";
 import {
   listSessions, listSessionMessages, normalizeMessageLimit, isSessionMessageKind,
   listProviderNotices,
@@ -125,6 +126,8 @@ export function toWorkView(db: Database.Database, row: WorkRow, name: (id: strin
     title: row.title,
     goal: row.goal,
     status: row.status,
+    // D7(2026-11-17):质检那一半的状态原样透出 —— 界面上「待质检」的事实来源。
+    reviewState: row.reviewState,
     assigneeAgentId: row.assigneeAgentId,
     assigneeName: name(row.assigneeAgentId),
     // migration 032:显式优先级原样透出(0=最高 … 9=最低;列 NOT NULL DEFAULT 3,
@@ -307,6 +310,9 @@ export function toClientQuestionView(
     ? (meta["options"] as unknown[]).filter((x): x is string => typeof x === "string")
     : [];
   const lean = typeof meta["lean"] === "string" ? meta["lean"] : null;
+  // D6(2026-11-17):收口提议(intent="close")—— 前端据此渲染成收口提议卡
+  // (同意 / 先不收 两个固定动作),不是普通的自由文本提问。
+  const intent = meta["intent"] === "close" ? ("close" as const) : null;
   const project = getProjectRow(db, row.projectId);
 
   return {
@@ -316,6 +322,7 @@ export function toClientQuestionView(
     question: row.title,
     options,
     lean,
+    intent,
     askedByAgentId: row.authorAgentId,
     askedByName: name(row.authorAgentId),
     createdAt: row.createdAt,
@@ -640,6 +647,14 @@ function countsOf(db: Database.Database, projectId: string) {
   return {
     works: works.length,
     openWorks: works.filter((w) => w.status !== "done" && w.status !== "failed" && w.status !== "cancelled").length,
+    // D3(2026-11-17):「待确认」的工作项数 —— 对话页「计划」卡的开关判据
+    // (>0 ⇒ 出卡)。终态项不算(它们不需要确认,确认的是「还没跑的活」)。
+    unconfirmedWorks: works.filter(
+      (w) => w.confirmedAt === null && (w.status === "open" || w.status === "in_progress" || w.status === "blocked"),
+    ).length,
+    // D1 升级(2026-11-17):卡在 failed 的工作项数 —— 左栏「停着」组的判据
+    // (db 就能给,不依赖宿主内存)。
+    failedWorks: works.filter((w) => w.status === "failed").length,
     artifacts: artifacts.length,
     pendingQuestions: questions.length,
     openBlockers: blockers.length,
@@ -687,7 +702,12 @@ function actionableAcceptance(
   return acceptance.pending;
 }
 
-export function toProjectSummary(db: Database.Database, row: ProjectRow): ProjectSummary {
+export function toProjectSummary(
+  db: Database.Database,
+  row: ProjectRow,
+  /** D1 升级:宿主内存里的在跑回合数(http 从 `deps.live.turns()` 聚合;缺省 = 读不到,不编 0) */
+  activity?: { readonly runningTurns: number },
+): ProjectSummary {
   // ⚠️ **判据只算一次**:派生状态与计数来自**同一次** `deliveryAcceptance` 调用 ——
   // 算两次会让「状态显示待收货、计数写 0」这种自相矛盾的读面有机会出现。
   const acceptance = deliveryAcceptance(db, row.id);
@@ -698,6 +718,9 @@ export function toProjectSummary(db: Database.Database, row: ProjectRow): Projec
     goal: row.goal,
     acceptanceCriteria: row.acceptanceCriteria,
     status: lifecycleOf(row, acceptance),
+    // D1 升级:「在跑」组的判据。只在宿主装配给了 live 快照时才有 ——
+    // 没有它(纯 HTTP 装配 / 测试)这个字段**不出现**,而不是写成 0(读不到 ≠ 没人跑)。
+    ...(activity !== undefined ? { runningTurns: activity.runningTurns } : {}),
     createdAt: row.createdAt,
     counts: {
       ...countsOf(db, row.id),
@@ -711,8 +734,18 @@ export function toProjectSummary(db: Database.Database, row: ProjectRow): Projec
 export function listProjectSummaries(
   db: Database.Database,
   status?: ProjectRow["status"],
+  /** D1 升级:projectId → 在跑回合数(http 从宿主忙闩聚合;缺省 = 读不到) */
+  runningTurnsByProject?: Record<string, number>,
 ): ProjectSummary[] {
-  return listProjects(db, status).map((r) => toProjectSummary(db, r));
+  return listProjects(db, status).map((r) =>
+    toProjectSummary(
+      db,
+      r,
+      runningTurnsByProject !== undefined
+        ? { runningTurns: runningTurnsByProject[r.id] ?? 0 }
+        : undefined,
+    ),
+  );
 }
 
 export function listProjectMembers(db: Database.Database, projectId: string): MemberView[] {
@@ -843,25 +876,53 @@ export function listAllClientQuestions(db: Database.Database): {
    * 给出坐标是为了**按项目如实报数**,不是为了让用户对着一排兑现不了的按钮。
    */
   closedProjectQuestions: ClientQuestionView[];
+  /** F3(2026-11-17):「已答复、业务经理还没处置」的条数,按项目分(见契约注释)。 */
+  answeredUnconsumed: Record<string, number>;
 } {
   const name = agentNameCache(db);
   const out: ClientQuestionView[] = [];
   const closedOut: ClientQuestionView[] = [];
+  const answeredUnconsumed: Record<string, number> = {};
   for (const p of listProjects(db)) {
     const closed = p.status === "done" || p.status === "abandoned";
     for (const a of listArtifacts(db, p.id, { kind: "client_question", status: "open" })) {
       (closed ? closedOut : out).push(toClientQuestionView(db, a, name));
     }
+    // F3:「已答未处置」窗口的计数(listUnconsumedClientAnswers 的谓词与
+    // `resume_client` 规则逐字同源:answered_at 非空且 consumed_at 为空)。
+    const pending = listUnconsumedClientAnswers(db, p.id).length;
+    if (pending > 0) answeredUnconsumed[p.id] = pending;
   }
   const byAge = (a: ClientQuestionView, b: ClientQuestionView): number => a.createdAt - b.createdAt;
   out.sort(byAge);
   closedOut.sort(byAge);
-  return { questions: out, fromClosedProjects: closedOut.length, closedProjectQuestions: closedOut };
+  return {
+    questions: out,
+    fromClosedProjects: closedOut.length,
+    closedProjectQuestions: closedOut,
+    answeredUnconsumed,
+  };
 }
 
 export function listProjectAsks(db: Database.Database, projectId: string): AskView[] {
   const name = agentNameCache(db);
   return listAsks(db, projectId).map((a) => toAskView(db, a, name));
+}
+
+/**
+ * D6(2026-11-17):项目里**待表态**的收口提议 —— open 且 intent="close" 的
+ * 提问工件。收口表态端点(`POST /api/projects/:id/close/consent`)的靶子:
+ * 没有它,表态就没有对象(409 如实说)。
+ */
+export function findOpenCloseProposal(
+  db: Database.Database,
+  projectId: string,
+): ClientQuestionView | null {
+  for (const a of listArtifacts(db, projectId, { kind: "client_question", status: "open" })) {
+    const v = toClientQuestionView(db, a, (id) => getAgent(db, id)?.displayName ?? id);
+    if (v.intent === "close") return v;
+  }
+  return null;
 }
 
 export function listProjectBlockers(db: Database.Database, projectId: string): BlockerView[] {

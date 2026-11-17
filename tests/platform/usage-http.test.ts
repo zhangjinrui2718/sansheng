@@ -177,7 +177,7 @@ async function post(
 describe("GET /api/projects/:id/usage · 正样本", () => {
   it("合计 / 今日 / 按角色 / 按天 / **按工作项** 五件事都答得出来", async () => {
     // `turn_usage.work_id` 有外键 ⇒ 账不能凭空挂在一个不存在的工作项上
-    insertWork(db, {
+    insertWork(db, { confirmedAt: 1,
       id: "w_big", projectId: P1, parentWorkId: null, title: "大活", goal: "g",
       status: "in_progress", assigneeAgentId: "wk", createdAt: 1, updatedAt: 1,
     });

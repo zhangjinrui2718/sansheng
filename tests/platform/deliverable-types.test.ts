@@ -406,7 +406,7 @@ describe("交付物类型 · 仓储与读面", () => {
 
   it("产出边与类型是两件独立的事(挂上根工作项不影响类型往返)", () => {
     const wid = `wk${++seq}`;
-    insertWork(db, {
+    insertWork(db, { confirmedAt: 1,
       id: wid, projectId, parentWorkId: null, title: "根", goal: "整合成一份方案",
       status: "done", assigneeAgentId: worker, createdAt: T0, updatedAt: T0,
     });

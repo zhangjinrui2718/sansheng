@@ -22,7 +22,7 @@ import { createGitWorkspace } from "../../src/platform/workspace/git.js";
 import type Database from "better-sqlite3";
 import { openPlatformMemoryDb } from "../../src/platform/storage/index.js";
 import {
-  insertProject, addMember, loadProjectForAuthz, getProjectRow,
+  insertProject, addMember, loadProjectForAuthz, getProjectRow, markCloseConsent,
 } from "../../src/platform/storage/repo/projects.js";
 import { insertAgent } from "../../src/platform/storage/repo/agents.js";
 import {
@@ -100,7 +100,7 @@ function bodyAt(path: string, content: string) {
 }
 
 function mkWork(id: string, over: { status?: "open" | "done" | "cancelled"; title?: string } = {}): void {
-  insertWork(db, {
+  insertWork(db, { confirmedAt: 1,
     id, projectId: PID, parentWorkId: null,
     title: over.title ?? id, goal: "做完",
     status: over.status ?? "open",
@@ -152,6 +152,7 @@ describe("project_close 落复盘 note", () => {
     answerAsk(db, "ak_2", T0 + 4, null); // 2 条提问、答复 1 条
 
     clock = T0 + 3 * DAY; // 恰好 3 天
+    markCloseConsent(db, PID, T0);
     const r = call("ag_business_manager", "project_close", { outcome: "done" });
     if (!r.ok) throw new Error(`close 失败:${r.message}`);
     expect(getProjectRow(db, PID)?.status).toBe("done");
@@ -184,6 +185,7 @@ describe("project_close 落复盘 note", () => {
   it("没有被取消的工作项 ⇒「未做 / 已知限制」一节整段不出现(不是空一节)", () => {
     mkWork("wk_ok", { status: "done", title: "唯一一件活" });
     clock = T0 + DAY;
+    markCloseConsent(db, PID, T0);
     const r = call("ag_business_manager", "project_close", { outcome: "done" });
     if (!r.ok) throw new Error(`close 失败:${r.message}`);
     const note = retroNote();
@@ -217,6 +219,7 @@ describe("复盘写不成:close 不回滚、一行都不插、文本如实告警
       now: () => clock,
       newId: (prefix) => `${prefix}_none${++seq}`,
     };
+    markCloseConsent(db, PID, T0);
     const tool = dispatch("project_close", { outcome: "done" }, noWorkspace);
     if (tool instanceof Promise) throw new Error("同步工具");
     if (!tool.ok) throw new Error(`close 失败:${tool.message}`);
@@ -235,6 +238,7 @@ describe("复盘写不成:close 不回滚、一行都不插、文本如实告警
         writeAtomic: () => ({ ok: false, problem: "EACCES: 模拟写盘失败" }),
       } as unknown as ToolRunContext["workspace"],
     });
+    markCloseConsent(db, PID, T0);
     const tool = dispatch("project_close", { outcome: "done" }, broken);
     if (tool instanceof Promise) throw new Error("同步工具");
     if (!tool.ok) throw new Error(`close 失败:${tool.message}`);

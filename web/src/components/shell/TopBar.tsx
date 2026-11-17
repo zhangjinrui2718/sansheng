@@ -140,9 +140,8 @@ function CostDisplay({
           ▸ {current.input + current.output} tok
         </span>
       )}
-      {live > 0 && hasTotal && <span>·</span>}
       {hasTotal && (
-        <span>
+        <span title="本次连接以来的合计;权威值在项目页成本段">
           Σ {total.input + total.output} tok
         </span>
       )}

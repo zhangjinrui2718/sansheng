@@ -519,6 +519,28 @@ const projectClose: PlatformTool = {
           ],
         );
       }
+      // ── 收口同意门(D6,2026-11-17)────────────────────────────────
+      //
+      // 「同意收口」必须来自甲方点的那一下:一行 `close_consented_at`
+      // (甲方在收口提议卡上点「同意收口」时由平台写入)。业务经理自己的判断、
+      // 提示词里的措辞、工件上的任何状态都**不算** —— 与上面的验收门同一条纪律
+      // (「代码里写了逻辑 ≠ 它有读者」的反面:这里读的是甲方写下的那一格)。
+      // ⚠️ 只挡 `done`,不挡 `abandoned`(同上:放弃不需要甲方点头)。
+      const consentRow = getProjectRow(ctx.db, pid);
+      if (consentRow !== null && consentRow.closeConsentedAt === null) {
+        return fail(
+          "conflict",
+          `收口被拒:收口不可逆,而甲方还没有对「收口」本身点过头。` +
+            `请先用 ask_client(intent:"close") 向甲方提议收口 —— question 写清做成了什么、` +
+            `凭什么可以关,options 给「同意收口 / 先不收」两个候选;` +
+            `甲方点「同意收口」之后重试 project_close。`,
+          [
+            'ask_client(intent:"close") 提议收口,等甲方在收口提议卡上点「同意收口」',
+            "甲方点了「先不收」:不要重试收口 —— 按他不满意的地方继续做",
+            "这件事不该继续:outcome 用 abandoned(放弃不需要甲方同意)",
+          ],
+        );
+      }
     }
     try {
       closeProject(ctx.db, pid, outcome, ctx.now());

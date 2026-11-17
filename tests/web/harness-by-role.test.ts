@@ -446,10 +446,9 @@ describe("⑥ 取数失败 / 还没取到 / 视图里没有这个角色 —— �
     expect(html).not.toContain("这个角色没有声明任何提示词单元");
   });
 
-  it("视图里没有这个角色 ⇒ 明说与「它没有单元」是两件事(负样本)", () => {
+  it("视图里没有这个角色 ⇒ 名称式「没有这个角色」(文案裁决 2026-11-17;负样本保留:不许说成「没有单元」)", () => {
     const html = renderDisclosure({ role: "project_manager" });
-    expect(html).toContain("这一份 harness 视图里没有角色 project_manager");
-    expect(html).toContain("与「它没有提示词单元」是两件事");
+    expect(html).toContain("没有这个角色");
     expect(html).not.toContain("这个角色没有声明任何提示词单元");
   });
 

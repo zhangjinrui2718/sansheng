@@ -153,6 +153,16 @@ describe("实体身份:邻居有地址", () => {
     expect(cell(workMeta(work()), "父项")?.value).toBe("顶层环节");
   });
 
+  it("D7:待质检(work reviewState = pending)出现「质检」格;其余状态不出现", () => {
+    // 常态(none / done / 缺字段)不上屏 —— 待质检才是「有信息量」的那一格。
+    expect(cell(workMeta(work({ reviewState: "pending" })), "质检")?.value).toBe("待质检");
+    expect(cell(workMeta(work()), "质检")).toBeUndefined();
+    expect(cell(workMeta(work({ reviewState: "done" })), "质检")).toBeUndefined();
+    expect(cell(workMeta(work({ reviewState: "none" })), "质检")).toBeUndefined();
+    // 负样本自检:「质检」格是 pending 专属,别的 tone/值不算数
+    expect(cell(workMeta(work({ reviewState: "pending" })), "质检")?.value).not.toBe("质检过");
+  });
+
   it("阻塞的「卡住」:条数是数出来的,而且每一条都有地址", () => {
     const meta = blockerMeta(blocker({ blockedWorkIds: ["w_1", "w_2"] }));
     const stuck = cell(meta, "卡住");

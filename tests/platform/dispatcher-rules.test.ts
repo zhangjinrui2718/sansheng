@@ -26,7 +26,7 @@ import type Database from "better-sqlite3";
 import { openPlatformMemoryDb } from "../../src/platform/storage/index.js";
 import { getAgent } from "../../src/platform/storage/repo/agents.js";
 import {
-  insertProject, loadProjectForAuthz,
+  insertProject, loadProjectForAuthz, markCloseConsent,
 } from "../../src/platform/storage/repo/projects.js";
 import { ensureProjectOrg } from "../../src/platform/runtime/org.js";
 import { insertWork } from "../../src/platform/storage/repo/works.js";
@@ -78,7 +78,7 @@ afterEach(() => {
 
 function mkWork(): string {
   const id = `wk_${++seq}`;
-  insertWork(db, {
+  insertWork(db, { confirmedAt: 1,
     id, projectId: "p1", parentWorkId: null, title: "调研路线 A", goal: "写出对比结论",
     status: "open", assigneeAgentId: "wk", createdAt: T0, updatedAt: T0,
   });

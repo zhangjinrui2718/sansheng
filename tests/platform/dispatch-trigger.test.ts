@@ -236,7 +236,7 @@ describe("硬上界不会被门铃的重跑绕过(真机跑出来的洞)", () =>
     insertProject(db, { id: "pj_x", name: "x", client: "甲", goal: "g", status: "active", createdAt: 1 });
     for (const id of ["wk1", "pm1", "bm1"]) addMember(db, "pj_x", id, 1);
     for (const id of ["w1", "w2"]) {
-      insertWork(db, {
+      insertWork(db, { confirmedAt: 1,
         id, projectId: "pj_x", parentWorkId: null, title: id, goal: "g", status: "open",
         assigneeAgentId: "wk1", createdAt: 1, updatedAt: 1,
       });
@@ -369,7 +369,7 @@ describe("A1 · 说话者身份在每条驱动路径上都传对(不硬编码 bm
     insertAgent(db, { id: "wk1", role: "research_worker", specialization: "engineering", displayName: "工", createdAt: 1 });
     insertProject(db, { id: "pj_a", name: "a", client: "甲", goal: "g", status: "active", createdAt: 1 });
     for (const id of ["bm", "pm1", "wk1"]) addMember(db, "pj_a", id, 1);
-    insertWork(db, {
+    insertWork(db, { confirmedAt: 1,
       id: "w1", projectId: "pj_a", parentWorkId: null, title: "w1", goal: "g", status: "open",
       assigneeAgentId: "wk1", createdAt: 1, updatedAt: 1,
     });

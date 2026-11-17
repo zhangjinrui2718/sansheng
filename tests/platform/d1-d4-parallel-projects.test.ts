@@ -320,7 +320,7 @@ function seedProject(
   });
   ensureProjectOrg(db, projectId, createdAt);
   if (workId !== null) {
-    insertWork(db, {
+    insertWork(db, { confirmedAt: 1,
       id: workId, projectId, parentWorkId: null, title: workId, goal: "g", status: "open",
       assigneeAgentId: "wk", createdAt, updatedAt: createdAt,
     });
@@ -334,7 +334,7 @@ function seedTerminalWork(
   workId: string,
   createdAt: number,
 ): void {
-  insertWork(db, {
+  insertWork(db, { confirmedAt: 1,
     id: workId, projectId, parentWorkId: null, title: workId, goal: "g", status: "cancelled",
     assigneeAgentId: "wk", createdAt, updatedAt: createdAt,
   });
@@ -455,7 +455,7 @@ describe("③ D3:A 排空期间 B 敲门 → B 立刻被处理(不等下一个 t
     expect(workTurns("pB").length).toBe(0);
 
     // ① 有人(外部 / 另一个驱动者)在 B 里造出一条工作项
-    insertWork(db, {
+    insertWork(db, { confirmedAt: 1,
       id: "wkB", projectId: "pB", parentWorkId: null, title: "wkB", goal: "g", status: "open",
       assigneeAgentId: "wk", createdAt: 2, updatedAt: 2,
     });
@@ -482,7 +482,7 @@ describe("③ D3:A 排空期间 B 敲门 → B 立刻被处理(不等下一个 t
     // → 敲门进来 → A 撞上界置 `deliberateStop`(当时是**全局**的)→ while 直接退出
     // ⇒ 那次敲门再也没人读」。B 排在 A 后面的话,for 循环会顺手把 B 补上,洞就不显形了。
     seedProject(db, "pA", "wkA1", 1);
-    insertWork(db, {
+    insertWork(db, { confirmedAt: 1,
       id: "wkA2", projectId: "pA", parentWorkId: null, title: "wkA2", goal: "g", status: "open",
       assigneeAgentId: "wk", createdAt: 1, updatedAt: 1,
     }); // A 有两条 ⇒ maxRounds=1 时**必定**故意停下
@@ -511,7 +511,7 @@ describe("③ D3:A 排空期间 B 敲门 → B 立刻被处理(不等下一个 t
     ).toBe(0);
 
     // B 现在才长出待办,并从真链路敲门(用户对 B 说一句话 → 回合结束 → `nudge(pB)`)
-    insertWork(db, {
+    insertWork(db, { confirmedAt: 1,
       id: "wkB2", projectId: "pB", parentWorkId: null, title: "wkB2", goal: "g", status: "open",
       assigneeAgentId: "wk", createdAt: 3, updatedAt: 3,
     });

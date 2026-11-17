@@ -20,6 +20,7 @@ import { useState } from "react";
 import type { ClientQuestionView } from "@shared/types/platform";
 import { Disclosure, Flag, Pill, RedMeta } from "@/components/ui/primitives";
 import { useChatStore } from "@/stores/chat";
+import { closeConsent } from "@/lib/api";
 import { fmtTime } from "@/lib/vocab";
 
 export function ClientQuestionCard({
@@ -44,6 +45,100 @@ export function ClientQuestionCard({
     setBusy(false);
     if (ok) setDone(true);
     else setFailed("没能提交答案 —— 答案没有落库,请重试。");
+  }
+
+  // ── D6:收口提议卡(intent="close")──────────────────────────────
+  // 两个固定动作走 `POST /api/projects/:id/close/consent`:「同意收口」会写
+  // `close_consented_at`(此后 project_close 才放行)**并**把提议答复成 decision;
+  // 「先不收」只答复、不写同意。答完卡片消失(问题已 resolved)。
+  // ⚠️ 刻意**不给自由文本框**:收口是一句话的裁决,不是讨论 —— 讨论走对话。
+  if (q.intent === "close") {
+    return (
+      <article className="sansheng-card p-3" data-role="close-proposal">
+        <div className="flex items-center gap-2 flex-wrap">
+          {showProject && (
+            <Pill tone="bone" title={q.projectId}>
+              {q.projectName}
+            </Pill>
+          )}
+          <Pill tone="amber" title="收口不可逆 —— 同意必须来自你点的那一下">
+            收口提议
+          </Pill>
+          <span className="ss-meta">{q.askedByName} 提议</span>
+          <span className="ss-meta ml-auto">{fmtTime(q.createdAt)}</span>
+        </div>
+
+        <div className="ss-body mt-1" style={{ color: "var(--bone)" }}>
+          {q.question}
+        </div>
+
+        {done ? (
+          <div className="mt-2">
+            <Pill tone="bamboo">已表态 · 已落成决策工件</Pill>
+          </div>
+        ) : (
+          <div className="mt-2 flex flex-col gap-1.5">
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                className="sansheng-button-primary"
+                style={{ padding: "4px 12px", fontSize: 12 }}
+                disabled={busy}
+                onClick={async () => {
+                  setBusy(true);
+                  setFailed(null);
+                  try {
+                    await closeConsent(q.projectId, "accept");
+                    setDone(true);
+                    // 左栏分组 / 项目页计数靠 projectsRevision 重拉(同意后收口门放行)。
+                    void useChatStore.getState().loadProjects();
+                  } catch {
+                    setFailed("没能提交表态 —— 没有落库,请重试。");
+                  } finally {
+                    setBusy(false);
+                  }
+                }}
+                title="同意后这个项目可以收口(project_close 放行)"
+              >
+                同意收口
+              </button>
+              <button
+                type="button"
+                className="sansheng-button"
+                style={{ padding: "4px 12px", fontSize: 12 }}
+                disabled={busy}
+                onClick={async () => {
+                  setBusy(true);
+                  setFailed(null);
+                  try {
+                    await closeConsent(q.projectId, "decline");
+                    setDone(true);
+                    void useChatStore.getState().loadProjects();
+                  } catch {
+                    setFailed("没能提交表态 —— 没有落库,请重试。");
+                  } finally {
+                    setBusy(false);
+                  }
+                }}
+                title="先不收:项目继续,哪里不满意直接在对话里说"
+              >
+                先不收
+              </button>
+            </div>
+            {failed !== null && <RedMeta>{failed}</RedMeta>}
+          </div>
+        )}
+
+        <Disclosure summary="原始字段">
+          <div className="flex flex-col gap-0.5">
+            <span>问题 id:{q.id}</span>
+            <span>项目 id:{q.projectId}</span>
+            <span>提问者 id:{q.askedByAgentId}</span>
+            <span>状态:{q.status}</span>
+          </div>
+        </Disclosure>
+      </article>
+    );
   }
 
   return (
@@ -99,7 +194,7 @@ export function ClientQuestionCard({
             className="ss-question-input"
             rows={2}
             value={text}
-            placeholder="回答甲方的问题…(可点上面的选项快速填入)"
+            placeholder="回答…"
             onChange={(e) => setText(e.target.value)}
             style={{
               background: "var(--ink-1)",
@@ -122,7 +217,6 @@ export function ClientQuestionCard({
             >
               {busy ? "提交中…" : "提交答案"}
             </button>
-            <span className="ss-meta">答完会生成一条 decision 工件</span>
           </div>
         </div>
       )}

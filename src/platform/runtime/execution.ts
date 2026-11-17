@@ -221,6 +221,14 @@ function checkRunnable(db: Database.Database, work: WorkRow): string | null {
   if (work.status === "done" || work.status === "failed" || work.status === "cancelled") {
     return `工作项已是终态(${work.status}),不该再执行`;
   }
+  // D3(migration 033):甲方确认开工之前**不派工** —— 确认之前一个 token 都不花。
+  // 拒绝文案是给甲方看的话术入口:它说清「在等什么、去哪里确认」。
+  if (work.confirmedAt === null) {
+    return (
+      `工作项「${work.title}」还在等你确认开工(确认之前平台不派工、不花用量)` +
+      `—— 到对话页的「计划」卡点「确认开工」`
+    );
+  }
   const agent = getAgent(db, work.assigneeAgentId);
   if (agent === null) return `负责人 ${work.assigneeAgentId} 不存在`;
   // 判据是**执行角色集合**(`EXECUTOR_ROLES`),不是某一个具体角色名 ——

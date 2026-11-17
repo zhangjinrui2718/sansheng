@@ -60,7 +60,7 @@ function mkWork(over: Partial<WorkRow> = {}): WorkRow {
   const w: WorkRow = {
     id: `w_${++seq}`, projectId: "p1", parentWorkId: null,
     title: "写一个接口", goal: "给用户列表加分页",
-    status: "open", assigneeAgentId: "wk",
+    status: "open", confirmedAt: 1, assigneeAgentId: "wk",
     createdAt: AT, updatedAt: AT,
     ...over,
   };
@@ -303,7 +303,7 @@ describe("composeWorkPrompt · 告诉它怎么算完成", () => {
   it("含标题与目标", () => {
     const p = composeWorkPrompt({
       id: "w1", projectId: "p1", parentWorkId: null, title: "写接口", goal: "加分页",
-      status: "open", assigneeAgentId: "wk", createdAt: AT, updatedAt: AT,
+      status: "open", confirmedAt: 1, assigneeAgentId: "wk", createdAt: AT, updatedAt: AT,
     });
     expect(p).toContain("w1");
     expect(p).toContain("写接口");
@@ -313,7 +313,7 @@ describe("composeWorkPrompt · 告诉它怎么算完成", () => {
   it("**明说工件就是交付物**,不需要另写总结来汇报(BC6 的核心变化)", () => {
     const p = composeWorkPrompt({
       id: "w1", projectId: "p1", parentWorkId: null, title: "t", goal: "g",
-      status: "open", assigneeAgentId: "wk", createdAt: AT, updatedAt: AT,
+      status: "open", confirmedAt: 1, assigneeAgentId: "wk", createdAt: AT, updatedAt: AT,
     });
     expect(p).toContain("board_write");
     expect(p).toContain("工件就是你的交付物");
@@ -547,7 +547,7 @@ describe("任务 1 · 产出采集走 014 的产出边", () => {
   it("任务描述里**点名了**要挂边的那一句(边的写入侧:不叫它传,边就永远是空的)", () => {
     const p = composeWorkPrompt({
       id: "w1", projectId: "p1", parentWorkId: null, title: "t", goal: "g",
-      status: "open", assigneeAgentId: "wk", createdAt: AT, updatedAt: AT,
+      status: "open", confirmedAt: 1, assigneeAgentId: "wk", createdAt: AT, updatedAt: AT,
     });
     expect(p).toContain("workId");
     expect(p).toContain('"w1"');

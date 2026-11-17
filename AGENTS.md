@@ -25,28 +25,72 @@
   **「Harness」并入「成员」**(`web/src/components/members/RoleHarness.tsx`,同日)。
   **「待办」页签也已删除**(2026-10-06):它是**唯一需要甲方动手**的数据,而甲方 90% 的时间在
   「对话」页 —— 现在长在对话页右下角(`web/src/components/client/ClientQuestionDock.tsx`)。
-  **对话页右栏现在是三块**(2026-10-12,用户裁决把「待你验收」从项目页搬过来):
-  `web/src/components/shell/ChatRightRail.tsx` = 「本项目」(`AgentPanel`)+
-  「待你验收」(`AcceptanceDock`)+ 「待答」(`ClientQuestionDock`)。
-  ⚠️ **三块共用**同一个 `useProjectDetail` 实例(hook 落在 `ChatRightRail` 里)——
-  各自拉一份会让同一份数据一处写「加载中」、另一处写「没有」(回归
-  `tests/web/acceptance-dock.test.ts` 钉住「四个文件里 `useProjectDetail(` 只出现一次」)。
-  **「记忆」页三段是两套东西**:用户画像 / 记忆碎片(关于**用户**,模型写、会淡忘)+
-  **知识语料**(关于**项目 / 组织**,平台索引、agent 只读 —— 见下「知识语料」一节)。
-  **工作项页的信息顺序 = 依赖关系图 → 推进图 → 选中的环节**(前者**不折叠**,用户点名的顺序);
+  **对话页右栏现在是两块,空栏整栏隐藏**(2026-11-17 v3 减法 S-A,用户裁决
+  「Apple 式简约」;取代 2026-10-12 的三块结构):
+  `web/src/components/shell/ChatRightRail.tsx` = 「待你验收」(`AcceptanceDock`)+
+  「待答」(`ClientQuestionDock`)。**「本项目」块(`AgentPanel.tsx`)已删除** ——
+  它与项目页仪表盘完全重复(删胜于收),项目概览的唯一落点是项目页。
+  ⚠️ **两块共用**同一组取数实例(详情 + 提问清单都拉在 `ChatRightRail` 里,
+  `ClientQuestionDock` 只收 props)—— 各自拉一份会让同一份数据一处写「加载中」、
+  另一处写「没有」(回归 `tests/web/acceptance-dock.test.ts` 钉住「三个文件里
+  `useProjectDetail(` 只出现一次」)。
+  ⚠️ **空栏判据 = 两块都拿到终值且都空**(详情加载完、无错、`awaitingAcceptance` 空;
+  提问按项目过滤后为 0 且已收口计数也为 0)⇒ 整栏 `return null`;
+  **加载中 / 读失败不许隐藏** —— 那会把「还没查过」渲染成「没有」(哨兵钉住)。
+  **头部降噪(S-G)**:状态灯只在 推演中/出错 上屏(就绪/连接中/内部推进中不上屏,
+  连接态在 composer 的连接行);主对话不标线名(只有交付线/自建线才标);
+  左栏项目行 = 名字 + 状态点 + 非零徽标,展开箭头悬停/聚焦才现形。
+  **「项目此刻」一行(D2)**:对话页头部之下,谁在跑(角色·环节·时长)+ 在等你 N +
+  阻塞 N,片段真地址;**零态整行不出现**;判据在 `lib/data.ts` 的 `projectNowOf`
+  (读 `GET /live` 5s 慢轮询 + 左栏同一份 store.projects,零新增请求路径);
+  **读不到 ⇒ 一行「运行态读不到」**,不渲染成「没人干活」。
+  **「计划」卡(D3 硬档,migration 033)**:项目经理拆解出的工作项 `confirmed_at`
+  为 NULL —— 派工门(`checkRunnable` + `myOpenWorks`)拒绝它们,**确认之前一个
+  token 都不花**;甲方在对话页「计划」卡点「确认开工」→
+  `POST /api/projects/:id/works/confirm` → 排空器下一次兜底轮询接手。
+  开关判据 = 服务端计数 `counts.unconfirmedWorks`。
+  **收口提议(D6 硬档,migration 034)**:`ask_client(intent:"close")` 免判据锚点
+  (收口提议锚的是「做成了什么」);甲方在收口提议卡点「同意收口」→
+  `POST /api/projects/:id/close/consent` 写 `projects.close_consented_at` 并把提议
+  答复成 decision 工件;`project_close(outcome:"done")` **未同意一律拒收**
+  (拒绝文案即流程指引;abandoned 照旧不拦)。
+  **顶栏 Σ(F1)**:`usage_recorded` 事件此前无读者(N2)—— 现在 store 累积
+  「本次连接以来」的合计(权威值在项目页成本段;事件会丢,库不会)。
+  **左栏状态分组(D1)**:在等你 → 在跑 → 停着 → 进行中 → 已收口(空组不渲染);
+  「在跑」= `runningTurns`(宿主忙闩聚合,`GET /api/projects` 带出;live 未装配时
+  字段不出现,**不是 0**);「停着」= `counts.failedWorks`;「在等你」= 待答+待验收。
+  **质检状态上屏(D7)**:`WorkView.reviewState`(works.review_state 原样透出)——
+  环节面板事实条只在 **待质检**(pending)时多一格,none/done 是常态不上屏。
+  **「已答复 · 业务经理整理中」(F3)**:`GET /api/client-questions` 增
+  `answeredUnconsumed`(按项目;谓词与 `resume_client` 同源)—— 答完到
+  `consumed_at` 之间的窗口此前不可见。
+  **「记忆」页三段收成**分段控件**(S-F,2026-11-17)**:画像 / 碎片 / 语料,一次看一段;
+  三段仍是两套东西:用户画像 / 记忆碎片(关于**用户**,模型写、会淡忘)+
+  **知识语料**(关于**项目 / 组织**,平台索引、agent 只读 —— 见下「知识语料」一节);
+  量的计数在页头 StatStrip **常显**。
+  **工作项页 = 一个画布 + 视图切换**(S-D,2026-11-17;取代 2026-10-07 的叠放顺序裁决
+  「依赖关系图→推进图→选中环节、前者不折叠」—— **切换是替换,不是叠放**,
+  默认视图 = 推进;`?view=` 进地址,默认值不写进地址):
   推进图是时间轴泳道(`web/src/lib/timeline.ts`,纯函数:x = 时间,一条工作项一道、一种工件
   kind 一道;点绿色条 ⇒ 下面显示那条工作项挂着的工件),依赖图是分层 DAG
-  (`web/src/lib/workGraph.ts`)。**成员页一个成员一块面板**(按角色页签切换):面板里有
+  (`web/src/lib/workGraph.ts`),工件关系图在「工件关系」视图。**成员页一个成员一块面板**(按角色页签切换):面板里有
   「正在做什么」(`GET /api/projects/:id/live`)、**「他说了什么」**(对话全文,进行中 +
   已完成;`GET /api/projects/:id/agents/:agentId/conversations`,见下专节)与他产出的工件;
   面板**之下另起一张独立的
   「角色 harness」卡片**(`Section` + 常显的状态摘要行 + 默认折叠的配置)—— 提示词单元的
   编辑 / 恢复出厂 / 备份数都在那里,写面四条规矩与后端一致。**未来角色 harness 的配置就放这张卡**。
-- **平台记录的落点 = 项目页两段,按主体分家**(`web/src/routes/ProjectDetail.tsx`)。
-  **「组织推进」**= 停止推进,带**派生状态**(已接回 / 会被接回 / 在等你 / 不会自愈 / 已收口 /
+- **平台记录的落点 = 项目页一段「平台记录」**(S-C,2026-11-17 三段合一;
+  原来的「两段按主体分家」退场 —— 三类记录同源,都是 `kind='system'` 的平台消息)。
+  过滤片:**需要你动作**(`orgState.ts` 的 `needsAttention` = stalled / waiting_client,
+  判据一处没动)/ **记录**(其余;合规那条「记录 · 不需要你动作」红线措辞逐字保留)。
+  ⚠️ **过滤只改可见性,记录一条不丢**;`liveHeadline`(组织此刻动不动)仍常显;
+  glossary 的三条 `notice.*` 随段合并成一条 `notice.record`。
+  **派生状态**仍在(已接回 / 会被接回 / 在等你 / 不会自愈 / 已收口 /
   读不到 ⇒ 判据在 `web/src/lib/orgState.ts`,事实来自 `GET /live` 与 `GET /messages`);
-  **「合规记录」**= 不派生状态 —— 那一个回合确实没留工作记录,平台也不替模型补,
-  **任何「已解决」都是编造现场**,它只能说「记录 · 不需要你动作」+ 计数。
+  合规类**不派生状态** —— 那个回合确实没留工作记录,平台也不替模型补,
+  **任何「已解决」都是编造现场**。同批折叠:成本(汇总行常显,
+  谁花的/花在哪件活收进折叠)、内部协作(**0 条整节不出现**,>0 默认折叠)、
+  文件系统(Wave 8 已折叠,保持)。
   `session_messages` 里 `kind='system'` 的行**有四个生产者**,都在
   `src/platform/host/serve.ts`:`announceDrain`(停止推进,项目级)、
   `reportUnannouncedTurn`(合规告警,回合级)、
@@ -656,8 +700,9 @@ dev/prod + CI/CD」,09:54 业务经理只回了一句「我先看下你之前留
   `remoteOf` / `remoteListOf`;**没拿到数据就拿不到 `children` 的参数**,所以「顺手渲染成空」
   在类型上写不出来。⚠️ **`unavailable` 不许并进 `ready`(会变成「没有」)也不许并进
   `loading`(会永远转圈)** —— 与 `ProjectLiveView.runtime = "unavailable"` 同一条纪律。
-  已接:`AgentPanel`(详情)/ `AcceptanceDock`(待验收)/ `ClientQuestionDock`(待答)/
-  `Members`(成员);回归 `tests/web/data-state.test.ts`(14 条)。
+  已接:`AcceptanceDock`(待验收)/ `ClientQuestionDock`(待答)/
+  `Members`(成员)/ `ProjectDetail` 等页;回归 `tests/web/data-state.test.ts`
+  (S-A 后 `AgentPanel` 已删,样本清单随之收缩)。
 - **「关于」页 = 说明书的唯一落点**(2026-10-26):`web/src/routes/About.tsx`,三段
   (四态含义 / `GLOSSARY` 全表 / **已知不实之处**)。
   ⚠️ **它不是第七个页签** —— 导航恒 6 项,入口是顶栏末尾那个 `?`(`TopBar` 的 `NavTab label="?"`)。

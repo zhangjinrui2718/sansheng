@@ -26,9 +26,9 @@ import type Database from "better-sqlite3";
 import { join } from "node:path";
 import { readFileSync, existsSync } from "node:fs";
 import {
-  listProjects, getProjectRow, insertProject,
+  listProjects, getProjectRow, insertProject, markCloseConsent,
 } from "../storage/repo/projects.js";
-import { getWork } from "../storage/repo/works.js";
+import { confirmWorks, getWork } from "../storage/repo/works.js";
 import {
   getArtifact,
   artifactBodyPaths,
@@ -52,6 +52,7 @@ import { ROLE_SPECS, PROJECT_ROLES, isProjectRole, type ProjectRole } from "../i
 import { getAgent, listAgents } from "../storage/repo/agents.js";
 import {
   listAllClientQuestions,
+  findOpenCloseProposal,
   listProjectArtifacts, listProjectAsks, listProjectBlockers,
   listProjectChanges, toProjectDetail, listProjectMembers,
   isTerminalProjectStatus,
@@ -391,7 +392,13 @@ export function createPlatformApp(deps: HttpDeps): Hono {
     const status = c.req.query("status");
     const allowed = ["draft", "active", "paused", "done", "abandoned"] as const;
     const filter = allowed.find((s) => s === status);
-    return c.json({ projects: listProjectSummaries(db, filter) });
+    // D1 升级:宿主忙闩聚合出「每项目在跑回合数」—— 左栏「在跑」组的判据。
+    // live 未装配(测试 / 纯 HTTP)⇒ 空表 ⇒ 读面不带这个字段(不是 0)。
+    const running: Record<string, number> = {};
+    for (const t of deps.live?.turns() ?? []) {
+      if (t.projectId !== null) running[t.projectId] = (running[t.projectId] ?? 0) + 1;
+    }
+    return c.json({ projects: listProjectSummaries(db, filter, running) });
   });
 
   app.post("/api/projects", async (c) => {
@@ -1168,6 +1175,106 @@ export function createPlatformApp(deps: HttpDeps): Hono {
     // 回包直接给**重新算出来**的收货进展(不让前端自己拼一个乐观值)。
     const view = toArtifactView(db, row, (id) => getAgent(db, id)?.displayName ?? id);
     return c.json({ ok: true, acceptance: view.acceptance });
+  });
+
+  // ── D3:甲方「确认开工」(2026-11-17)───────────────────────────────
+  //
+  // 项目经理拆解出的工作项 `confirmed_at` 为 NULL(migration 033)—— 派工门
+  // (`execution.ts` 的 `checkRunnable` / `pendingWork.ts` 的 `myOpenWorks`)拒绝它们:
+  // **确认之前一个 token 都不花**。甲方在对话页「计划」卡点「确认开工」⇒ 这条端点
+  // 把当前所有未确认的工作项一次性写上确认时刻;排空器的下一次兜底轮询自然接手
+  // (不在这里敲排空:固定定时器是既有兜底,「答复→resume_client 被定时器接走」同一条路)。
+  // ⚠️ 确认的对象是**此刻的全部未确认项**;部分调整(「先不做第 2 项」)走既有对话,
+  // 项目经理改完清单后新的工作项同样未确认,甲方再确认一次。
+  app.post("/api/projects/:id/works/confirm", (c) => {
+    const id = c.req.param("id");
+    const project = getProjectRow(db, id);
+    if (project === null) return c.json(err("not_found", "项目不存在", 404).body, 404);
+    if (isTerminalProjectStatus(project.status)) {
+      return c.json(
+        err(
+          "project_closed",
+          `项目 ${id} 已经收口(${project.status})—— 没有可确认的工作项。`,
+        ).body,
+        409,
+      );
+    }
+    const confirmed = confirmWorks(db, id, deps.now());
+    return c.json({ ok: true, confirmed });
+  });
+
+  // ── D6:甲方对「收口提议」表态(2026-11-17)────────────────────────
+  //
+  // accept = 同意收口:写 `close_consented_at`(此后 `project_close(outcome:"done")`
+  // 放行)**并**把这条 open 的收口提议答复成 decision 工件(复用答复路径 ——
+  // 提议的表态与普通答复一样是库里的审计事实)。decline = 先不收:只答复,不写同意。
+  // ⚠️ 表态的靶子是 `findOpenCloseProposal`(open 且 intent="close" 的提问工件):
+  // 没有它就没有对象(404 如实说,不静默吞)。
+  app.post("/api/projects/:id/close/consent", async (c) => {
+    const body = (await c.req.json().catch(() => null)) as { choice?: unknown } | null;
+    if (body === null || (body.choice !== "accept" && body.choice !== "decline")) {
+      return c.json(
+        err("invalid_args", "choice 只能是 accept(同意收口)或 decline(先不收)").body,
+        400,
+      );
+    }
+    const id = c.req.param("id");
+    const project = getProjectRow(db, id);
+    if (project === null) return c.json(err("not_found", "项目不存在", 404).body, 404);
+    if (isTerminalProjectStatus(project.status)) {
+      return c.json(
+        err("project_closed", `项目 ${id} 已经收口 —— 提议已无表态对象。`).body,
+        409,
+      );
+    }
+    const proposal = findOpenCloseProposal(db, id);
+    if (proposal === null) {
+      return c.json(
+        err(
+          "not_found",
+          '没有待表态的收口提议 —— 业务经理还没有用 ask_client(intent:"close") 提议过收口。',
+        ).body,
+        404,
+      );
+    }
+    const ws = deps.workspace;
+    if (ws === undefined) {
+      return c.json(
+        err(
+          "internal",
+          "本次装配没有接上工作区 —— 表态要落一条 decision 工件,正文写不出去就等于没有表态。",
+          500,
+        ).body,
+        500,
+      );
+    }
+    const answer = body.choice === "accept" ? "同意收口" : "先不收";
+    const r = resolveClientQuestion(db, proposal.id, answer, deps.now(), {
+      newId: deps.newId,
+      answeredByAgentId: "bm",
+      workspace: ws,
+      workspaceRoot: deps.cwd,
+    });
+    if (!r.ok) {
+      const map: Record<string, [string, 400 | 404 | 409 | 500]> = {
+        not_found: ["not_found", 404],
+        not_a_question: ["not_a_question", 400],
+        already_resolved: ["already_resolved", 409],
+        content_write_failed: ["content_write_failed", 500],
+      };
+      const [code, status] = map[r.reason ?? "not_found"] ?? ["internal", 500];
+      const base = "表态没能落成 decision 工件(没有生效)";
+      const text = r.problem !== undefined ? `${base}:${r.problem}` : base;
+      return c.json(err(code, text, status).body, status);
+    }
+    if (body.choice === "accept") {
+      markCloseConsent(db, id, deps.now());
+    }
+    return c.json({
+      ok: true,
+      choice: body.choice,
+      decisionArtifactId: r.decisionArtifactId,
+    });
   });
 
   // ── 等甲方答的问题(全项目)────────────────────────────────────

@@ -1,0 +1,14 @@
+-- D6(2026-11-17):收口同意门 —— 「同意收口」必须来自甲方点的那一下。
+--
+-- 机制(设计 docs/DESIGN-FRONTEND-UX.md v3 §4 D6 硬档):
+--   · 业务经理先 ask_client(intent:"close")提议收口 —— 该类提问**免判据锚点**
+--     (收口提议锚的是「做成了什么、凭什么可以关」),intent 记在提问工件的
+--     metadata_json 里(不加新列:工件元数据本来就是 options/lean 的家);
+--   · 甲方的表态走 POST /api/projects/:id/close/consent(accept = 同意收口 /
+--     decline = 先不收):accept 同时把这条 open 提问答复掉(落 decision 工件,
+--     复用 resolveClientQuestion)并把 `close_consented_at` 写上;
+--   · `project_close(outcome:"done")` 的门在此之后:`close_consented_at` 为空
+--     一律拒收,拒绝文案教业务经理走上面的提议流程。
+-- ⚠️ 只挡 `done`,不挡 `abandoned` —— 与 029 验收门同一条边界(放弃不需要甲方点头)。
+-- 纯加法:可空列、无 CHECK(与 022/030/033 同一条先例)。
+ALTER TABLE projects ADD COLUMN close_consented_at INTEGER;

@@ -73,7 +73,7 @@ beforeEach(() => {
   // `decompose_project` 成立,根工作项 done+已审而无交付物时 `integrate` /
   // `handover` 成立 —— 那些都不是本文件要测的东西,却会让断言变成在测两件事。
   // 这里一次把它们全部封死,让 `visited` 里只剩本文件关心的那一条。
-  insertWork(db, {
+  insertWork(db, { confirmedAt: 1,
     id: "wk_seed", projectId: "p1", parentWorkId: null, title: "已完成的子项",
     goal: "占位,让 decompose / integrate / review 都不成立",
     status: "done", assigneeAgentId: "wk", createdAt: T0, updatedAt: T0,

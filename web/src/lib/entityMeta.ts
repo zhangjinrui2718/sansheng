@@ -261,6 +261,19 @@ export function workMeta(w: WorkView): MetaItem[] {
       tone: workStatusTone(w.status),
       pill: true,
     },
+    // D7(2026-11-17):质检那一半的状态 —— 只在**待质检**时出现一格
+    // (none / done 是常态,常态不上屏)。事实来源:works.review_state(migration 013)。
+    ...(w.reviewState === "pending"
+      ? [
+          {
+            label: "质检",
+            value: "待质检",
+            tone: "amber" as const,
+            pill: true as const,
+            title: "做完了,质检还没看(works.review_state = pending)",
+          },
+        ]
+      : []),
     {
       label: "负责人",
       links: [{ label: w.assigneeName || w.assigneeAgentId, to: memberLocation(w.assigneeAgentId) }],

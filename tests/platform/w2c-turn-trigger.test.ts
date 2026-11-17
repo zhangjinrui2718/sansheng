@@ -95,7 +95,7 @@ describe("① `drainProject` 把 `todo.kind` 原样传给两条回合路(不是�
     // ── 现场 A:一条分派给 worker 的 open 工作项 ⇒ 唯一的待办是 `execute_work`,
     //    它走 `runWork`(工作项执行那条路)。
     const idA = newId("wk");
-    insertWork(db, {
+    insertWork(db, { confirmedAt: 1,
       id: idA, projectId: "pA", parentWorkId: null,
       title: "调研路线 A", goal: "写出对比结论", status: "open",
       assigneeAgentId: "wk", createdAt: T0, updatedAt: T0,
@@ -120,7 +120,7 @@ describe("① `drainProject` 把 `todo.kind` 原样传给两条回合路(不是�
     //    而 `handover` 的资格判据(`accepted`)不成立;项目里有工作项 ⇒ 没有
     //    `decompose_project`。
     const idB = newId("wk");
-    insertWork(db, {
+    insertWork(db, { confirmedAt: 1,
       id: idB, projectId: "pB", parentWorkId: null,
       title: "交付物", goal: "g", status: "open",
       assigneeAgentId: "wk", createdAt: T0, updatedAt: T0,
@@ -472,7 +472,7 @@ describe("③ 真宿主:排空叫醒业务经理时,封套带的是待办真值,
       goal: "给出三条技术路线的对比与选型建议", status: "active", createdAt: T0,
     });
     ensureProjectOrg(db, "p1", T0);
-    insertWork(db, {
+    insertWork(db, { confirmedAt: 1,
       id: "wk1", projectId: "p1", parentWorkId: null,
       title: "调研路线 A", goal: "写出对比结论", status: "open",
       assigneeAgentId: "wk", createdAt: T0, updatedAt: T0,

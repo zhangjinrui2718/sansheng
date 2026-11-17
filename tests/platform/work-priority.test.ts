@@ -79,7 +79,7 @@ function mkWork(over: {
   id: string; title?: string; priority?: number; status?: "open" | "in_progress" | "done";
   assignee?: string;
 }): string {
-  insertWork(db, {
+  insertWork(db, { confirmedAt: 1,
     id: over.id, projectId: "pj_1", parentWorkId: null,
     title: over.title ?? over.id, goal: "做完",
     status: over.status ?? "open",

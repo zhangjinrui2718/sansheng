@@ -20,7 +20,7 @@ import {
 import type { ToolRunContext, ToolResult } from "../../src/platform/tools/types.js";
 import { insertAgent } from "../../src/platform/storage/repo/agents.js";
 import {
-  insertProject, addMember, loadProjectForAuthz, getProjectRow,
+  insertProject, addMember, loadProjectForAuthz, getProjectRow, markCloseConsent,
 } from "../../src/platform/storage/repo/projects.js";
 import { insertWork, getWork, listDeps, addDep } from "../../src/platform/storage/repo/works.js";
 import { listArtifacts, getArtifact, listLinks } from "../../src/platform/storage/repo/artifacts.js";
@@ -247,11 +247,13 @@ describe("BC1 工具 · project_*", () => {
   });
 
   it("project_close 落终态", () => {
+    markCloseConsent(db, "pj_1", clock);
     okText(call(ids.bm, "project_close", { outcome: "done" }));
     expect(getProjectRow(db, "pj_1")?.status).toBe("done");
   });
 
   it("project_close 重复关闭 → conflict", () => {
+    markCloseConsent(db, "pj_1", clock);
     okText(call(ids.bm, "project_close", { outcome: "done" }));
     expect(errOf(call(ids.bm, "project_close", { outcome: "abandoned" })).code).toBe("conflict");
   });
@@ -697,6 +699,7 @@ describe("端到端 · 立项 → 拆解 → 干活 → 阻塞 → 变更 → �
 
     // 收尾:工作项完成、项目关闭
     okText(run(wk, "report", { workId: w, summary: "交付完成", status: "done" }));
+    markCloseConsent(db, pid, clock);
     okText(run(bm, "project_close", { outcome: "done" }));
 
     // 终态校验

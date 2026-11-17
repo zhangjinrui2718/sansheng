@@ -36,7 +36,7 @@ import type Database from "better-sqlite3";
 import { openPlatformMemoryDb } from "../../src/platform/storage/index.js";
 import { insertAgent } from "../../src/platform/storage/repo/agents.js";
 import {
-  insertProject, loadProjectForAuthz, getProjectRow,
+  insertProject, loadProjectForAuthz, getProjectRow, markCloseConsent,
 } from "../../src/platform/storage/repo/projects.js";
 import { insertWork } from "../../src/platform/storage/repo/works.js";
 import { insertArtifact, getArtifact } from "../../src/platform/storage/repo/artifacts.js";
@@ -87,7 +87,7 @@ beforeEach(() => {
     status: "active", createdAt: T0,
   });
   ensureProjectOrg(db, P, T0);
-  insertWork(db, {
+  insertWork(db, { confirmedAt: 1,
     id: "wk_root", projectId: P, parentWorkId: null, title: "最终交付",
     goal: "整合成一份", status: "done", assigneeAgentId: WK,
     createdAt: T0, updatedAt: T0,
@@ -323,6 +323,7 @@ describe("③ 收口门:甲方接受之前收不了口,接受之后才成立", (
 
 describe("④ `project_close`:模型直接调也绕不过去", () => {
   function closeTool(): (args: Record<string, unknown>) => ToolResult {
+    markCloseConsent(db, P, T0);
     const tool = TOOL_INDEX.get("project_close");
     if (tool === undefined) throw new Error("project_close 不在工具表里");
     const ctx = {
@@ -607,6 +608,7 @@ describe("⑦ 被拒的那一版要退休 —— 否则收口门读到一个永�
       projectId: P, artifactId: "art_v2", verdict: "accept", note: null, createdAt: T0 + 8,
     });
 
+    markCloseConsent(db, P, T0);
     const tool = TOOL_INDEX.get("project_close");
     if (tool === undefined) throw new Error("project_close 不在工具表里");
     const ctx = {

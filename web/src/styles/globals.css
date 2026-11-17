@@ -38,15 +38,16 @@
   }
 
   .sansheng-card {
-    background: var(--ink-1);
-    border: 1px solid var(--ink-3);
+    /* 「砚」:卡片是**墨面上的浅浮层**,不是 SaaS 圆角框阵 ——
+       边界用暖发丝线(宣色 7%),hover 只抬一线,不发光。 */
+    background: var(--ink-2);
+    border: 1px solid rgba(233, 230, 220, 0.07);
     border-radius: 10px;
     box-shadow: var(--shadow-ink-sm);
-    transition: border-color var(--duration-160) var(--ease-out),
-                box-shadow var(--duration-160) var(--ease-out);
+    transition: border-color var(--duration-160) var(--ease-out);
   }
   .sansheng-card:hover {
-    border-color: var(--ink-4);
+    border-color: rgba(233, 230, 220, 0.12);
   }
   .sansheng-card-elevated {
     background: var(--ink-2);
@@ -758,16 +759,30 @@
 
 @layer utilities {
   .grid-cols-app {
-    grid-template-columns: 260px 1fr 360px;
+    /* S-A:右栏空栏返回 null ⇒ auto 列宽 0,主栏吃满(空栏不留尸体列) */
+    grid-template-columns: 260px minmax(0, 1fr) auto;
   }
   @media (max-width: 1100px) {
     .grid-cols-app {
-      grid-template-columns: 220px 1fr 320px;
+      grid-template-columns: 220px minmax(0, 1fr) auto;
     }
   }
   @media (max-width: 880px) {
     .grid-cols-app {
       grid-template-columns: 1fr;
     }
+  }
+}
+/* ── S-G(2026-11-17,减法):左栏展开箭头默认隐匿,悬停/键盘聚焦才现形 ──
+   默认视场里每个项目只剩「名字 + 状态点 + 非零徽标」。opacity 而非 display:
+   元素保持可点击与可聚焦(触屏没有 hover,轻点行内任意处即可见)。 */
+@layer utilities {
+  .rail-chevron {
+    opacity: 0;
+    transition: opacity 120ms var(--ease-out, ease-out);
+  }
+  .rail-row:hover .rail-chevron,
+  .rail-row:focus-within .rail-chevron {
+    opacity: 1;
   }
 }

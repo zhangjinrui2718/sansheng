@@ -293,7 +293,7 @@ export const CodeService = memo(function CodeService({ artifactId, at, service }
           label="服务目录"
           value={meta.servicePath}
           mono
-          hint="交付物的边界与 docker build 的上下文(仓库内相对路径)。仓库根还含 artifacts/ 与 work/,所以构建上下文不能是仓库根。"
+          hint="构建上下文边界"
         />
         <Row label="分支" value={meta.branch} mono />
         <Row
@@ -304,21 +304,21 @@ export const CodeService = memo(function CodeService({ artifactId, at, service }
               : `${delivered}${meta.deliverableSubject !== null ? ` ${meta.deliverableSubject}` : ""}`
           }
           mono
-          hint="最后触及服务目录的提交(这版交付物是什么)。"
+          hint="这版交付物的提交"
         />
         <Row
           label="HEAD"
           value={head === null ? null : `${head}${meta.headSubject !== null ? ` ${meta.headSubject}` : ""}`}
           mono
-          hint="模型照抄 git rev-parse HEAD,写入时核对过。"
+          hint="写入时核对过"
         />
         <Row
           label="交付提交数"
           value={meta.commitCount === null ? null : String(meta.commitCount)}
-          hint="按服务目录算(git rev-list --count HEAD -- <servicePath>),不是整个仓库的提交数。"
+          hint="按服务目录统计"
         />
         <Row label="Dockerfile" value={meta.dockerfile} mono />
-        <Row label="仓库" value={meta.repoPath} mono hint="项目仓的根 —— 交付物是它里面的一个目录。" />
+        <Row label="仓库" value={meta.repoPath} mono hint="项目仓根目录" />
       </div>
 
       {/*

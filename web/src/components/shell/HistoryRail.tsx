@@ -27,11 +27,59 @@
  * 数据源:`projects`(`GET /api/projects`)+ `sessionsByProject`(`GET /api/sessions`),
  * 二者都随 `projectsRevision` 重拉 —— WS 的提问 / 工作项 / 工件事件都会递增它。
  */
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { useChatStore } from "@/stores/chat";
-import { Pill } from "@/components/ui/primitives";
-import { projectStatusLabel, projectStatusTone, excerpt } from "@/lib/vocab";
+import { Pill, toneColor } from "@/components/ui/primitives";
+import { projectStatusLabel, projectStatusTone } from "@/lib/vocab";
 import type { ProjectSummary, SessionSummaryView } from "@shared/types/platform";
+
+/**
+ * ── D1(2026-11-17 v3):项目列表按状态分组 ─────────────────────────
+ *
+ * 「在等你」永远在最上(有事在等你的项目不该混在九个进行中里);
+ * 组序固定:在等你 → 在跑 → 停着 → 进行中 → 已收口;组内按创建时间**最近优先**。
+ * 判据全部来自 `ProjectSummary` 已有字段(counts + status + runningTurns),不新增请求:
+ *   · 在等你 = `pendingQuestions > 0 || pendingAcceptance > 0`(含派生「待收货」);
+ *   · 在跑 = `runningTurns > 0`(宿主忙闩聚合;live 未装配时字段不出现,
+ *     该组自然不渲染 —— **读不到 ≠ 没人跑**,不降级成「停着/进行中」);
+ *   · 停着 = `counts.failedWorks > 0`(db 可算,恒有);
+ *   · 已收口 = 终态(done / abandoned);
+ *   · 其余(active / draft / paused)→ 进行中。
+ * ⚠️ **空组不渲染**(默认安静)—— 「已收口 0」不是信息。
+ * ⚠️ 分组**不改变行为**:行还是同一个 ProjectNode,点它还是 `selectProject`。
+ */
+type RailGroup = {
+  key: "waiting" | "running" | "stalled" | "active" | "closed";
+  label: string;
+  items: ProjectSummary[];
+};
+
+function groupProjects(projects: readonly ProjectSummary[]): RailGroup[] {
+  const waiting: ProjectSummary[] = [];
+  const running: ProjectSummary[] = [];
+  const stalled: ProjectSummary[] = [];
+  const active: ProjectSummary[] = [];
+  const closed: ProjectSummary[] = [];
+  for (const p of projects) {
+    const isWaiting = p.counts.pendingQuestions > 0 || p.counts.pendingAcceptance > 0;
+    const terminal = p.status === "done" || p.status === "abandoned";
+    if (terminal) closed.push(p);
+    else if (isWaiting) waiting.push(p);
+    else if ((p.runningTurns ?? 0) > 0) running.push(p);
+    else if ((p.counts.failedWorks ?? 0) > 0) stalled.push(p);
+    else active.push(p);
+  }
+  const byRecent = (a: ProjectSummary, b: ProjectSummary) => b.createdAt - a.createdAt;
+  return (
+    [
+      { key: "waiting", label: "在等你", items: waiting.sort(byRecent) },
+      { key: "running", label: "在跑", items: running.sort(byRecent) },
+      { key: "stalled", label: "停着", items: stalled.sort(byRecent) },
+      { key: "active", label: "进行中", items: active.sort(byRecent) },
+      { key: "closed", label: "已收口", items: closed.sort(byRecent) },
+    ] as RailGroup[]
+  ).filter((g) => g.items.length > 0);
+}
 
 export function HistoryRail() {
   const projects = useChatStore((s) => s.projects);
@@ -52,6 +100,8 @@ export function HistoryRail() {
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   /** 正在起名的项目 id —— 同时只有一个表单,免得左栏被输入框撑开。 */
   const [namingFor, setNamingFor] = useState<string | null>(null);
+  /** D1:状态分组(判据见文件底部的 `groupProjects`)。 */
+  const groups = useMemo(() => groupProjects(projects), [projects]);
 
   // 项目列表的加载由 App 统一负责(它在所有路由下都挂着,且按 projectsRevision
   // 重拉)—— 本组件只读 store,不自己 fetch,避免同一份列表在两处各拉一次。
@@ -97,9 +147,6 @@ export function HistoryRail() {
             </span>
             {intakeActive && <Pill tone="jade">进行中</Pill>}
           </div>
-          <div className="truncate mt-0.5" style={{ fontSize: 11, color: "var(--bone-mute)" }}>
-            和业务经理说想要什么 —— 立项由他执行
-          </div>
         </button>
 
         {error && !intakeActive && (
@@ -123,36 +170,48 @@ export function HistoryRail() {
         )}
         {loading && projects.length === 0 && !error && <RailEmpty text="加载中…" />}
         {!loading && projects.length === 0 && !error && !intakeActive && (
-          <RailEmpty text="还没有项目。点右上「+ 新建」和业务经理聊聊要做什么。" />
+          <RailEmpty text="暂无项目" />
         )}
 
-        {projects.map((p) => {
-          const isActive = p.id === projectId && !intakeActive;
-          const pending = p.counts.pendingQuestions;
-          // ⚠️ `?? isActive` 而非 `|| isActive` —— 后者会把「显式折叠当前项目」
-          // 也吃掉(折叠是 false,`false || true` 又是 true),于是那个箭头按不动。
-          const isOpen = expanded[p.id] ?? isActive;
-          return (
-            <ProjectNode
-              key={p.id}
-              project={p}
-              isActive={isActive}
-              isOpen={isOpen}
-              pending={pending}
-              sessionId={isActive ? sessionId : null}
-              naming={namingFor === p.id}
-              onToggle={() => setExpanded((prev) => ({ ...prev, [p.id]: !isOpen }))}
-              onSelectProject={() => void selectProject(p.id)}
-              onSelectSession={(sid) => void selectProject(p.id, { sessionId: sid })}
-              onStartNaming={() => setNamingFor(p.id)}
-              onCancelNaming={() => setNamingFor(null)}
-              onSubmitNaming={(title) => {
-                setNamingFor(null);
-                void createThread(p.id, title);
-              }}
-            />
-          );
-        })}
+        {groups.map((group) => (
+          <div key={group.key}>
+            <div
+              className="px-2 pt-2 pb-0.5 flex items-baseline gap-1.5"
+              style={{ fontSize: 11, color: "var(--bone-mute)" }}
+              data-rail-group={group.key}
+            >
+              {group.label}
+              <span>{group.items.length}</span>
+            </div>
+            {group.items.map((p) => {
+              const isActive = p.id === projectId && !intakeActive;
+              const pending = p.counts.pendingQuestions;
+              // ⚠️ `?? isActive` 而非 `|| isActive` —— 后者会把「显式折叠当前项目」
+              // 也吃掉(折叠是 false,`false || true` 又是 true),于是那个箭头按不动。
+              const isOpen = expanded[p.id] ?? isActive;
+              return (
+                <ProjectNode
+                  key={p.id}
+                  project={p}
+                  isActive={isActive}
+                  isOpen={isOpen}
+                  pending={pending}
+                  sessionId={isActive ? sessionId : null}
+                  naming={namingFor === p.id}
+                  onToggle={() => setExpanded((prev) => ({ ...prev, [p.id]: !isOpen }))}
+                  onSelectProject={() => void selectProject(p.id)}
+                  onSelectSession={(sid) => void selectProject(p.id, { sessionId: sid })}
+                  onStartNaming={() => setNamingFor(p.id)}
+                  onCancelNaming={() => setNamingFor(null)}
+                  onSubmitNaming={(title) => {
+                    setNamingFor(null);
+                    void createThread(p.id, title);
+                  }}
+                />
+              );
+            })}
+          </div>
+        ))}
 
         {/* ⚠️ 索引读不到**不**升级成整栏错误 —— 项目列表仍然是真的,
             只是第二层暂时没有。⚠️ 它也**不是**「所有项目都没有线」:
@@ -207,6 +266,11 @@ function ProjectNode(props: {
   const { project: p, isActive, isOpen, pending } = props;
   const sessions = useChatStore((s) => s.sessionsByProject[p.id]);
   const lines = sessions ?? [];
+  // 状态点颜色:已收口 ⇒ 灰阶(组的归属已说了状态,绿点会读成「在跑」)
+  const dotColor =
+    p.status === "done" || p.status === "abandoned"
+      ? "var(--ink-4)"
+      : toneColor(projectStatusTone(p.status));
 
   return (
     <div
@@ -217,21 +281,27 @@ function ProjectNode(props: {
         borderLeft: isActive ? undefined : "1px solid var(--ink-3)",
       }}
     >
-      <div className="flex items-start gap-1 px-2 py-1.5">
+      <div className="rail-row flex items-start gap-1 px-2 py-1.5">
         {/*
           展开箭头与项目名**分开两个按钮**:箭头只管展开/收起(不发任何请求),
           名字才是「切到这个项目」。合成一个按钮的话,想收起当前项目就只能
           先切走 —— 而「看一眼这个项目有几条线」是一个正当的、不该改变上下文的动作。
+
+          ⚠️ S-G(2026-11-17,减法):箭头**悬停/聚焦才现形**(globals.css 的
+          `.rail-row:hover .rail-chevron`)—— 默认视场里每个项目只剩
+          名字 + 一个状态点 + 非零徽标。
         */}
         <button
           type="button"
           onClick={props.onToggle}
           aria-expanded={isOpen}
           aria-label={isOpen ? `收起 ${p.name}` : `展开 ${p.name} 的对话线`}
+          className="rail-chevron"
           style={{
             flex: "none", width: 14, marginTop: 2, padding: 0,
             background: "none", border: "none", cursor: "pointer",
             color: "var(--bone-mute)", fontSize: 10, lineHeight: "1.4",
+            opacity: isOpen ? 1 : undefined,
           }}
           title={isOpen ? "收起对话线" : `展开 ${lines.length} 条对话线`}
         >
@@ -243,32 +313,31 @@ function ProjectNode(props: {
           onClick={props.onSelectProject}
           className="text-left flex-1 min-w-0"
           style={{ background: "none", border: "none", padding: 0, cursor: "pointer" }}
-          title={`${p.name} · ${p.client || "无甲方"} · 工作项 ${p.counts.openWorks}/${p.counts.works} 未完成 · 工件 ${p.counts.artifacts}`}
+          title={`${p.name} · ${projectStatusLabel(p.status)} · ${p.client || "无甲方"} · 工作项 ${p.counts.openWorks}/${p.counts.works} 未完成 · 工件 ${p.counts.artifacts}`}
         >
-          <div className="flex items-baseline justify-between gap-2">
+          <div className="flex items-center justify-between gap-2">
             <span
               className="font-serif truncate"
               style={{ fontSize: 13, color: "var(--bone)", letterSpacing: ".04em" }}
             >
               {p.name}
             </span>
-            <span className="flex-none">
-              <Pill tone={projectStatusTone(p.status)}>{projectStatusLabel(p.status)}</Pill>
-            </span>
-          </div>
-          <div className="flex items-baseline gap-2 mt-0.5">
-            <span className="truncate flex-1" style={{ fontSize: 11, color: "var(--bone-mute)" }}>
-              {p.goal ? excerpt(p.goal, 40) : p.client || "(无目标)"}
-            </span>
-            {/* 「待你回答 N 个问题」—— 这个徽标是本栏存在的核心信息,
-                为 0 时不渲染(不摆一个测出来的 0)。 */}
-            {pending > 0 && (
-              <span className="flex-none">
+            <span className="flex-none flex items-center gap-1.5">
+              {/* S-G:状态 pill → 一个状态点(悬停项目名可读全文)。非零徽标保留。 */}
+              <span
+                aria-hidden
+                style={{
+                  width: 7, height: 7, borderRadius: "50%",
+                  background: dotColor,
+                  flex: "none",
+                }}
+              />
+              {pending > 0 && (
                 <Pill tone="amber" title={`${p.name} 有 ${pending} 个问题等你回答`}>
                   待答 {pending}
                 </Pill>
-              </span>
-            )}
+              )}
+            </span>
           </div>
         </button>
       </div>

@@ -200,7 +200,7 @@ function seedProject(db: Database.Database, projectId: string, workId: string | 
   });
   ensureProjectOrg(db, projectId, 1);
   if (workId !== null) {
-    insertWork(db, {
+    insertWork(db, { confirmedAt: 1,
       id: workId, projectId, parentWorkId: null, title: workId, goal: "把活干完",
       status: "open", assigneeAgentId: "wk", createdAt: 1, updatedAt: 1,
     });

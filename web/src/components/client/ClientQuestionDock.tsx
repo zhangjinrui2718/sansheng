@@ -1,5 +1,11 @@
 /**
- * 待答面板 —— 原「待办」页的新落点(对话页右栏,「本项目」下方)
+ * 待答面板 —— 原「待办」页的新落点(对话页右栏)
+ *
+ * ⚠️ **判据变更(S-A,2026-11-17)**:右栏的「本项目」块已删、两块都空时**整栏隐藏**
+ * (用户裁决 2026-11-17「Apple 式简约」:删胜于收)。2026-10-06 的「常驻在右栏、
+ * 与『本项目』并列、不要点击收起」裁决被这一条取代 —— 常驻的代价(平时恒空的
+ * 一列占着版面)正是「臃肿」本身。隐藏判据在 `ChatRightRail.tsx`:两块都拿到
+ * 终值且都空才藏,加载中/读失败不藏(诚实纪律不变)。
  *
  * ── 为什么它不再是第四个 tab(2026-10-06)───────────────────────────
  *
@@ -74,19 +80,29 @@ import { ClientQuestionCard } from "./ClientQuestionCard";
 import { Pill } from "@/components/ui/primitives";
 import { DataState, remoteListOf } from "@/components/ui/DataState";
 import { Help } from "@/components/ui/Help";
-import { useClientQuestions } from "@/lib/data";
 import { scopeClientQuestions } from "@/lib/questionScope";
-import { useChatStore } from "@/stores/chat";
+// ⚠️ type-only:只要「返回类型」这个形状,不要 hook 本身(取数已在 ChatRightRail)。
+import type { useClientQuestions } from "@/lib/data";
 
-export function ClientQuestionDock() {
-  const { data: questions, loading, error, closedProjectQuestions } = useClientQuestions();
-  const projectId = useChatStore((s) => s.projectId);
+export function ClientQuestionDock({
+  questions,
+  projectId,
+}: {
+  /** ⚠️ S-A(2026-11-17)起取数提升到 `ChatRightRail`(它要判「整栏是否隐藏」),
+   *  这里只收 props —— 别在这里再调一次 `useClientQuestions`(两个实例=两份 loading)。 */
+  questions: ReturnType<typeof useClientQuestions>;
+  projectId: string | null;
+}) {
+  const { data, loading, error, closedProjectQuestions, answeredUnconsumed } = questions;
 
   // 早问的先答(FIFO)—— 队列的公平性比「最新的先看」重要。
   // ⚠️ 按项目筛选(见文件头与 `lib/questionScope.ts`):切到哪个项目才看到哪个项目的;
   //   没选项目 ⇒ 空(不退化成全局面板)。
-  const { items, closedCount } = scopeClientQuestions(questions, closedProjectQuestions, projectId);
+  const { items, closedCount } = scopeClientQuestions(data, closedProjectQuestions, projectId);
   const count = items.length;
+  // F3(2026-11-17):「已答复、业务经理还没处置」——答完的那一瞬到 `resume_client`
+  // 消化掉之前,这个窗口此前不可见(提问从待答消失 = 「我答的话到哪一步了」没有回答)。
+  const answeredPending = projectId !== null ? (answeredUnconsumed[projectId] ?? 0) : 0;
 
   return (
     <section
@@ -104,14 +120,14 @@ export function ClientQuestionDock() {
           /* ⚠️ 「还没查到」≠「查过了是空」——没选项目 / 读失败 / 还在加载都说「还没查到」,
              否则会把「没看」说成「没有」(见文件头)。 */
           projectId !== null && error === null && !loading ? (
-            <span className="ss-meta">没有等你回答的问题</span>
+            <span className="ss-meta">暂无待答</span>
           ) : null
         )}
       </div>
 
       <div className="flex-1 overflow-y-auto p-2 flex flex-col gap-2">
         {projectId === null && error === null ? (
-          <div className="ss-meta">先在左栏选一个项目 —— 这一块只看当前项目的提问。</div>
+          <div className="ss-meta">未选项目</div>
         ) : (
           /* 四态归 `DataState`(空态文案仍是这一块自己的领域语言)。 */
           <DataState
@@ -122,9 +138,7 @@ export function ClientQuestionDock() {
           >
             {(rows) =>
               rows.length === 0 ? (
-                <div className="ss-meta">
-                  没有等你回答的问题 —— 本项目的业务经理没卡在你这里。
-                </div>
+                <div className="ss-meta">暂无待答</div>
               ) : (
                 rows.map((q) => <ClientQuestionCard key={q.id} q={q} />)
               )
@@ -133,9 +147,19 @@ export function ClientQuestionDock() {
         )}
       </div>
 
-      {count > 0 && (
-        <div className="ss-meta px-3 py-1 flex-none" title="GET /api/client-questions">
-          答案会落成 decision 工件,项目上留得下
+      {/*
+        F3(2026-11-17):「已答复、业务经理还没处置」的窗口。此前答完即从待答消失,
+        「我答的话到哪一步了」没有任何回答。⚠️ 只报数:处置是业务经理的活
+        (`resume_client` 被叫醒后写 `consumed_at`,这一行随之消失),不渲染可点的卡。
+      */}
+      {answeredPending > 0 && (
+        <div
+          className="ss-meta px-3 py-1 flex-none"
+          style={{ borderTop: "1px solid var(--ink-3)" }}
+          data-answered-unconsumed={answeredPending}
+          title="业务经理消化掉之后,这一行会消失"
+        >
+          已答复 {answeredPending} 条 · 业务经理整理中
         </div>
       )}
 
@@ -151,7 +175,7 @@ export function ClientQuestionDock() {
           data-from-closed-projects={closedCount}
           title="项目已收口 · 不会再有人来处理,事实仍在项目页"
         >
-          <span>另有 {closedCount} 件来自已收口,不再等回复(项目页里还看得见)</span>
+          <span>已收口项目 {closedCount} 条</span>
           <Help id="client-question.closed" />
         </div>
       )}

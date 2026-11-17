@@ -58,19 +58,24 @@ const askClient: PlatformTool = {
     "向甲方提问。**这是你唯一能直接接触用户的动词** —— 其余角色遇到不确定的事必须来找你,不能自己打扰甲方。" +
     "两道打扰闸(2026-11-15):① 每个项目同时最多挂 2 条未答提问 —— 挂满后再问会被拒,先等甲方作答或用 tell_client 说明情况;" +
     "② 问题必须**锚定项目目标里的验收判据原文**(blocks 字段引用 ≥10 字连续片段)—— 与目标无关的问题不配打扰甲方。" +
-    "提问前先自问:这条真的需要用户拍板吗?能自己判断的直接判断,能问上游的先问上游。给候选项比开放式提问更容易得到可执行的答复。",
+    "提问前先自问:这条真的需要用户拍板吗?能自己判断的直接判断,能问上游的先问上游。给候选项比开放式提问更容易得到可执行的答复。" +
+    "**提议收口(D6,2026-11-17)**:intent 传 \"close\" —— 此时免判据锚点(收口提议锚的是「做成了什么」,不是某条判据);" +
+    "question 写清做成了什么、凭什么可以关,options 给「同意收口 / 先不收」两个候选。甲方点「同意收口」之后 project_close 才会放行。",
   parameters: Type.Object({
     question: Type.String({ description: "问什么(具体到一个可回答的问题)" }),
-    blocks: Type.String({
+    blocks: Type.Optional(Type.String({
       description:
         "这条问题卡住了目标里的哪条验收判据 —— **必须引用项目目标里的原文**(≥10 字连续片段,含标点亦可)。" +
-        "与目标无关的问题会被拒绝:打扰甲方是有预算的,预算只花在卡住判据的问题上",
-    }),
+        "与目标无关的问题会被拒绝:intent=\"close\"(提议收口)时**免填** —— 那一类锚的是收口理由本身",
+    })),
     options: Type.Optional(Type.Array(Type.String(), {
-      description: "候选项(带各自代价)。强烈建议给 —— 开放式提问的答复往往不可执行",
+      description: "候选项(带各自代价)。强烈建议给 —— 开放式提问的答复往往不可执行;intent=\"close\" 时给「同意收口 / 先不收」",
     })),
     lean: Type.Optional(Type.String({
       description: "你的倾向与理由。让用户一眼看到你建议怎么做,而不是从零判断",
+    })),
+    intent: Type.Optional(Type.Union([Type.Literal("close")], {
+      description: "D6:提议收口 —— 甲方同意之后 project_close 才会放行(收口不可逆,同意必须来自甲方点的那一下)",
     })),
   }),
   async run(args, ctx): Promise<ToolResult> {
@@ -85,6 +90,7 @@ const askClient: PlatformTool = {
     }
     const question = requireString(args, "question");
     if (!question.ok) return question.result;
+    const closeIntent = readString(args, "intent") === "close";
 
     // ── 甲方打扰闸(2026-11-15)──────────────────────────────────
     // 两道都是**机制**,不靠提示词自律:
@@ -93,14 +99,22 @@ const askClient: PlatformTool = {
     //      与目标无关的问题不配打扰甲方。归一化(去空白/标点、小写)后做
     //      包含判定;引用不要求逐字,但必须是目标里真实存在的连续文字。
     // 拒绝时的消息就是给 BM 的自查指引:等作答 / 撤销(ask 取消)/ 补目标。
-    const blocksRaw = requireString(args, "blocks");
-    if (!blocksRaw.ok) return blocksRaw.result;
+    // ⚠️ D6:intent="close"(提议收口)**免判据锚点** —— 收口提议锚的是
+    // 「做成了什么、凭什么可以关」,不是某条判据;它仍然过并发上限(①)。
+    const blocksRaw = readString(args, "blocks");
+    if (!closeIntent && blocksRaw === undefined) {
+      return fail(
+        "invalid_args",
+        `blocks 必填:引用目标里某条验收判据的原文(≥10 字连续片段)—— 说清这条问题卡住的是哪条判据`,
+      );
+    }
 
     // goal 不在 authz 视图里(loadProjectForAuthz 只带 id/name/status/assignments)
     // —— 从仓储行直接拿目标原文,锚点校验要对着它做
     // 锚点升级(2026-11-15,结构化判据):blocks 必须命中**某条结构化验收判据**
     // (归一化包含判定)—— 与目标无关的问题不配打扰甲方。空判据(含旧项目
     // 未补)⇒ 拒并指引;BM 持 project.update,能自己补判据再问。
+    // ⚠️ D6:intent="close" 时整段锚点校验跳过(收口提议不锚判据,见参数说明)。
     const row = getProjectRow(ctx.db, proj.project.id);
     const criteria = row?.acceptanceCriteria ?? [];
     const norm = (x: string): string =>
@@ -108,21 +122,23 @@ const askClient: PlatformTool = {
         .toLowerCase()
         .replace(/[\s\p{P}\p{S}]+/gu, "")
         .trim();
-    const anchorNorm = norm(blocksRaw.value);
-    if (anchorNorm.length < ANCHOR_MIN_CHARS) {
-      return fail(
-        "goal_anchor",
-        `锚点太短:blocks 需引用某条验收判据的原文(≥${ANCHOR_MIN_CHARS} 字连续片段)—— 说清这条问题卡住的是哪条判据`,
-      );
-    }
-    const hit = criteria.some((c) => norm(c).includes(anchorNorm) || anchorNorm.includes(norm(c)));
-    if (!hit) {
-      return fail(
-        "goal_anchor",
-        criteria.length === 0
-          ? "这个项目还没有结构化验收判据 —— 先用 project_update 补判据,再让问题锚定到判据原文。与目标无关的问题,不要打扰甲方"
-          : `锚点与任何一条验收判据都对不上(共 ${criteria.length} 条)—— 用 project_read 读判据原文,再引用;与判据无关的问题,不要打扰甲方`,
-      );
+    if (!closeIntent) {
+      const anchorNorm = norm(blocksRaw ?? "");
+      if (anchorNorm.length < ANCHOR_MIN_CHARS) {
+        return fail(
+          "goal_anchor",
+          `锚点太短:blocks 需引用某条验收判据的原文(≥${ANCHOR_MIN_CHARS} 字连续片段)—— 说清这条问题卡住的是哪条判据`,
+        );
+      }
+      const hit = criteria.some((c) => norm(c).includes(anchorNorm) || anchorNorm.includes(norm(c)));
+      if (!hit) {
+        return fail(
+          "goal_anchor",
+          criteria.length === 0
+            ? "这个项目还没有结构化验收判据 —— 先用 project_update 补判据,再让问题锚定到判据原文。与目标无关的问题,不要打扰甲方"
+            : `锚点与任何一条验收判据都对不上(共 ${criteria.length} 条)—— 用 project_read 读判据原文,再引用;与判据无关的问题,不要打扰甲方`,
+        );
+      }
     }
 
     const openCount = countOpenClientQuestions(ctx.db, proj.project.id);
@@ -142,8 +158,9 @@ const askClient: PlatformTool = {
     const questionTitle = question.value;
     // 锚点前置(打扰闸②):甲方在待答卡片上第一眼看到「卡住的是哪条判据」,
     // 引文来自目标原文 —— 判据与问题的关联不需要甲方自己脑补。
+    // D6:收口提议的正文头是「收口提议」,不是判据引文。
     const questionBody =
-      `【卡住的判据:${blocksRaw.value}】\n` +
+      (closeIntent ? `【收口提议】\n` : `【卡住的判据:${blocksRaw ?? ""}】\n`) +
       question.value +
       (options.length > 0 ? `\n\n候选:\n${options.map((o) => `- ${o}`).join("\n")}` : "") +
       (lean !== undefined ? `\n\n倾向:${lean}` : "");
@@ -183,6 +200,7 @@ const askClient: PlatformTool = {
         metadataJson: JSON.stringify({
           options,
           ...(lean !== undefined ? { lean } : {}),
+          ...(closeIntent ? { intent: "close" } : {}),
           askedBy: ctx.agent.id,
         }),
         createdAt: at,

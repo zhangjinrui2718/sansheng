@@ -442,7 +442,7 @@ function seedProject(workId: string | null): void {
   });
   ensureProjectOrg(db, "p1", 1);
   if (workId !== null) {
-    insertWork(db, {
+    insertWork(db, { confirmedAt: 1,
       id: workId, projectId: "p1", parentWorkId: null, title: workId, goal: "g",
       status: "open", assigneeAgentId: "wk", createdAt: 1, updatedAt: 1,
     });
@@ -626,7 +626,7 @@ describe("⑤ dispatcher · 降级成功 ⇒ 尝试预算归零", () => {
       goal: "给出三条技术路线的对比与选型建议", status: "active", createdAt: T0,
     });
     ensureProjectOrg(db, "p1", T0);
-    insertWork(db, {
+    insertWork(db, { confirmedAt: 1,
       id: "R", projectId: "p1", parentWorkId: null, title: "根", goal: "结论",
       status: "done", assigneeAgentId: "wk", createdAt: T0, updatedAt: T0,
     });

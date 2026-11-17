@@ -14,41 +14,41 @@ export default {
       colors: {
         // —— Surface ——
         ink: {
-          0: "#0B0F14",
-          1: "#0F141B",
-          2: "#151C24",
-          3: "#1C2530",
-          4: "#26303D",
+          0: "#121310",
+          1: "#171816",
+          2: "#1D1E1B",
+          3: "#242521",
+          4: "#2D2E29",
         },
         // —— Text ——
         bone: {
-          DEFAULT: "#E8E4D9",
-          dim: "#B7AE9D",
-          mute: "#7E776B",
+          DEFAULT: "#E9E6DC",
+          dim: "#B5AE9E",
+          mute: "#8B8375",
         },
         // —— Accent: 青玄 (jade) ——
         jade: {
-          50: "#E6F0EC",
-          100: "#C2DCD2",
-          200: "#9BC4B5",
-          300: "#74AC97",
-          400: "#5E8B7E",
-          500: "#46705F",
-          600: "#33564A",
-          700: "#223C36",
+          50: "#E9F0EB",
+          100: "#CBDCCF",
+          200: "#A6C6B4",
+          300: "#82AE99",
+          400: "#6E9381",
+          500: "#557867",
+          600: "#3F5C4F",
+          700: "#2B4239",
         },
         // —— Secondary: 赭 (ochre) ——
         ochre: {
-          DEFAULT: "#C76B4A",
-          soft: "#A85636",
+          DEFAULT: "#B98A4A",
+          soft: "#A4753B",
         },
         // —— Destructive: 朱砂 (cinnabar) ——
         cinnabar: {
-          DEFAULT: "#E5484D",
-          soft: "#B8383C",
+          DEFAULT: "#C3402E",
+          soft: "#9E3325",
         },
         bamboo: "#7BA876",
-        amber: "#D49A3A",
+        amber: "#C9963C",
       },
       fontFamily: {
         sans: [

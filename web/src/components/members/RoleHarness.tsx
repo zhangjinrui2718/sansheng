@@ -481,9 +481,7 @@ export function RoleHarnessDisclosure({
           >
             {(view) => (
               found === null ? (
-                <EmptyState>
-                  这一份 harness 视图里没有角色 {role}(与「它没有提示词单元」是两件事)。
-                </EmptyState>
+                <EmptyState>没有这个角色</EmptyState>
               ) : (
             <>
               {/* 落在空处的意图:文件名写错(如 workers.json)会被安静忽略 —— 必须报出来。

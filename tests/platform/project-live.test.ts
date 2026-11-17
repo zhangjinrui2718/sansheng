@@ -107,7 +107,7 @@ function work(
   } = {},
 ): void {
   clock += 10;
-  insertWork(db, {
+  insertWork(db, { confirmedAt: 1,
     id,
     projectId: P,
     parentWorkId: over.parent ?? null,

@@ -128,7 +128,7 @@ function mkArtifact(kind: ArtifactKind, over: Partial<ArtifactRow> = {}): string
 
 function mkWork(status: "open" | "in_progress" = "open"): string {
   const id = `wk${++seq}`;
-  insertWork(db, {
+  insertWork(db, { confirmedAt: 1,
     id, projectId, parentWorkId: null, title: `工作${seq}`, goal: "g",
     status, assigneeAgentId: agentA, createdAt: T0 + seq, updatedAt: T0 + seq,
   });
@@ -878,7 +878,7 @@ describe("board_write · 产出边(工具层判据:存在 + 同项目)", () => {
       id: other, name: "别的项目", client: "甲", goal: "g", status: "active", createdAt: T0,
     });
     const otherWork = `wk${++seq}`;
-    insertWork(db, {
+    insertWork(db, { confirmedAt: 1,
       id: otherWork, projectId: other, parentWorkId: null, title: "别处的活", goal: "g",
       status: "open", assigneeAgentId: agentA, createdAt: T0, updatedAt: T0,
     });
@@ -937,7 +937,7 @@ describe("board_write · 产出边(工具层判据:存在 + 同项目)", () => {
 describe("返工 · 新交付物把被退回的旧版本标成 superseded", () => {
   function mkWorkItem(): string {
     const id = `wk${++seq}`;
-    insertWork(db, {
+    insertWork(db, { confirmedAt: 1,
       id, projectId, parentWorkId: null, title: `工作${seq}`, goal: "g",
       status: "in_progress", assigneeAgentId: agentA, createdAt: T0 + seq, updatedAt: T0 + seq,
     });

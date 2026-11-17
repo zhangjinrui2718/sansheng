@@ -148,12 +148,12 @@ async function seedEverything(): Promise<{ project: string; work: string; agent:
   });
   addMember(db, project, agent, NOW);
   addMember(db, project, reviewer, NOW);
-  insertWork(db, {
+  insertWork(db, { confirmedAt: 1,
     id: root, projectId: project, parentWorkId: null, title: "T", goal: "G",
     status: "done", reviewState: "done", assigneeAgentId: agent,
     createdAt: NOW, updatedAt: NOW,
   });
-  insertWork(db, {
+  insertWork(db, { confirmedAt: 1,
     id: child, projectId: project, parentWorkId: root, title: "T2", goal: "G2",
     status: "open", assigneeAgentId: reviewer, createdAt: NOW, updatedAt: NOW,
   });

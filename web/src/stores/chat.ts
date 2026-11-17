@@ -1577,6 +1577,25 @@ export const useChatStore = create<ChatState>((set, get) => ({
         return;
       }
 
+      case "usage_recorded": {
+        // F1(2026-11-17):这个 case 曾经**不存在**(N2)—— 平台每落一笔
+        // `turn_usage` 都会广播(hub.emitUsageRecorded),前端却掉在地上,于是
+        // **后台回合**(排空器叫醒的内部角色)烧的 token 在顶栏永远看不见:
+        // `message_end` 只累计轮表里还有它的那轮,而轮表随 `agent_end` 按上下文 flush。
+        // ⚠️ 接法按 hub 自己写的纪律(emitUsageRecorded 注释):**事件会丢,库不会**
+        // —— 这里累积的是「本次连接以来看到的合计」(Σ),权威值仍在项目页「成本」段
+        // (GET /api/projects/:id/usage)。与 `message_end` 的 `currentUsage`(▸)
+        // 是两个桶:▸ = 这一屏可见轮的反馈,Σ = 会话内全部已见笔数。
+        const u = e.usage;
+        set((s) => ({
+          totalUsage: {
+            input: s.totalUsage.input + u.input,
+            output: s.totalUsage.output + u.output,
+          },
+        }));
+        return;
+      }
+
       case "client_question":
       case "client_question_answered":
       case "work_changed":

@@ -164,12 +164,9 @@ export function RoleDetailPane({
     // 两种「没有」分开说:视图是空的(不该发生,如实说)vs 地址点名了不存在
     // 的角色(那是深链接指错了地方,**不许**静默退到第一个角色装成功)。
     return view.roles.length === 0 ? (
-      <EmptyState>这一份 harness 视图里没有任何角色。</EmptyState>
+      <EmptyState>没有这个角色</EmptyState>
     ) : (
-      <EmptyState>
-        这一份 harness 视图里没有角色 {requested}(地址点名的角色不存在;与「它没有
-        提示词单元」是两件事)。
-      </EmptyState>
+      <EmptyState>没有这个角色</EmptyState>
     );
   }
 

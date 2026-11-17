@@ -51,6 +51,8 @@ import type {
 } from "@shared/types/platform";
 import * as api from "./api";
 import { errorMessage } from "./api";
+import { memberLocation, projectLocation } from "./entityMeta";
+import { toHash } from "./route";
 import { useChatStore, type ChatStatus, type Turn } from "../stores/chat";
 // ⚠️ **type-only**:只要「连接状态」这个类型,不要传输层本身
 // (`lib/ws.ts` 会在浏览器里 new WebSocket,而 `lib/data.ts` 被 node 里的测试直接引用)。
@@ -374,6 +376,8 @@ export function useClientQuestions(): Loaded<ClientQuestionView[]> & {
    * 名下)—— 计数必须从这一份里按项目数出来。
    */
   closedProjectQuestions: ClientQuestionView[];
+  /** F3:「已答复、业务经理还没处置」条数,按项目分(projectId → count)。 */
+  answeredUnconsumed: Record<string, number>;
 } {
   const revision = useChatStore((s) => s.projectsRevision);
   const r = useLoad(() => api.listClientQuestions(), [revision]);
@@ -383,6 +387,7 @@ export function useClientQuestions(): Loaded<ClientQuestionView[]> & {
     error: r.error,
     fromClosedProjects: r.data?.fromClosedProjects ?? 0,
     closedProjectQuestions: r.data?.closedProjectQuestions ?? [],
+    answeredUnconsumed: r.data?.answeredUnconsumed ?? {},
   };
 }
 
@@ -907,19 +912,19 @@ export function channelNoteText(input: {
   readonly ready: boolean;
   readonly harnessError: string | null;
 }): string | null {
+  // ⚠️ v3 文案裁决(2026-11-17):界面只留**名称 + 计数**,落点指引改由
+  // `HiddenNotice` 的悬停承载(默认不可见)——「另有一段散文」的形态退场。
   const parts: string[] = [];
   if (input.hidden > 0) {
     parts.push(
       input.ready
-        ? `另有 ${input.hidden} 条回合不在这条通道里(不是由你触发、也不是播报)—— 到「成员」页逐人查看`
-        : `另有 ${input.hidden} 条消息暂时无法归类 —— 角色能力面(GET /api/harness)还没读到` +
+        ? `内部回合 ${input.hidden}`
+        : `消息 ${input.hidden} 条无法归类` +
             (input.harnessError !== null ? `:${input.harnessError}` : ""),
     );
   }
   if (input.notices > 0) {
-    parts.push(
-      `另有 ${input.notices} 条平台通知(组织停止推进 / 合规告警)—— 到「项目」页「组织运行态」查看`,
-    );
+    parts.push(`平台通知 ${input.notices}`);
   }
   return parts.length === 0 ? null : parts.join(" · ");
 }
@@ -1163,3 +1168,96 @@ export function remoteClaimsRunning(
  * 按了没反应比多等 5 秒更坏。
  */
 export const REMOTE_WATCH_INTERVAL_MS = 5000;
+
+// ── D2:「项目此刻」一行(2026-11-17 v3)────────────────────────────
+//
+// 对话页头部下的**一行小字**:谁在跑(角色·环节·时长)、有什么在等你、有没有阻塞。
+// 判据(纯函数,可单测):
+//   · 数据只来自 `GET /live`(`ProjectLiveView`——「此刻」的唯一来源,不造第二真相)
+//     与左栏同一份 `ProjectSummary.counts`(不新增请求);
+//   · **零态整行不出现**(v3「默认安静」):没人跑、没人在等、没有阻塞 ⇒ `null`
+//     —— 这与 dock 的空态不同:dock 说「没有」是一句断言,这里只是不说话;
+//   · **读不到 ≠ 没事**:取数失败 / `runtime` 不是 host ⇒ `unreadable`,一行小字
+//     如实说,不渲染成「没人干活」;
+//   · 每个片段都是**真地址**(半个地址比没有地址更坏):角色 → 成员页,
+//     在等你 / 阻塞 → 项目页。
+
+export interface ProjectNowSegment {
+  readonly kind: "running" | "waiting" | "blocked";
+  readonly label: string;
+  readonly href: string;
+  readonly title?: string;
+}
+
+export interface ProjectNowLine {
+  readonly segments: readonly ProjectNowSegment[];
+  /** 运行态读不到(取数失败 / runtime 非 host)—— 一行小字,不是「没事」。 */
+  readonly unreadable: boolean;
+}
+
+/** 甲方通道一行最多点名的角色数;更多的折成一条「+N」,不把头部撑成名单。 */
+export const PROJECT_NOW_MAX_RUNNING = 3;
+
+const projectNowElapsed = (ms: number): string => {
+  const sec = Math.max(0, Math.round(ms / 1000));
+  return sec < 60 ? "刚起步" : `${Math.floor(sec / 60)} 分钟`;
+};
+
+export function projectNowOf(input: {
+  readonly projectId: string;
+  readonly live: ProjectLiveView | null;
+  readonly liveError: string | null;
+  readonly pendingQuestions: number;
+  readonly pendingAcceptance: number;
+  readonly openBlockers: number;
+  /** 渲染这一刻的本地时钟(入场参数,不是判断依据 —— 与 Works 同一条纪律) */
+  readonly now: number;
+  /** agentId → 屏上名字(来自成员表;调用方已持有,这里不重复取数) */
+  readonly nameOf: (agentId: string) => string;
+}): ProjectNowLine | null {
+  if (input.liveError !== null) return { segments: [], unreadable: true };
+  const live = input.live;
+  if (live === null || live.runtime !== "host") return { segments: [], unreadable: true };
+
+  const segments: ProjectNowSegment[] = [];
+  const running = live.agents.filter((a) => a.turn !== null);
+  for (const a of running.slice(0, PROJECT_NOW_MAX_RUNNING)) {
+    const work = a.currentWorks[0]?.title ?? null;
+    const name = input.nameOf(a.agentId);
+    segments.push({
+      kind: "running",
+      label: `${name} 在跑「${work ?? "手头的事"}」(${projectNowElapsed(a.turn?.elapsedMs ?? 0)})`,
+      href: toHash(memberLocation(a.agentId)),
+      title: work !== null ? `${name} 正在推进:${work}` : `${name} 有一个回合正在跑`,
+    });
+  }
+  if (running.length > PROJECT_NOW_MAX_RUNNING) {
+    segments.push({
+      kind: "running",
+      label: `还有 ${running.length - PROJECT_NOW_MAX_RUNNING} 个角色在跑`,
+      href: toHash(projectLocation(input.projectId)),
+      title: "到项目页 / 成员页看全",
+    });
+  }
+
+  const waitingYou = input.pendingQuestions + input.pendingAcceptance;
+  if (waitingYou > 0) {
+    segments.push({
+      kind: "waiting",
+      label: `在等你 ${waitingYou}`,
+      href: toHash(projectLocation(input.projectId)),
+      title: "有交付物等你验收 / 有问题等你回答 —— 项目页与右栏都有入口",
+    });
+  }
+  if (input.openBlockers > 0) {
+    segments.push({
+      kind: "blocked",
+      label: `阻塞 ${input.openBlockers}`,
+      href: toHash(projectLocation(input.projectId)),
+      title: "有未解决的阻塞 —— 项目页看是哪件活被卡住",
+    });
+  }
+
+  if (segments.length === 0) return null;
+  return { segments, unreadable: false };
+}

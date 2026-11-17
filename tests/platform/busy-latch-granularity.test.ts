@@ -410,7 +410,7 @@ function seedProject(
   });
   ensureProjectOrg(db, projectId, 1);
   if (workId !== null) {
-    insertWork(db, {
+    insertWork(db, { confirmedAt: 1,
       id: workId, projectId, parentWorkId: null, title: workId, goal: "g", status: "open",
       assigneeAgentId: "wk", createdAt: 1, updatedAt: 1,
     });

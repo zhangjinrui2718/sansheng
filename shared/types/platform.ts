@@ -91,6 +91,13 @@ export type WorkStatus =
   | "failed"
   | "cancelled";
 
+/**
+ * 质检那一半的状态(`works.review_state`,migration 013;D7,2026-11-17 起进读面)。
+ * 与 `WorkStatus` 是**两个轴**:status 管「这条活干完没有」,review_state 管
+ * 「干完了的那条,质检看过没有」。`pending` = 做完了、质检还没看。
+ */
+export type WorkReviewState = "none" | "pending" | "done";
+
 export type ArtifactKind =
   | "decision"
   | "note"
@@ -177,11 +184,22 @@ export interface ProjectSummary {
    * {@link ProjectLifecycleStatus} —— 库里的 `projects.status` 仍然是 `active`。
    */
   status: ProjectLifecycleStatus;
+  /**
+   * D1 升级(2026-11-17):此刻占着忙闩的回合数(宿主内存聚合)。
+   * ⚠️ **只在宿主装配给了 live 快照时才有** —— 没有它(纯 HTTP 装配 / 测试)
+   * 这个字段不出现,而**不是**写成 0(读不到 ≠ 没人跑)。左栏「在跑」组的判据。
+   */
+  runningTurns?: number;
   createdAt: number;
   /** 该项目的规模概览 —— 列表页直接用,不必再拉详情 */
   counts: {
     works: number;
     openWorks: number;
+    /**
+     * D3(2026-11-17):**等你确认开工**的工作项数(>0 ⇒ 对话页出现「计划」卡,
+     * 确认之前平台不派工、不花用量)。
+     */
+    unconfirmedWorks: number;
     artifacts: number;
     /** **等甲方答的**问题数。这是左栏徽标的来源。 */
     pendingQuestions: number;
@@ -195,6 +213,11 @@ export interface ProjectSummary {
      * 这么被漏掉的(见 `components/client/ClientQuestionDock.tsx` 的文件头)。
      */
     pendingAcceptance: number;
+    /**
+     * D1 升级(2026-11-17):卡在 `failed` 的工作项数 —— 左栏「停着」组的判据
+     * (db 就能算,恒有)。
+     */
+    failedWorks: number;
   };
 }
 
@@ -229,6 +252,12 @@ export interface WorkView {
   title: string;
   goal: string;
   status: WorkStatus;
+  /**
+   * 质检那一半的状态(D7,2026-11-17)。后端**必给**(读面从 `works.review_state`
+   * 原样透出);类型上可选只为存量测试夹具不必逐个补字段 —— 缺省按 `none` 解释
+   * (缺字段 ≠ 待质检,不把「没带字段」说成「在等质检」)。
+   */
+  reviewState?: WorkReviewState;
   assigneeAgentId: string;
   /** 解析后的负责人名(前端不再自己拼 agent id → 名字) */
   assigneeName: string;
@@ -889,6 +918,12 @@ export interface ClientQuestionView {
   options: string[];
   /** 提问者的倾向与理由 —— 「让我只需点个头」的关键 */
   lean: string | null;
+  /**
+   * D6(2026-11-17):`"close"` = 这是一条**收口提议**(ask_client intent="close")
+   * —— 前端渲染成收口提议卡(同意收口 / 先不收 两个固定动作,走
+   * `POST /api/projects/:id/close/consent`),不是自由文本提问。null = 普通提问。
+   */
+  intent: "close" | null;
   askedByAgentId: string;
   askedByName: string;
   createdAt: number;
@@ -925,6 +960,14 @@ export interface ClientQuestionList {
    * 处理的按钮。
    */
   closedProjectQuestions: ClientQuestionView[];
+  /**
+   * F3(2026-11-17):「已答复、业务经理还没处置」的条数,**按项目分**
+   * (`answered_at IS NOT NULL AND consumed_at IS NULL` —— `resume_client`
+   * 规则读的就是同一个谓词)。这一段窗口此前在界面上不可见:甲方答完了,
+   * 提问从待答里消失,而在业务经理把它消化掉之前,「我答的话到哪一步了」
+   * 没有任何回答。⚠️ 只报数:处置是业务经理的活,这里不渲染可点的卡。
+   */
+  answeredUnconsumed: Record<string, number>;
 }
 
 export interface BlockerView {

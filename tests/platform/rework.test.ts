@@ -77,7 +77,7 @@ function mkWork(over: {
   id?: string; parent?: string | null; title?: string; status?: WorkStatus; assignee?: string;
 } = {}): string {
   const id = over.id ?? `wk_${++seq}`;
-  insertWork(db, {
+  insertWork(db, { confirmedAt: 1,
     id, projectId: "p1", parentWorkId: over.parent ?? null,
     title: over.title ?? `工作项 ${id}`, goal: "写出结论",
     status: over.status ?? "open", assigneeAgentId: over.assignee ?? "wk",

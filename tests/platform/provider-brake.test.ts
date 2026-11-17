@@ -353,7 +353,7 @@ function seedProject(workId: string | null): void {
   });
   ensureProjectOrg(db, "p1", 1);
   if (workId !== null) {
-    insertWork(db, {
+    insertWork(db, { confirmedAt: 1,
       id: workId, projectId: "p1", parentWorkId: null, title: workId, goal: "g",
       status: "open", assigneeAgentId: "wk", createdAt: 1, updatedAt: 1,
     });

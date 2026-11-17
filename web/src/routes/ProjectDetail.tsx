@@ -46,8 +46,8 @@ import {
   useProjectAsks, useProjectChanges, useProjectDetail, useProjectLive, useProjectMessages,
   useProjectUsage, useProjectWorkspace,
 } from "@/lib/data";
-import { platformNoticeLabel, type PlatformNoticeKind } from "@/lib/platformNotices";
-import { liveHeadline, orgRuntime } from "@/lib/orgState";
+import { platformNoticeLabel, type PlatformNotice, type PlatformNoticeKind } from "@/lib/platformNotices";
+import { liveHeadline, needsAttention, orgRuntime, type StopState } from "@/lib/orgState";
 import { useChatStore } from "@/stores/chat";
 import {
   askStatusLabel,
@@ -78,6 +78,20 @@ const NOTICE_TITLE: Record<PlatformNoticeKind, string> = {
     "平台叫醒的回合没留工作记录(未调 tell_client,正文也没有行首 [未播报])—— 「判断过」与「漏了」的分界",
   other: "平台自己落的通知:作者不是任何角色,也不是甲方",
 };
+
+/** 平台记录三合一(S-C)后的**一条记录**。三类同源(kind='system'),只是分类不同。 */
+type PlatformRecord =
+  | { kind: "stop"; notice: PlatformNotice; state: StopState }
+  | { kind: "compliance"; notice: PlatformNotice }
+  | { kind: "other"; notice: PlatformNotice };
+
+/**
+ * 「这条记录需要你动作吗」—— **判据只有一处**(`orgState.ts` 的 `needsAttention` =
+ * stalled / waiting_client),这里只是把它统一到三类上:合规与其他类恒为「记录」。
+ */
+function recordNeedsYou(r: PlatformRecord): boolean {
+  return r.kind === "stop" && needsAttention(r.state);
+}
 
 /**
  * 平台记录正文的**唯一渲染口**:全文在 DOM 里(分类靠首行前缀,搜索/测试不丢),
@@ -238,6 +252,31 @@ export function ProjectDetailPage() {
   // 页面只渲染结果,不自己认字符串、也不自己编状态。
   const runtime = orgRuntime({ messages, live: live.data });
   /**
+   * 平台记录三合一(S-C,2026-11-17 减法):停止推进 / 合规记录 / 认不出类别的记录
+   * 并成**一份列表**(S-C 判据:三类本就同源 —— 都是 `kind='system'` 的平台消息,
+   * 只是分类器认出的前缀不同)。每条带 `needsYou`:**停下且不会自己过去**
+   * (`orgState.ts` 的 `needsAttention` = stalled / waiting_client)⇒ 需要你动作;
+   * 其余(已接回 / 会被接回 / 已收口 / 读不到 / 合规 / 其他)是记录。
+   * ⚠️ 过滤不删: chips 只改可见性,记录本体一条不丢(折叠不静默)。
+   */
+  const platformRecords = useMemo((): PlatformRecord[] => {
+    return [
+      ...runtime.stops.map((s) => ({ kind: "stop" as const, notice: s.notice, state: s.state })),
+      ...runtime.compliance.map((n) => ({ kind: "compliance" as const, notice: n })),
+      ...runtime.others.map((n) => ({ kind: "other" as const, notice: n })),
+    ];
+  }, [runtime, messages]);
+  const [recordFilter, setRecordFilter] = useState<"all" | "attention" | "log">("all");
+  const shownRecords = useMemo(
+    () =>
+      recordFilter === "all"
+        ? platformRecords
+        : platformRecords.filter((r) =>
+            recordFilter === "attention" ? recordNeedsYou(r) : !recordNeedsYou(r),
+          ),
+    [platformRecords, recordFilter],
+  );
+  /**
    * 仪表盘的事实(判据在 `lib/dashboard.ts`)。
    *
    * ⚠️ **每一份都带自己的加载态** —— 「还没查到」与「查过了是 0」在屏幕上长得一样,
@@ -289,7 +328,7 @@ export function ProjectDetailPage() {
     return (
       <div className="ss-page">
         <PageHeader title="项目" />
-        <EmptyState>先在「对话」页的左栏选一个项目。</EmptyState>
+        <EmptyState>未选项目</EmptyState>
       </div>
     );
   }
@@ -365,26 +404,24 @@ export function ProjectDetailPage() {
                 </div>
               )
             ) : (
-              <EmptyState>这个项目还没写目标。</EmptyState>
+              <EmptyState>暂无目标</EmptyState>
             )}
           </Section>
 
           {/*
-            平台记录的**全文落点**,按主体分两段(2026-10-05)。
+            平台记录 —— 三段合一(S-C,2026-11-17 减法)。
 
-            ⚠️ 两段的**状态语义完全不同**,这是这次分家的全部理由:
-              - 「停止推进」是运行态**快照** —— 会自己过去(兜底定时器每 10 秒重查);
-                所以它带一个**派生出来的状态**(已接回 / 会被接回 / 在等你 / 不会自愈……),
-                判据在 `lib/orgState.ts`,事实来自 `GET /live` 与 `GET /messages`。
-              - 「合规告警」是既成事实的**记录** —— 它**没有**「已解决」这个状态,
-                也不该有(平台不替模型补那行 `[未播报]`)。所以它只报事实与计数,
-                并明写「这不是待办」。
+            原来这里分三段(2026-10-05 的分家):「组织推进」(停止推进 + 派生状态)、
+            「合规记录」(漏留工作记录)、「其他平台记录」(认不出类别)。三段**同源**
+            —— 都是 kind='system' 的平台消息,只是分类器认出的前缀不同 —— 分三段
+            就是同一屏把「平台写了什么」说三遍。现在合成**一份列表 + 过滤片**:
+              · 「需要你动作」= 停下且不会自己过去(`orgState.ts` 的 needsAttention
+                = stalled / waiting_client)—— 判据原样,一处没动;
+              · 「记录」= 其余(已接回 / 会被接回 / 已收口 / 读不到 / 合规 / 其他)——
+                合规那条「记录 · 不需要你动作」的红线措辞逐字保留。
+            ⚠️ 过滤只改**可见性**,一条记录都不丢;liveHeadline(组织此刻动不动)仍常显。
           */}
-          <Section
-            title="组织推进"
-            count={runtime.stops.length}
-            helpId="notice.stop"
-          >
+          <Section title="平台记录" count={platformRecords.length} helpId="notice.record">
             <div className="ss-note mb-1.5">
               {liveHeadline(live.data)}
               {runtime.attention > 0 && (
@@ -394,123 +431,106 @@ export function ProjectDetailPage() {
                 </span>
               )}
             </div>
+            <div className="flex items-center gap-1.5 mb-2" data-role="record-filter">
+              {(
+                [
+                  { key: "all", label: "全部" },
+                  { key: "attention", label: "需要你动作" },
+                  { key: "log", label: "记录" },
+                ] as const
+              ).map((f) => (
+                <button
+                  key={f.key}
+                  type="button"
+                  aria-pressed={recordFilter === f.key}
+                  onClick={() => setRecordFilter(f.key)}
+                  className="ss-pill"
+                  data-tone={recordFilter === f.key ? "jade" : "bone"}
+                  style={{ cursor: "pointer" }}
+                >
+                  {f.label}
+                </button>
+              ))}
+            </div>
             <DataState
-              what="异常"
-              state={remoteListOf(runtime.stops, noticesLoading, noticesError)}
+              what="平台记录"
+              state={remoteListOf(shownRecords, noticesLoading, noticesError)}
               variant="card"
               loadingLabel="加载中…"
             >
-              {() => (
-                runtime.stops.length === 0 ? (
-                  <EmptyState>没有异常停下过 —— 排空每次都跑到了没有待办为止。</EmptyState>
+              {() =>
+                shownRecords.length === 0 ? (
+                  <EmptyState>
+                    {recordFilter === "all"
+                      ? "暂无平台记录"
+                      : recordFilter === "attention"
+                        ? "暂无需要你动作的记录"
+                        : "暂无记录"}
+                  </EmptyState>
                 ) : (
-              <div className="grid gap-1.5">
-                {runtime.stops.map(({ notice, state }) => (
-                  <article
-                    key={notice.id}
-                    className="sansheng-card p-2.5"
-                    data-notice-kind="stop"
-                    data-stop-state={state.key}
-                    title={notice.id}
-                  >
-                    <div className="flex items-center gap-2 flex-wrap">
-                      <Pill tone="amber" title={NOTICE_TITLE.stop}>
-                        {platformNoticeLabel("stop")}
-                      </Pill>
-                      {/* 状态是这一批的重点:同一个类名下的两条,状态可能完全不同。
-                          why 不再塞进悬停 —— 下一行已经常显它,重复份是「解释」。 */}
-                      <Pill
-                        tone={
-                          state.key === "stalled"
-                            ? "cinnabar"
-                            : state.key === "waiting_client"
-                              ? "amber"
-                              : state.key === "unreadable"
-                                ? "mute"
-                                : "bone"
-                        }
-                      >
-                        {state.label}
-                      </Pill>
-                      <span className="ss-meta ml-auto">{fmtTime(notice.createdAt)}</span>
-                    </div>
-                    <div className="ss-note mt-0.5" title="判据(为什么是左边那个状态)">
-                      {state.why}
-                    </div>
-                    <div className="ss-meta">该怎么办:{state.action}</div>
-                    {/* 正文原样:换行保留;长的收进 Disclosure(见 NoticeBody) */}
-                    <NoticeBody content={notice.content} />
-                  </article>
-                ))}
-              </div>
-            ))}
+                  <div className="grid gap-1.5">
+                    {shownRecords.map((r) =>
+                      r.kind === "stop" ? (
+                        <article
+                          key={r.notice.id}
+                          className="sansheng-card p-2.5"
+                          data-notice-kind="stop"
+                          data-stop-state={r.state.key}
+                          title={r.notice.id}
+                        >
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <Pill tone="amber" title={NOTICE_TITLE.stop}>
+                              {platformNoticeLabel("stop")}
+                            </Pill>
+                            {/* 状态是重点:同一个类名下的两条,状态可能完全不同。 */}
+                            <Pill
+                              tone={
+                                r.state.key === "stalled"
+                                  ? "cinnabar"
+                                  : r.state.key === "waiting_client"
+                                    ? "amber"
+                                    : r.state.key === "unreadable"
+                                      ? "mute"
+                                      : "bone"
+                              }
+                            >
+                              {r.state.label}
+                            </Pill>
+                            <span className="ss-meta ml-auto">{fmtTime(r.notice.createdAt)}</span>
+                          </div>
+                          <div className="ss-note mt-0.5" title="判据(为什么是左边那个状态)">
+                            {r.state.why}
+                          </div>
+                          <div className="ss-meta">该怎么办:{r.state.action}</div>
+                          <NoticeBody content={r.notice.content} />
+                        </article>
+                      ) : (
+                        <article
+                          key={r.notice.id}
+                          className="sansheng-card p-2.5"
+                          data-notice-kind={r.kind}
+                          title={r.notice.id}
+                        >
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <Pill tone={r.kind === "compliance" ? "cyan" : "bone"} title={NOTICE_TITLE[r.kind]}>
+                              {platformNoticeLabel(r.kind)}
+                            </Pill>
+                            {r.kind === "compliance" && (
+                              <Pill tone="mute" title="这一类没有「已解决」—— 它是记录,不是待办">
+                                记录 · 不需要你动作
+                              </Pill>
+                            )}
+                            <span className="ss-meta ml-auto">{fmtTime(r.notice.createdAt)}</span>
+                          </div>
+                          <NoticeBody content={r.notice.content} />
+                        </article>
+                      ),
+                    )}
+                  </div>
+                )
+              }
             </DataState>
           </Section>
-
-          <Section
-            title="合规记录"
-            count={runtime.compliance.length}
-            helpId="notice.compliance"
-          >
-            {runtime.compliance.length === 0 ? (
-              <EmptyState>没有合规告警 —— 平台叫醒的每个回合都留了工作记录。</EmptyState>
-            ) : (
-              <div className="grid gap-1.5">
-                {runtime.compliance.map((n) => (
-                  <article
-                    key={n.id}
-                    className="sansheng-card p-2.5"
-                    data-notice-kind="compliance"
-                    title={n.id}
-                  >
-                    <div className="flex items-center gap-2 flex-wrap">
-                      <Pill tone="cyan" title={NOTICE_TITLE.compliance}>
-                        {platformNoticeLabel("compliance")}
-                      </Pill>
-                      <Pill tone="mute" title="这一类没有「已解决」—— 它是记录,不是待办">
-                        记录 · 不需要你动作
-                      </Pill>
-                      <span className="ss-meta ml-auto">{fmtTime(n.createdAt)}</span>
-                    </div>
-                    <NoticeBody content={n.content} />
-                  </article>
-                ))}
-              </div>
-            )}
-          </Section>
-
-
-          {/*
-            只在**真的有**认不出类别的平台记录时才渲染这一段(与成员页那段 `strangers`
-            同一形态:一条证据可以被折叠,但不许被删掉)。今天它是空的 —— 两个写入方
-            (`announceDrain` / `reportUnannouncedTurn`)的正文前缀都被分类器认得。
-          */}
-          {runtime.others.length > 0 && (
-            <Section
-              title="其他平台记录"
-              count={runtime.others.length}
-              helpId="notice.other"
-            >
-              <div className="grid gap-1.5">
-                {runtime.others.map((n) => (
-                  <article
-                    key={n.id}
-                    className="sansheng-card p-2.5"
-                    data-notice-kind="other"
-                    title={n.id}
-                  >
-                    <div className="flex items-center gap-2 flex-wrap">
-                      <Pill tone="bone" title={NOTICE_TITLE.other}>
-                        {platformNoticeLabel("other")}
-                      </Pill>
-                      <span className="ss-meta ml-auto">{fmtTime(n.createdAt)}</span>
-                    </div>
-                    <NoticeBody content={n.content} />
-                  </article>
-                ))}
-              </div>
-            </Section>
-          )}
 
           {/* ⚠️ **「工作项」这一段被删掉了**(2026-10-26,仪表盘那一刀)——
               它与工作项页各渲染一遍同一个实体,而两处各渲染一遍的地方,
@@ -545,19 +565,18 @@ export function ProjectDetailPage() {
             内部协作区。**刻意与「待你回答」分开**:这一区里的提问收件人是别的角色,
             用户不是对话的一方。做成同样的可回答卡片会邀请用户去替项目经理拍板,
             而那条链路(角色间问答)有自己的升级机制(judgment 轮 → 必要时才升级到用户)。
+
+            ⚠️ S-C(2026-11-17,减法):**0 条整节不出现** —— 表头 StatStrip 的
+            「内部提问 0」已经说了这个 0,一节空卡把同一个 0 再说一遍是重复份;
+            详单(>0)保持默认折叠,理由不变(Wave 7:要查时查得到,不是常驻)。
           */}
-          <Section
-            title="内部协作"
-            count={asks.length}
-            hint="不用你处理"
-            helpId="ask"
-          >
-            {/* 角色问角色的详单(Wave 7 默认收起):表头已经说了「不用你处理」,
-                两张一百五十字的大卡却占着首屏 —— 详单留着的理由是「要查时查得到」,
-                不是「常驻」。0 条时空态照常直排(那是一句正向事实)。 */}
-            {asks.length === 0 ? (
-              <EmptyState>没有角色之间的提问 —— 团队没卡在横向沟通上。</EmptyState>
-            ) : (
+          {asks.length > 0 && (
+            <Section
+              title="内部协作"
+              count={asks.length}
+              hint="不用你处理"
+              helpId="ask"
+            >
               <Disclosure summary={`展开详单(${asks.length} 条 · 不用你处理)`}>
                 <DataState
                   what="内部提问"
@@ -624,8 +643,8 @@ export function ProjectDetailPage() {
                   )}
                 </DataState>
               </Disclosure>
-            )}
-          </Section>
+            </Section>
+          )}
 
           {/* 变更记录:**0 时整节不渲染**(Wave 8)—— 表头 StatStrip 的
               「变更 0」已经在说这件事。 */}
@@ -784,36 +803,44 @@ export function ProjectDetailPage() {
                     })()}
                   </div>
 
-                  {u.byAgent.length > 0 && (
-                    <div className="sansheng-card p-3">
-                      <div className="ss-meta mb-1">谁花的</div>
-                      {u.byAgent.map((a) => (
-                        <div key={a.agentId} className="flex items-center gap-2">
-                          <span className="ss-body" style={{ color: "var(--bone-dim)" }}>
-                            {a.agentName}
-                          </span>
-                          <span className="ss-meta ml-auto">
-                            {fmtTokens(a.input + a.output)} token · {a.turns} 回合
-                          </span>
-                        </div>
-                      ))}
-                    </div>
-                  )}
+                  {/* S-C(2026-11-17,减法):汇总行(三个总数 + 参考线提醒)常显;
+                      「谁花的 / 花在哪件活上」是**详单**,收进折叠 —— 判据与数据一个字没动。 */}
+                  {(u.byAgent.length > 0 || u.byWork.length > 0) && (
+                    <Disclosure summary="成本详单(谁花的 · 花在哪件活上)">
+                      <div className="grid gap-2">
+                        {u.byAgent.length > 0 && (
+                          <div className="sansheng-card p-3">
+                            <div className="ss-meta mb-1">谁花的</div>
+                            {u.byAgent.map((a) => (
+                              <div key={a.agentId} className="flex items-center gap-2">
+                                <span className="ss-body" style={{ color: "var(--bone-dim)" }}>
+                                  {a.agentName}
+                                </span>
+                                <span className="ss-meta ml-auto">
+                                  {fmtTokens(a.input + a.output)} token · {a.turns} 回合
+                                </span>
+                              </div>
+                            ))}
+                          </div>
+                        )}
 
-                  {u.byWork.length > 0 && (
-                    <div className="sansheng-card p-3">
-                      <div className="ss-meta mb-1">花在哪件活上</div>
-                      {u.byWork.map((w) => (
-                        <div key={w.workId ?? "__platform__"} className="flex items-center gap-2">
-                          <span className="ss-body" style={{ color: "var(--bone-dim)" }}>
-                            {w.workTitle ?? (w.workId === null ? "平台回合(不挂工作项)" : w.workId)}
-                          </span>
-                          <span className="ss-meta ml-auto">
-                            {fmtTokens(w.input + w.output)} token · {w.turns} 回合
-                          </span>
-                        </div>
-                      ))}
-                    </div>
+                        {u.byWork.length > 0 && (
+                          <div className="sansheng-card p-3">
+                            <div className="ss-meta mb-1">花在哪件活上</div>
+                            {u.byWork.map((w) => (
+                              <div key={w.workId ?? "__platform__"} className="flex items-center gap-2">
+                                <span className="ss-body" style={{ color: "var(--bone-dim)" }}>
+                                  {w.workTitle ?? (w.workId === null ? "平台回合(不挂工作项)" : w.workId)}
+                                </span>
+                                <span className="ss-meta ml-auto">
+                                  {fmtTokens(w.input + w.output)} token · {w.turns} 回合
+                                </span>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    </Disclosure>
                   )}
               </div>
               )}
@@ -875,9 +902,7 @@ export function ProjectDetailPage() {
                     </div>
 
                     {workspace.entries.length === 0 ? (
-                      <EmptyState>
-                        这个项目的目录是空的 —— 这一次确实「读到了」(runtime ok),里面一个条目都没有。
-                      </EmptyState>
+                      <EmptyState>目录为空(已读到,真没有条目)</EmptyState>
                     ) : (
                       /* 文件清单默认折叠(Wave 8):它是**取证**用的详单(注释见本节头),
                          35 条平铺会把「成本」以下的页面全部顶走;上面那行对账计数

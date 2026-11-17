@@ -16,6 +16,12 @@ export interface ProjectRow {
   /** 结构化验收判据(migration 031;JSON 数组)。空数组 = 还没有结构化判据 */
   acceptanceCriteria: string[];
   status: ProjectStatus;
+  /**
+   * 甲方对「收口提议」点「同意收口」的时刻(D6,migration 034)。
+   * NULL = 甲方还没同意过 —— `project_close(outcome:"done")` 的门读它。
+   * 回答「先不收」**不写**这一列(decline 只把提议答复掉)。
+   */
+  closeConsentedAt: number | null;
   createdAt: number;
   closedAt: number | null;
   /**
@@ -70,6 +76,8 @@ interface RawProject {
   closed_at: number | null;
   version: number;
   parent_project_id: string | null;
+  /** D6(034):收口同意时刻;迁移前的库副本没有这一列 —— 读取侧用兜底 */
+  close_consented_at?: number | null;
   /** JSON 数组(031 起写入);迁移前的库副本没有这一列 —— 读取侧用兜底 */
   acceptance_criteria?: string;
 }
@@ -105,6 +113,9 @@ function rowToProject(raw: RawProject): ProjectRow {
     // 而那两份读出来的值与 023 之后写进去的**完全一致**(1 / NULL)。
     version: raw.version ?? 1,
     parentProjectId: raw.parent_project_id ?? null,
+    // D6(034):迁移前的库副本读不到这一列 ⇒ 兜底 NULL(「还没同意过」),
+    // 与 023 之后真实写入的值(NULL)完全一致 —— 同一条兜底理由。
+    closeConsentedAt: raw.close_consented_at ?? null,
   };
 }
 
@@ -112,22 +123,25 @@ function rowToProject(raw: RawProject): ProjectRow {
 
 export function insertProject(
   db: Database.Database,
-  row: Omit<ProjectRow, "closedAt" | "version" | "parentProjectId"> & {
+  row: Omit<ProjectRow, "closedAt" | "version" | "parentProjectId" | "closeConsentedAt"> & {
     closedAt?: number | null;
     /** 缺省 1。**不给它编一个「上一版」** —— 没有前身是合法状态 */
     version?: number;
     parentProjectId?: string | null;
+    /** D6:新项目恒为未同意(NULL)—— 同意只能来自甲方点的那一下,这里不收 */
+    closeConsentedAt?: number | null;
   },
 ): void {
   db.prepare(
     `INSERT INTO projects
-       (id, name, client, goal, acceptance_criteria, status, created_at, closed_at, version, parent_project_id)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       (id, name, client, goal, acceptance_criteria, status, created_at, closed_at, version, parent_project_id, close_consented_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     row.id, row.name, row.client, row.goal,
     JSON.stringify(row.acceptanceCriteria ?? []),
     row.status, row.createdAt,
     row.closedAt ?? null, row.version ?? 1, row.parentProjectId ?? null,
+    row.closeConsentedAt ?? null,
   );
 }
 
@@ -289,4 +303,16 @@ export function loadProjectForAuthz(db: Database.Database, id: string): Project 
     status: row.status,
     assignments: listAssignments(db, id),
   };
+}
+
+/**
+ * D6(2026-11-17):甲方点「同意收口」—— 写 `close_consented_at`。
+ * COALESCE = append 语义:甲方改主意再点一次也**不覆盖第一次同意的时刻**
+ * (同意是不可撤的起点;反悔走「先不收」→ 项目继续,`project_close` 仍放行
+ * —— 那是另一个裁决,不是这一列的职责)。
+ */
+export function markCloseConsent(db: Database.Database, projectId: string, at: number): void {
+  db.prepare(
+    `UPDATE projects SET close_consented_at = COALESCE(close_consented_at, ?) WHERE id = ?`,
+  ).run(at, projectId);
 }

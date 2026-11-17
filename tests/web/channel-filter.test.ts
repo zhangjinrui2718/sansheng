@@ -281,36 +281,37 @@ describe("A3 · 渲染:只有甲方与业务经理,系统通知走独立带", ()
     // 负样本:平台通知**一个字都不在这页**(既不是气泡,也不再是一条「系统带」)
     expect(html).not.toContain("排空停在 max_rounds");
     expect(html).not.toContain('data-channel="system"');
-    // 但它**不是静默丢**:条数与去向必须写在屏幕上
-    expect(html).toContain("1 条平台通知");
-    expect(html).toContain("「项目」页「组织运行态」");
+    // 但它**不是静默丢**:条数写在屏幕上(⚠️ 判据变更 2026-11-17,文案裁决
+    // 「UI 只留名称+计数」:落点指引从屏上散文改由 HiddenNotice 的悬停承载)
+    expect(html).toContain("平台通知 1");
   });
 
   // ── 那一行提示的**文案**是纯函数产出的:判据在这里,不靠肉眼 ────────
+  // ⚠️ **判据变更(2026-11-17,文案裁决)**:旧文案是「另有 N 条……—— 到某页查看」
+  // 的散文;新文案 = **名称 + 计数**(「内部回合 N / 平台通知 M」),落点进悬停。
+  // 折叠不静默的判据不变:条数仍必须在屏上。
   describe("channelNoteText · 「不在这条通道里的东西」怎么报出来", () => {
     it("负样本:什么都没滤掉 ⇒ null(不摆 0 占位)", () => {
       expect(channelNoteText({ hidden: 0, notices: 0, ready: true, harnessError: null })).toBeNull();
     });
 
-    it("两类并存时**两段都在**,各自给落点", () => {
+    it("两类并存时**两段都在**(名称 + 计数)", () => {
       const t = channelNoteText({ hidden: 2, notices: 1, ready: true, harnessError: null })!;
-      expect(t).toContain("2 条回合不在这条通道里");
-      expect(t).toContain("「成员」页");
-      expect(t).toContain("1 条平台通知");
-      expect(t).toContain("「项目」页「组织运行态」");
+      expect(t).toContain("内部回合 2");
+      expect(t).toContain("平台通知 1");
     });
 
     it("只有平台通知时也报出来(它不是静默丢弃,只是搬到项目页)", () => {
       const t = channelNoteText({ hidden: 0, notices: 3, ready: true, harnessError: null })!;
-      expect(t).toContain("3 条平台通知");
-      expect(t).not.toContain("「成员」页");
+      expect(t).toContain("平台通知 3");
+      expect(t).not.toContain("内部回合");
     });
 
     it("⚠️ 能力面还没读到 ⇒ 内部回合那一半**不许**按「不是由你触发」解释(读不到 ≠ 空闲)", () => {
       const t = channelNoteText({ hidden: 4, notices: 0, ready: false, harnessError: "boom" })!;
-      expect(t).toContain("暂时无法归类");
+      expect(t).toContain("无法归类");
       expect(t).toContain("boom");
-      expect(t).not.toContain("不是由你触发");
+      expect(t).not.toContain("内部回合 4");
     });
   });
 

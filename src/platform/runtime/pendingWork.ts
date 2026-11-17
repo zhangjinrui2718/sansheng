@@ -138,7 +138,11 @@ export function collectPendingWork(
   const containers = workIdsWithChildren(db, projectId);
   const assigned = listWorks(db, projectId, { assigneeAgentId: agentId }).filter(
     (w) =>
-      (w.status === "open" || w.status === "in_progress") && !containers.has(w.id),
+      (w.status === "open" || w.status === "in_progress") &&
+      !containers.has(w.id) &&
+      // D3(migration 033):甲方确认开工之前**不算待办** —— 不叫醒执行者,
+      // 不进任何人的「手上活」。等确认的那一眼在「计划」卡(对话页)上。
+      w.confirmedAt !== null,
   );
   const myOpenWorks: WorkRow[] = [];
   const myWaitingWorks: WorkRow[] = [];

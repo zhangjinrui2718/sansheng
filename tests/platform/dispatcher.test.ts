@@ -80,7 +80,7 @@ function mkWork(over: {
   id?: string; title?: string; assignee?: string; status?: "open" | "in_progress" | "done";
 } = {}): string {
   const id = over.id ?? newId("wk");
-  insertWork(db, {
+  insertWork(db, { confirmedAt: 1,
     id, projectId: "p1", parentWorkId: null,
     title: over.title ?? "调研路线 A", goal: "写出对比结论",
     status: over.status ?? "open",
@@ -423,7 +423,7 @@ describe("drainProject · 尝试预算(库里的账本,取代内存 stallStore)"
         const count = (db.prepare(`SELECT COUNT(*) AS n FROM works`).get() as { n: number }).n;
         if (count === 0) {
           n++;
-          insertWork(db, {
+          insertWork(db, { confirmedAt: 1,
             id: `wk_${n}`, projectId: "p1", parentWorkId: null, title: "t", goal: "g",
             status: "open", assigneeAgentId: "wk", createdAt: T0 + n, updatedAt: T0 + n,
           });
@@ -456,7 +456,7 @@ describe("drainProject · 硬上界(烧 token 的闸)", () => {
     let n = 0;
     const mk = (assignee: string) => {
       n++;
-      insertWork(db, {
+      insertWork(db, { confirmedAt: 1,
         id: `wk_x${n}`, projectId: "p1", parentWorkId: null, title: "t", goal: "g",
         status: "open", assigneeAgentId: assignee, createdAt: T0 + n, updatedAt: T0 + n,
       });
@@ -669,7 +669,7 @@ describe("排空器 · 重启后补跑(状态在库里)", () => {
       id: "p1", name: "调研", client: "甲方", goal: "g", status: "active", createdAt: T0,
     });
     ensureProjectOrg(db1, "p1", T0);
-    insertWork(db1, {
+    insertWork(db1, { confirmedAt: 1,
       id: "w1", projectId: "p1", parentWorkId: null, title: "调研", goal: "g",
       status: "open", assigneeAgentId: "wk", createdAt: T0, updatedAt: T0,
     });
@@ -1062,7 +1062,7 @@ describe("任务 5 · 合并唤醒", () => {
 
   it("**中间**工作项的 `work_failed` 也立刻叫醒(写侧与位置无关,判侧同一条)", () => {
     const root = mkWork();
-    insertWork(db, {
+    insertWork(db, { confirmedAt: 1,
       id: "kid_fail", projectId: "p1", parentWorkId: root, title: "子项", goal: "g",
       status: "open", assigneeAgentId: "wk", createdAt: T0, updatedAt: T0,
     });

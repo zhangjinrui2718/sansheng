@@ -1,47 +1,50 @@
-/* Sansheng · design tokens (CSS variables) */
+/* Sansheng · 水墨青玄 design tokens —— 「砚」方向(2026-11-17,frontend-design 流程)
+ *
+ * 题材即选择:水墨的世界里墨分五色,底色是**中性偏暖的真墨**,不是蓝黑;
+ * 矿物色只有两个有声音:石绿(可点)与印朱(不可逆/失败),其余退后。
+ * 层级靠墨阶深浅,不靠框;一屏一声,朱砂是唯一强声。
+ */
 :root {
-  --ink-0: #0B0F14;
-  --ink-1: #0F141B;
-  --ink-2: #151C24;
-  --ink-3: #1C2530;
-  --ink-4: #26303D;
+  /* —— 墨阶(surfaces):中性偏暖,五阶 —— */
+  --ink-0: #121310;
+  --ink-1: #171816;
+  --ink-2: #1D1E1B;
+  --ink-3: #242521;
+  --ink-4: #2D2E29;
 
-  --bone: #E8E4D9;
-  --bone-dim: #B7AE9D;
-  --bone-mute: #7E776B;
+  /* —— 宣(文字)—— */
+  --bone: #E9E6DC;
+  --bone-dim: #B5AE9E;
+  --bone-mute: #8B8375;
 
-  --jade: #5E8B7E;
-  --jade-soft: rgba(94, 139, 126, 0.18);
-  --ochre: #C76B4A;
-  --cinnabar: #E5484D;
+  /* —— 石绿(主行动:可点、进行中)—— */
+  --jade: #6E9381;
+  --jade-soft: rgba(110, 147, 129, 0.16);
+
+  /* —— 赭石(警示/等待)—— */
+  --ochre: #B98A4A;
+
+  /* —— 印朱(唯一强声:破坏性、失败、印章)—— */
+  --cinnabar: #C3402E;
+  --cinnabar-soft: rgba(195, 64, 46, 0.12);
+
   --bamboo: #7BA876;
-  --amber: #D49A3A;
-  --amber-soft: rgba(212, 154, 58, 0.18);
-  --cinnabar-soft: rgba(229, 72, 77, 0.12);
-  /*
-   * --cyan 此前**没有被定义过**:页面里写的一律是 `var(--cyan, #4cc9c0)`,
-   * 即永远走 fallback。每次写都带 fallback 是个容易漏的坑(Timeline / Agents /
-   * AgentPanel 三处各写一遍),故正式入 token,调用点改成裸 var(--cyan)。
-   */
-  --cyan: #4cc9c0;
-  --cyan-soft: rgba(76, 201, 192, 0.18);
+  --amber: #C9963C;
+  --amber-soft: rgba(201, 150, 60, 0.16);
+
+  /* —— 石青(链接/指路)—— */
+  --cyan: #58A39B;
+  --cyan-soft: rgba(88, 163, 155, 0.16);
 
   --ease-out: cubic-bezier(0.2, 0.7, 0.2, 1);
   --duration-120: 120ms;
   --duration-160: 160ms;
   --duration-200: 200ms;
 
-  --shadow-ink-sm: 0 1px 2px rgba(11, 15, 20, 0.5);
-  --shadow-ink: 0 2px 8px rgba(11, 15, 20, 0.55), 0 1px 2px rgba(11, 15, 20, 0.4);
-  --shadow-ink-lg: 0 8px 24px rgba(11, 15, 20, 0.6), 0 2px 4px rgba(11, 15, 20, 0.45);
+  --shadow-ink-sm: 0 1px 2px rgba(10, 10, 8, 0.4);
+  --shadow-ink: 0 2px 8px rgba(10, 10, 8, 0.45), 0 1px 2px rgba(10, 10, 8, 0.3);
+  --shadow-ink-lg: 0 8px 24px rgba(10, 10, 8, 0.5), 0 2px 4px rgba(10, 10, 8, 0.35);
   --shadow-jade-glow: 0 0 0 3px var(--jade-soft);
 
   --gutter: 24px;
-}
-
-@media (prefers-reduced-motion: reduce) {
-  * {
-    animation-duration: 0.001ms !important;
-    transition-duration: 0.001ms !important;
-  }
 }

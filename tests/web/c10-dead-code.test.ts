@@ -62,10 +62,9 @@ describe("C10 · 不再轮询恒 null 的 legacy blackboard 端点", () => {
     expect(src).not.toMatch(/\/api\/blackboard\/\$\{/);
   });
 
-  it("components/shell/AgentPanel.tsx 不引用 `/api/blackboard/${...}` 单数端点", () => {
-    const src = stripComments(read("components/shell/AgentPanel.tsx"));
-    expect(src).not.toMatch(/\/api\/blackboard\/\$\{/);
-  });
+  // ⚠️ S-A(2026-11-17):原来这里还有一条 `AgentPanel.tsx` 的同款断言 ——
+  // 该文件已删(右栏「本项目」块退场,判据变更见 acceptance-dock.test.ts 头部),
+  // 对不存在文件的断言只会读炸,已随之移除。
 });
 
 describe("C10 · TopBar 不再渲染恒 0 的 currentUsage 承诺", () => {

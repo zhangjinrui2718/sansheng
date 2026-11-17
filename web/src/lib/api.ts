@@ -798,3 +798,29 @@ export function errorMessage(e: unknown): string {
   if (e instanceof ApiError) return e.message;
   return e instanceof Error ? e.message : String(e);
 }
+
+/**
+ * D3(2026-11-17):甲方「确认开工」—— 把项目里当前所有未确认的工作项一次性
+ * 写上确认时刻;排空器的下一次兜底轮询接手派工。返回确认了几条。
+ */
+export function confirmWorks(projectId: string): Promise<{ ok: boolean; confirmed: number }> {
+  return request<{ ok: boolean; confirmed: number }>(
+    `/projects/${encodeURIComponent(projectId)}/works/confirm`,
+    { method: "POST", body: JSON.stringify({}) },
+  );
+}
+
+/**
+ * D6(2026-11-17):甲方对「收口提议」表态 —— accept = 同意收口(写
+ * `close_consented_at`,此后 project_close 放行;同时把提议答复成 decision 工件);
+ * decline = 先不收(只答复,不写同意)。
+ */
+export function closeConsent(
+  projectId: string,
+  choice: "accept" | "decline",
+): Promise<{ ok: boolean; choice: "accept" | "decline"; decisionArtifactId: string | null }> {
+  return request<{ ok: boolean; choice: "accept" | "decline"; decisionArtifactId: string | null }>(
+    `/projects/${encodeURIComponent(projectId)}/close/consent`,
+    { method: "POST", body: JSON.stringify({ choice }) },
+  );
+}

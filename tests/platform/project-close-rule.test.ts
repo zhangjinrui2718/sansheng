@@ -101,7 +101,7 @@ function seedFinishedProject(over: {
   unconsumedAnswer?: boolean;
   openBlocker?: boolean;
 } = {}): void {
-  insertWork(db, {
+  insertWork(db, { confirmedAt: 1,
     id: "wk_root", projectId: P, parentWorkId: null, title: "整合与最终交付",
     goal: "把七份子文档整合成一份交付给甲方",
     status: over.workStatus ?? "done", assigneeAgentId: "wk", createdAt: T0, updatedAt: T0,
@@ -222,7 +222,7 @@ describe("① `close_finished_project`:八件事同时成立才叫醒业务经�
 
   it("没有已验收交付物时**不**收口 —— 「工作项全 done 而甲方手上什么都没有」不算完成", () => {
     // 这是真机上最难看的那种终局:过程全绿、交付物为零。
-    insertWork(db, {
+    insertWork(db, { confirmedAt: 1,
       id: "wk_root", projectId: P, parentWorkId: null, title: "整合与最终交付",
       goal: "g", status: "done", assigneeAgentId: "wk", createdAt: T0, updatedAt: T0,
     });
@@ -341,7 +341,7 @@ describe("④ `renderTask(review_work)`:判据在提示词里,达成目标的定
   });
 
   it("goal 为空时如实说「没有判据」,**不编一个**", () => {
-    insertWork(db, {
+    insertWork(db, { confirmedAt: 1,
       id: "wk_nogoal", projectId: P, parentWorkId: null, title: "没有写目标的那条",
       goal: "", status: "done", assigneeAgentId: "wk", createdAt: T0, updatedAt: T0,
     });
@@ -367,7 +367,7 @@ describe("⑤ `renderTask(integrate)`:根的 goal 决定要一份还是几份", 
     // 夹具里根已经有交付物 ⇒ 不成立;直接造一个没有的
     expect(todo, "根上已有交付物 ⇒ integrate 不成立(先自检)").toBeUndefined();
 
-    insertWork(db, {
+    insertWork(db, { confirmedAt: 1,
       id: "wk_fresh", projectId: P, parentWorkId: null, title: "整合与最终交付",
       goal: "交一份整合后的完整文档",
       status: "done", assigneeAgentId: "wk", createdAt: T0 + 20, updatedAt: T0 + 20,

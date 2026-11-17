@@ -333,9 +333,7 @@ export function ProgressTimeline({
     // 没有环节也没有工件 ⇒ 不画一张空的坐标系(空轴会被读成「有一条时间线,只是没数据」)
     return (
       <div>
-        <EmptyState>
-          这个项目还没有环节,也没有工件 —— 推进图要等第一条工作项或第一件工件落下来才有东西可画。
-        </EmptyState>
+        <EmptyState>暂无环节与工件</EmptyState>
         <TimelineLegend runtimeUnknown={unknown} />
       </div>
     );
@@ -985,7 +983,7 @@ export function ArtifactRelationGraph({
       helpId="artifact.graph"
     >
       {artifacts.length === 0 ? (
-        <EmptyState>这个项目还没有工件 —— 关系图要等第一件产出落库才有节点。</EmptyState>
+        <EmptyState>暂无工件</EmptyState>
       ) : (
         <div className="flex flex-col">
           <div className="ss-dag" style={{ maxHeight: 620 }}>
@@ -1152,9 +1150,7 @@ export function DependencyGraph({
       helpId="work.deps"
     >
       {works.length === 0 ? (
-        <EmptyState>
-          这个项目还没有工作项 —— 依赖关系要等项目经理拆出第一条工作项才有节点。
-        </EmptyState>
+        <EmptyState>暂无工作项</EmptyState>
       ) : (
         // ⚠️ 这里**只有** `WorkDag`,没有 `<Disclosure>` / `<details>` —— 展开是
         // 用户明确要求的(「不要默认收起」)。别顺手把它折回去。
@@ -1656,7 +1652,7 @@ export function ArtifactsBody({
     <div className="grid gap-4">
       {works.length > 0 &&
         (selectedWork === null ? (
-          <EmptyState>点一个环节看它的产出。</EmptyState>
+          <EmptyState>未选环节</EmptyState>
         ) : (
           <WorkNodePanel
             work={selectedWork}
@@ -1690,25 +1686,34 @@ export function ArtifactsBody({
   );
 }
 
-// ── 页面正文:①② + ③④⑤(纯 props)───────────────────────────────
+// ── 页面正文:一个画布 + 视图切换 + ③④⑤(纯 props)────────────────
 
 /**
- * 本页正文 = **① 依赖关系图 + ② 推进图 + ③④⑤**。
+ * ⚠️ **S-D(2026-11-17 减法):三张图收成**一个画布 + 视图切换**。**
  *
- * 抽成纯 props 组件、而不是写死在 `WorksPage` 的 JSX 里,是为了让测试渲染的
- * 就是页面真正渲染的那棵树 —— 否则「点 ② 上的条,③ 面板跟着切」这类判据只能在
- * 测试自己拼的组合上验证,页面真接线错了也不会红。
+ * v2 之前本页把「工件关系图 + 推进图」**上下叠放**(2026-10-07 用户定的顺序:
+ * 「依赖关系图不默认收起、放最上面」),`DependencyGraph`(节点=环节的依赖图)则
+ * 是一个**没有页面读者**的导出。v3 的裁决是「切换是**替换**,不是叠放」:
+ * 默认视图 = **推进**;依赖图与工件关系图一次只出现一张。
+ * ⇒ 2026-10-07 的顺序判据随之退场(见 `tests/web/artifact-timeline.test.ts` 头部)。
  *
- * ⚠️ **顺序就是用户定的那一句**(2026-10-07 原话:「工作项中,依赖关系图不要默认
- * 收起,放在最上面,这个页面的信息依次是:依赖关系图、推进图、选中的环节详情」):
- * ① `DependencyGraph` → ② 推进图 `Section` → ③④⑤ `ArtifactsBody`。
- * 别把 ① 挪到后面 —— 除了用户的要求,`nodeButton()` 的定位方式也依赖「节点排在面板
- * 之前」(见 `ArtifactsBody` 的注释)。
- *
- * ② 与 ③ 的选中态来自**同一次** `resolveSelectedWorkId(...)` 调用;① 内部另调一次
- * 同一个纯函数(`DependencyGraph` 保持纯 props,不必把布局从外面塞进去 —— 同一份
- * `works` / `artifacts` / `picked` 进同一个纯函数,结果必然相同)。
+ * ⚠️ `view` / `onViewChange` 仍是**纯 props**:`WorksPage` 把它接在地址参数
+ * `?view=` 上(默认值不写进地址 —— 深链接保持干净);测试可以直接渲染任意视图。
  */
+export type WorksView = "timeline" | "deps" | "relations";
+
+export const WORKS_VIEWS: ReadonlyArray<{ key: WorksView; label: string }> = [
+  { key: "timeline", label: "推进" },
+  { key: "deps", label: "依赖" },
+  { key: "relations", label: "工件关系" },
+];
+
+export const WORKS_VIEW_DEFAULT: WorksView = "timeline";
+
+/** 地址参数 → 视图(认不得的值回落默认,不抛错 —— 地址是坐标,不是判据)。 */
+export const isWorksView = (v: string | null): WorksView =>
+  WORKS_VIEWS.some((w) => w.key === v) ? (v as WorksView) : WORKS_VIEW_DEFAULT;
+
 export function ArtifactsScreen({
   works,
   artifacts,
@@ -1719,6 +1724,8 @@ export function ArtifactsScreen({
   onPick,
   openId,
   onToggleDetail,
+  view,
+  onViewChange,
 }: {
   works: readonly WorkView[];
   artifacts: readonly ArtifactView[];
@@ -1731,7 +1738,11 @@ export function ArtifactsScreen({
   onPick: (workId: string | null) => void;
   openId: string | null;
   onToggleDetail: (artifactId: string) => void;
+  /** 当前视图(S-D);缺省 = 推进。 */
+  view?: WorksView;
+  onViewChange?: (v: WorksView) => void;
 }) {
+  const current: WorksView = view ?? WORKS_VIEW_DEFAULT;
   const selectedId = resolveSelectedWorkId(layoutWorkDag(works, artifacts), picked);
   /**
    * 抽屉里那份工件 —— **从本次列表里找**,找不到就**不给事实条**。
@@ -1743,31 +1754,58 @@ export function ArtifactsScreen({
   const inspected = openId !== null ? artifacts.find((a) => a.id === openId) ?? null : null;
   return (
     <div className="grid gap-4">
-      {/* ① 工件关系图 —— **第一块,而且是展开的**。
-          2026-10-06 用户裁决:「我之前说的 dag,其实是想要工件的 dag」,
-          所以它**取代**了原先那块「节点 = 环节」的依赖关系图。 */}
-      <ArtifactRelationGraph
-        artifacts={artifacts}
-        works={works}
-        openId={openId}
-        onOpenArtifact={onToggleDetail}
-      />
+      <div className="flex items-center gap-2" data-role="works-view">
+        {WORKS_VIEWS.map((v) => (
+          <button
+            key={v.key}
+            type="button"
+            aria-pressed={current === v.key}
+            onClick={() => onViewChange?.(v.key)}
+            className="ss-pill"
+            data-tone={current === v.key ? "jade" : "bone"}
+            style={{ cursor: "pointer" }}
+          >
+            {v.label}
+          </button>
+        ))}
+      </div>
 
-      <Section
-        title="推进图"
-        hint={`${works.length} 条工作项 · ${artifacts.length} 件工件`}
-        helpId="timeline"
-      >
-        <ProgressTimeline
+      {current === "timeline" && (
+        <Section
+          title="推进图"
+          hint={`${works.length} 条工作项 · ${artifacts.length} 件工件`}
+          helpId="timeline"
+        >
+          <ProgressTimeline
+            works={works}
+            artifacts={artifacts}
+            live={live}
+            now={now}
+            selectedId={selectedId}
+            onSelectWork={onPick}
+            onOpenArtifact={onToggleDetail}
+          />
+        </Section>
+      )}
+
+      {current === "deps" && (
+        <DependencyGraph
           works={works}
           artifacts={artifacts}
           live={live}
-          now={now}
-          selectedId={selectedId}
-          onSelectWork={onPick}
+          picked={picked}
+          onPick={onPick}
+        />
+      )}
+
+      {current === "relations" && (
+        <ArtifactRelationGraph
+          artifacts={artifacts}
+          works={works}
+          openId={openId}
           onOpenArtifact={onToggleDetail}
         />
-      </Section>
+      )}
 
       <ArtifactsBody
         works={works}
@@ -1842,6 +1880,15 @@ export function WorksPage() {
   const picked: string | null | undefined = paramOf(loc, "work") ?? undefined;
   const setPicked = useCallback(
     (id: string | null | undefined) => setParam("work", id ?? null),
+    [setParam],
+  );
+  /**
+   * 当前视图(S-D):地址里的 `?view=`,默认值(推进)**不写进地址** ——
+   * 绝大多数时候的地址保持 `#/works?work=…` 的干净形状。
+   */
+  const view = isWorksView(paramOf(loc, "view"));
+  const setView = useCallback(
+    (v: WorksView) => setParam("view", v === WORKS_VIEW_DEFAULT ? null : v),
     [setParam],
   );
   /** 展开了详情的那条工件 id(地址里的 `artifact`,`null` = 都收起)。 */
@@ -1989,7 +2036,7 @@ export function WorksPage() {
       />
 
       {scope === null ? (
-        <EmptyState>先在「对话」页的左栏选一个项目,或在上面的选择器里挑一个。</EmptyState>
+        <EmptyState>未选项目</EmptyState>
       ) : (
         <DataState
           what="工作项与工件"
@@ -1999,9 +2046,7 @@ export function WorksPage() {
         >
           {() => (
             nothingYet ? (
-              <EmptyState>
-                这个项目还没有工作项,也没有工件。项目跑起来后,环节与工件会落在这里。
-              </EmptyState>
+              <EmptyState>暂无环节与工件</EmptyState>
             ) : (
               <ArtifactsScreen
           works={works}
@@ -2015,6 +2060,8 @@ export function WorksPage() {
           onPick={setPicked}
           openId={openId}
           onToggleDetail={(id) => setOpenId((cur) => (cur === id ? null : id))}
+          view={view}
+          onViewChange={setView}
         />
             )
           )}

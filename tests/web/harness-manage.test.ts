@@ -257,7 +257,7 @@ describe("③ `?role=` 的读法:点名了精确找,找不到不编", () => {
     const html = renderToStaticMarkup(
       createElement(RoleDetailPane, detailProps({ role: null, requested: "nope" })),
     );
-    expect(visible(html)).toContain("没有角色 nope");
+    expect(visible(html)).toContain("没有这个角色");
     expect(visible(html), "页面上画出了别的角色 —— 静默替换了地址点名的对象").not.toContain("业务经理");
   });
 
@@ -267,7 +267,7 @@ describe("③ `?role=` 的读法:点名了精确找,找不到不编", () => {
     const html = renderToStaticMarkup(
       createElement(RoleDetailPane, detailProps({ role: null, view: empty, requested: null })),
     );
-    expect(visible(html)).toContain("没有任何角色");
+    expect(visible(html)).toContain("没有这个角色");
   });
 });
 

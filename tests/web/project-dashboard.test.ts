@@ -33,7 +33,6 @@ const read = (rel: string): string => readFileSync(join(here, "..", "..", rel), 
 const projectDetail = read("web/src/routes/ProjectDetail.tsx");
 const dashboard = read("web/src/lib/dashboard.ts");
 const chatRightRail = read("web/src/components/shell/ChatRightRail.tsx");
-const agentPanel = read("web/src/components/shell/AgentPanel.tsx");
 const acceptanceDock = read("web/src/components/client/AcceptanceDock.tsx");
 const clientQuestionDock = read("web/src/components/client/ClientQuestionDock.tsx");
 
@@ -310,9 +309,9 @@ describe("接线:项目页降级为仪表盘", () => {
     expect(page).toContain("nextThing(");
   });
 
-  it("⚠️ 右栏四个文件里 useProjectDetail( 仍只出现一次", () => {
+  it("⚠️ 右栏三个文件里 useProjectDetail( 仍只出现一次(S-A 后四文件变三文件)", () => {
     // 三个 hook 实例 = 三份 loading = 「一处写加载中、另一处写没有」。
-    const files = [chatRightRail, agentPanel, acceptanceDock, clientQuestionDock];
+    const files = [chatRightRail, acceptanceDock, clientQuestionDock];
     const count = files.filter((f) => f.includes("useProjectDetail(")).length;
     expect(count).toBe(1);
   });

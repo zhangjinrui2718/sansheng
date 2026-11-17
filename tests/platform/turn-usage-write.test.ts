@@ -62,7 +62,7 @@ beforeEach(() => {
   insertProject(db, { id: "p2", name: "项目二", client: "乙", goal: "g", status: "active", createdAt: 1 });
   addMember(db, "p1", "wk", 1);
   addMember(db, "p2", "wk", 1);
-  insertWork(db, {
+  insertWork(db, { confirmedAt: 1,
     id: "w1", projectId: "p1", parentWorkId: null, title: "活", goal: "g",
     status: "in_progress", assigneeAgentId: "wk", createdAt: 1, updatedAt: 1,
   });

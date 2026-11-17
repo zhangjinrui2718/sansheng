@@ -27,21 +27,25 @@
  *     通道」——输入框禁用与屏幕上显示的东西因此仍然是**同一个判据**
  *     (`channelOf`),这正是 bug A 那次修好的一半,不许在这里另立一份。
  */
-import { useEffect, useMemo, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
 import { inFlightTurns, useChatStore } from "@/stores/chat";
 import { useSettingsStore, activeProviderOf } from "@/stores/settings";
 import { MessageList } from "./MessageList";
 import { ChatComposer } from "./ChatComposer";
+import { PlanConfirmCard } from "./PlanConfirmCard";
 import { Pill, RedNote } from "@/components/ui/primitives";
-import { projectStatusLabel, projectStatusTone } from "@/lib/vocab";
+import { projectLocation } from "@/lib/entityMeta";
+import { toHash } from "@/lib/route";
 import {
   channelActivityOf,
   channelContextOf,
   interruptAvailableOf,
+  projectNowOf,
   remoteClaimsRunning,
   REMOTE_WATCH_INTERVAL_MS,
   surfaceStatusOf,
   useHarnessRoles,
+  useProjectLive,
   useProjectMembers,
   type SurfaceStatus,
 } from "@/lib/data";
@@ -54,8 +58,6 @@ export function ChatSurface() {
   // 读到「新快照」。
   const inFlight = useChatStore((s) => s.inFlight);
   const inFlightOrder = useChatStore((s) => s.inFlightOrder);
-  const provider = useChatStore((s) => s.provider);
-  const modelId = useChatStore((s) => s.modelId);
   const projectId = useChatStore((s) => s.projectId);
   const intakeActive = useChatStore((s) => s.intakeActive);
   const projects = useChatStore((s) => s.projects);
@@ -117,7 +119,10 @@ export function ChatSurface() {
     if (projectId === null || sessionId === null) return null;
     const hit = (sessionsByProject[projectId] ?? []).find((s) => s.id === sessionId);
     if (hit === undefined) return null;
-    return hit.title ?? (hit.kind === "main" ? "主对话" : "对话");
+    // ⚠️ S-G(2026-11-17):主对话不标线名 —— 常态不上屏;只有 thread(交付线 /
+    // 自建线)才是真定位信息。
+    if (hit.kind === "main") return null;
+    return hit.title ?? "对话";
   }, [projectId, sessionId, sessionsByProject]);
   // 服务端那份「此刻有回合在跑」—— 本地 WS 状态在刷新/切换之后会归零,
   // 那一份是**唯一**还能说出「它还在跑」的东西(见 `surfaceStatusOf` 的第三个参数)。
@@ -202,6 +207,30 @@ export function ChatSurface() {
   const reason: "streaming" | "noContext" | "noKey" | undefined =
     clientBusy ? "streaming" : !hasContext ? "noContext" : !hasKey ? "noKey" : undefined;
 
+  // ── D2:「项目此刻」一行(v3,2026-11-17)──────────────────────────
+  // 数据两个来源都**不新增请求路径**:live 走 `useProjectLive` 慢轮询(5s),
+  // 计数读左栏同一份 `store.projects`(WS 事件 bump `projectsRevision` 时它会重拉)。
+  // 判据在 `lib/data.ts` 的 `projectNowOf`(零态 ⇒ null,整行不渲染;读不到 ⇒ 一行
+  // 「运行态读不到」,不渲染成「没人干活」)。
+  const liveNow = useProjectLive(projectId, { pollMs: 5000 });
+  const nameOf = useCallback(
+    (agentId: string) => members.data.find((m) => m.id === agentId)?.displayName || agentId,
+    [members.data],
+  );
+  const nowLine = useMemo(() => {
+    if (intakeActive || projectId === null || project === undefined || project === null) return null;
+    return projectNowOf({
+      projectId,
+      live: liveNow.data,
+      liveError: liveNow.error,
+      pendingQuestions: project.counts.pendingQuestions,
+      pendingAcceptance: project.counts.pendingAcceptance,
+      openBlockers: project.counts.openBlockers,
+      now: Date.now(),
+      nameOf,
+    });
+  }, [intakeActive, project, projectId, liveNow.data, liveNow.error, nameOf]);
+
   return (
     <section className="sansheng-card overflow-hidden flex flex-col" style={{ minHeight: 0 }}>
       <div
@@ -213,9 +242,11 @@ export function ChatSurface() {
             {intakeActive ? "接待 · 业务经理" : project ? project.name : "未选项目"}
           </span>
           {/*
-            当前在**哪条线**。页签删掉之后,左栏高亮是唯一的定位手段,而对话页
-            正文里看不出区别 —— 在 A 线和 B 线说的内容长得一样。标题可能是一份
-            **交付物**的标题(后端读面兜底),所以不限于甲方起的名。
+            当前在**哪条线**。⚠️ S-G(2026-11-17,减法):**主对话不再标线名** ——
+            主对话是常态,标出来是常驻噪音;只有**交付线/自建线**(thread)才标,
+            因为在 A 线和 B 线说的内容长得一样,那是真定位信息。页签删掉之后,
+            左栏高亮与这里的线名是同一件事的两处读面,必须来自同一个 store 字段。
+            标题可能是一份**交付物**的标题(后端读面兜底),所以不限于甲方起的名。
           */}
           {!intakeActive && currentLine !== null && (
             <>
@@ -229,7 +260,7 @@ export function ChatSurface() {
               </span>
             </>
           )}
-          {intakeActive ? (
+          {intakeActive && (
             <>
               <Pill tone="jade" title="第一个项目之前的那段对话:业务经理与你对齐诉求,谈拢后由他立项">
                 谈新项目
@@ -248,21 +279,17 @@ export function ChatSurface() {
                 ↻ 重新谈
               </button>
             </>
-          ) : (
-            project && (
-              <Pill tone={projectStatusTone(project.status)}>{projectStatusLabel(project.status)}</Pill>
-            )
           )}
-          <span
-            className="sansheng-text-mute truncate"
-            style={{ fontSize: 11 }}
-            title={provider && modelId ? `${provider} / ${modelId}` : "模型信息来自 WS ready 事件"}
-          >
-            {provider && modelId ? `${provider} / ${modelId}` : "未连接"}
-          </span>
+          {/* ⚠️ S-G(2026-11-17,减法):项目状态 pill 与「供应商/模型」已从头部移除 ——
+              前者与左栏状态点、项目页重复;后者顶栏健康区已有(同一份 WS ready)。 */}
         </div>
         <div className="flex items-center gap-2 flex-none ss-meta">
-          <SurfaceStatusIndicator status={surface} />
+          {/* ⚠️ S-G:五态里只有 **推演中 / 出错** 上屏 —— 就绪/连接中/内部推进中
+              是常态或由别处表达(连接态在 composer 的连接行;内部在跑 V2 的
+              「项目此刻」行会接)。常态不上屏,出事才出声。 */}
+          {(surface === "streaming" || surface === "error") && (
+            <SurfaceStatusIndicator status={surface} />
+          )}
           {/* 中断按钮的可见性跟「**能不能停**」走,不跟输入框的可用性走 ——
               否则「内部在跑」时既解除了输入框禁用、又撤掉了唯一的中断入口
               (Esc 那条路要求输入框处于禁用态,见 ChatComposer)。
@@ -288,6 +315,64 @@ export function ChatSurface() {
           )}
         </div>
       </div>
+
+      {/* ── D3:「计划」卡(硬档,2026-11-17)── 有未确认工作项才出现;确认之前
+          派工门拒绝它们,一个 token 都不花。开关判据是服务端算好的计数。 */}
+      {!intakeActive && projectId !== null && project != null && project.counts.unconfirmedWorks > 0 && (
+        <PlanConfirmCard
+          projectId={projectId}
+          goal={project.goal}
+          acceptanceCriteria={project.acceptanceCriteria}
+          onConfirmed={() => void useChatStore.getState().loadProjects()}
+        />
+      )}
+
+      {/* ── D2:「项目此刻」(v3,2026-11-17)── 零态整行不渲染(见 projectNowOf)。 */}
+      {nowLine !== null && (
+        <div
+          className="flex-none flex items-center flex-wrap px-4 py-1.5"
+          style={{
+            gap: "2px 8px",
+            borderBottom: "1px solid var(--ink-3)",
+            background: "var(--ink-2)",
+            fontSize: 12,
+          }}
+          data-role="project-now"
+        >
+          {nowLine.unreadable ? (
+            <span className="ss-meta">
+              运行态读不到
+              {projectId !== null && (
+                <>
+                  {"　"}
+                  <a
+                    href={toHash(projectLocation(projectId))}
+                    style={{ color: "var(--cyan)", textDecoration: "underline dotted" }}
+                  >
+                    看详情
+                  </a>
+                </>
+              )}
+            </span>
+          ) : (
+            nowLine.segments.map((s) => (
+              <a
+                key={`${s.kind}:${s.label}`}
+                href={s.href}
+                title={s.title}
+                style={{
+                  color: "var(--bone-dim)",
+                  textDecoration: "underline dotted",
+                  textUnderlineOffset: 3,
+                  padding: "0 6px",
+                }}
+              >
+                {s.label}
+              </a>
+            ))
+          )}
+        </div>
+      )}
 
       {/* ⚠️ 原来这里有一整行 `<SessionPicker />`(对话线的横向页签)。它已移到
           左栏做成**二级目录**(见 `HistoryRail.tsx` 的文件头):横向页签在 9 条线

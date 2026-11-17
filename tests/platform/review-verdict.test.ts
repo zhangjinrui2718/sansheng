@@ -62,7 +62,7 @@ beforeEach(() => {
   ensureProjectOrg(db, "p1", T0);
   project = loadProjectForAuthz(db, "p1")!;
   // 待审的产出:done + review_state=pending(质检那条待办的判据)
-  insertWork(db, {
+  insertWork(db, { confirmedAt: 1,
     id: "W0", projectId: "p1", parentWorkId: null, title: "整合与最终交付",
     goal: "收敛为一份完整方案文档", status: "done", assigneeAgentId: "wk",
     createdAt: T0, updatedAt: T0,
@@ -233,7 +233,7 @@ describe("④ 错误必须响亮(8-F:回灌允许集合)", () => {
       id: "p2", name: "别的", client: "x", goal: "y", status: "active", createdAt: T0,
     });
     ensureProjectOrg(db, "p2", T0);
-    insertWork(db, {
+    insertWork(db, { confirmedAt: 1,
       id: "W_other", projectId: "p2", parentWorkId: null, title: "t", goal: "g",
       status: "done", assigneeAgentId: "wk", createdAt: T0, updatedAt: T0,
     });

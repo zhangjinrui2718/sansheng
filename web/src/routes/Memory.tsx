@@ -123,7 +123,17 @@ const FILTER_BUTTON_STYLE = {
   cursor: "pointer",
 } as const;
 
+/** S-F:三段的分段控件(画像 / 碎片 / 语料)。量在页头 StatStrip 常显,这里只有名字。 */
+type MemoryTab = "profile" | "fragments" | "corpus";
+
+const MEMORY_TABS: ReadonlyArray<{ key: MemoryTab; label: string }> = [
+  { key: "profile", label: "画像" },
+  { key: "fragments", label: "碎片" },
+  { key: "corpus", label: "语料" },
+];
+
 export function MemoryPage() {
+  const [tab, setTab] = useState<MemoryTab>("profile");
   const [fragments, setFragments] = useState<MemoryFragmentView[]>([]);
   const [entries, setEntries] = useState<Record<string, unknown> | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -267,8 +277,30 @@ export function MemoryPage() {
 
       {error !== null ? <ReadError error={error} variant="card" /> : null}
 
+      {/*
+        S-F(2026-11-17 减法):三段 → **分段控件**(画像 / 碎片 / 语料),一次看一段。
+        三段是两套东西(画像与碎片 = 关于用户;语料 = 关于项目,平台索引、agent 只读),
+        平铺在一只屏上互相顶走;计数字段在页头 StatStrip 里**常显**,切到哪段都能看见量。
+      */}
+      <div className="flex items-center gap-2" data-role="memory-tabs">
+        {MEMORY_TABS.map((t) => (
+          <button
+            key={t.key}
+            type="button"
+            aria-pressed={tab === t.key}
+            onClick={() => setTab(t.key)}
+            className="ss-pill"
+            data-tone={tab === t.key ? "jade" : "bone"}
+            style={{ cursor: "pointer" }}
+          >
+            {t.label}
+          </button>
+        ))}
+      </div>
+
       {/* 「结构化摘要 · 与碎片互补」删了(2026-10-26):它解释的是**这一页的布局**,
           而两块的标题已经说完了(「用户画像」/「碎片」)。**标题说得清的,不要再解释一遍**。 */}
+      {tab === "profile" && (
       <Section title="用户画像" count={profileKeys.length}>
         <DataState
           what="用户画像"
@@ -278,7 +310,7 @@ export function MemoryPage() {
         >
           {() => (
             profileKeys.length === 0 ? (
-              <EmptyState>暂无用户画像 —— 还没沉淀出「用户是谁」这一层。</EmptyState>
+              <EmptyState>暂无用户画像</EmptyState>
             ) : (
               <div className="grid gap-1.5">
             {profileKeys.map((key) => {
@@ -317,7 +349,9 @@ export function MemoryPage() {
           )}
         </DataState>
       </Section>
+      )}
 
+      {tab === "fragments" && (
       <Section title="碎片" count={fragments.length}>
         <DataState
           what="记忆碎片"
@@ -366,7 +400,9 @@ export function MemoryPage() {
           )}
         </DataState>
       </Section>
+      )}
 
+      {tab === "corpus" && (
       <Section
         title="知识语料"
         count={knowledge !== null && knowledge.runtime === "ok" ? knowledge.chunks : undefined}
@@ -552,6 +588,7 @@ export function MemoryPage() {
           }}
         </DataState>
       </Section>
+      )}
     </div>
   );
 }

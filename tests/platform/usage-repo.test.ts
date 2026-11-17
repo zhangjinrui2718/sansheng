@@ -197,7 +197,7 @@ describe("usage · 聚合(合计 / 今日 / 按角色 / 按天)", () => {
 
   /** 造一条工作项(`turn_usage.work_id` 有外键 ⇒ 账不能凭空挂在 id 上)。 */
   const mkWork = (id: string): void => {
-    insertWork(db, {
+    insertWork(db, { confirmedAt: 1,
       id, projectId: "p1", parentWorkId: null, title: `活 ${id}`, goal: "g",
       status: "in_progress", assigneeAgentId: "wk", createdAt: 1, updatedAt: 1,
     });
@@ -335,7 +335,7 @@ describe("usage · 删数据时三条外键的动作(018 各写了一段理由)"
   });
 
   it("`work_id` 是 **ON DELETE SET NULL**:删工作项不删账,只把工作项那一格置空", () => {
-    insertWork(db, {
+    insertWork(db, { confirmedAt: 1,
       id: "w_x", projectId: "p1", parentWorkId: null, title: "活", goal: "g",
       status: "in_progress", assigneeAgentId: "wk", createdAt: 1, updatedAt: 1,
     });

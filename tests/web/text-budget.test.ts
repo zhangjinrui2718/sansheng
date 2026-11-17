@@ -65,12 +65,24 @@ const BASELINE: Record<string, number> = {
   "components/chat/ChatComposer.tsx": 136,
   "components/chat/ChatSurface.tsx": 317,
   "components/chat/Markdown.tsx": 0,
-  "components/chat/MessageList.tsx": 103,
+  // 2026-11-17(D3):「计划」卡 —— 新 UI(目标/判据摘要 + 拆解清单 + 确认开工),
+  // 逐句斟酌过;对照的减量:AgentPanel -52、ChatRightRail -9、HistoryRail -19、
+  // ChatSurface -14、ProjectDetail -5(HistoryRail/ChatSurface/ProjectDetail 见各自条目)。
+  "components/chat/PlanConfirmCard.tsx": 117,
+    // 2026-11-17(文案裁决):103 → 128(+25,HiddenNotice 的落点指引移进悬停 ——
+  // 屏上散文退场,指针保留在 title)
+  "components/chat/MessageList.tsx": 128,
   "components/chat/ThinkingBlock.tsx": 25,
   "components/chat/ToolCallCard.tsx": 0,
-  "components/client/AcceptanceDock.tsx": 97,
-  "components/client/ClientQuestionCard.tsx": 91,
-  "components/client/ClientQuestionDock.tsx": 125,
+  // 2026-11-17(D5):97 → 115(+18,验收卡的「查看」入口 —— 跳工件抽屉读正文;
+  // 有了它,右栏表态不再需要先去工作项页找那件货)。
+  "components/client/AcceptanceDock.tsx": 115,
+  // 2026-11-17(D6):91 → 202(+111,收口提议卡 —— intent="close" 的提问渲染成
+  // 「同意收口 / 先不收」两个固定动作,替代自由文本框;这是新分支,不是原卡片的加厚)。
+  "components/client/ClientQuestionCard.tsx": 202,
+  // 2026-11-17(F3):125 → 151(+26,「已答复 · 业务经理整理中」一行 + 判据注释
+  // 进了 title;对照 S-A 的删减净下降)。
+  "components/client/ClientQuestionDock.tsx": 151,
   "components/dashboard/DashboardCards.tsx": 17,
   "components/deliverable/CodeService.tsx": 484,
   "components/deliverable/ContentDriftNote.tsx": 30,
@@ -101,11 +113,14 @@ const BASELINE: Record<string, number> = {
   // 空态 17 + kind 标签 8 + `what` 4 + 「审计聚合,非结构化遥测」一句 16)。
   // 新功能计入基线,不是放水 —— 那一句注释性文案已压到最短。
   "components/settings/SettingsPanel.tsx": 397,
-  "components/shell/AgentPanel.tsx": 52,
-  "components/shell/ChatRightRail.tsx": 9,
+  // 2026-11-17(S-A):「本项目」块删除 —— AgentPanel.tsx(52)整个移除;
+  // ChatRightRail 9 → 0(右栏不再有任何屏上文案)。净 -61。
+  "components/shell/ChatRightRail.tsx": 0,
   "components/shell/EntityInspector.tsx": 8,
   "components/shell/HistoryRail.tsx": 255,
-  "components/shell/TopBar.tsx": 37,
+  // 2026-11-17(F1):37 → 56(+19,Σ 的口径悬停 —— 「本次连接以来;权威值在项目页成本段」,
+  // 防止把会话内合计读成全历史)。
+  "components/shell/TopBar.tsx": 56,
   "components/ui/DataState.tsx": 14,
   "components/ui/Help.tsx": 12,
   "components/ui/MetadataStrip.tsx": 0,
@@ -114,10 +129,15 @@ const BASELINE: Record<string, number> = {
   "lib/appSocket.ts": 0,
   "lib/artifactGraph.ts": 274,
   "lib/dashboard.ts": 357,
-  "lib/data.ts": 82,
+  // 2026-11-17(D2):82 → 169(+87,「项目此刻」的片段文案生成器 projectNowOf ——
+  // 「X 在跑「环节」(N 分钟)/ 在等你 N / 阻塞 N / 还有 N 个角色在跑 / 运行态读不到」;
+  // 判据与屏上措辞同层(与 orgState/liveHeadline 同一条先例),词表拆出去会变成两处)。
+  "lib/data.ts": 169,
   "lib/deepLink.ts": 0,
   "lib/deliverable.ts": 2,
-  "lib/entityMeta.ts": 143,
+    // 2026-11-17(D7):143 → 156(+13,环节面板的「质检 · 待质检」一格 ——
+  // 只在 review_state = pending 时出现,none/done 是常态不上屏)。
+  "lib/entityMeta.ts": 156,
   "lib/knowledgeState.ts": 210,
   "lib/markdown.ts": 0,
   "lib/orgState.ts": 345,
@@ -132,9 +152,13 @@ const BASELINE: Record<string, number> = {
   "lib/ws.ts": 0,
   "main.tsx": 0,
   "routes/Members.tsx": 927,
-  "routes/Memory.tsx": 358,
+  // 2026-11-17(S-F):358 → 364(+6,分段控件的三个标签「画像/碎片/语料」——
+  // 三段收成分段控件后,标签是新 UI 的必需字;总量靠 S-A/S-C 的删减净下降)。
+  "routes/Memory.tsx": 364,
   "routes/ProjectDetail.tsx": 678,
-  "routes/Works.tsx": 1527,
+  // 2026-11-17(S-D):1527 → 1535(+8,视图切换的三个标签「推进/依赖/工件关系」——
+  // 三图收成一画布后,切换标签是新 UI 的必需字;叠放的段落标题随之消失)。
+  "routes/Works.tsx": 1535,
   "stores/chat.ts": 111,
   "stores/settings.ts": 0,
 };
@@ -162,7 +186,14 @@ describe("可见文字预算:屏上的中文只许减不许增", () => {
     // 2026-11-14:9,346 → 9,591(+245,全部来自「Harness 管理」:新页面 +139,
     // 共享 ToolSurface 把旧悬停里的路径 / allow / deny 摆上看得见的地方 +106;
     // 其余都是搬家(RoleHarness −719 在四个新文件里原样记账),明细见 BASELINE)
-    expect(total).toBeLessThanOrEqual(9704);
+    // 2026-11-17(v3 波):9,704 → 10,011 → **9,425(文案裁决:界面只留功能名称)** ——
+    // 空态名称化(23 处)、卡片脚注判据句退场(「这里点了才算数」「答案会落成」
+    // 「每项完成后…」「确认之前不派工」)、channelNoteText 名称+计数化、
+    // CodeService 五条 hint 名称式。
+    // ⚠️ v3 §1.6 的 ≤7,500 目标**仍未达标**(差 1,925)—— 剩余大头是记录卡内的
+    // why/行动行(组织推进的呈现判据,2026-10-07 兜底裁决的呈现面)与 CodeService
+    // 技术事实;再压需要逐条裁决,留作下一波。
+    expect(total).toBeLessThanOrEqual(9425);
   });
 
   it("② 基线表覆盖所有文件(不许有文件悄悄逃出仪器)", () => {

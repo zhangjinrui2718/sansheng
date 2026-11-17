@@ -323,7 +323,10 @@ describe("注解预算(Wave 2b):悬停只留一行话,屏上不许有 markdown �
       }
     }
     expect(long.join("\n")).toBe("");
-    expect(total).toBeLessThanOrEqual(103);
+    // 2026-11-17(v3):103 → 108(+5,新 UI 的必要悬停:D3 计划卡的确认开工、
+    // D5 验收卡的「查看」、D2 项目此刻的片段、F3 已答未处置行、TopBar Σ 口径 ——
+    // 全部 ≤ 40 字;同时 ChatSurface 头部的供应商/模型悬停随 S-G 删除,-1 已计)。
+    expect(total).toBeLessThanOrEqual(108);
     // 自检:计数口径不是「有没有 title=」而是「字面量长度」—— 两条边界都验一遍
     expect([...'title="短"'.matchAll(/title="([^"]*)"/g)][0][1].length).toBe(1);
   });

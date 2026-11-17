@@ -86,7 +86,7 @@ function mkWork(): WorkRow {
   const w: WorkRow = {
     id: `w_${++seq}`, projectId: "p1", parentWorkId: null,
     title: "调研路线 A", goal: "写出对比结论",
-    status: "open", assigneeAgentId: "wk", createdAt: T0, updatedAt: T0,
+    status: "open", confirmedAt: 1, assigneeAgentId: "wk", createdAt: T0, updatedAt: T0,
   };
   insertWork(db, w);
   return w;

@@ -79,7 +79,7 @@ afterEach(() => {
 });
 
 function addWork(id: string, status: "open" | "in_progress" | "done" | "failed"): void {
-  insertWork(db, {
+  insertWork(db, { confirmedAt: 1,
     id, projectId: "p1", title: `工作项 ${id}`, goal: "做点事",
     status, assigneeAgentId: "wk", createdAt: T0, updatedAt: T0,
   });

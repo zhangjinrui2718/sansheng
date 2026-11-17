@@ -1067,7 +1067,7 @@ export function MembersPage() {
         <PageHeader
           title="成员"
         />
-        <EmptyState>先在「对话」页的左栏选一个项目。</EmptyState>
+        <EmptyState>未选项目</EmptyState>
       </div>
     );
   }
@@ -1088,7 +1088,7 @@ export function MembersPage() {
       >
         {(rows) =>
           rows.length === 0 ? (
-            <EmptyState>这个项目还没有成员。</EmptyState>
+            <EmptyState>暂无成员</EmptyState>
           ) : (
         <>
           {/* ── 按成员分栏:一次只看一个人(照 harness 的组织方式)─────
@@ -1161,7 +1161,7 @@ export function MembersPage() {
         <Section
           title="不在成员表里的发言"
           count={strangers.length}
-          hint="作者不在成员表里 · 留着不静默丢证据"
+          hint="不在成员表"
         >
           <Disclosure summary={`展开查看 · ${strangers.length} 组`}>
             <div className="grid gap-2">

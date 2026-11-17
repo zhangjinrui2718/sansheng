@@ -36,6 +36,8 @@ import { useMemo } from "react";
 import { DeliveryVerdictActions } from "@/components/deliverable/DeliveryVerdictActions";
 import { Pill } from "@/components/ui/primitives";
 import { DataState, remoteOf } from "@/components/ui/DataState";
+import { artifactLocation } from "@/lib/entityMeta";
+import { toHash } from "@/lib/route";
 import { deliverableTypeLabel, deliverableTypeTone, fmtTime } from "@/lib/vocab";
 import type { ProjectDetailState } from "@/lib/data";
 import type { AwaitingAcceptanceView } from "@shared/types/platform";
@@ -70,7 +72,7 @@ export function AcceptanceDock({ state }: { state: ProjectDetailState }) {
         {count > 0 ? (
           <Pill tone="amber">{count} 件等你表态</Pill>
         ) : knownEmpty ? (
-          <span className="ss-meta">没有等你验收的东西</span>
+          <span className="ss-meta">暂无待验收</span>
         ) : (
           <span className="ss-meta" title="还没查到 / 读不到,不是「没有」">
             还没查到
@@ -80,7 +82,7 @@ export function AcceptanceDock({ state }: { state: ProjectDetailState }) {
 
       <div className="flex-1 overflow-y-auto p-2 flex flex-col gap-2">
         {projectId === null ? (
-          <div className="ss-meta">先在左栏选一个项目。</div>
+          <div className="ss-meta">未选项目</div>
         ) : (
           /* 四态由 `DataState` 一处承担 —— 「还没查过 / 读失败 / 查完了读不到」
              都不许渲染成「没有等你验收的东西」(这条注释原来抄在每一页上,
@@ -93,7 +95,7 @@ export function AcceptanceDock({ state }: { state: ProjectDetailState }) {
           >
             {(d) =>
               d.awaitingAcceptance.length === 0 ? (
-                <div className="ss-meta">没有等你验收的东西 —— 交付出去的都收了。</div>
+                <div className="ss-meta">暂无待验收</div>
               ) : (
                 d.awaitingAcceptance.map((a) => <DockCard key={a.artifactId} a={a} />)
               )
@@ -102,16 +104,11 @@ export function AcceptanceDock({ state }: { state: ProjectDetailState }) {
         )}
       </div>
 
-      {/* 这一行是**判据**,不是装饰:模型写在工件上的 `accepted` 是「定稿」,
-          收不收由甲方说 —— 两件事分不清就会出现「作者自己批了自己的交付」。 */}
-      <div className="ss-meta px-3 py-1 flex-none">
-        这里点了才算数 —— 工件上的「定稿」不是你的验收
-      </div>
     </section>
   );
 }
 
-/** 一份等你表态的交付物。**不标项目名** —— 这一块就在「本项目」下面,标出来是噪音。 */
+/** 一份等你表态的交付物。**不标项目名** —— 它就在当前项目的右栏里,标出来是噪音。 */
 function DockCard({ a }: { a: AwaitingAcceptanceView }) {
   return (
     <article className="sansheng-card p-2" title={a.artifactId}>
@@ -135,6 +132,17 @@ function DockCard({ a }: { a: AwaitingAcceptanceView }) {
           projectClosed: false,
         }}
       />
+      {/* D5(2026-11-17):「查看」= 跳工作项页的**工件抽屉**(同一实体全站只有一种
+          详情渲染方式 —— 抽屉是唯一详情面)。真 <a href>:右键复制 / 中键 / 后退都在。 */}
+      <div className="ss-meta">
+        <a
+          href={toHash(artifactLocation(a.artifactId))}
+          title="到工作项页的工件抽屉读正文与变更"
+          style={{ color: "var(--cyan)", textDecoration: "underline dotted" }}
+        >
+          查看
+        </a>
+      </div>
     </article>
   );
 }

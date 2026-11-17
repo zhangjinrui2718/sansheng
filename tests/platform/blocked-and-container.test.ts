@@ -90,7 +90,7 @@ function mkWork(over: {
   id?: string; parent?: string | null; title?: string; status?: WorkStatus; assignee?: string;
 } = {}): string {
   const id = over.id ?? `wk_${++seq}`;
-  insertWork(db, {
+  insertWork(db, { confirmedAt: 1,
     id, projectId: "p1", parentWorkId: over.parent ?? null,
     title: over.title ?? `工作项 ${id}`, goal: "写出结论",
     status: over.status ?? "open", assigneeAgentId: over.assignee ?? "wk",
@@ -214,7 +214,7 @@ describe("丙① · 容器(有子项)不进 `execute_work`;叶子(真活)照旧"
       id: "p_other", name: "别的项目", client: "甲方", goal: "g",
       status: "active", createdAt: T0,
     });
-    insertWork(db, {
+    insertWork(db, { confirmedAt: 1,
       id: "kid_other", projectId: "p_other", parentWorkId: root, title: "别人的子项",
       goal: "g", status: "open", assigneeAgentId: "wk", createdAt: T0, updatedAt: T0,
     });

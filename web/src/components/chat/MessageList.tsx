@@ -643,7 +643,11 @@ function Empty() {
 function HiddenNotice({ note }: { note: string }) {
   return (
     <div className="flex justify-center" data-channel="hidden">
-      <div className="ss-note" style={{ fontSize: 11, textAlign: "center" }}>
+      <div
+        className="ss-note"
+        style={{ fontSize: 11, textAlign: "center" }}
+        title="内部回合在「成员」页逐人查看 · 平台通知在「项目」页「组织运行态」"
+      >
         {note}
       </div>
     </div>

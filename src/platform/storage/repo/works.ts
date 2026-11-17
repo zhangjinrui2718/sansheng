@@ -232,6 +232,12 @@ export interface WorkRow {
   title: string;
   goal: string;
   status: WorkStatus;
+  /**
+   * 甲方确认开工的时刻(D3,migration 033)。NULL = 待确认 —— 派工门拒绝它,
+   * 一个 token 都不花。存量行在 033 里回填为 `created_at`(拆出来即派工是
+   * 那个世界的唯一行为)。
+   */
+  confirmedAt: number | null;
   /** 审查态(migration 013)。质检的待办由它查出来,不靠任何内存事件。 */
   reviewState: ReviewState;
   /**
@@ -253,6 +259,7 @@ interface RawWork {
   goal: string;
   status: string;
   review_state: string;
+  confirmed_at: number | null;
   priority: number;
   assignee_agent_id: string;
   created_at: number;
@@ -279,6 +286,7 @@ function rowToWork(raw: RawWork): WorkRow {
     goal: raw.goal,
     status: raw.status,
     reviewState: raw.review_state,
+    confirmedAt: raw.confirmed_at,
     priority: raw.priority,
     assigneeAgentId: raw.assignee_agent_id,
     createdAt: raw.created_at,
@@ -302,22 +310,43 @@ function initialReviewState(status: WorkStatus): ReviewState {
  * `priority` 同理可省(缺省 {@link DEFAULT_WORK_PRIORITY});显式给的值在
  * 这里再 clamp 一次,让「写口只出 0–9 的整数」不依赖每个调用方都记得 clamp。
  */
-export type NewWorkRow = Omit<WorkRow, "reviewState" | "priority"> & {
+export type NewWorkRow = Omit<WorkRow, "reviewState" | "priority" | "confirmedAt"> & {
   readonly reviewState?: ReviewState;
   readonly priority?: number;
+  /**
+   * 显式给 `confirmedAt` 只为重建历史数据;正常新建**恒为未确认**(NULL)——
+   * D3:确认开工是甲方的那一刻,不是项目经理的。
+   */
+  readonly confirmedAt?: number | null;
 };
 
 export function insertWork(db: Database.Database, row: NewWorkRow): void {
   db.prepare(
     `INSERT INTO works (id, project_id, parent_work_id, title, goal, status, review_state,
-                        priority, assignee_agent_id, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                        confirmed_at, priority, assignee_agent_id, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     row.id, row.projectId, row.parentWorkId, row.title, row.goal,
     row.status, row.reviewState ?? initialReviewState(row.status),
+    row.confirmedAt ?? null,
     clampWorkPriority(row.priority ?? DEFAULT_WORK_PRIORITY), row.assigneeAgentId,
     row.createdAt, row.updatedAt,
   );
+}
+
+/**
+ * D3:甲方「确认开工」—— 把项目里**当前所有未确认**的工作项一次性写上确认时刻。
+ * 部分调整(「先不做第 2 项」)走既有对话:项目经理退役/重建工作项,新的同样
+ * 未确认,甲方再确认一次。返回确认了几条(0 条也是合法结果 —— 比如重复点击)。
+ */
+export function confirmWorks(db: Database.Database, projectId: string, now: number): number {
+  const result = db
+    .prepare(
+      `UPDATE works SET confirmed_at = ?
+       WHERE project_id = ? AND confirmed_at IS NULL`,
+    )
+    .run(now, projectId);
+  return result.changes;
 }
 
 export function getWork(db: Database.Database, id: string): WorkRow | null {

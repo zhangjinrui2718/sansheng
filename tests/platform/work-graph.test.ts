@@ -67,7 +67,7 @@ interface WorkOver {
 
 function mkWork(over: WorkOver = {}): string {
   const id = over.id ?? `wk_${++seq}`;
-  insertWork(db, {
+  insertWork(db, { confirmedAt: 1,
     id,
     projectId: over.projectId ?? "p1",
     parentWorkId: over.parentWorkId ?? null,
@@ -908,7 +908,7 @@ describe("真机事故复现:取消旧项 + 新建同名项 + 下游指向被取
 // 的真因是**前端把父边的方向画反了**,不是数据有环。
 describe("任务 5 · 环检测的方向必须与「先后」一致", () => {
   const mk = (id: string, parent: string | null = null): void => {
-    insertWork(db, {
+    insertWork(db, { confirmedAt: 1,
       id, projectId: "p1", parentWorkId: parent, title: id, goal: "g", status: "open",
       assigneeAgentId: "wk", createdAt: T0, updatedAt: T0,
     });

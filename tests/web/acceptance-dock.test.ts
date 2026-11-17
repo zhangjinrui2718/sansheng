@@ -1,6 +1,13 @@
 /**
  * 「待你验收」的**位置**(2026-10-12,用户裁决:从项目页搬到对话页)
  *
+ * ⚠️ **判据变更(S-A,2026-11-17,用户裁决「Apple 式简约」)**:右栏的「本项目」块
+ * (`AgentPanel`)已**删除**(与项目页仪表盘完全重复),右栏只剩 待你验收 + 待答,
+ * 且两块都真的空时**整栏隐藏**。随之:① 「顺序 = 本项目→待你验收→待答」判据退场;
+ * ② 「四个文件 useProjectDetail 唯一」变**三个文件**(判据没变 —— 右栏只拉一次详情
+ * —— 变的是文件集合);③ 新增两条:AgentPanel 不许回来;隐藏必须以「两块都拿到
+ * 终值且都空」为前提(加载中/读失败不许藏)。
+ *
  * ── 它盯的是「搬家搬对了吗」,不是「验收逻辑对吗」──────────────────
  *
  * 逻辑本身由 `delivery-verdict.test.ts` 钉(那个组件一个字都没改)。这里盯的是
@@ -38,11 +45,10 @@ function stripComments(src: string): string {
 
 const source = (rel: string): string => stripComments(readWebSrc(rel));
 
-/** 右栏三块 + 它们的数据来源。**范围是这四个文件**,因为「右栏只拉一次详情」这句话
- *  只在这四个文件之间成立 —— 漏掉一个就看不见第二次 fetch。 */
+/** 右栏两块 + 它们的数据来源。**范围是这三个文件**(S-A 后「本项目」块已删),
+ *  因为「右栏只拉一次详情」这句话只在这三个文件之间成立 —— 漏掉一个就看不见第二次 fetch。 */
 const RAIL_FILES = [
   "components/shell/ChatRightRail.tsx",
-  "components/shell/AgentPanel.tsx",
   "components/client/AcceptanceDock.tsx",
   "components/client/ClientQuestionDock.tsx",
 ] as const;
@@ -107,12 +113,12 @@ describe("待你验收面板 · 渲染", () => {
     // 「没有等你验收的东西」时,用户会以为货已经收完了。
     const html = render(state({ loading: true, detail: null }));
     expect(html).toContain("加载中…");
-    expect(html).not.toContain("没有等你验收的东西");
+    expect(html).not.toContain("暂无待验收");
   });
 
-  it("查过了、真的没有 ⇒ 空态,且**一个验收按钮都不给**", () => {
+  it("查过了、真的没有 ⇒ 空态,且**一个验收按钮都不给**(文案裁决:名称式「暂无待验收」)", () => {
     const html = render(state({ detail: detail({ awaitingAcceptance: [] }) }));
-    expect(html).toContain("没有等你验收的东西");
+    expect(html).toContain("暂无待验收");
     expect(html).not.toContain(">接受<");
     expect(html).not.toContain(">要改<");
   });
@@ -120,13 +126,13 @@ describe("待你验收面板 · 渲染", () => {
   it("读失败 ⇒ 如实说失败,不许静默变成「没有」(7-N)", () => {
     const html = render(state({ error: "boom" }));
     expect(html).toContain("加载失败:boom");
-    expect(html).not.toContain("没有等你验收的东西");
+    expect(html).not.toContain("暂无待验收");
   });
 
-  it("没选项目 ⇒ 说清先选项目(不是「没有等你验收的东西」)", () => {
+  it("没选项目 ⇒ 名称式「未选项目」(不是「暂无待验收」—— 文案裁决 2026-11-17)", () => {
     const html = render(state({ projectId: null }));
-    expect(html).toContain("先在左栏选一个项目");
-    expect(html).not.toContain("没有等你验收的东西");
+    expect(html).toContain("未选项目");
+    expect(html).not.toContain("暂无待验收");
   });
 
   it("自检:上面四种渲染**真的互不相同**(不是恒真断言)", () => {
@@ -173,17 +179,22 @@ describe("落点 · 对话页右栏", () => {
     expect(source("components/shell/ChatRightRail.tsx")).toContain("<AcceptanceDock");
   });
 
-  it("顺序 =「本项目」→「待你验收」→「待答」(用户裁决:放在「本项目」下面)", () => {
-    const src = source("components/shell/ChatRightRail.tsx");
-    const panel = src.indexOf("<AgentPanel");
-    const dock = src.indexOf("<AcceptanceDock");
-    const ask = src.indexOf("<ClientQuestionDock");
-    expect(panel).toBeGreaterThanOrEqual(0);
-    expect(panel).toBeLessThan(dock);
-    expect(dock).toBeLessThan(ask);
+  it("S-A:「本项目」块(`AgentPanel`)不许回来 —— 项目概览的唯一落点是项目页", () => {
+    // 「删胜于收」:再渲染一份概览就是第二个会漂的事实来源。
+    expect(source("components/shell/ChatRightRail.tsx")).not.toContain("AgentPanel");
   });
 
-  it("**右栏只拉一次详情**:四个文件里 `useProjectDetail(` 只出现一次", () => {
+  it("S-A:**空栏整栏隐藏**,且隐藏必须以「两块都拿到终值且都空」为前提", () => {
+    // 隐藏是减法,不是撒谎的许可证:加载中/读失败时右栏必须在(让 dock 的四态说话),
+    // 否则一个慢请求会把「还没查过」渲染成「没事」。
+    const src = source("components/shell/ChatRightRail.tsx");
+    expect(src).toContain("return null");
+    expect(src).toContain("awaitingAcceptance.length === 0");
+    expect(src).toMatch(/!questions\.loading/);
+    expect(src).toMatch(/questions\.error === null/);
+  });
+
+  it("**右栏只拉一次详情**:三个文件里 `useProjectDetail(` 只出现一次", () => {
     // 三个 hook 实例 = 三份 loading = 「一处写加载中、另一处写没有」。这是搬进来
     // 之后最容易顺手犯的错(每块各拉一份最省事),所以钉住。
     const calls = RAIL_FILES.flatMap((f) =>
@@ -208,16 +219,23 @@ describe("自检 · 扫描器不是恒真的", () => {
     expect(mutated).toContain("DeliveryVerdictActions");
   });
 
-  it("把右栏的顺序倒过来 ⇒ ③ 的顺序断言会红", () => {
+  it("牙(S-A):把 `AgentPanel` 塞回右栏 ⇒ 「不许回来」那条会红", () => {
     const real = source("components/shell/ChatRightRail.tsx");
     const mutated = real.replace(
-      /<AgentPanel state=\{state\} \/>[\s\S]*?<AcceptanceDock state=\{state\} \/>/,
-      "<AcceptanceDock state={state} />\n      <AgentPanel state={state} />",
+      "<AcceptanceDock",
+      "<AgentPanel state={state} />\n      <AcceptanceDock",
     );
     expect(mutated, "前提:变异真的改到了源码").not.toBe(real);
-    const panel = mutated.indexOf("<AgentPanel");
-    const dock = mutated.indexOf("<AcceptanceDock");
-    expect(panel < dock).toBe(false);
+    expect(mutated).toContain("AgentPanel");
+  });
+
+  it("牙(S-A):把空栏隐藏的前提拿掉(无条件 return null)⇒ 「终值前提」那条会红", () => {
+    const real = source("components/shell/ChatRightRail.tsx");
+    const mutated = real
+      .replace("state.error === null && state.detail !== null && state.detail.awaitingAcceptance.length === 0", "true")
+      .replace("!questions.loading && questions.error === null && items.length === 0 && closedCount === 0", "true");
+    expect(mutated, "前提:变异真的改到了源码").not.toBe(real);
+    expect(mutated).toContain("return null");
   });
 
   it("负样本:`App.tsx` 里**不该**再出现这三块的直排(它们归 `ChatRightRail` 管)", () => {

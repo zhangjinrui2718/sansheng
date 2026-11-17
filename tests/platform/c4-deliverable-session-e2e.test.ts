@@ -224,7 +224,7 @@ function seed(db: Database.Database): void {
   });
   for (const id of ["wk", "pm", "bm", "qa"]) addMember(db, "p1", id, 1);
   // 根工作项:done + **已审**(否则先跑的是 `review_work`)
-  insertWork(db, {
+  insertWork(db, { confirmedAt: 1,
     id: "R", projectId: "p1", parentWorkId: null, title: "交付:选型建议", goal: "g",
     status: "done", assigneeAgentId: "wk", createdAt: 2, updatedAt: 2,
   });
@@ -374,7 +374,7 @@ describe("C4 真机 · 交付物 → 甲方对话(临时目录 · 真宿主 · �
     ).toHaveLength(4);
 
     // ── 断言 3:交付之后**再跑一个 worker**,它的消息不得落进交付对话 ──
-    insertWork(db, {
+    insertWork(db, { confirmedAt: 1,
       id: "w_after", projectId: "p1", parentWorkId: null, title: "补一份路线 C 的成本明细",
       goal: "g", status: "open", assigneeAgentId: "wk", createdAt: 100, updatedAt: 100,
     });

@@ -71,7 +71,7 @@ function mkWork(
   over: Partial<WorkRow> = {},
 ): string {
   const id = `wk${++seq}`;
-  insertWork(db, {
+  insertWork(db, { confirmedAt: 1,
     id, projectId, parentWorkId: null, title: `工作${seq}`, goal: "做点什么",
     status: "open", assigneeAgentId, createdAt: T0 + seq, updatedAt: T0 + seq,
     ...over,

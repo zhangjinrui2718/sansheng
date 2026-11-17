@@ -24,9 +24,10 @@
 
 /** 词汇表 id —— 闭合联合,新增一项就要同时在某个页面上给它一个读者。 */
 export type GlossaryId =
-  | "notice.stop"
-  | "notice.compliance"
-  | "notice.other"
+  // ⚠️ S-C(2026-11-17,减法):notice.stop / notice.compliance / notice.other 三条
+  // 随项目页「平台记录」三段合一而**合并成一条**(`notice.record`)—— 三段同源,
+  // 各自的判据细节由记录卡的悬停与平台记录列表自身承载。
+  | "notice.record"
   | "client-question"
   | "ask"
   | "change"
@@ -70,20 +71,10 @@ export interface GlossaryEntry {
 }
 
 export const GLOSSARY: Record<GlossaryId, GlossaryEntry> = {
-  "notice.stop": {
-    line: "组织在这里停过,不会再自己动",
-    basis: "lib/orgState.ts 的 orgRuntime()(派生状态,不由 projects.status 表达)",
-    source: "GET /api/projects/:id/messages 里 kind='system' 且正文首行以「⚠️ 组织停止推进」开头",
-  },
-  "notice.compliance": {
-    line: "那一回合没留工作记录",
-    basis: "serve.ts 的 reportUnannouncedTurn(平台不替模型补记录)",
-    source: "同上,正文首行以「⚠️ 平台检测」开头",
-  },
-  "notice.other": {
-    line: "认不出类别,原样保留",
-    basis: "lib/platformNotices.ts 的 classifyPlatformNotice(只认正文首行前缀)",
-    source: "同上,前缀不匹配任何已注册项",
+  "notice.record": {
+    line: "平台写下的记录,分「需要你动作」与「记录」",
+    basis: "lib/orgState.ts 的 needsAttention(停下且不会自己过去的才算需要你动作)",
+    source: "GET /api/projects/:id/messages 里 kind='system' 的行,按正文首行前缀分类",
   },
   "client-question": {
     line: "等你拍板,答完落成 decision",
