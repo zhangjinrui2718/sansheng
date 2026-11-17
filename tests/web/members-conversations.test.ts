@@ -124,10 +124,10 @@ describe("成员页 · 「他说了什么」:进行中 + 已完成的对话内�
     expect(text).not.toContain("此刻没有正在流的回复");
   });
 
-  it("①「进行中」:没有在飞轮 ⇒ 如实说「此刻没有正在流的回复」,并说清它的边界", () => {
+  it("①「进行中」:没有在飞轮 ⇒ 如实说「此刻没有正在流的回复」(文案裁决 2026-11-17:边界说明退场)", () => {
     const text = visible(renderBody());
     expect(text).toContain("此刻没有正在流的回复");
-    expect(text).toContain("回合结束后才落库");
+    expect(text).not.toContain("回合结束后才落库");
   });
 
   it("①「已完成」:正文摆在明面上(全文,不截断)", () => {

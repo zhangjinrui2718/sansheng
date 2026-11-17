@@ -253,7 +253,11 @@ export function artifactMeta(a: ArtifactView, opts: ArtifactMetaOptions = {}): M
 }
 
 /** 工作项的身份。 */
-export function workMeta(w: WorkView): MetaItem[] {
+export function workMeta(
+  w: WorkView,
+  /** workId → 标题(调用方手里有列表就传;没有就退 id,不编) */
+  workTitles?: ReadonlyMap<string, string>,
+): MetaItem[] {
   return [
     {
       label: "状态",
@@ -283,7 +287,12 @@ export function workMeta(w: WorkView): MetaItem[] {
       ? { label: "父项", value: "顶层环节", title: "没有父工作项 —— 这是一条顶层环节" }
       : {
           label: "父项",
-          links: [{ label: w.parentWorkId, to: workLocation(w.parentWorkId) }],
+          links: [
+            {
+              label: workTitles?.get(w.parentWorkId) ?? w.parentWorkId,
+              to: workLocation(w.parentWorkId),
+            },
+          ],
           title: "父工作项 id:" + w.parentWorkId,
         },
     { label: "创建", value: fmtTime(w.createdAt), title: "契约 WorkView.createdAt" },

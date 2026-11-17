@@ -105,7 +105,7 @@ export function ChatComposer({
         ? "连接中…"
         : disabled
           ? "正在生成…"
-          : "说点什么 · Enter 发送 · Shift+Enter 换行");
+          : "说点什么…");
 
   return (
     <div

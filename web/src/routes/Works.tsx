@@ -236,15 +236,12 @@ function runtimeUnreadable(live: DagLive | null): boolean {
  * 一条**具体的工作项**上,说的是「库里的状态读得到、运行态读不到」)。
  */
 export function TimelineLegend({ runtimeUnknown }: { runtimeUnknown: boolean }) {
+  /* 文案裁决(2026-11-17):静态解释行退场(读法在 `?` 里);只有**读不到**
+     这个状态值得占一行 —— 它是状态,不是描述。 */
+  if (!runtimeUnknown) return null;
   return (
-    <div className="ss-note" style={{ marginTop: 6 }}>
-      {"横轴 = 距项目起点的耗时(T+0 起)· 每条工作项一道(条 = 创建→收口,刻度 = 它产出的工件)· " +
-        "每种工件一道(点 = 一件工件)· 开口端 = 未收口"}
-      {runtimeUnknown && (
-        <span style={{ color: "var(--amber)" }}>
-          {" · 运行态读不到:此刻谁在跑读不到,所以一条都没点亮。"}
-        </span>
-      )}
+    <div className="ss-note" style={{ marginTop: 6, color: "var(--amber)" }}>
+      运行态读不到 · 一条都没点亮
     </div>
   );
 }
@@ -1444,7 +1441,8 @@ export function WorkNodePanel({
           身份条 —— 与项目页那份「工作项」清单、别处说的都是**同一组事实**
           (`lib/entityMeta.ts`)。「负责人」与「父项」两格是**地址**。
         */}
-        <MetadataStrip items={workMeta(work)} />
+        {/* 父项/前置的 id 翻成标题(标题解析判据在 entityMeta,这里只传表) */}
+        <MetadataStrip items={workMeta(work, new Map(works.map((w) => [w.id, w.title] as const)))} />
 
         {/*
           关系栏:「子项 / 前置 / 卡住它的阻塞」。

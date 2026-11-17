@@ -454,7 +454,7 @@ export function ChatSurface() {
                   ? "请先在「设置」配置 API Key"
                   : intakeActive
                     ? "说说你想做什么 —— 业务经理会和你对齐,谈拢后由他立项"
-                    : "说点什么 · Enter 发送 · Shift+Enter 换行"
+                    : "说点什么…"
         }
       />
     </section>

@@ -141,7 +141,6 @@ export function SettingsPanel() {
             设置
           </h1>
           <p className="sansheng-text-mute mt-1" style={{ fontSize: 13 }}>
-            可配置多个 provider,选一个作为「当前」使用
           </p>
         </div>
         <button className="sansheng-button" onClick={addProvider} style={{ padding: "6px 12px" }}>
@@ -302,7 +301,7 @@ export function SettingsPanel() {
             style={{ fontSize: 11 }}
             title="命令与文件的根 · 换成新路径要你先自己建好它"
           >
-            agent 跑命令、读写文件的根。默认 <code>~/sansheng-workspace</code>(自动创建)。
+            默认 <code>~/sansheng-workspace</code>(自动创建)。
             <Help id="settings.workdir" />
           </p>
         </div>

@@ -414,13 +414,14 @@ describe("④ 运行态 `unavailable` / `live === null` ⇒ ② 推进图一个 
     expect(html).toContain("读不到");
   });
 
-  it("`TimelineLegend` 是纯 props:那句话说出口,但只在读不到时", () => {
+  it("`TimelineLegend` 是纯 props:读不到时说一句,常态**整段退场**(文案裁决 2026-11-17)", () => {
+    // 判据变更:静态解释行(横轴 = …)退场 —— 读法归 `?`;只有「读不到」这个
+    // 状态值得占一行(状态,不是描述)。
     const on = renderToStaticMarkup(createElement(TimelineLegend, { runtimeUnknown: true }));
     const off = renderToStaticMarkup(createElement(TimelineLegend, { runtimeUnknown: false }));
     expect(on).toContain("读不到");
     expect(on).toContain("一条都没点亮");
-    expect(off).not.toContain("读不到");
-    expect(off).toContain("横轴 = 距项目起点的耗时");
+    expect(off, "常态下图例应整段退场(返回 null)").toBe("");
     // 图例本身不许放点(旧 DAG 图例里那个点是它自己的事)
     expect(countOf(off, /ss-live-dot/g)).toBe(0);
   });

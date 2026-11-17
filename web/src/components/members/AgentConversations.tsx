@@ -195,7 +195,6 @@ export function AgentConversationBody({
             className="ss-note"
             title="这里空着多半是实时连接断了 · 已完成的不受影响"
           >
-            只在实时流里看得见,回合结束后才落库。
           </div>
         ) : (
           live.map((t) => <LiveTurn key={t.id} turn={t} lines={lines} />)
