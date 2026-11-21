@@ -1012,3 +1012,61 @@
     color: var(--text-3);
   }
 }
+
+/* ── V2 工件交付序列(一等公民;设计书 §4.3)── */
+@layer components {
+  .ss-page-title {
+    font-size: var(--text-display);
+    line-height: var(--text-display--line-height);
+    margin: 0 0 12px;
+  }
+  .ss-artifact-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    width: 100%;
+    min-height: var(--row-height);
+    padding: 6px 12px;
+    border: none;
+    border-radius: var(--radius-m);
+    background: var(--surface);
+    color: var(--text-1);
+    font-size: 13px;
+    text-align: left;
+    cursor: pointer;
+    transition: background var(--duration-120) var(--ease-out);
+  }
+  .ss-artifact-row:hover {
+    background: var(--surface-hover);
+  }
+  .ss-artifact-row[data-deliverable="true"] {
+    min-height: 44px;
+    background: var(--surface-raised);
+    border: 1px solid var(--surface-border);
+  }
+  .ss-artifact-kind {
+    flex: none;
+    font-size: 11px;
+    color: var(--text-2);
+    min-width: 4.5em;
+  }
+  .ss-artifact-title {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .ss-artifact-row[data-deliverable="true"] .ss-artifact-title {
+    font-weight: 500;
+  }
+  .ss-artifact-meta {
+    flex: none;
+    font-size: 11px;
+    color: var(--text-3);
+  }
+  .ss-artifact-verdict {
+    flex: none;
+    font-size: 12px;
+  }
+}

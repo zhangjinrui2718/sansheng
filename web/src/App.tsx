@@ -23,6 +23,7 @@ import { AppShell } from "./app/AppShell";
 import { Sidebar } from "./app/Sidebar";
 import { TopBar } from "./components/shell/TopBar";
 import { ChatSurface } from "./features/chat/ChatSurface";
+import { ArtifactFlowPage } from "./features/artifacts/ArtifactFlow";
 import { SettingsPanel } from "./components/settings/SettingsPanel";
 import { ProjectDetailPage } from "./routes/ProjectDetail";
 import { WorksPage } from "./routes/Works";
@@ -140,6 +141,8 @@ export function App() {
         page(<ChatSurface />)
       ) : route === "project" ? (
         page(<ProjectDetailPage />)
+      ) : route === "artifacts" ? (
+        page(<ArtifactFlowPage />)
       ) : route === "works" ? (
         page(<WorksPage />)
       ) : route === "members" ? (

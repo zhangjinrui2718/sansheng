@@ -1,9 +1,10 @@
 /**
  * Sidebar —— V2 左栏:导航块 + 项目列表,全路由恒在(设计书 §3.1)
  *
- * · 导航 5 项:对话 / 项目 / 工作项 / 成员 / 记忆 —— **项目恢复一级**
- *   (v4 把它并进工作台、入口藏在对话页头部链接,V2 修掉这个动线断裂);
- *   设置退为顶栏图标;关于保持顶栏 `?`。
+ * · 导航 4 项:对话 / 项目 / 工件 / 记忆 —— **工件是一等公民**
+ *   (2026-11-21 用户裁决:所有交互和展示围绕工件展开,角色与工作项
+ *   退到「以工件为交付序列的内部」—— 它们的路由保留作深链过程视图,
+ *   但不再占一级导航);设置退为顶栏图标;关于保持顶栏 `?`。
  * · 项目列表 = 原对话页左栏(HistoryRail)原样嵌入:状态分组/会话线二级/
  *   接待入口的判据一个不动(它们的测试继续钉在 HistoryRail 上)。
  * · 折叠态由 AppShell 管(整栏 48px 只留导航图标;项目列表只在展开态可见)。
@@ -13,12 +14,11 @@ import type { Route } from "@/app/router";
 import { HistoryRail } from "@/components/shell/HistoryRail";
 
 /** 导航项:声明式单一来源,顺序即视觉顺序。「项目」恢复一级(V2)。 */
-const TABS: ReadonlyArray<{ route: Route; label: string; icon: JSX.Element }> = [
+const TABS: ReadonlyArray<{ route: Route; label: string; icon: React.ReactNode }> = [
   { route: "chat", label: "对话", icon: <IconChat /> },
   { route: "project", label: "项目", icon: <IconDashboard /> },
-  { route: "works", label: "工作项", icon: <IconGraph /> },
-  { route: "members", label: "成员", icon: <IconPeople /> },
-  { route: "memory", label: "记忆", icon: <IconLayers /> },
+  { route: "artifacts", label: "工件", icon: <IconLayers /> },
+  { route: "memory", label: "记忆", icon: <IconArchive /> },
 ];
 
 export function Sidebar(props: { route: Route; onRoute: (r: Route) => void }) {
@@ -75,22 +75,12 @@ function IconDashboard() {
     </Svg>
   );
 }
-function IconGraph() {
+function IconArchive() {
   return (
     <Svg>
-      <circle cx="3.5" cy="12.5" r="1.8" />
-      <circle cx="12.5" cy="3.5" r="1.8" />
-      <circle cx="12.5" cy="12.5" r="1.8" />
-      <path d="M5 11 11 5M5.3 12.5h5.4M12.5 5.3v5.4" />
-    </Svg>
-  );
-}
-function IconPeople() {
-  return (
-    <Svg>
-      <circle cx="6" cy="5.5" r="2.3" />
-      <path d="M2.5 13c.6-2.3 1.9-3.4 3.5-3.4s2.9 1.1 3.5 3.4" />
-      <path d="M10.5 4a2.2 2.2 0 0 1 0 4.2M11.5 9.8c1.3.4 2.1 1.5 2.5 3.2" />
+      <rect x="2.5" y="3" width="11" height="3.5" rx="1" />
+      <path d="M3.5 6.5V13a1 1 0 0 0 1 1h7a1 1 0 0 0 1-1V6.5" />
+      <path d="M6.5 9.5h3" />
     </Svg>
   );
 }

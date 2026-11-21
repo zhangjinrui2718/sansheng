@@ -82,6 +82,8 @@ const BASELINE: Record<string, number> = {
   // 展开 verb)+ StreamFacts(塌缩事实行,文案从 v5 逐字继承,40→24 是可操作
   // 卡文案随卡身搬走)。
   "features/chat/ActionRail.tsx": 50,
+  // 2026-11-21(工件一等公民):交付序列页 —— 裁决态行/空态/引导的功能性文字。
+  "features/artifacts/ArtifactFlow.tsx": 118,
   "features/chat/StreamFacts.tsx": 24,
   "features/chat/ThinkingBlock.tsx": 25,
   "features/chat/ToolCallCard.tsx": 0,
@@ -142,7 +144,8 @@ const BASELINE: Record<string, number> = {
   // ── 2026-11-21(V2 外壳):AppShell(折叠钮 title/aria)与 Sidebar(五枚
   //    导航标签 —— 对话/项目/工作项/成员/记忆,功能性文字)逐文件登记。──
   "app/AppShell.tsx": 22,
-  "app/Sidebar.tsx": 14,
+  // 2026-11-21(工件一等公民):导航 5→4 项(工作项/成员退到工件内部)。
+  "app/Sidebar.tsx": 11,
   "components/ui/DataState.tsx": 14,
   "components/ui/Help.tsx": 12,
   "components/ui/MetadataStrip.tsx": 0,

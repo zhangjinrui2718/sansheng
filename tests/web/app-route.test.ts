@@ -37,7 +37,7 @@ describe("parseHash — 地址 → 状态", () => {
     // 不变):它是一个跨角色的管理一屏(`routes/HarnessManage.tsx`),入口在成员页
     // harness 卡的 aside 链接上;地址要能解析才能被分享(TopBar 的 TABS 里没有它,
     // 哨兵在 tests/web/harness-manage.test.ts)。
-    expect(ROUTES).toHaveLength(8); // 6 个页签 + about(? 打开)+ harness(无页签)
+    expect(ROUTES).toHaveLength(9); // 4 页签 + works/members(过程深链)+ about(? 打开)+ harness(无页签)
   });
 
   it("查询串进 params,且已解码", () => {

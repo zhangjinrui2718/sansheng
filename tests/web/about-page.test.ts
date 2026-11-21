@@ -120,22 +120,25 @@ describe("接线 · 「关于」是 `?`,不是第七个页签", () => {
     expect(tb).toContain('onRoute("about")');
   });
 
-  it("**左栏导航 `TABS` 恒 5 项(V2:对话/项目/工作项/成员/记忆),且里面没有 about/settings**", () => {
+  it("**左栏导航 `TABS` 恒 4 项(V2 工件一等公民:对话/项目/工件/记忆),且里面没有 about/settings/works/members**", () => {
     // 判据变更记录(2026-11-21,V2 重做):导航从 TopBar 挪进左栏 Sidebar;
-    // **项目恢复一级**(v4 把它并进工作台、入口藏二级链接 —— V2 修掉动线断裂);
-    // 设置退为顶栏图标(低频配置不占一级导航)。
+    // 项目恢复一级;设置退为顶栏图标。
+    // 2026-11-21 用户裁决「工件是一等公民」:导航改 4 项,工作项与成员
+    // **退到工件的内部上下文**(路由保留作深链过程视图,不占一级导航)。
     const sb = source("app/Sidebar.tsx");
     const block = sb.slice(sb.indexOf("const TABS"), sb.indexOf("];", sb.indexOf("const TABS")));
     const routes = block.match(/\{ route: "/g) ?? [];
-    expect(routes.length).toBe(5);
+    expect(routes.length).toBe(4);
     expect(block).not.toContain('"about"');
     expect(block).not.toContain('"settings"');
+    expect(block).not.toContain('"works"');
+    expect(block).not.toContain('"members"');
     expect(block).toContain('route: "chat", label: "对话"');
-    expect(block).toContain('route: "project", label: "项目"');
+    expect(block).toContain('route: "artifacts", label: "工件"');
     // 变异自检:把 about 塞进 TABS ⇒ 上面两条当场变红(这里模拟一次)
     const mutated = block.replace('{ route: "chat", label: "对话", icon: <IconChat /> },', '{ route: "chat", label: "对话", icon: <IconChat /> },\n  { route: "about", label: "关于" },');
     expect(mutated).toContain('"about"');
-    expect((mutated.match(/\{ route: "/g) ?? []).length).toBe(6);
+    expect((mutated.match(/\{ route: "/g) ?? []).length).toBe(5);
   });
 
   it("`about` 是一条真的路由(union 在 app/router.ts 里,由 App 接到分支)", () => {

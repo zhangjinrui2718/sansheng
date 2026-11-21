@@ -34,6 +34,7 @@ import { useCallback, useEffect, useState } from "react";
 export type Route =
   | "chat"
   | "project"
+  | "artifacts"
   | "works"
   | "members"
   | "memory"
@@ -51,6 +52,7 @@ export type Route =
 export const ROUTES: readonly Route[] = [
   "chat",
   "project",
+  "artifacts",
   "works",
   "members",
   "memory",
