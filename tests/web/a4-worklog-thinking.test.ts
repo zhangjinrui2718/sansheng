@@ -201,10 +201,9 @@ describe("A4 · `thinking` 默认折叠(折叠时 DOM 里没有推理正文)", (
   it("两轮各自的思考都折叠 —— 折叠状态不在轮之间共享", () => {
     const a = turn("mA", "assistant", "bm", [{ kind: "thinking", text: "第一轮的推理正文 AAA" }]);
     const b = turn("mB", "assistant", "bm", [{ kind: "thinking", text: "第二轮的推理正文 BBB" }]);
-    const history: ConversationPartition["timeline"] = [
-      { turn: a, channel: "client" },
-      { turn: b, channel: "client" },
-    ];
+    // v5(2026-11-20):history 是归并后的 StreamItem(轮 + 表态卡);本文件不发卡,
+    // 手工包成流条目。
+    const history = [a, b].map((t) => ({ kind: "turn" as const, at: t.startedAt, turn: t }));
     const html = renderToStaticMarkup(
       createElement(ConversationStream, { history, streaming: [], hiddenNote: null }),
     );

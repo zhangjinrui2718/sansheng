@@ -243,6 +243,27 @@ export interface ProjectDetail extends ProjectSummary {
   pendingQuestions: ClientQuestionView[];
   /** 待甲方**验收**的交付物(本项目)。判据与收口门同源(029) */
   awaitingAcceptance: AwaitingAcceptanceView[];
+  /**
+   * 本项目**已记录**的甲方裁决,各交付物取最新一条,时间降序(v5,2026-11-20)。
+   *
+   * 「表态卡进流」的另一半塌缩事实来源:裁决一落,交付物就离开
+   * `awaitingAcceptance`(那里只含「还没表态」的),而对话流里那张验收卡
+   * 要**原地塌缩成一行事实**,不是凭空消失。事实本身 append-only
+   * (`delivery_verdicts`,029);这里每份交付物只给**最新**一条
+   * (`latestVerdictsByArtifact` 同源),历史裁决仍在工件卡上(改判可见)。
+   */
+  recentDeliveryVerdicts: RecentDeliveryVerdictView[];
+}
+
+/** 一条已落库的甲方裁决(塌缩事实行)。 */
+export interface RecentDeliveryVerdictView {
+  readonly artifactId: string;
+  readonly title: string;
+  readonly verdict: "accept" | "reject";
+  /** 甲方写的那句话(拒收理由 / 接受附言);可空 */
+  readonly note: string | null;
+  /** 裁决落库的时刻(塌缩行在流里的锚) */
+  readonly at: number;
 }
 
 export interface WorkView {
@@ -269,6 +290,14 @@ export interface WorkView {
   priority: number;
   createdAt: number;
   updatedAt: number;
+  /**
+   * 甲方确认开工的时刻(migration 033;`null` = 还没确认 —— 派工门拒收的那种)。
+   *
+   * v5(2026-11-20)透出的理由:对话流的「计划」卡确认之后要塌缩成一行事实
+   * (「已确认开工 · N 条」),锚就是这一列。类型可选与 `reviewState` 同一条
+   * 先例:后端必给,存量测试夹具不必逐个补字段。
+   */
+  confirmedAt?: number | null;
   /** 被哪些工作项依赖(用于画 DAG 的入边) */
   dependsOn: string[];
 }
@@ -461,6 +490,31 @@ export interface RepoCommitsView {
   readonly head: string | null;
   readonly branch: string | null;
   /** 不是 `ok` 时说明为什么(可执行:用户能据此决定下一步) */
+  readonly problem?: string;
+}
+
+/**
+ * 代码服务在**交付时点**的文件树(v5,2026-11-20;`GET /api/artifacts/:id/files`)。
+ *
+ * ⚠️ 读的是 `deliverableCommit`(交付那一个提交),不是 HEAD —— 界面上看到的就是
+ * 甲方 clone 到的东西,平台提交工件不会让它动。
+ */
+export interface CodeServiceFilesView {
+  readonly runtime: "ok" | "unavailable";
+  /** 文件树读的那个提交(= 交付版本);非 ok 时也可能带出坐标(便于说清读的是哪个 sha) */
+  readonly commit: string | null;
+  /** 相对 `servicePath` 的路径,升序;非 ok 时 `null`(读不到不是空列表) */
+  readonly files: readonly string[] | null;
+  readonly problem?: string;
+}
+
+/** 交付时点的单个文件内容(`GET /api/artifacts/:id/file?path=…`)。 */
+export interface CodeServiceFileView {
+  readonly runtime: "ok" | "unavailable";
+  /** 服务目录相对路径(原样回显) */
+  readonly path: string;
+  readonly content: string | null;
+  readonly bytes: number | null;
   readonly problem?: string;
 }
 
@@ -968,6 +1022,32 @@ export interface ClientQuestionList {
    * 没有任何回答。⚠️ 只报数:处置是业务经理的活,这里不渲染可点的卡。
    */
   answeredUnconsumed: Record<string, number>;
+  /**
+   * 已答复的提问行(v5,2026-11-20)—— 「表态卡进流」的塌缩事实来源。
+   *
+   * 待答队列(`questions`)只含 open 的:甲方答完,提问从队列里消失,而在旧形态里
+   * 「我答的那句话后来怎么样了」在对话面上没有任何回答。这一份把**已答复**的行
+   * (含「业务经理还没处置」的 F3 窗口,靠 `consumedAt` 区分)按项目交出来,
+   * 让对话流里的提问卡能**原地塌缩成一行事实**,而不是凭空消失。
+   *
+   * ⚠️ 与 `answeredUnconsumed` 的分工:那个是**计数**(按项目分,给徽标),
+   * 这一份是**行**(给塌缩渲染)。谓词同源:`answered_at IS NOT NULL`;
+   * `consumedAt` 非空 = 业务经理已处置(`resume_client` 写的那个时刻)。
+   */
+  answered: AnsweredClientQuestionView[];
+}
+
+/** 一条已答复的甲方提问(塌缩事实行)。`question` 与待答卡的 `question` 同源(工件标题)。 */
+export interface AnsweredClientQuestionView {
+  /** 提问工件 id(与 `ClientQuestionView.id` 同一名字空间) */
+  readonly id: string;
+  readonly projectId: string;
+  readonly question: string;
+  readonly answeredAt: number;
+  /** 业务经理已处置的时刻;`null` = 还在 F3 窗口里(已答复 · 整理中) */
+  readonly consumedAt: number | null;
+  /** 答复落成的 decision 工件(审计坐标);理论上非空,`null` 如实透出 */
+  readonly decisionArtifactId: string | null;
 }
 
 export interface BlockerView {

@@ -61,6 +61,8 @@ import type {
   ProjectStatus,
   ProjectSummary,
   ProjectUsageResponse,
+  CodeServiceFileView,
+  CodeServiceFilesView,
   RepoCommitsView,
   ProviderFailoverResponse,
   WorkView,
@@ -466,6 +468,23 @@ export function fetchArtifactContent(id: string, at?: string): Promise<ArtifactC
 export function getRepoCommits(id: string, limit = 20): Promise<RepoCommitsView> {
   return request<RepoCommitsView>(
     `/artifacts/${encodeURIComponent(id)}/commits?limit=${encodeURIComponent(String(limit))}`,
+  );
+}
+
+/**
+ * 代码服务在**交付时点**的文件树(v5,2026-11-20)。
+ *
+ * 与提交列表同一条纪律:非 `ok` 是「读不到」(盘被移走 / 提交不可达),
+ * **不是**「这个服务没有文件」—— 渲染方必须分开。
+ */
+export function getArtifactFiles(id: string): Promise<CodeServiceFilesView> {
+  return request<CodeServiceFilesView>(`/artifacts/${encodeURIComponent(id)}/files`);
+}
+
+/** 交付时点的单个文件内容(`path` = 服务目录相对路径)。 */
+export function getArtifactFile(id: string, path: string): Promise<CodeServiceFileView> {
+  return request<CodeServiceFileView>(
+    `/artifacts/${encodeURIComponent(id)}/file?path=${encodeURIComponent(path)}`,
   );
 }
 

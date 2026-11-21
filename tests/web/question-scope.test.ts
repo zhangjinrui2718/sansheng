@@ -146,31 +146,29 @@ describe("scopeClientQuestions · 只显示当前项目的待答", () => {
   });
 });
 
-describe("接线 · 面板真的用了这道筛", () => {
-  const dock = (): string => source("components/client/Inbox.tsx");
+describe("接线 · 这道筛真的有人用(v5:读者从收件箱迁到流内卡判据)", () => {
+  // 2026-11-20 判据变更记录:原读者 Inbox.tsx(右栏收件箱)退役;「只显示当前
+  // 项目的待答」这道筛的唯一读者现在是 `lib/streamCards.ts`(表态卡进流)。
+  // 判据本身没变 —— 变的是谁在调它。
+  const cards = (): string => source("lib/streamCards.ts");
   const scope = (): string => source("lib/questionScope.ts");
 
-  it("面板把**筛选结果**渲染出去(不是把全局列表整个渲染)", () => {
-    const s = dock();
+  it("判据层走的是**筛的输出**(不是把全局列表整个发卡)", () => {
+    const s = cards();
     expect(s).toMatch(/scopeClientQuestions\(/);
-    // 2026-10-26:`items.map(` 那一行改成了 `DataState` 的 `rows.map(`
-    // (四态收进 `ui/DataState.tsx`)。**判据没变** —— 被渲染的仍必须是
-    // 那道筛的输出,所以这里改成「`items` 是喂给状态的那一份」+「渲染的是它吐出来的 `rows`」,
-    // 两条合起来才等价于原来那一条(单看 `rows.map(` 是恒真的空断言)。
-    expect(s).toMatch(/remoteListOf\(items,/);
-    expect(s).toMatch(/rows\.map\(/);
-    // ⚠️ 变异自检:整份 questions 直接 map 出去 ⇒ 这一格当场变红
-    expect(s).not.toMatch(/questions\.map\(/);
-    // ⚠️ 变异自检:把 `questions` 喂给 DataState(而不是筛过的 `items`)⇒ 红
-    expect(s).not.toMatch(/remoteListOf\(questions,/);
+    // 发卡遍历的是 `items`(筛的输出),不是原始 `data`
+    expect(s).toMatch(/for \(const q of scopeClientQuestions\(/);
+    // ⚠️ 变异自检:整份 questions 直接发卡 ⇒ 这一格当场变红
+    expect(s).not.toMatch(/input\.questions\.data\s*\.\s*map/);
+    expect(s).not.toMatch(/for \(const q of input\.questions\.data\)/);
   });
 
-  it("面板**不用**后端那个全局收口计数(它答不对「本项目有几件」)", () => {
-    expect(dock()).not.toMatch(/fromClosedProjects/);
+  it("判据层**不用**后端那个全局收口计数(它答不对「本项目有几件」)", () => {
+    expect(cards()).not.toMatch(/fromClosedProjects/);
   });
 
-  it("面板**不**把收口那批渲染成可答的卡片", () => {
-    const s = dock();
+  it("判据层**不**把收口那批渲染成可答的卡片", () => {
+    const s = cards();
     expect(s).not.toMatch(/closedProjectQuestions\.map\(/);
     // 变异自检:加了这么一行 ⇒ 这一格当场变红
     expect(s + "\nclosedProjectQuestions.map((q) => q)").toMatch(/closedProjectQuestions\.map\(/);

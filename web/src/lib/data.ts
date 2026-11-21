@@ -29,6 +29,7 @@ import { useCallback, useEffect, useState } from "react";
 import { todoKindReachesClient } from "@shared/types/platform";
 import type {
   AgentConversationsResponse,
+  AnsweredClientQuestionView,
   ArtifactContentView,
   ArtifactView,
   AskView,
@@ -301,9 +302,10 @@ export const LIVE_POLL_MS = 2500;
  * 会各自 fetch、各自维护 `loading` ⇒ **同一份数据在两块面板里可能一处写
  * 「加载中」、另一处写「没有等你验收的东西」**。这不是理论上的不整齐 ——
  * 它会把「还没查过」渲染成「查过了是空的」,那正是这个项目反复吃亏的那类
- * 静默失败。右栏那三块共用**一个**实例,落点见 `components/shell/ChatRightRail.tsx`。
+ * 静默失败。详情实例的唯一落点现在是**对话页本体**(`ChatSurface`,v5 起表态卡
+ * 进流,右栏收件箱退场)。
  *
- * `projectId` 也在里面:「还没选项目」这一档是右栏三块**共同**的前置条件,
+ * `projectId` 也在里面:「还没选项目」这一档是表态卡**共同**的前置条件,
  * 判在持有数据的那一处,不在每一块里各写一遍。
  */
 export type ProjectDetailState = {
@@ -378,6 +380,8 @@ export function useClientQuestions(): Loaded<ClientQuestionView[]> & {
   closedProjectQuestions: ClientQuestionView[];
   /** F3:「已答复、业务经理还没处置」条数,按项目分(projectId → count)。 */
   answeredUnconsumed: Record<string, number>;
+  /** 已答复行(v5,塌缩事实来源;含 consumedAt,「整理中 / 已落工件」由它区分)。 */
+  answered: AnsweredClientQuestionView[];
 } {
   const revision = useChatStore((s) => s.projectsRevision);
   const r = useLoad(() => api.listClientQuestions(), [revision]);
@@ -388,6 +392,7 @@ export function useClientQuestions(): Loaded<ClientQuestionView[]> & {
     fromClosedProjects: r.data?.fromClosedProjects ?? 0,
     closedProjectQuestions: r.data?.closedProjectQuestions ?? [],
     answeredUnconsumed: r.data?.answeredUnconsumed ?? {},
+    answered: r.data?.answered ?? [],
   };
 }
 

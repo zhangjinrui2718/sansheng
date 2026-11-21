@@ -503,7 +503,52 @@ export function createGitCodeService(opts: { workspaceRoot: string }): CodeServi
     return git(input.repoPath, ["merge-base", "--is-ancestor", sha, "HEAD"]) !== null;
   }
 
-  return { inspect, recentCommits, isReachable };
+  /**
+   * **这个提交里**、`servicePath` 之内的全部文件(v5,2026-11-20)。
+   *
+   * `git ls-tree -r --name-only <sha> -- <servicePath>`,剥掉 `servicePath` 前缀,
+   * 返回服务目录相对路径(升序)。仓库/提交读不到 ⇒ `null`(读不到不是空列表)。
+   */
+  function listFilesAt(input: {
+    readonly repoPath: string;
+    readonly servicePath: string;
+    readonly sha: string;
+  }): readonly string[] | null {
+    const spec = input.servicePath.trim();
+    if (spec === "" || isAbsolute(spec)) return null;
+    const raw = git(input.repoPath, ["ls-tree", "-r", "--name-only", input.sha.trim(), "--", spec]);
+    if (raw === null) return null;
+    const prefix = spec.replace(/\/+$/, "") + "/";
+    const out: string[] = [];
+    for (const line of raw.split("\n")) {
+      if (line.trim() === "") continue;
+      if (!line.startsWith(prefix)) continue; // 仓库根的杂物(artifacts/ work/)不进交付物树
+      out.push(line.slice(prefix.length));
+    }
+    return out.sort();
+  }
+
+  /**
+   * 读**这个提交里**的一个文件(v5)。http 层已拦过路径形状;这里再拦一次,
+   * 因为这里是**拼接点** —— `servicePath + "/" + path` 的结果必须仍落在
+   * 服务目录之内,`..` 与绝对路径在这里是最后一道闸。
+   */
+  function readFileAt(input: {
+    readonly repoPath: string;
+    readonly servicePath: string;
+    readonly path: string;
+    readonly sha: string;
+  }): { readonly content: string; readonly bytes: number } | null {
+    const rel = input.path.trim();
+    if (rel === "" || isAbsolute(rel) || rel.split("/").includes("..")) return null;
+    const spec = input.servicePath.trim();
+    if (spec === "" || isAbsolute(spec)) return null;
+    const raw = git(input.repoPath, ["show", `${input.sha.trim()}:${spec}/${rel}`]);
+    if (raw === null) return null;
+    return { content: raw, bytes: Buffer.byteLength(raw, "utf8") };
+  }
+
+  return { inspect, recentCommits, isReachable, listFilesAt, readFileAt };
 }
 
 /**
@@ -521,5 +566,7 @@ export function unavailableCodeService(reason: string): CodeServicePort {
     // `unreachable` 之外的那条 unavailable 分支由端口缺席表达)——
     // 唯一不许的是回 `true` 假装核对过。
     isReachable: () => false,
+    listFilesAt: () => null,
+    readFileAt: () => null,
   };
 }

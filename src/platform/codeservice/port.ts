@@ -138,6 +138,32 @@ export interface CodeServicePort {
    * **不许**回一个空提交列表假装正常。
    */
   isReachable(input: { readonly repoPath: string; readonly sha: string }): boolean;
+  /**
+   * **这个提交里**、`servicePath` 之内的全部文件(v5,2026-11-20:交付物文件树)。
+   *
+   * ⚠️ 读的是**给的 sha**(调用方传 `deliverableCommit` —— 看的是交付时点的
+   * 东西),不读工作树:HEAD 一直在动,树不能跟着动。
+   * 返回**相对 `servicePath`** 的路径(升序);仓库/提交读不到 ⇒ `null`
+   * (读不到不是空列表,与 `recentCommits` 同一条纪律)。
+   */
+  listFilesAt(input: {
+    readonly repoPath: string;
+    readonly servicePath: string;
+    readonly sha: string;
+  }): readonly string[] | null;
+  /**
+   * 读**这个提交里**的一个文件(`git show <sha>:<servicePath>/<path>`)。
+   *
+   * ⚠️ `path` 是**相对 `servicePath`** 的路径;绝对路径或含 `..` 的路径一律
+   * `null`(实现层再拦一次 —— http 层拦的是形状,这里拦的是拼接结果)。
+   * 读不到(路径不在 / sha 不可达)⇒ `null`,由调用方翻成 `unavailable`。
+   */
+  readFileAt(input: {
+    readonly repoPath: string;
+    readonly servicePath: string;
+    readonly path: string;
+    readonly sha: string;
+  }): { readonly content: string; readonly bytes: number } | null;
 }
 
 /**

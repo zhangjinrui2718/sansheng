@@ -181,6 +181,7 @@ import { EntityInspector } from "@/components/shell/EntityInspector";
 import { Help } from "@/components/ui/Help";
 import { HtmlReport } from "@/components/deliverable/HtmlReport";
 import { CodeService } from "@/components/deliverable/CodeService";
+import { ArtifactTextBody } from "@/components/deliverable/ArtifactTextBody";
 import { ContentDriftNote } from "@/components/deliverable/ContentDriftNote";
 import { DataState, remoteListOf, remoteOf } from "@/components/ui/DataState";
 import { DeliveryVerdictActions } from "@/components/deliverable/DeliveryVerdictActions";
@@ -2121,10 +2122,12 @@ function ArtifactBodySection({ id }: { id: string }) {
             </>
           ) : bodyMode(artifact) === "code_service" ? (
             // 坐标(主体)与 markdown 说明都由 CodeService 渲染 —— 它要把坐标
-            // 摆在正文之前,所以不能复用下面那个只印 `<pre>` 的分支。
+            // 摆在正文之前,所以不能复用下面那个只印正文的分支。
             <CodeService artifactId={artifact.id} service={artifact.codeService} />
           ) : (
-            <TextArtifactBody artifactId={artifact.id} />
+            // v5:文本正文搬到了 `components/deliverable/ArtifactTextBody.tsx`
+            // (流内展开共用同一份;判据搬家 ≠ 改写),并按 markdown 渲染。
+            <ArtifactTextBody artifactId={artifact.id} />
           )}
 
           {/*
@@ -2165,65 +2168,3 @@ function ArtifactBodySection({ id }: { id: string }) {
 }
 
 // ── 普通工件的正文(现读)────────────────────────────────────────
-
-/**
- * 普通工件的正文(`<pre>`)—— **现读** `GET /api/artifacts/:id/content`。
- *
- * ── 为什么不再从 `artifact.body` 读 ─────────────────────────────
- *
- * 2026-10-08 起正文住**项目仓里的一份文件**(设计 §4.2):工件视图只给落点
- * (`bodyPath` / `bodyBytes` / `commitSha`),正文要现读。所以 `body` 这个字段
- * 已经从 `ArtifactView` 上消失 —— 不是「改了个名字」。
- *
- * ── 三态必须分开 ────────────────────────────────────────────────
- *
- * `runtime: "unavailable"` 是**读不到**(文件被删 / 被回滚 / `at` 不可达),
- * 把它显示成「这条工件没有正文」就是把一次读失败说成「本来就没有」。
- * 读不到时印 `problem` 那一行,**不许**留空。
- */
-function TextArtifactBody({ artifactId }: { artifactId: string }) {
-  const { data, loading, error } = useArtifactContent(artifactId);
-
-  if (error !== null) {
-    return <RedNote>读不到正文:{error}</RedNote>;
-  }
-  if (loading || data === null) return <div className="ss-meta">读取正文…</div>;
-  if (data.runtime !== "ok") {
-    return (
-      <RedNote data-content-runtime="unavailable">
-        读不到这份正文 —— {data.problem ?? "原因未说明"}。
-        (这不是「这条工件没有正文」,是这一次读不到。落点:{data.path})
-      </RedNote>
-    );
-  }
-  if (data.content.length === 0) {
-    return <div className="ss-note">这条工件的正文是空的。</div>;
-  }
-  return (
-    <>
-      <div className="ss-section" style={{ fontSize: 12 }}>
-        正文
-      </div>
-      {/* 索引漂移:一行提示(不是错误、不阻止阅读)—— 见 ContentDriftNote.tsx */}
-      <ContentDriftNote drifted={data.drifted} />
-      <pre
-        style={{
-          whiteSpace: "pre-wrap",
-          wordBreak: "break-word",
-          fontSize: 12,
-          lineHeight: 1.7,
-          margin: 0,
-          padding: "6px 8px",
-          background: "var(--ink-1)",
-          border: "1px solid var(--ink-3)",
-          borderRadius: 6,
-          color: "var(--bone-dim)",
-          maxHeight: 420,
-          overflow: "auto",
-        }}
-      >
-        {data.content}
-      </pre>
-    </>
-  );
-}

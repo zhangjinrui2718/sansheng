@@ -117,7 +117,7 @@ export function HistoryRail() {
           className="sansheng-button"
           style={{ padding: "2px 8px", fontSize: 11 }}
           onClick={() => void startIntake()}
-          title="和业务经理谈一个新项目 —— 立项由他执行,你只需要说想要什么"
+          title="谈一个新项目 —— 对齐诉求,你只需要说想要什么"
         >
           + 新建
         </button>
@@ -136,7 +136,7 @@ export function HistoryRail() {
             borderLeft: intakeActive ? undefined : "1px solid var(--ink-3)",
             cursor: "pointer",
           }}
-          title="接待会话:第一个项目之前的那段对话。业务经理在这里与你对齐诉求,谈拢后由他立项"
+          title="接待会话:第一个项目之前的那段对话。在这里对齐诉求,谈拢后立项"
         >
           <div className="flex items-baseline justify-between gap-2">
             <span
@@ -411,7 +411,7 @@ function SessionRow(props: { session: SessionSummaryView; active: boolean; onSel
       }}
       title={
         s.kind === "main"
-          ? "主对话:平台叫醒业务经理的回合落在这里"
+          ? "主对话:平台回合落在这里"
           : "另开的对话线:只有你在这里说的话会进来"
       }
     >

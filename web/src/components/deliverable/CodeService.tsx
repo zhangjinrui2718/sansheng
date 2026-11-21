@@ -42,11 +42,13 @@
  */
 import { memo, useCallback, useEffect, useState } from "react";
 import { Help } from "@/components/ui/Help";
-import { errorMessage, getRepoCommits } from "@/lib/api";
+import { errorMessage, getArtifactFile, getArtifactFiles, getRepoCommits } from "@/lib/api";
+import type { CodeServiceFileView, CodeServiceFilesView } from "@shared/types/platform";
 import type { RepoCommitsView } from "@shared/types/platform";
 import type { CodeServiceView } from "@shared/types/platform";
 import { dockerCommands, shortSha } from "@/lib/deliverable";
 import { useArtifactContent } from "@/lib/data";
+import { Markdown } from "@/components/chat/Markdown";
 import { ContentDriftNote } from "./ContentDriftNote";
 import { RedMeta, RedNote } from "@/components/ui/primitives";
 
@@ -229,6 +231,10 @@ function CommitList({ artifactId }: { artifactId: string }) {
  *
  * ⚠️ 读不到时印 `problem` 那一行,**不许**留空 —— 「没有说明」与「说明读不到」
  * 在屏幕上长得一样,而处置完全不同。
+ *
+ * v5(2026-11-20):正文按 markdown 渲染(说明一直就是 markdown;此前裸 `<pre>`
+ * 把标题/表格印成了字面量)。渲染器与对话同款(`components/chat/Markdown.tsx`,
+ * 清洗边界在 `lib/markdown.ts`)。
  */
 function ServiceBody({ artifactId, at }: { artifactId: string; at?: string }) {
   const { data, loading, error } = useArtifactContent(artifactId, at ?? null);
@@ -254,23 +260,166 @@ function ServiceBody({ artifactId, at }: { artifactId: string; at?: string }) {
     <>
       {/* 索引漂移:一行提示,不是错误(见 ContentDriftNote.tsx 文件头) */}
       <ContentDriftNote drifted={data.drifted} />
-      <pre
+      <div
+        className="ss-md"
+        data-role="service-body"
         style={{
-          whiteSpace: "pre-wrap",
-          wordBreak: "break-word",
-          fontSize: 12,
-          lineHeight: 1.7,
-          margin: 0,
+          maxHeight: 420,
+          overflow: "auto",
           padding: "6px 8px",
           background: "var(--ink-1)",
           border: "1px solid var(--ink-3)",
           borderRadius: 6,
-          color: "var(--bone-dim)",
+          fontSize: 13,
         }}
       >
-        {data.content}
-      </pre>
+        <Markdown text={data.content} />
+      </div>
     </>
+  );
+}
+
+/**
+ * **交付时点的文件树**(v5,2026-11-20)—— 树的四态纯展示面(导出给测试)。
+ *
+ * ⚠️ 三态分开渲染的老规矩在这里同样成立:`unavailable`(读不到盘 / 提交不可达)
+ * **不是**「没有文件」;`ok` + 空列表(理论上不该发生 —— 交付校验要求目录非空)
+ * 也单独说。读的是 `deliverableCommit`,所以树不会随平台提交漂动。
+ */
+export function FileTreeView({
+  data,
+  error,
+  selected,
+  onSelect,
+}: {
+  data: CodeServiceFilesView | null;
+  error: string | null;
+  selected: string | null;
+  onSelect: (path: string | null) => void;
+}) {
+  if (error !== null) {
+    return <RedMeta as="div" color={RED_FALLBACK}>读不到文件树:{error}</RedMeta>;
+  }
+  if (data === null) return <div className="ss-meta">读取文件树…</div>;
+  if (data.runtime !== "ok") {
+    return (
+      <RedMeta as="div" color={RED_FALLBACK} data-files-runtime={data.runtime}>
+        读不到交付文件树 —— {data.problem ?? "原因未说明"}。
+      </RedMeta>
+    );
+  }
+  const files = data.files ?? [];
+  if (files.length === 0) {
+    return <div className="ss-meta">这版交付物一个文件都没有。</div>;
+  }
+  return (
+    <div className="flex flex-col gap-0.5" data-role="file-tree">
+      {files.map((f) => {
+        const depth = f.split("/").length - 1;
+        return (
+          <button
+            key={f}
+            type="button"
+            onClick={() => onSelect(selected === f ? null : f)}
+            className="flex items-baseline gap-2 text-left"
+            style={{
+              paddingLeft: 12 + depth * 14,
+              fontSize: 12,
+              lineHeight: 1.8,
+              color: selected === f ? "var(--bone)" : "var(--bone-dim)",
+              background: selected === f ? "var(--ink-2)" : undefined,
+              borderRadius: 4,
+              fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
+              wordBreak: "break-all",
+            }}
+          >
+            <span className="ss-meta" style={{ flex: "0 0 auto" }}>
+              {f.split("/").pop()}
+            </span>
+            {depth > 0 && (
+              <span className="ss-meta" style={{ flex: "0 0 auto", opacity: 0.7 }}>
+                {f.slice(0, f.lastIndexOf("/"))}
+              </span>
+            )}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+/** 选中文件的内容(四态:读不到 ≠ 空文件)。 */
+function FileContent({ artifactId, path }: { artifactId: string; path: string }) {
+  const [data, setData] = useState<CodeServiceFileView | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    setData(null);
+    setError(null);
+    getArtifactFile(artifactId, path)
+      .then((r) => { if (!cancelled) setData(r); })
+      .catch((e: unknown) => { if (!cancelled) setError(errorMessage(e)); });
+    return () => { cancelled = true; };
+  }, [artifactId, path]);
+
+  if (error !== null) {
+    return <RedMeta as="div" color={RED_FALLBACK}>读不到 {path}:{error}</RedMeta>;
+  }
+  if (data === null) return <div className="ss-meta">读取 {path} …</div>;
+  if (data.runtime !== "ok") {
+    return (
+      <RedMeta as="div" color={RED_FALLBACK} data-file-runtime="unavailable">
+        读不到 {path} —— {data.problem ?? "原因未说明"}。
+      </RedMeta>
+    );
+  }
+  return (
+    <pre
+      data-role="file-content"
+      style={{
+        whiteSpace: "pre-wrap",
+        wordBreak: "break-word",
+        fontSize: 12,
+        lineHeight: 1.6,
+        margin: 0,
+        padding: "6px 8px",
+        background: "var(--ink-1)",
+        border: "1px solid var(--ink-3)",
+        borderRadius: 6,
+        color: "var(--bone)",
+        maxHeight: 420,
+        overflow: "auto",
+      }}
+    >
+      {data.content}
+    </pre>
+  );
+}
+
+/** 文件树 + 选中预览(取数壳;判据在纯展示面 `FileTreeView`)。 */
+function FileTree({ artifactId }: { artifactId: string }) {
+  const [data, setData] = useState<CodeServiceFilesView | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [selected, setSelected] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    setData(null);
+    setError(null);
+    setSelected(null);
+    getArtifactFiles(artifactId)
+      .then((r) => { if (!cancelled) setData(r); })
+      .catch((e: unknown) => { if (!cancelled) setError(errorMessage(e)); });
+    return () => { cancelled = true; };
+  }, [artifactId]);
+
+  return (
+    <div className="flex flex-col gap-1">
+      <div className="ss-meta">交付文件树 · 交付时点</div>
+      <FileTreeView data={data} error={error} selected={selected} onSelect={setSelected} />
+      {selected !== null && <FileContent artifactId={artifactId} path={selected} />}
+    </div>
   );
 }
 
@@ -379,14 +528,10 @@ export const CodeService = memo(function CodeService({ artifactId, at, service }
         <CommitList artifactId={artifactId} />
       </div>
 
-      {meta.files.length > 0 && (
-        <div className="flex flex-col gap-0.5">
-          <div className="ss-meta">服务目录的一级条目:</div>
-          <div className="ss-body" style={{ fontSize: 12, color: "var(--bone-dim)", wordBreak: "break-all" }}>
-            {meta.files.join(" · ")}
-          </div>
-        </div>
-      )}
+      {/* v5(2026-11-20):一级条目拼接行被真文件树取代(读交付时点的完整树,
+          可逐文件看内容)。坐标里的 `meta.files`(一级快照)仍由核对面持有,
+          但屏上只渲染树这一份 —— 同一个事实两处说必然漂。 */}
+      <FileTree artifactId={artifactId} />
 
       <div className="ss-section" style={{ fontSize: 12 }}>
         说明

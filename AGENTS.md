@@ -25,15 +25,27 @@
   **「Harness」并入「成员」**(`web/src/components/members/RoleHarness.tsx`,同日)。
   **「待办」页签也已删除**(2026-10-06):它是**唯一需要甲方动手**的数据,而甲方 90% 的时间在
   「对话」页 —— 现在长在对话页右下角(`web/src/components/client/ClientQuestionDock.tsx`)。
-  **对话页右栏现在是两块,空栏整栏隐藏**(2026-11-17 v3 减法 S-A,用户裁决
-  「Apple 式简约」;取代 2026-10-12 的三块结构):
-  `web/src/components/shell/ChatRightRail.tsx` = 「待你验收」(`AcceptanceDock`)+
-  「待答」(`ClientQuestionDock`)。**「本项目」块(`AgentPanel.tsx`)已删除** ——
-  它与项目页仪表盘完全重复(删胜于收),项目概览的唯一落点是项目页。
-  ⚠️ **两块共用**同一组取数实例(详情 + 提问清单都拉在 `ChatRightRail` 里,
-  `ClientQuestionDock` 只收 props)—— 各自拉一份会让同一份数据一处写「加载中」、
-  另一处写「没有」(回归 `tests/web/acceptance-dock.test.ts` 钉住「三个文件里
-  `useProjectDetail(` 只出现一次」)。
+  **「等你表态」四类卡已全部进对话流**(2026-11-20 v5,用户裁决「待答和验收的
+  交互都放在聊天框里面」;**取代** 2026-11-17 的右栏收件箱 R-A 与
+  `PlanConfirmCard:6-13` 的旧推理「提问是状态不是消息」—— 新形态 = **锚定时刻 +
+  完结塌缩成一行事实**,历史不删除也不再冒充待办):
+  提问 / 收口提议 / 验收 / 计划确认四类卡由 `web/src/lib/streamCards.ts`
+  (纯函数判据层)按锚定时刻归并进**主对话线**(`mergeStream`,卡只在
+  `kind='main'` 渲染;接待无卡),渲染层 `components/chat/StreamCards.tsx`
+  复用三份既有卡身。塌缩事实来源 = 三个新读面:`ClientQuestionList.answered`
+  (含 `consumedAt`,「整理中 / 已落 decision 工件」两态)、
+  `ProjectDetail.recentDeliveryVerdicts`(每份交付物最新裁决)、
+  `WorkView.confirmedAt`(计划确认批次)。**右栏
+  (`ChatRightRail.tsx` + `Inbox.tsx`)已删除,工作台恒两栏**;
+  取数实例(详情 + 提问台账 + 工作项)的唯一落点搬进 `ChatSurface.tsx`
+  (「`useProjectDetail(` 只出现一次」哨兵随之迁到
+  `tests/web/project-dashboard.test.ts`);已收口项目的提问仍只数不渲染,
+  计数落点回到项目页「待你回答」(`client-question.closed` 词汇条的新读者)。
+  回归:`tests/web/stream-cards.test.ts` + 变异 `.probe/mutation-stream-cards.py`
+  (5 条实测变红)。
+  **历史沿革**(已被上面取代,判据思想的来源):2026-11-17 v3 减法 S-A 的右栏
+  两块(`ChatRightRail` + `Inbox` 融合队列)——「空栏整栏隐藏」「两块共用取数
+  实例」两条纪律被流内卡继承(数据没到终值不发卡,读失败由流尾一行如实说)。
   ⚠️ **空栏判据 = 两块都拿到终值且都空**(详情加载完、无错、`awaitingAcceptance` 空;
   提问按项目过滤后为 0 且已收口计数也为 0)⇒ 整栏 `return null`;
   **加载中 / 读失败不许隐藏** —— 那会把「还没查过」渲染成「没有」(哨兵钉住)。
@@ -49,11 +61,15 @@
   token 都不花**;甲方在对话页「计划」卡点「确认开工」→
   `POST /api/projects/:id/works/confirm` → 排空器下一次兜底轮询接手。
   开关判据 = 服务端计数 `counts.unconfirmedWorks`。
+  **(v5 起「计划」卡长在对话流里**,头部 band 挂载点退场;锚 = 最新一条未确认
+  工作项的 createdAt,确认后塌缩成「已确认开工 · N 条」—— 按 `confirmedAt`
+  批次锚定,见 `streamCards.ts`)。
   **收口提议(D6 硬档,migration 034)**:`ask_client(intent:"close")` 免判据锚点
   (收口提议锚的是「做成了什么」);甲方在收口提议卡点「同意收口」→
   `POST /api/projects/:id/close/consent` 写 `projects.close_consented_at` 并把提议
   答复成 decision 工件;`project_close(outcome:"done")` **未同意一律拒收**
-  (拒绝文案即流程指引;abandoned 照旧不拦)。
+  (拒绝文案即流程指引;abandoned 照旧不拦)。**v5 起这张卡同样长在对话流里**
+  (与普通提问同为 `question` 卡,渲染层按 `intent` 分叉)。
   **顶栏 Σ(F1)**:`usage_recorded` 事件此前无读者(N2)—— 现在 store 累积
   「本次连接以来」的合计(权威值在项目页成本段;事件会丢,库不会)。
   **左栏状态分组(D1)**:在等你 → 在跑 → 停着 → 进行中 → 已收口(空组不渲染);
@@ -73,12 +89,26 @@
   默认视图 = 推进;`?view=` 进地址,默认值不写进地址):
   推进图是时间轴泳道(`web/src/lib/timeline.ts`,纯函数:x = 时间,一条工作项一道、一种工件
   kind 一道;点绿色条 ⇒ 下面显示那条工作项挂着的工件),依赖图是分层 DAG
-  (`web/src/lib/workGraph.ts`),工件关系图在「工件关系」视图。**成员页一个成员一块面板**(按角色页签切换):面板里有
+  (`web/src/lib/workGraph.ts`),工件关系图在「工件关系」视图。
+  **成员页 = 全员并发板**(2026-11-20 v5,用户裁决「成员是可以并发的吧,重新设计
+  展示方式」;**取代** 2026-10-06 的「一行页签 + 一次只渲染一个面板」—— 那是防杂乱
+  设计,与「并发可见」相反;忙闩键 = `(项目, agent)`,用户回合 ∥ 内部推进真的同时跑):
+  每成员一张卡、**同屏常渲染**(`components/members/MemberCard.tsx` 的
+  `MemberBoard`;卡 = 角色名 + 角标 + 三态状态行 + 手上的活 + 欠什么 + 实时行
+  `liveLineOf` 读 WS 在飞轮),点卡按 `?member=` 在板**之下**展开完整面板
+  (`MemberPane` 原样保留;「一次只渲染一个**面板**」的判据由它继续承担)。
+  三态判据抽到 `components/members/TurnStatus.tsx`(板卡与面板共用一份),
+  活动判据(欠什么/为什么在跑/年龄)抽到 `components/members/activity.ts`。
+  面板里有
   「正在做什么」(`GET /api/projects/:id/live`)、**「他说了什么」**(对话全文,进行中 +
   已完成;`GET /api/projects/:id/agents/:agentId/conversations`,见下专节)与他产出的工件;
   面板**之下另起一张独立的
   「角色 harness」卡片**(`Section` + 常显的状态摘要行 + 默认折叠的配置)—— 提示词单元的
   编辑 / 恢复出厂 / 备份数都在那里,写面四条规矩与后端一致。**未来角色 harness 的配置就放这张卡**。
+  **甲方对话面去角色化(2026-11-20 v5)**:对话里只有「三生」一个声音 ——
+  五个角色中文名不许出现在甲方对话面源码里(`components/chat|client|deliverable`
+  + `HistoryRail`,哨兵 `tests/web/chat-no-persona.test.ts` + 变异脚本,4 条实测变红);
+  **内部视图(成员页/工作项页/词汇表/关于页)保留角色名** —— 那是组织现场,不是人格泄漏。
 - **平台记录的落点 = 项目页一段「平台记录」**(S-C,2026-11-17 三段合一;
   原来的「两段按主体分家」退场 —— 三类记录同源,都是 `kind='system'` 的平台消息)。
   过滤片:**需要你动作**(`orgState.ts` 的 `needsAttention` = stalled / waiting_client,
@@ -108,7 +138,7 @@
   判据的一部分:同一对节点上两类边**方向一致**时不是环(真机那份数据就是这样),方向相反
   才是环(`mutualPairs` 会点名是哪两条边)。写反会让「交付」跑到最左、并且把一个不存在的
   环报出来(`web/src/lib/workGraph.ts` 的 `collectEdges`)。
-- 基线:**2502 passed / 131 test files** · 两条 typecheck 0 error · `check:design` E1–E14 全绿(5 角色)。
+- 基线:**2680 passed / 147 test files**(2026-11-20 v5 五波之后)· 两条 typecheck 0 error · `check:design` E1–E14 全绿(5 角色)。
 - **角色中文名只有一处**:`src/platform/runtime/org.ts` 的 `ORG`(播种 / `roleDisplayName()` /
   `RoleHarnessView.displayName` / **系统提示里的「# 你的角色:X」**全走它);
   前端兜底表 `web/src/lib/vocab.ts` 的 `ROLE_LABEL` 必须逐项相同,由

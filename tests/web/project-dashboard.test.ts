@@ -32,7 +32,8 @@ const read = (rel: string): string => readFileSync(join(here, "..", "..", rel), 
 
 const projectDetail = read("web/src/routes/ProjectDetail.tsx");
 const dashboard = read("web/src/lib/dashboard.ts");
-const chatRightRail = read("web/src/components/shell/ChatRightRail.tsx");
+// v5(2026-11-20):右栏收件箱退场,详情实例的唯一落点搬到了对话页本体。
+const chatSurface = read("web/src/components/chat/ChatSurface.tsx");
 
 /** 去掉注释再找 —— 注释里写着反面教材会让 grep 命中假阳性。 */
 const stripComments = (src: string): string =>
@@ -307,11 +308,13 @@ describe("接线:项目页降级为仪表盘", () => {
     expect(page).toContain("nextThing(");
   });
 
-  it("⚠️ 右栏三个文件里 useProjectDetail( 仍只出现一次(S-A 后四文件变三文件)", () => {
-    // 三个 hook 实例 = 三份 loading = 「一处写加载中、另一处写没有」。
-    const files = [chatRightRail];
+  it("⚠️ 表态卡的取数层里 useProjectDetail( 仍只出现一次(v5 后唯一落点 = ChatSurface)", () => {
+    // 多个 hook 实例 = 多份 loading = 「一处写加载中、另一处写没有」。
+    // v5 判据变更记录(2026-11-20):原判据在 ChatRightRail(R-A),右栏退场后
+    // 搬到这里 —— 判据本身没变(详情实例唯一),变的是落点。
+    const files = [chatSurface];
     const count = files.filter((f) => f.includes("useProjectDetail(")).length;
-    expect(count).toBe(1); // R-A 后详情只在 ChatRightRail
+    expect(count).toBe(1); // v5 后详情只在 ChatSurface
   });
 });
 

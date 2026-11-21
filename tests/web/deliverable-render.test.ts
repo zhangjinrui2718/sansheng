@@ -336,7 +336,9 @@ describe("正文 · 索引漂移提示(T9)", () => {
     for (const rel of [
       "components/deliverable/HtmlReport.tsx",
       "components/deliverable/CodeService.tsx",
-      "routes/Works.tsx",
+      // 2026-11-20(v5 Wave B):文本正文从 Works.tsx 搬到 ArtifactTextBody.tsx
+      // (流内展开共用一份)—— 读者清单跟着搬,判据本身不变(三个渲染点都在)。
+      "components/deliverable/ArtifactTextBody.tsx",
     ]) {
       const src = stripComments(readWebSrc(rel));
       expect(src, `${rel} 没有引用 ContentDriftNote —— 提示没接上`).toContain("ContentDriftNote");

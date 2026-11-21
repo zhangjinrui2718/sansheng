@@ -221,3 +221,42 @@ AGENTS.md 已同步(右栏两块、平台记录一段、工作项单画布、记
 
 **验证**:2630/2630 全绿(测试数变化 = 退役 dock 的渲染测试由收件箱测试接棒);
 typecheck 0 error。截图:5 页签 + DAG 默认视图 + 收件箱真数据验证通过。
+
+
+## v5(2026-11-20,用户裁决「我想完全重做一下」)—— 交互模型重做
+
+> 设计不变的部分:v3 减法、v4 IA 合并、通道分离、中断收窄、四态纪律、坐标纪律全部照旧。
+> 这一波重做的是**交互容器**:甲方对话面、表态交互、工件阅读、成员展示。
+
+### 两次裁决变更(推翻旧裁决,判据思想的来源全部保留)
+
+1. **表态卡进流**(取代 PlanConfirmCard:6-13 的「提问是状态不是消息」):四类表态卡
+   锚定在发生的时刻、完结后原地塌缩成一行事实 —— 历史不被删除(旧裁决要保护的),
+   也不再冒充待办。判据层 `web/src/lib/streamCards.ts`(mergeStream/锚定/塌缩/主对话线限定),
+   渲染层 `components/chat/StreamCards.tsx`(复用 DeliveryVerdictActions / ClientQuestionCard /
+   PlanConfirmCard 三份卡身)。右栏 `ChatRightRail.tsx` + `Inbox.tsx` 退役,工作台恒两栏。
+2. **成员全员并发板**(取代 2026-10-06「一行页签 + 一次只渲染一个面板」):并发是真的
+   (忙闩键 = (项目, agent)),板让并发一眼可见;`MemberBoard` 全部成员同屏常渲染,
+   `?member=` 在板下展开完整面板(MemberPane/harness 卡归属不变)。
+
+### 四波内容与哨兵
+
+| 波 | 内容 | 哨兵 | 变异 |
+|---|---|---|---|
+| A 表态进流 | 四类卡进主对话线 + 右栏退场 + 三读面(answered / recentDeliveryVerdicts / confirmedAt) | stream-cards.test.ts;project-dashboard 的 useProjectDetail 唯一性迁到 ChatSurface | .probe/mutation-stream-cards.py(5×RED) |
+| B 工件视图 | 文本/说明 markdown 化(ArtifactTextBody 搬出 Works)、验收卡流内展开(InlineDeliverableBody,bodyMode 唯一分发)、code_service 交付时点文件树(CodeServicePort.listFilesAt/readFileAt + /files /file 端点) | artifact-view.test.ts;deliverable-render 的 T9 读者清单随迁 | .probe/mutation-artifact-view.py(5×RED) |
+| C 去角色化 | 甲方对话面零角色名字面量(12 处清扫);提问卡不再打印 askedByName | chat-no-persona.test.ts(范围=chat/client/deliverable/HistoryRail;内部视图保留) | .probe/mutation-chat-no-persona.py(4×RED) |
+| D 成员板 | MemberBoard 全员同屏 + TurnStatus/activity 判据抽组件共用 + liveLineOf 实时行 | members-board.test.ts(板=全部成员,与选中无关) | .probe/mutation-members-board.py(3×RED) |
+
+### 塌缩事实的数据来源(三个新读面)
+
+- `ClientQuestionList.answered`(含 consumedAt):「已答复 · 整理中」/「已落 decision 工件」两态;
+- `ProjectDetail.recentDeliveryVerdicts`(每份交付物最新裁决):「已接受/要改 · 附言」;
+- `WorkView.confirmedAt`(033):计划确认按批次塌缩「已确认开工 · N 条」。
+
+### v5 的遗留(如实记)
+
+- 真机浏览器人工走检未做(建议起只读 UI 复审服务目检四类卡/展开/文件树/并发板);
+- 文案总量 9425 棘轮:五波净降(v5 各文件账本见 text-budget BASELINE 注记),≤7500 的
+  v3 目标仍差约 1800,留待下一波逐条裁决;
+- 六巨头拆文件(结构债)不在本波范围,仍是桌上独立的下一案。

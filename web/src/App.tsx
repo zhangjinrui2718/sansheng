@@ -41,7 +41,6 @@ import type { ReactNode } from "react";
 import type { AppConfigResponse, HealthResponse } from "@shared/types/platform";
 import { TopBar } from "./components/shell/TopBar";
 import { HistoryRail } from "./components/shell/HistoryRail";
-import { ChatRightRail } from "./components/shell/ChatRightRail";
 import { ChatSurface } from "./components/chat/ChatSurface";
 import { SettingsPanel } from "./components/settings/SettingsPanel";
 import { ProjectDetailPage } from "./routes/ProjectDetail";
@@ -162,15 +161,12 @@ export function App() {
         status={status}
       />
       {route === "chat" ? (
+        // v5(2026-11-20):两栏。右栏收件箱退场 —— 「等你表态」的四类卡(提问 /
+        // 验收 / 计划 / 塌缩事实行)按锚定时刻长进了消息流本体(判据在
+        // lib/streamCards.ts;取数实例的唯一落点在 ChatSurface)。
         <main className="grid grid-cols-app gap-3 px-4 pb-4" style={{ minHeight: 0 }}>
           <HistoryRail />
           {needsSetup ? <SetupHint onGo={() => go("settings")} /> : <ChatSurface />}
-          {/* 右栏 = 三块上下并列:**「本项目」(现在怎么样)+「待你验收」(等你
-              点头)+「待答」(等你回答)。后两块都是「需要甲方动手」的事,所以挨着
-              放。⚠️ 三块共用**同一个**项目详情实例(hook 落在 `ChatRightRail` 里)
-              —— 各自拉一份会让同一份数据在两块面板里显示不同的加载态。
-              详见 `components/shell/ChatRightRail.tsx` 的文件头。 */}
-          <ChatRightRail />
         </main>
       ) : route === "project" ? (
         page(<ProjectDetailPage />)

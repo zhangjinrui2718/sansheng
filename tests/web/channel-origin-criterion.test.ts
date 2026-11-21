@@ -134,8 +134,11 @@ function runTurn(
 
 function renderTimeline(turns: readonly Turn[]): string {
   const { timeline } = partitionTurns(turns, CTX);
+  // v5(2026-11-20):history 换成归并后的 StreamItem(轮 + 表态卡)。本文件判的是
+  // 通道,不发卡 —— 手工包成流条目(不引判据层)。
+  const items = timeline.map(({ turn }) => ({ kind: "turn" as const, at: turn.startedAt, turn }));
   return renderToStaticMarkup(
-    createElement(ConversationStream, { history: timeline, streaming: [], hiddenNote: null }),
+    createElement(ConversationStream, { history: items, streaming: [], hiddenNote: null }),
   );
 }
 

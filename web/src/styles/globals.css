@@ -759,12 +759,12 @@
 
 @layer utilities {
   .grid-cols-app {
-    /* S-A:右栏空栏返回 null ⇒ auto 列宽 0,主栏吃满(空栏不留尸体列) */
-    grid-template-columns: 260px minmax(0, 1fr) auto;
+    /* v5(2026-11-20):右栏收件箱退场(表态卡进流),工作台恒两栏 */
+    grid-template-columns: 260px minmax(0, 1fr);
   }
   @media (max-width: 1100px) {
     .grid-cols-app {
-      grid-template-columns: 220px minmax(0, 1fr) auto;
+      grid-template-columns: 220px minmax(0, 1fr);
     }
   }
   @media (max-width: 880px) {

@@ -32,10 +32,10 @@ import { inFlightTurns, useChatStore } from "@/stores/chat";
 import { useSettingsStore, activeProviderOf } from "@/stores/settings";
 import { MessageList } from "./MessageList";
 import { ChatComposer } from "./ChatComposer";
-import { PlanConfirmCard } from "./PlanConfirmCard";
 import { Pill, RedNote } from "@/components/ui/primitives";
 import { projectLocation } from "@/lib/entityMeta";
 import { toHash } from "@/lib/route";
+import { cardsUnavailableOf, streamCardsOf } from "@/lib/streamCards";
 import {
   channelActivityOf,
   channelContextOf,
@@ -44,9 +44,12 @@ import {
   remoteClaimsRunning,
   REMOTE_WATCH_INTERVAL_MS,
   surfaceStatusOf,
+  useClientQuestions,
   useHarnessRoles,
+  useProjectDetail,
   useProjectLive,
   useProjectMembers,
+  useWorks,
   type SurfaceStatus,
 } from "@/lib/data";
 
@@ -231,6 +234,62 @@ export function ChatSurface() {
     });
   }, [intakeActive, project, projectId, liveNow.data, liveNow.error, nameOf]);
 
+  // ── v5(2026-11-20):表态卡进流 ────────────────────────────────────
+  // 详情 + 提问台账 + 工作项清单三份取数实例的**唯一落点**(右栏收件箱退场后,
+  // 「同一份数据一处写加载中、另一处写没有」的判据在这里继续成立:卡由
+  // streamCardsOf 从这三份实例算出,渲染层不再自己拉)。计划卡的旧挂载点
+  // (头部 band)退场 —— 它现在按锚定时刻长在流里,见 MessageList 的 cards。
+  const detailState = useProjectDetail(projectId, { pollMs: 5000 });
+  const questionsState = useClientQuestions();
+  const worksState = useWorks(projectId);
+  /** 表态卡只渲染在主对话线(kind='main')—— 判据见 lib/streamCards.ts 文件头。 */
+  const isMainSession = useMemo(() => {
+    if (intakeActive || projectId === null) return false;
+    if (sessionId === null) return true; // 还没选线 ⇒ 还没有流,这个值此时不影响渲染
+    const hit = (sessionsByProject[projectId] ?? []).find((s) => s.id === sessionId);
+    return hit === undefined ? true : hit.kind === "main";
+  }, [intakeActive, projectId, sessionId, sessionsByProject]);
+  const cards = useMemo(
+    () =>
+      streamCardsOf({
+        projectId: intakeActive ? null : projectId,
+        isMainSession,
+        detail: {
+          detail: detailState.detail,
+          loading: detailState.loading,
+          error: detailState.error,
+        },
+        questions: {
+          data: questionsState.data,
+          closedProjectQuestions: questionsState.closedProjectQuestions,
+          answered: questionsState.answered,
+          loading: questionsState.loading,
+          error: questionsState.error,
+        },
+        works: { data: worksState.data, loading: worksState.loading, error: worksState.error },
+        unconfirmedCount: project?.counts.unconfirmedWorks ?? 0,
+      }),
+    [intakeActive, projectId, isMainSession, detailState, questionsState, worksState, project],
+  );
+  const cardsUnavailable = cardsUnavailableOf({
+    projectId: intakeActive ? null : projectId,
+    detailError: detailState.error,
+    questionsError: questionsState.error,
+  });
+  const planContext = useMemo(
+    () =>
+      intakeActive || projectId === null || project == null
+        ? null
+        : {
+            projectId,
+            goal: project.goal,
+            acceptanceCriteria: project.acceptanceCriteria,
+            works: { data: worksState.data, loading: worksState.loading, error: worksState.error },
+            onConfirmed: () => void useChatStore.getState().loadProjects(),
+          },
+    [intakeActive, projectId, project, worksState],
+  );
+
   return (
     <section className="sansheng-card overflow-hidden flex flex-col" style={{ minHeight: 0 }}>
       <div
@@ -239,7 +298,7 @@ export function ChatSurface() {
       >
         <div className="flex items-center gap-2 min-w-0">
           <span style={{ fontSize: 13, color: "var(--bone)" }}>
-            {intakeActive ? "接待 · 业务经理" : project ? project.name : "未选项目"}
+            {intakeActive ? "接待" : project ? project.name : "未选项目"}
           </span>
           {/* R-B:项目页签退场后,这里是进「项目详情」的常驻入口 */}
           {!intakeActive && projectId !== null && (
@@ -275,7 +334,7 @@ export function ChatSurface() {
           )}
           {intakeActive && (
             <>
-              <Pill tone="jade" title="第一个项目之前的那段对话:业务经理与你对齐诉求,谈拢后由他立项">
+              <Pill tone="jade" title="第一个项目之前的那段对话:对齐诉求,谈拢后立项">
                 谈新项目
               </Pill>
               {/* 「重新谈」= 左栏 + 新建 的头部冗余入口。
@@ -329,16 +388,9 @@ export function ChatSurface() {
         </div>
       </div>
 
-      {/* ── D3:「计划」卡(硬档,2026-11-17)── 有未确认工作项才出现;确认之前
-          派工门拒绝它们,一个 token 都不花。开关判据是服务端算好的计数。 */}
-      {!intakeActive && projectId !== null && project != null && project.counts.unconfirmedWorks > 0 && (
-        <PlanConfirmCard
-          projectId={projectId}
-          goal={project.goal}
-          acceptanceCriteria={project.acceptanceCriteria}
-          onConfirmed={() => void useChatStore.getState().loadProjects()}
-        />
-      )}
+      {/* ── v5:「计划」卡随表态卡一起进了流(按锚定时刻归并,见 MessageList 的
+          cards prop);头部 band 挂载点退场。开关判据仍是服务端算好的计数
+          (unconfirmedCount > 0 ⇒ streamCardsOf 发卡),确认之前一个 token 不花。 */}
 
       {/* ── D2:「项目此刻」(v3,2026-11-17)── 零态整行不渲染(见 projectNowOf)。 */}
       {nowLine !== null && (
@@ -445,7 +497,7 @@ export function ChatSurface() {
         </RedNote>
       )}
 
-      <MessageList />
+      <MessageList cards={cards} cardsUnavailable={cardsUnavailable} plan={planContext} />
 
       <ChatComposer
         value={input}
@@ -462,11 +514,11 @@ export function ChatSurface() {
             : socketStatus === "connecting"
               ? "连接中…"
               : !hasContext
-                ? "先在左栏选一个项目,或点「+ 新建」和业务经理聊聊"
+                ? "先在左栏选一个项目,或点「+ 新建」开始聊"
                 : !hasKey
                   ? "请先在「设置」配置 API Key"
                   : intakeActive
-                    ? "说说你想做什么 —— 业务经理会和你对齐,谈拢后由他立项"
+                    ? "说说你想做什么 —— 三生会和你对齐,谈拢后立项"
                     : "说点什么…"
         }
       />
@@ -501,12 +553,13 @@ export function SurfaceStatusIndicator({ status }: { status: SurfaceStatus }) {
     status === "streaming"
       ? "甲方通道在跑(你发起的那一轮,或对你说的一条播报)—— 输入框先歇一会儿"
       : status === "internal"
-        ? // ⚠️ 这里**不许**只写「你可以照常跟业务经理说话」:那一句在当前服务端是**空头承诺** ——
+        ? // ⚠️ 这里**不许**只写「你可以照常说话」:那一句在当前服务端是**空头承诺** ——
           // `hub.ts` 的「项目忙」闩由 `serve.ts` 的 `drainOne` 在**整次级联**期间持有,
           // 发出去的 `send` 会被拒(错误 `busy` 显示在会话里)。前端能诚实的部分:输入框
           // **可用**(不再是「推演中」禁用)、内部在跑**说得出来**、被拒时**看得见**。
-          "内部角色(项目经理 / 工程师 / 质检)在跑 —— 输入框保持可用;" +
-          "服务端在本项目这一轮排空结束前可能拒收(那条错误会显示在会话里)"
+          // v5 去角色化(2026-11-20):不点名内部角色 —— 甲方对话面只有一个声音。
+          "组织内部在推进 —— 输入框保持可用;" +
+          "这一轮推进结束前发消息可能被拒(那条错误会显示在会话里)"
         : undefined;
   return (
     <span className={`${className} flex items-center gap-1`} title={title}>

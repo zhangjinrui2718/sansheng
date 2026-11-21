@@ -302,3 +302,97 @@ describe("代码服务 · 提交读面(现读,不是快照)", () => {
     expect(wrong.status, "不是代码服务时回 200 + 空列表 = 把「这不是仓库」说成「没有提交」").toBe(400);
   });
 });
+
+describe("代码服务 · 交付时点文件树(/files)与单文件(/file)—— v5", () => {
+  it("正样本:树 = 交付时点 servicePath 之内的文件,相对路径升序,commit = 交付版本", async () => {
+    const repo = makeRepo("tree-ok", 3);
+    const id = writeDeliverable({
+      repoPath: repo.path, servicePath: repo.servicePath, head: repo.head,
+    });
+    const r = await get(`/api/artifacts/${id}/files`);
+    expect(r.status).toBe(200);
+    const v = r.body as import("@shared/types/platform").CodeServiceFilesView;
+    expect(v.runtime).toBe("ok");
+    // Dockerfile + f1..f3,剥掉 servicePath 前缀,升序
+    expect(v.files).toEqual(["Dockerfile", "f1.txt", "f2.txt", "f3.txt"]);
+    expect(v.commit).toBe(repo.head);
+  });
+
+  it("★ 树读的是**交付时点**:平台再提交工件(不动服务目录),树一个字都不变", async () => {
+    const repo = makeRepo("tree-pin", 1);
+    const id = writeDeliverable({
+      repoPath: repo.path, servicePath: repo.servicePath, head: repo.head,
+    });
+    const before = (await get(`/api/artifacts/${id}/files`)).body as import("@shared/types/platform").CodeServiceFilesView;
+    // 平台写一份工件并提交 → HEAD 前进,交付版本没动
+    mkdirSync(join(repo.path, "artifacts"), { recursive: true });
+    writeFileSync(join(repo.path, "artifacts", "x.md"), "平台写的正文");
+    git(repo.path, "add", "-A");
+    git(repo.path, "commit", "-m", "平台写工件");
+    const after = (await get(`/api/artifacts/${id}/files`)).body as import("@shared/types/platform").CodeServiceFilesView;
+    expect(after.files).toEqual(before.files);
+    expect(after.commit).toBe(repo.head); // 仍是交付版本,不是新 HEAD
+  });
+
+  it("负样本:404 / 非 code_service 400 / 交付版本不可达 ⇒ unavailable + 说明(files=null 不是空)", async () => {
+    expect((await get("/api/artifacts/不存在/files")).status).toBe(404);
+    const html = writeDeliverable({ repoPath: null, type: null });
+    expect((await get(`/api/artifacts/${html}/files`)).status).toBe(400);
+
+    const repo = makeRepo("tree-gone", 2);
+    const id = writeDeliverable({
+      repoPath: repo.path, servicePath: repo.servicePath,
+      head: repo.head, deliverableCommit: repo.head,
+    });
+    git(repo.path, "reset", "--hard", "HEAD~1");
+    const v = (await get(`/api/artifacts/${id}/files`)).body as import("@shared/types/platform").CodeServiceFilesView;
+    expect(v.runtime).toBe("unavailable");
+    expect(v.files).toBeNull();
+    expect(v.problem).toMatch(/不可达/);
+  });
+
+  it("/file 正样本:内容与字节都对得上;逃逸路径(../、绝对路径)⇒ 400", async () => {
+    const repo = makeRepo("file-ok", 1);
+    const id = writeDeliverable({
+      repoPath: repo.path, servicePath: repo.servicePath, head: repo.head,
+    });
+    const ok = await get(`/api/artifacts/${id}/file?path=${encodeURIComponent("f1.txt")}`);
+    expect(ok.status).toBe(200);
+    const v = ok.body as import("@shared/types/platform").CodeServiceFileView;
+    expect(v.runtime).toBe("ok");
+    expect(v.content).toBe("1\n");
+    expect(v.bytes).toBe(2);
+
+    for (const bad of ["../outside.txt", "/etc/passwd"]) {
+      const r = await get(`/api/artifacts/${id}/file?path=${encodeURIComponent(bad)}`);
+      expect(r.status, `逃逸路径 ${bad} 必须被拒`).toBe(400);
+    }
+  });
+
+  it("/file 负样本:不在这版交付物里 ⇒ unavailable(**不是**空文件);超过预览上限 ⇒ 不截断", async () => {
+    const repo = makeRepo("file-miss", 1);
+    const id = writeDeliverable({
+      repoPath: repo.path, servicePath: repo.servicePath, head: repo.head,
+    });
+    const miss = (await get(`/api/artifacts/${id}/file?path=${encodeURIComponent("nope.txt")}`)).body as import("@shared/types/platform").CodeServiceFileView;
+    expect(miss.runtime).toBe("unavailable");
+    expect(miss.content).toBeNull();
+    expect(miss.problem).toBeTruthy();
+
+    // 超上限:写一份 201KB 的文件并让它进交付版本
+    const big = "x".repeat(201 * 1024);
+    const svc = join(repo.path, repo.servicePath);
+    writeFileSync(join(svc, "big.txt"), big);
+    git(repo.path, "add", "-A");
+    git(repo.path, "commit", "-m", "放大文件");
+    const newHead = git(repo.path, "rev-parse", "HEAD");
+    const id2 = writeDeliverable({
+      repoPath: repo.path, servicePath: repo.servicePath,
+      head: newHead, deliverableCommit: newHead,
+    });
+    const over = (await get(`/api/artifacts/${id2}/file?path=${encodeURIComponent("big.txt")}`)).body as import("@shared/types/platform").CodeServiceFileView;
+    expect(over.runtime).toBe("unavailable");
+    expect(over.content).toBeNull(); // ★ 不截断:半份代码看起来是完整的代码
+    expect(over.problem).toMatch(/上限|截断/);
+  });
+});

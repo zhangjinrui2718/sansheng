@@ -64,31 +64,40 @@ const BASELINE: Record<string, number> = {
   "components/brand/Seal.tsx": 2,
   "components/chat/ChatComposer.tsx": 136,
   // 2026-11-17(IA v4 走检):317 → 329(+12,头部「详情」入口;placeholder 键位段删除)
-  "components/chat/ChatSurface.tsx": 329,
+  "components/chat/ChatSurface.tsx": 297,
   "components/chat/Markdown.tsx": 0,
-  // 2026-11-17(D3):「计划」卡 —— 新 UI(目标/判据摘要 + 拆解清单 + 确认开工),
-  // 逐句斟酌过;对照的减量:AgentPanel -52、ChatRightRail -9、HistoryRail -19、
-  // ChatSurface -14、ProjectDetail -5(HistoryRail/ChatSurface/ProjectDetail 见各自条目)。
-  "components/chat/PlanConfirmCard.tsx": 117,
+  // 2026-11-17(D3):「计划」卡 —— 新 UI(目标/判据摘要 + 拆解清单 + 确认开工)。
+  // 2026-11-20(v5):117 → 57 —— band 形态退场,卡身随表态卡进流(判据在
+  // lib/streamCards.ts),works 取数上移到 ChatSurface(组件只收 props)。
+  "components/chat/PlanConfirmCard.tsx": 57,
     // 2026-11-17(文案裁决):103 → 128(+25,HiddenNotice 的落点指引移进悬停 ——
-  // 屏上散文退场,指针保留在 title)
-  "components/chat/MessageList.tsx": 128,
+  // 屏上散文退场,指针保留在 title)。2026-11-20(v5):流尾「读不到」行不加悬停
+  // (可见正文由判据层给出),维持 128。
+  "components/chat/MessageList.tsx": 124,
+  // 2026-11-20(v5):表态卡的渲染层 —— 可操作卡复用三份既有卡身,塌缩事实行
+  // 是居中小字;悬停一律不加(⑨ 的条数棘轮)。
+  // 2026-11-20(v5 Wave B):32 → 40(+8,验收卡的「查看正文/收起正文」——
+  // 流内展开的最小一对按钮;正文懒加载,点开才取)。
+  "components/chat/StreamCards.tsx": 40,
   "components/chat/ThinkingBlock.tsx": 25,
   "components/chat/ToolCallCard.tsx": 0,
-  // 2026-11-17(D5):97 → 115(+18,验收卡的「查看」入口 —— 跳工件抽屉读正文;
-  // 有了它,右栏表态不再需要先去工作项页找那件货)。
-  // 2026-11-17(D6):91 → 202(+111,收口提议卡 —— intent="close" 的提问渲染成
-  // 「同意收口 / 先不收」两个固定动作,替代自由文本框;这是新分支,不是原卡片的加厚)。
-  // 2026-11-17(R-A 融合):两个 dock 合并为收件箱 —— AcceptanceDock(97)与
-  // ClientQuestionDock(151)退役,Inbox 承载同一判据(类型徽章+动作)。
-  "components/client/Inbox.tsx": 111,
+  // 2026-11-20(v5):Inbox.tsx(111)与 ChatRightRail.tsx(0)退役 —— 收件箱
+  // 融合队列被「表态卡进流」取代(判据在 lib/streamCards.ts,见下面那条)。
   "components/client/ClientQuestionCard.tsx": 177,
   // 2026-11-17(F3):125 → 151(+26,「已答复 · 业务经理整理中」一行 + 判据注释
   // 进了 title;对照 S-A 的删减净下降)。
   "components/dashboard/DashboardCards.tsx": 17,
-  "components/deliverable/CodeService.tsx": 484,
+  // 2026-11-20(v5 Wave B):484 → 468 —— 一级条目拼接行被交付时点文件树取代
+  // (树 + 选中预览;新增文案砍掉了悬停与尾巴短语后净降)。
+  "components/deliverable/CodeService.tsx": 468,
+  // 2026-11-20(v5 Wave B):从 routes/Works.tsx 搬出(流内展开共用一份),
+  // 裸 <pre> 换 markdown;三态判据逐字继承。
+  "components/deliverable/ArtifactTextBody.tsx": 53,
+  // 2026-11-20(v5 Wave B):流内展开的正文挂载点(按 bodyMode 分发;只有正文,
+  // 结构化详情仍在抽屉)。
+  "components/deliverable/InlineDeliverableBody.tsx": 13,
   "components/deliverable/ContentDriftNote.tsx": 30,
-  "components/deliverable/DeliveryVerdictActions.tsx": 276,
+  "components/deliverable/DeliveryVerdictActions.tsx": 268,
   "components/deliverable/HtmlReport.tsx": 113,
   // 2026-11-17(IA v4 走检):256 → 239(描述句「只在实时流里看得见…」退场)
   "components/members/AgentConversations.tsx": 239,
@@ -117,11 +126,10 @@ const BASELINE: Record<string, number> = {
   // 新功能计入基线,不是放水 —— 那一句注释性文案已压到最短。
   // 2026-11-17(IA v4 走检):397 → 374(顶部描述句退场;cwd 帮助句压成缺省值)
   "components/settings/SettingsPanel.tsx": 374,
-  // 2026-11-17(S-A):「本项目」块删除 —— AgentPanel.tsx(52)整个移除;
-  // ChatRightRail 9 → 0(右栏不再有任何屏上文案)。净 -61。
-  "components/shell/ChatRightRail.tsx": 0,
+  // 2026-11-17(S-A):「本项目」块删除 —— AgentPanel.tsx(52)整个移除。
+  // 2026-11-20(v5):ChatRightRail.tsx(0)也退役了 —— 工作台恒两栏。
   "components/shell/EntityInspector.tsx": 8,
-  "components/shell/HistoryRail.tsx": 255,
+  "components/shell/HistoryRail.tsx": 210,
   // 2026-11-17(F1):37 → 56(+19,Σ 的口径悬停 —— 「本次连接以来;权威值在项目页成本段」,
   // 防止把会话内合计读成全历史)。
   "components/shell/TopBar.tsx": 55,
@@ -151,12 +159,22 @@ const BASELINE: Record<string, number> = {
   "lib/relations.ts": 107,
   "lib/route.ts": 0,
   "lib/scroll.ts": 0,
+  // 2026-11-20(v5):表态卡进流的判据层(锚定/塌缩/读不到文案的唯一落点)
+  "lib/streamCards.ts": 21,
   "lib/timeline.ts": 17,
   "lib/vocab.ts": 168,
   "lib/workGraph.ts": 0,
   "lib/ws.ts": 0,
   "main.tsx": 0,
-  "routes/Members.tsx": 927,
+  // 2026-11-20(v5 Wave D):927 → 578 —— 页签组件退役,活动判据搬到
+  // components/members/activity.ts(板与面板共用;下面三条新账)。
+  "routes/Members.tsx": 578,
+  // 活动判据(欠什么/为什么在跑/年龄)—— MemberCard 与 MemberPane 共用。
+  "components/members/activity.ts": 171,
+  // 「此刻状态」三态行(读不到 ≠ 空闲;没拿到 ≠ 读不到)—— 板与面板共用一份。
+  "components/members/TurnStatus.tsx": 53,
+  // 全员并发板的卡面(谁在跑/手上活/欠什么/实时行;悬停只有角标口径)。
+  "components/members/MemberCard.tsx": 104,
   // 2026-11-17(S-F):358 → 364(+6,分段控件的三个标签「画像/碎片/语料」——
   // 三段收成分段控件后,标签是新 UI 的必需字;总量靠 S-A/S-C 的删减净下降)。
   "routes/Memory.tsx": 364,
@@ -165,7 +183,9 @@ const BASELINE: Record<string, number> = {
   // 三图收成一画布后,切换标签是新 UI 的必需字;叠放的段落标题随之消失)。
   // 2026-11-17(R-C/R-D):1535 → 1262(默认依赖 DAG;TimelineLegend/WorkDagLegend
   // 静态图例退场,运行态说明名称式;DAG 节点增「待质检」标记)
-  "routes/Works.tsx": 1262,
+  // 2026-11-20(v5 Wave B):1262 → 1209 —— 文本正文搬到 ArtifactTextBody
+  // (markdown 化,流内展开共用)。
+  "routes/Works.tsx": 1209,
   "stores/chat.ts": 111,
   "stores/settings.ts": 0,
 };

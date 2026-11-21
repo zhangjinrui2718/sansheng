@@ -28,7 +28,9 @@ import {
   listBlockers, listBlockedWorks, isUnresolvedBlocker, type BlockerRow,
 } from "../storage/repo/blockers.js";
 import { listChanges, type ChangeRequestRow } from "../storage/repo/changes.js";
-import { listUnconsumedClientAnswers } from "../storage/repo/clientQuestions.js";
+import {
+  listAnsweredClientQuestions, listUnconsumedClientAnswers,
+} from "../storage/repo/clientQuestions.js";
 import {
   listSessions, listSessionMessages, normalizeMessageLimit, isSessionMessageKind,
   listProviderNotices,
@@ -36,7 +38,7 @@ import {
 } from "../storage/repo/sessions.js";
 import { getAgent } from "../storage/repo/agents.js";
 import {
-  deliveryAcceptance, deliveredDeliverables, latestDeliveryVerdict,
+  deliveryAcceptance, deliveredDeliverables, latestDeliveryVerdict, latestVerdictsByArtifact,
   type DeliveryAcceptance,
 } from "../storage/repo/deliveryVerdicts.js";
 import {
@@ -57,14 +59,14 @@ import { makeArtifactTextReader, materializeChunk, type Materialization } from "
 import { buildMatchQuery } from "../knowledge/query.js";
 import type { WorkspacePort } from "../workspace/port.js";
 import type {
-  ArtifactAcceptanceView, AskView, ArtifactView, AwaitingAcceptanceView, BlockerView,
-  ChangeView, ClientQuestionView, CodeServiceView,
+  AnsweredClientQuestionView, ArtifactAcceptanceView, AskView, ArtifactView,
+  AwaitingAcceptanceView, BlockerView, ChangeView, ClientQuestionView, CodeServiceView,
   IntakeLiveView,
   KnowledgeChunkView, KnowledgeOverviewView, KnowledgePendingSourceView, KnowledgeProjectStatsView,
   MemberActivityView, MemberView, MessageOrigin, ProjectDetail, ProjectLifecycleStatus,
   ProjectLiveView,
   ProjectStatus,
-  ProjectSummary, ProjectUsageView, UsageByWorkView,
+  ProjectSummary, ProjectUsageView, RecentDeliveryVerdictView, UsageByWorkView,
   SessionMessageView, TurnTrigger, TurnUsageView,
   UsageByAgentView, WorkView,
   ProviderFailoverEntryView, ProviderFailoverKind,
@@ -133,6 +135,9 @@ export function toWorkView(db: Database.Database, row: WorkRow, name: (id: strin
     // migration 032:显式优先级原样透出(0=最高 … 9=最低;列 NOT NULL DEFAULT 3,
     // 这里不做任何换算 —— 换算是判据,判据只有一个落点:排空器的 collectTodos)。
     priority: row.priority,
+    // migration 033:甲方确认开工的时刻原样透出(null = 未确认)—— 对话流的
+    // 「计划」卡塌缩行(「已确认开工 · N 条」)的锚。换算同样不在这里做。
+    confirmedAt: row.confirmedAt,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
     dependsOn: listDeps(db, row.id),
@@ -778,7 +783,29 @@ export function toProjectDetail(db: Database.Database, row: ProjectRow): Project
     works,
     pendingQuestions: questions,
     awaitingAcceptance: awaitingAcceptanceOf(db, row, acceptance),
+    recentDeliveryVerdicts: recentDeliveryVerdictsOf(db, row.id),
   };
+}
+
+/**
+ * 本项目**已记录**的甲方裁决,各交付物取最新一条,时间降序(v5,2026-11-20)。
+ *
+ * 对话流的验收卡塌缩事实来源:裁决一落,交付物就离开 `awaitingAcceptance`,
+ * 卡要原地塌缩成一行,不是凭空消失。行数与 `latestVerdictsByArtifact` 同源
+ * (每份交付物最新一条);裁决历史本身 append-only,工件卡上的改判可见性不受影响。
+ */
+function recentDeliveryVerdictsOf(
+  db: Database.Database,
+  projectId: string,
+): RecentDeliveryVerdictView[] {
+  const out: RecentDeliveryVerdictView[] = [];
+  for (const [artifactId, v] of latestVerdictsByArtifact(db, projectId)) {
+    const a = getArtifact(db, artifactId);
+    if (a === null) continue; // 交付物被清过库:少一条,不编标题(与 awaitingAcceptanceOf 同一条纪律)
+    out.push({ artifactId, title: a.title, verdict: v.verdict, note: v.note, at: v.createdAt });
+  }
+  out.sort((x, y) => y.at - x.at);
+  return out;
 }
 
 /**
@@ -865,6 +892,11 @@ export function listAllClientQuestions(db: Database.Database): {
   /** 因项目已收口而**没有**进入待答队列的条数。⚠️ 必须被显示,不许静默丢弃。 */
   fromClosedProjects: number;
   /**
+   * 已答复的提问行(v5,2026-11-20;谓词与消费边界见契约类型上的注释)。
+   * 对话流的提问卡塌缩事实来源 —— 裁决同款纪律:答完的卡塌缩成一行,不凭空消失。
+   */
+  answered: AnsweredClientQuestionView[];
+  /**
    * 同样因项目已收口而被排除的那些提问,**按项目分**地给出(与 `questions` 同一形状)。
    *
    * ⚠️ 为什么要它:2026-10-12 起「待答」面板**按当前项目显示**(与「待你验收」同口径),
@@ -882,6 +914,7 @@ export function listAllClientQuestions(db: Database.Database): {
   const name = agentNameCache(db);
   const out: ClientQuestionView[] = [];
   const closedOut: ClientQuestionView[] = [];
+  const answeredOut: AnsweredClientQuestionView[] = [];
   const answeredUnconsumed: Record<string, number> = {};
   for (const p of listProjects(db)) {
     const closed = p.status === "done" || p.status === "abandoned";
@@ -892,15 +925,31 @@ export function listAllClientQuestions(db: Database.Database): {
     // `resume_client` 规则逐字同源:answered_at 非空且 consumed_at 为空)。
     const pending = listUnconsumedClientAnswers(db, p.id).length;
     if (pending > 0) answeredUnconsumed[p.id] = pending;
+    // v5:已答复行(塌缩事实来源)。问题文本与待答卡同源 = 工件标题;
+    // 工件被清过库 ⇒ 少一行,不编文本(与 awaitingAcceptanceOf 同一条纪律)。
+    for (const row of listAnsweredClientQuestions(db, p.id)) {
+      const a = getArtifact(db, row.questionArtifactId);
+      if (a === null) continue;
+      answeredOut.push({
+        id: row.questionArtifactId,
+        projectId: p.id,
+        question: a.title,
+        answeredAt: row.answeredAt ?? a.createdAt,
+        consumedAt: row.consumedAt,
+        decisionArtifactId: row.answerArtifactId,
+      });
+    }
   }
   const byAge = (a: ClientQuestionView, b: ClientQuestionView): number => a.createdAt - b.createdAt;
   out.sort(byAge);
   closedOut.sort(byAge);
+  answeredOut.sort((a, b) => a.answeredAt - b.answeredAt);
   return {
     questions: out,
     fromClosedProjects: closedOut.length,
     closedProjectQuestions: closedOut,
     answeredUnconsumed,
+    answered: answeredOut,
   };
 }
 

@@ -40,6 +40,7 @@
 import { useCallback, useMemo, useState } from "react";
 import { PageHeader, Pill, Section, StatStrip, EmptyState, Flag, Disclosure, Clamp } from "@/components/ui/primitives";
 import { DataState, remoteListOf, remoteOf } from "@/components/ui/DataState";
+import { Help } from "@/components/ui/Help";
 import { ClientQuestionCard } from "@/components/client/ClientQuestionCard";
 
 import {
@@ -563,6 +564,15 @@ export function ProjectDetailPage() {
               hint="需要你处理"
               helpId="client-question"
             >
+              {/* v5(2026-11-20):收口项目的提问从这里如实说明 —— 右栏收件箱退场后,
+                  「这些提问兑现不了」的事实落点回到项目页(判据见 glossary 的
+                  client-question.closed:终态项目被待答队列排除,但工件原样在)。 */}
+              {(detail.status === "done" || detail.status === "abandoned") && (
+                <div className="ss-meta">
+                  项目已收口 · 提问不再等答复
+                  <Help id="client-question.closed" />
+                </div>
+              )}
               <div className="grid gap-2">
                 {detail.pendingQuestions.map((q) => (
                   <ClientQuestionCard key={q.id} q={q} />

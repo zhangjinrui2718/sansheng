@@ -256,11 +256,15 @@ erDiagram
 
 ### 对话页 `#/chat`(无地址参数,当前项目在 store)
 
+> **2026-11-20 v5**:右栏收件箱退场,工作台恒两栏(左栏 + 对话面);四类
+> 「等你表态」卡(提问/收口提议/验收/计划确认)按**锚定时刻**归并进主对话线
+> (`lib/streamCards.ts` 判据;`?member=` 式深链接不涉及),完结后原地塌缩成
+> 一行事实。取数实例(详情 5s + 提问台账 + 工作项)唯一落点 = `ChatSurface`。
+
 | 区块 | 展示(读) | 接受 | 行为 |
 |---|---|---|---|
 | 左栏 | 项目列表(`GET /api/projects`)+状态 pill+待答 N;展开后会话线(`GET /api/sessions`);接待入口;索引错误 | `+ 新建`;点项目/线;`+ 新对话线` | 切项目(选 main);切线(`GET …/messages?sessionId=`);`POST /api/projects/:id/sessions`;接待态读 `GET /api/intake/messages` |
-| 中栏 | 消息流(项目线或接待线);思考/工具/内部过程折叠;平台通知折成一行计数;断线红横幅;状态灯五态+在跑时 5s 补问 `GET /live` | 文本(Enter 发送);■ 停止/Esc | WS `send`(断线退回乐观上屏);WS `interrupt`(channel=client);未配 Key → 引去设置 |
-| 右栏(三块共用 detail,5s 轮询) | ① 本项目:计数/成员/未完成工作项/阻塞(`GET /api/projects/:id`+`/blockers`)② 待你验收:`awaitingAcceptance` ③ 待答:`GET /api/client-questions` 按项目过滤 | 验收:备注+接受/要改;提问:选项回填/文本 | `POST /api/artifacts/:id/verdict`(已收口 409);`POST /api/client-questions/:id/answer`(落 decision 工件) |
+| 对话面 | 消息流(项目线或接待线)+ **流内表态卡**(主对话线;锚:提问 createdAt / 交付 deliveredAt / 裁决 at / 未确认工作项 createdAt)+ 塌缩事实行(已答复·consumedAt 两态 / 已接受·要改 / 已确认开工·批次);思考/工具折叠;平台通知折成计数;断线红横幅;状态灯;「项目此刻」行;头部 band(计划)已退场 | 文本(Enter 发送);■ 停止/Esc;卡上:验收 备注+接受/要改(`POST /api/artifacts/:id/verdict`)、提问 选项回填/文本(`POST /api/client-questions/:id/answer`)、计划 确认开工(`POST …/works/confirm`)、收口 同意/先不收(`POST …/close/consent`) | WS `send`/`interrupt`(channel=client);卡完结塌缩不删除;验收展开 = `InlineDeliverableBody`(bodyMode 分发,懒加载) |
 
 ### 项目页 `#/project`(读 `?blocker=`)
 
@@ -283,10 +287,16 @@ erDiagram
 
 ### 成员页 `#/members`(读 `?member=`)
 
-**展示**:页头运行态统计;每角色一页签(活动/欠 N 件/harness 徽标);面板:正在做什么
+> **2026-11-20 v5**:页签形态(一次一个)→ **全员并发板**。每成员一张卡、同屏
+> 常渲染(`MemberBoard`,与选中无关——哨兵 `tests/web/members-board.test.ts`),
+> 卡 = 角色名+角标+三态状态行(`TurnStatus` 共用一份)+手上的活+欠什么+
+> 实时行(WS 在飞轮最后一格,`liveLineOf`);点卡按 `?member=` 在板下展开完整
+> 面板(MemberPane 原样)+ harness 卡(归属不变)。
+
+**展示**:页头运行态统计;全员板(全部成员卡同屏);展开成员的面板:正在做什么
 (快照/手上活/欠着什么/待办+耗尽警示/最后动作/兜底心跳)、负责的环节、他说了什么
 (线选择+全文)、产出的工件;角色 harness 卡(默认折叠);不在成员表的发言(折叠)。
-**接受**:`?member=`;线选择(页面状态);提示词编辑;两步恢复出厂。
+**接受**:`?member=`(展开那张卡);线选择(页面状态);提示词编辑;两步恢复出厂。
 **行为**:`GET /members` `/live`(2.5s) `/agents/:id/conversations` `/artifacts` `/works`
 `/harness`;`PUT /api/harness/units/:unitId`;`POST …/reset`;aside → `#/harness?role=`。
 
@@ -331,7 +341,7 @@ client)· `ping`。
 `work_changed` `blocker_changed` `overdue_asks` `usage_recorded` `cascade_stopped`
 `error`。
 **未消费**:`usage_recorded`(store 无 case,成本读面靠 `GET /usage`);
-`artifact_created`(服务端发射点零调用方)。
+`artifact_created`(服务端发射点零调用方)。v5 起 `client_question` 的完整载荷已被流内卡消费(此前只 bump revision)。
 
 ## 7. 「存在但没有读者」清单(2026-11-17 实测)
 
@@ -343,3 +353,5 @@ client)· `ping`。
 | N4 | MCP 端点族前端零包装 | 与 About 已知缺口第 6 条一致 |
 | N5 | `POST /api/projects` UI 从不调用 | 符合设计(立项只经对话),不是缺口 |
 | N6 | `works.review_state`(013)不在 `WorkView` 里 | 质检状态在库,界面上不了屏 |
+| N7 | `ClientQuestionList.answeredUnconsumed`(F3 计数)v5 起前端无读者 | 塌缩行改按 `answered[].consumedAt` 逐条说态;计数仍是 `resume_client` 的库内判据,仅界面侧无读者 |
+| N8 | 验收裁决无 GET 历史端点;`recentDeliveryVerdicts` 只给每份交付物**最新**一条 | 历史 append-only 在库;工件卡可改判,但流内塌缩行只显示最新 |

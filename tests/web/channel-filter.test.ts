@@ -66,6 +66,15 @@ function turn(
   };
 }
 
+/**
+ * v5(2026-11-20):`ConversationStream` 的 history 换成了归并后的 `StreamItem`
+ * (轮 + 表态卡)。本文件判的是**通道**,不是表态卡 —— 这个薄壳把分区结果
+ * 包成流条目,卡一概不给(`sessionId` 缺省按主对话线,但输入里没有任何
+ * 表态数据 ⇒ `streamCardsOf` 本来就发不出卡;这里直接手工包,不引判据层)。
+ */
+const asStream = (timeline: ReadonlyArray<{ turn: Turn }>) =>
+  timeline.map(({ turn }) => ({ kind: "turn" as const, at: turn.startedAt, turn }));
+
 /** 排空器按**待办**叫醒的一轮(`trigger.kind === "todo"`)—— 不进甲方通道。 */
 function todoOrigin(todoKind: TriggerTodoKind): Turn["origin"] {
   // 取值域是闭合集(`TriggerTodoKind`,与 `runtime/dispatcher.ts` 的 `TodoKind`
@@ -252,7 +261,7 @@ describe("A3 · 渲染:只有甲方与业务经理,系统通知走独立带", ()
     const part = partitionTurns(all, ctx());
     const html = renderToStaticMarkup(
       createElement(ConversationStream, {
-        history: part.timeline,
+        history: asStream(part.timeline),
         streaming: [],
         hiddenNote: part.hidden > 0 ? `另有 ${part.hidden} 条发言不在这条通道里` : null,
       }),
@@ -274,7 +283,7 @@ describe("A3 · 渲染:只有甲方与业务经理,系统通知走独立带", ()
       harnessError: null,
     });
     const html = renderToStaticMarkup(
-      createElement(ConversationStream, { history: part.timeline, streaming: [], hiddenNote: note }),
+      createElement(ConversationStream, { history: asStream(part.timeline), streaming: [], hiddenNote: note }),
     );
     // 正样本:甲方那句话照旧上屏
     expect(html).toContain("你好");

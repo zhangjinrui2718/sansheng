@@ -64,7 +64,9 @@ export function ClientQuestionCard({
           <Pill tone="amber" title="收口不可逆 —— 同意必须来自你点的那一下">
             收口提议
           </Pill>
-          <span className="ss-meta">{q.askedByName} 提议</span>
+          {/* v5 去角色化(2026-11-20):甲方对话面只有一个声音,提问者名字不进卡
+              (它是哪位内部角色,成员页看得到;原始字段里保留 askedByAgentId)。 */}
+          <span className="ss-meta">发起</span>
           <span className="ss-meta ml-auto">{fmtTime(q.createdAt)}</span>
         </div>
 
@@ -149,7 +151,8 @@ export function ClientQuestionCard({
             {q.projectName}
           </Pill>
         )}
-        <span className="ss-meta">{q.askedByName} 提问</span>
+        {/* v5 去角色化:同上 —— 卡头只说「提问」,不点名内部角色。 */}
+        <span className="ss-meta">提问</span>
         <span className="ss-meta ml-auto">{fmtTime(q.createdAt)}</span>
       </div>
 

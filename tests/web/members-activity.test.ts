@@ -79,13 +79,14 @@ import type {
 import type { RelationContext } from "@/lib/relations";
 import {
   MemberPane,
-  MemberRoleTabs,
   MemberTabPanels,
   debtFacts,
   elapsedSinceFetch,
   formatAge,
   memberDebt,
 } from "@/routes/Members";
+// 2026-11-20(v5 Wave D):MemberRoleTabs(页签)退役,换成全员并发板。
+import { MemberBoard, liveLineOf } from "@/components/members/MemberCard";
 import { RoleHarnessDisclosure, roleIssueCount } from "@/components/members/RoleHarness";
 
 /**
@@ -365,25 +366,29 @@ describe("① 一次只渲染一个成员(这一版要修的正是「四个人�
     expect(text).toContain(BM_ARTIFACT_TITLE);
   });
 
-  it("页签:每个成员一个 tab,只有选中的那个 aria-selected=true", () => {
+  it("板:每个成员一张卡,与选中无关;只有展开的那张 aria-expanded=true", () => {
+    // 2026-11-20 判据变更记录:MemberRoleTabs(页签,一次一个)退役 ——
+    // 用户裁决「成员可以并发」,全员板让并发一眼可见。角色名判据不变:
+    // 卡面主体仍是角色名(2026-10-06 的「不写第二遍」纪律照旧)。
     const html = renderToStaticMarkup(
-      createElement(MemberRoleTabs, {
+      createElement(MemberBoard, {
         members: [BM, WK],
-        active: WK_ID,
+        selectedId: WK_ID,
         onSelect: vi.fn(),
         activityOf: (id: string) => (id === WK_ID ? WK_ACTIVITY : BM_ACTIVITY),
         issuesOf: () => 0,
+        liveTurnsOf: () => [],
+        age: (ms: number) => formatAge(ms),
         runtime: "host",
+        liveTurnsOf: () => [],
+        age: (ms: number) => formatAge(ms),
       }),
     );
-    expect((html.match(/role="tab"/g) ?? []).length, "两个成员 ⇒ 两个 tab").toBe(2);
-    expect((html.match(/aria-selected="true"/g) ?? []).length, "只有一个选中").toBe(1);
+    expect((html.match(/data-member-card=/g) ?? []).length, "两个成员 ⇒ 两张卡(不随选中减半)").toBe(2);
+    expect((html.match(/aria-expanded="true"/g) ?? []).length, "只有展开的那张").toBe(1);
     const text = visible(html);
     expect(text).toContain("业务经理");
     expect(text).toContain("研究员");
-    // ⚠️ 页签上**只有角色名**(2026-10-06):以前页签是「人 + 角色 Pill」两段,
-    // 而在「一人一角色」的组织里那两个词一模一样 ⇒ 屏幕上成了「工程师 执行者」。
-    // 现在主体就是角色名(与 harness 页逐字相同),人的名字进 tooltip。
     expect(text, "角色名只出现一次语义,不再有第二个说法").not.toContain("执行者");
     expect(text).not.toContain("质检审查员");
   });
@@ -639,13 +644,15 @@ describe("③ runtime=unavailable 是「读不到」,不是「空闲」", () => 
 
   it("页签上也不许把「读不到」显示成「没在跑」:给灰点,不给绿点", () => {
     const html = renderToStaticMarkup(
-      createElement(MemberRoleTabs, {
+      createElement(MemberBoard, {
         members: [WK],
-        active: WK_ID,
+        selectedId: WK_ID,
         onSelect: vi.fn(),
         // ⚠️ 即便快照里带着 turn:runtime 不是 host,就不许点亮
         activityOf: () => activity(WK_ID, { turn: { elapsedMs: 1_000, trigger: { kind: "user" } } }),
         issuesOf: () => 0,
+        liveTurnsOf: () => [],
+        age: (ms: number) => formatAge(ms),
         runtime: "unavailable",
       }),
     );
@@ -730,12 +737,14 @@ describe("⑤ 页签角标 = 它欠着几件事(口径:readyWorks + todos.length
     });
     const clean = activity(BM_ID, { readyWorks: 0, todos: [] });
     const html = renderToStaticMarkup(
-      createElement(MemberRoleTabs, {
+      createElement(MemberBoard, {
         members: [WK, BM],
-        active: null,
+        selectedId: null,
         onSelect: vi.fn(),
         activityOf: (id: string) => (id === WK_ID ? debtful : clean),
         issuesOf: () => 0,
+        liveTurnsOf: () => [],
+        age: (ms: number) => formatAge(ms),
         runtime: "host",
       }),
     );
@@ -748,13 +757,15 @@ describe("⑤ 页签角标 = 它欠着几件事(口径:readyWorks + todos.length
 
   it("页签:有回合在跑的那一个才点亮实时点", () => {
     const html = renderToStaticMarkup(
-      createElement(MemberRoleTabs, {
+      createElement(MemberBoard, {
         members: [WK, BM],
-        active: null,
+        selectedId: null,
         onSelect: vi.fn(),
         activityOf: (id: string) =>
           id === WK_ID ? activity(WK_ID, { turn: { elapsedMs: 1_000, trigger: { kind: "user" } } }) : activity(BM_ID),
         issuesOf: () => 0,
+        liveTurnsOf: () => [],
+        age: (ms: number) => formatAge(ms),
         runtime: "host",
       }),
     );
@@ -781,12 +792,14 @@ describe("⑤ 页签角标 = 它欠着几件事(口径:readyWorks + todos.length
     const activityOf = (id: string) =>
       id === WK_ID ? activity(WK_ID, { readyWorks: 2 }) : activity(BM_ID);
     const html = renderToStaticMarkup(
-      createElement(MemberRoleTabs, {
+      createElement(MemberBoard, {
         members: [WK, BM],
-        active: null,
+        selectedId: null,
         onSelect: vi.fn(),
         activityOf,
         issuesOf,
+        liveTurnsOf: () => [],
+        age: (ms: number) => formatAge(ms),
         runtime: "host",
       }),
     );
@@ -798,12 +811,14 @@ describe("⑤ 页签角标 = 它欠着几件事(口径:readyWorks + todos.length
 
     // 负样本:全部正常(告警 0)⇒ 只剩「欠活」那一个角标,告警那句一个字都不出现
     const okHtml = renderToStaticMarkup(
-      createElement(MemberRoleTabs, {
+      createElement(MemberBoard, {
         members: [WK],
-        active: null,
+        selectedId: null,
         onSelect: vi.fn(),
         activityOf,
         issuesOf: () => 0,
+        liveTurnsOf: () => [],
+        age: (ms: number) => formatAge(ms),
         runtime: "host",
       }),
     );

@@ -62,6 +62,13 @@
  *      · 贴底 → 新内容跟随(节流 80ms,避免流式高频更新把主线程压住)
  *      · 用户上滚 → 关闭跟随 + 显示「回到底部」;自己滚回底部 → 恢复跟随
  *      · 滚到顶加载历史 → **未做**(后端无分页/游标,见 lib/scroll.ts 文件头)
+ *
+ * ── v5(2026-11-20):表态卡进流 ────────────────────────────────
+ *
+ * 四类「等你表态」的卡(提问 / 验收 / 计划 / 及它们的塌缩事实行)按**锚定时刻**
+ * 归并进历史流(`lib/streamCards.ts` 的 `mergeStream`,判据在那里)。本组件
+ * 只做两件事:接 `cards` prop 并归并;渲染 `StreamCardView`。**判据不在这里**
+ * —— 哪些卡存在、锚在哪、什么时候塌缩,全部在判据层。
  */
 import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { inFlightTurns, useChatStore, type Block, type Turn } from "@/stores/chat";
@@ -73,6 +80,13 @@ import {
   useProjectMembers,
   type ConversationPartition,
 } from "@/lib/data";
+import {
+  mergeStream,
+  streamCardKey,
+  type StreamCard,
+  type StreamItem,
+} from "@/lib/streamCards";
+import { StreamCardView, type PlanCardContext } from "./StreamCards";
 import {
   INITIAL_FOLLOW,
   observeFollow,
@@ -375,7 +389,18 @@ export function splitWorkLog(text: string): TextSegment[] {
   return segments;
 }
 
-export function MessageList() {
+export function MessageList({
+  cards = [],
+  cardsUnavailable = null,
+  plan = null,
+}: {
+  /** 表态卡(判据在 `streamCardsOf`;由 `ChatSurface` 从它持有的取数实例算出)。 */
+  cards?: readonly StreamCard[];
+  /** 「表态清单读不到」那一行;null = 没有读失败(加载中不是读失败)。 */
+  cardsUnavailable?: string | null;
+  /** 计划卡需要的上下文;null 时计划卡不渲染(其它卡不受影响)。 */
+  plan?: PlanCardContext | null;
+}) {
   const turns = useChatStore((s) => s.turns);
   // ⚠️ 选择器只取**引用稳定**的字段:`inFlightTurns(s)` 每次调用都返回新数组,
   // 直接当 selector 会让 useSyncExternalStore 每次渲染都读到「新快照」。
@@ -408,6 +433,8 @@ export function MessageList() {
   );
 
   const history = useMemo(() => partitionTurns(turns, ctx), [turns, ctx]);
+  /** 表态卡按锚定时刻归并进历史(判据在 lib/streamCards.ts;进行中的轮不参与归并)。 */
+  const items = useMemo(() => mergeStream(history.timeline, cards), [history.timeline, cards]);
   const live = useMemo(() => partitionTurns(streaming, ctx), [streaming, ctx]);
   const hidden = history.hidden + live.hidden;
   const notices = history.notices + live.notices;
@@ -474,7 +501,11 @@ export function MessageList() {
   //    依赖用长度信号而不是 `turns` 引用:delta 只改最后一个块的**文本**,
   //    只依赖 `blocks.length` 的话流式打字期间根本没跟随;**只算一轮**的话第二轮
   //    不跟随(本批次修掉的那一半)。
-  const contentSignal = useMemo(() => contentSignalOf(turns, streaming), [turns, streaming]);
+  const contentSignal = useMemo(
+    // 卡的数量与「读不到」行也改变流的内容:新卡出现时要能触发跟随。
+    () => contentSignalOf(turns, streaming) + `:${cards.length}:${cardsUnavailable ?? ""}`,
+    [turns, streaming, cards.length, cardsUnavailable],
+  );
   useEffect(() => {
     const el = ref.current;
     if (!el) return;
@@ -504,10 +535,11 @@ export function MessageList() {
     scheduleScroll(scrollBehaviorFor("pin-bottom"));
   }
 
-  // 一条轮都没有(且没有在跑的回合)= 真的空。**注意判据是「有没有轮」而不是
-  // 「有没有可见的轮」**:全是内部角色的发言时不能显示空态 —— 那等于告诉甲方
+  // 一条轮都没有(且没有在跑的回合、没有表态卡)= 真的空。**注意判据是「有没有轮」
+  // 而不是「有没有可见的轮」**:全是内部角色的发言时不能显示空态 —— 那等于告诉甲方
   // 「什么都没发生」,而实际上团队刚说了 20 句(下面的条数提示才是对的回答)。
-  if (turns.length === 0 && streaming.length === 0) return <Empty />;
+  // 表态卡也算内容:一个刚拆解完、消息还没落库的项目,计划卡不该被空态吃掉。
+  if (turns.length === 0 && streaming.length === 0 && cards.length === 0) return <Empty />;
 
   return (
     <div className="flex-1 relative flex flex-col" style={{ minHeight: 0 }}>
@@ -519,9 +551,11 @@ export function MessageList() {
       >
         <div className="max-w-3xl mx-auto flex flex-col gap-6">
           <ConversationStream
-            history={history.timeline}
+            history={items}
             streaming={live.timeline}
             hiddenNote={hiddenNote}
+            cardsUnavailable={cardsUnavailable}
+            plan={plan}
           />
           {/*
             ⚠️ **`busy` 那一条不是故障,但它必须看得见** ——
@@ -580,11 +614,18 @@ export function ConversationStream({
   history,
   streaming,
   hiddenNote,
+  cardsUnavailable = null,
+  plan = null,
 }: {
-  history: ConversationPartition["timeline"];
+  /** 归并后的流(v5:轮 + 表态卡;纯轮的旧形状见 `StreamItem`)。 */
+  history: readonly StreamItem[];
   streaming: ConversationPartition["timeline"];
   /** 「不在这一屏里的东西」那一行(内部回合 + 平台通知的条数);`null` = 一条都没有 */
   hiddenNote: string | null;
+  /** 「表态清单读不到」那一行;`null` = 没有读失败。 */
+  cardsUnavailable?: string | null;
+  /** 计划卡上下文(`StreamCardView` 只在 plan 卡上用它)。 */
+  plan?: PlanCardContext | null;
 }) {
   // ⚠️ 2026-10-05:**类型上只可能有 `client`**。平台通知与内部回合都被
   // `partitionTurns` 挡在外面了(前者只留条数,全文与状态在项目页的「组织运行态」)——
@@ -592,13 +633,24 @@ export function ConversationStream({
   // 那条路的存在本身就是「对话页里出现机器记录」的原因。
   return (
     <>
-      {history.map(({ turn }) => (
-        <TurnView key={turn.id} turn={turn} />
-      ))}
+      {history.map((item) =>
+        item.kind === "turn" ? (
+          <TurnView key={item.turn.id} turn={item.turn} />
+        ) : (
+          <StreamCardView key={streamCardKey(item.card)} card={item.card} plan={plan} />
+        ),
+      )}
       {streaming.map(({ turn }) => (
         <TurnView key={turn.id} turn={turn} streaming />
       ))}
       {hiddenNote !== null && <HiddenNotice note={hiddenNote} />}
+      {cardsUnavailable !== null && (
+        <div className="flex justify-center" data-role="cards-unavailable">
+          <div className="ss-note" style={{ fontSize: 11, textAlign: "center" }}>
+            {cardsUnavailable}
+          </div>
+        </div>
+      )}
     </>
   );
 }
@@ -779,7 +831,7 @@ function WorkLogBlock({ text, streaming }: { text: string; streaming?: boolean }
     <div
       className="ss-worklog"
       data-channel="work-log"
-      title="业务经理判断「不值得打扰你」时留下的现场"
+      title="决定「不值得打扰你」时留下的现场"
     >
       <span className="ss-worklog-label">工作记录 · 未播报</span>
       <span className="ss-worklog-text">

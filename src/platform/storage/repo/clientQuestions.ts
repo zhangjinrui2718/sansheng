@@ -131,6 +131,32 @@ export function listUnconsumedClientAnswers(
 }
 
 /**
+ * 某项目**已答复**的全部提问行,时间升序(v5,2026-11-20)。
+ *
+ * 「表态卡进流」的塌缩事实来源:`GET /api/client-questions` 的 `answered` 读面
+ * (`views.ts` 的 `listAllClientQuestions` 按项目调它)。谓词只有一条:
+ * `answered_at IS NOT NULL` —— 含已消费与未消费的,`consumedAt` 原样透出,
+ * 「已答复 · 整理中」(F3 窗口)与「已答复 · 落 decision 工件」由前端按它区分。
+ *
+ * ⚠️ 不设上限:提问本身有「同项目未答 ≤2」的并发闸(2026-11-15),生命周期内
+ * 的已答复行是有限的;截断会让塌缩行凭空少一条,而「塌缩不凭空消失」正是这次
+ * 透出的全部理由。
+ */
+export function listAnsweredClientQuestions(
+  db: Database.Database,
+  projectId: string,
+): ClientQuestionRow[] {
+  const rows = db
+    .prepare(
+      `SELECT * FROM client_questions
+       WHERE project_id = ? AND answered_at IS NOT NULL
+       ORDER BY answered_at, question_artifact_id`,
+    )
+    .all(projectId) as RawClientQuestion[];
+  return rows.map(rowToQuestion);
+}
+
+/**
  * 按提问工件 id 取台账行(渲染现场用)。
  *
  * **为什么不用「扫工件表 + `metadataJson.includes(id)` 反查答复」**:那是子串匹配,

@@ -109,6 +109,16 @@
  *
  * 页面上**不许只靠颜色**表达状态:每个 Pill 都带中文词,灰点旁边一定有「读不到」
  * 这四个字(色盲用户与截图里都分不出绿点与灰点)。
+ *
+ * ── 2026-11-20(v5 Wave D):页签形态 → **全员并发板** ──────────────
+ *
+ * 用户裁决:「成员是可以并发的吧,重新设计一下现在项目成员的展示方式。」
+ * 它**取代**了上面 ① 的「一行成员页签 + 一次只渲染一个成员的面板」—— 那是
+ * 防杂乱的设计,与「并发可见」正好相反(忙闩键 = (项目, agent),用户回合与
+ * 内部推进真的会同时跑)。新形态:每成员一张卡、**同屏常渲染**(`MemberBoard`,
+ * components/members/MemberCard.tsx),点卡按 `?member=` 在板下展开完整面板
+ * (`MemberPane` 原样保留;harness 卡仍在面板之下 —— 2026-10-06 第三刀的归属不变)。
+ * 「一次只看一个」的负样本判据(①)依旧成立:面板一次仍只渲染一个成员。
  */
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
@@ -120,8 +130,6 @@ import type {
   ProjectLiveView,
   ProjectRole,
   SessionMessageKind,
-  TriggerTodoKind,
-  TurnTrigger,
   WorkView,
 } from "@shared/types/platform";
 import {
@@ -142,6 +150,9 @@ import { artifactLocation, artifactMeta } from "@/lib/entityMeta";
 import type { RelationContext } from "@/lib/relations";
 import { RoleHarnessSection, roleIssueCount } from "@/components/members/RoleHarness";
 import { AgentConversations } from "@/components/members/AgentConversations";
+import { MemberBoard } from "@/components/members/MemberCard";
+import { TurnStatus } from "@/components/members/TurnStatus";
+import { inFlightTurns, type Turn } from "@/stores/chat";
 import {
   useArtifacts,
   useHarnessRoles,
@@ -169,146 +180,17 @@ import {
  */
 const OTHER_KINDS: readonly SessionMessageKind[] = ["assistant", "thinking", "tool"];
 
-/**
- * `TriggerTodoKind` 的中文读法。
- *
- * ⚠️ 为什么写在这一屏而不是 `lib/vocab.ts`:vocab 是**契约状态的共享词表**
- * (项目 / 工作项 / 工件 / 提问 / 角色),而这一列在此之前**没有任何前端读者**
- * (`stores/chat.ts` 只读 `trigger.kind`,不读 `todoKind`)。本次改造把它第一次
- * 摆到用户面前,所以先随这一屏落地;真要第二次用到它,再搬进 vocab。
- * 与 vocab 同一纪律:**未知取值原样透出,不猜**(见下面的 `todoKindLabel`)。
- *
- * ⚠️ **2026-10-06(migration 022)修的一处静默降级**:这张表在 022 之前**一直
- * 全部显示英文** —— 它读 `trigger.todoKind`,而那一维当时既不落库、也没进前端契约,
- * 于是每一次都落到 `?? kind` 那条兜底。真机上成员页「正在做什么」写的是
- * 「排空器按待办叫醒(execute_work)」而不是「执行工作项」。**一个没人看出来的
- * 错读法**,因为它仍然显示了一个合理的英文 token。
- */
-const TODO_KIND_LABEL: Record<TriggerTodoKind, string> = {
-  answer_ask: "回答提问",
-  attend_meeting: "参加评审会",
-  review_change: "评审变更",
-  fix_work_assignment: "改派工作项",
-  resolve_blocked_work: "处理被卡住的工作项",
-  recover_failed_work: "重新划失败的工作项",
-  decompose_project: "拆解项目",
-  execute_work: "执行工作项",
-  rework: "返工(质检判了不通过)",
-  // 029:同一款待办的另一个入口 —— 甲方在界面上点了「要改」。
-  rework_rejected: "重做(甲方拒收了交付物)",
-  review_work: "审查产出",
-  integrate: "整合成果",
-  handover: "交付交接",
-  report_downstream: "向甲方汇报下游结果",
-  resume_client: "处置甲方的答复",
-  close_project: "判断项目是否收口",
-  escalate_stalled_work: "处置平台已经不再叫醒的待办",
-  review_undelivered_project: "判断项目为什么没有交付物",
-};
-
-/**
- * 未知取值原样显示英文 —— 「显示英文」比「显示一个编的中文」诚实。
- *
- * ⚠️ **`undefined` 不走这里**:它表示「这一维没有落」(022 之前的存量行),
- * 那要显示成「未记录」而不是 `undefined` —— 原样透出一个 `undefined` 字面量
- * 在界面上比「未记录」更像故障。
- */
-function todoKindLabel(kind: string | undefined): string {
-  if (kind === undefined) return "未记录是哪一类待办";
-  return (TODO_KIND_LABEL as Record<string, string>)[kind] ?? kind;
-}
-
-/** 「这一轮为什么存在」。判据与契约 `TurnTrigger` 一致,只有两半。 */
-function triggerText(trigger: TurnTrigger): string {
-  if (trigger.kind === "user") return "你亲口发起";
-  return `排空器按待办叫醒(${todoKindLabel(trigger.todoKind)})`;
-}
-
-/**
- * 服务端算的 `ageMs` → 人话。
- *
- * ⚠️ 这里的入参**已经**加过「本地收到快照之后流逝的时间」(见 `elapsedSinceFetch`),
- * 不是裸的快照值 —— 不要把两者搞混。
- *
- * 粒度**刻意到秒**:这一屏存在的理由是让用户看出「它还活着」,而 60s 粒度会让
- * 「已跑 1 分」在整整一分钟里一动不动 —— 那正是「界面停在最后一帧上」的观感。
- * 一小时以上退到「时 + 分」,一天以上退到「天 + 时」(那时秒已经没有信息量)。
- */
-export function formatAge(ms: number): string {
-  if (!Number.isFinite(ms) || ms < 0) return "—";
-  const s = Math.floor(ms / 1000);
-  if (s < 60) return `${s}s`;
-  const m = Math.floor(s / 60);
-  if (m < 60) return `${m}分${s % 60}s`;
-  const h = Math.floor(m / 60);
-  if (h < 24) return `${h}小时${m % 60}分`;
-  const d = Math.floor(h / 24);
-  return `${d}天${h % 24}小时`;
-}
-
-/**
- * 「本地收到这份快照之后过了多久」。
- *
- * ── 为什么这个加法成立 ──────────────────────────────────────────
- *
- * 契约里 `ageMs` 由**服务端**算(快照时刻 − 事件时刻),是**一个快照值**,
- * 不会自己往前走。要让它「看起来在走」,就把本地已经过去的时间加上去:
- *
- *     显示年龄 = ageMs(服务端算) + (now(本地) − fetchedAt(本地收到快照的时刻))
- *
- * 这一步成立的前提是**同一台机器**:`platform-serve` 与浏览器跑在本机同一时钟上,
- * 所以两段时长的流逝速率相同,相加不会引入时钟偏移。若哪天宿主与浏览器不同机,
- * 这个加法就要换成「用两次快照的差值外推」(那需要保留上一份快照)。
- *
- * ⚠️ **这是展示层面的推进,不是重新取数**:它不改任何判定,也不制造新事实 ——
- * `useProjectLive` 每 2.5s 会用新快照把 `ageMs` 重新校正一次,所以误差只在两次
- * 轮询之间累积,而且**只影响显示出来的那个数字**。
- * ⚠️ `fetchedAt === null`(还没拿到过快照)时加 0:不假装时间在走。
- */
-export function elapsedSinceFetch(fetchedAt: number | null, now: number): number {
-  if (fetchedAt === null) return 0;
-  return Math.max(0, now - fetchedAt);
-}
-
-/**
- * 页签角标 = 「它欠着几件事」。
- *
- * 口径:`readyWorks + todos.length`。理由**逐项写清**,因为这个数字最容易被读歪:
- *
- *   - `readyWorks` —— 派给它、**前置已满足**、还没终态的活(`collectPendingWork()
- *     .myOpenWorks`)。这是「它手上真实欠着的活」。
- *   - `todos.length` —— 排空器**现在愿意叫它去跑**的条目(`collectTodos` 的
- *     runnable)。这是「平台现在会去推它的事」。
- *   - **不含 `waitingWorks`**:那些前置还没满足,它想做也做不了 —— 算进「欠」会让
- *     每个上游没做完的成员都顶着一个永远不变的数字。
- *   - **不含 `exhaustedTodos`**:那是「预算用尽、排空器**不再叫醒**它了」,
- *     性质是**卡住**而不是**欠着**;它由「正在做什么」里那行
- *     「预算用尽不再叫醒 N 件」单独说,不混进角标。
- *
- * ⚠️ **这个和是会重叠的**:一条 `execute_work` 待办对应的往往正是 `readyWorks`
- * 里的那条活,两边各算一次。所以它的准确读法是「**需要它动手的处数**」,
- * 而不是「不重复的工作项个数」—— 可能偏大。我**宁可偏大也不偏小**:
- * 角标的用途是「这个人身上有东西,值得点开看」,把一个有活的成员显示成 0
- * 恰好就是这次要修的那类谎(「看起来一切正常」)。
- */
-export function memberDebt(activity: MemberActivityView | null): number {
-  if (activity === null) return 0;
-  return activity.readyWorks + activity.todos.length;
-}
-
-/**
- * 「他欠着什么」的一行事实。
- *
- * **只有 > 0 的才出现** —— 数是 0 的时候占版面,只会把有信息的那一项淹掉
- * (上一版的教训:整行都是 0 时,读者会把这一行整个跳过,连非零项也一起跳过)。
- */
-export function debtFacts(activity: MemberActivityView): string[] {
-  const facts: string[] = [];
-  if (activity.readyWorks > 0) facts.push(`优先做 ${activity.readyWorks} 件`);
-  if (activity.waitingWorks > 0) facts.push(`等前置 ${activity.waitingWorks} 件`);
-  if (activity.exhaustedTodos > 0) facts.push(`预算用尽不再叫醒 ${activity.exhaustedTodos} 件`);
-  return facts;
-}
+// ── 活动判据已搬到 `components/members/activity.ts`(v5 Wave D)────────
+// MemberCard(板)与 MemberPane(面板)读同一份;这里 re-export 是给
+// 既有测试的(它们从本文件 import 这些名字 —— 判据搬家,读者地址不变)。
+import {
+  debtFacts,
+  elapsedSinceFetch,
+  formatAge,
+  memberDebt,
+  triggerText,
+} from "@/components/members/activity";
+export { debtFacts, elapsedSinceFetch, formatAge, memberDebt, triggerText } from "@/components/members/activity";
 
 /** 本地时钟。只为一件事存在:让快照里的 `ageMs` 在屏上继续走(见 `elapsedSinceFetch`)。 */
 function useNow(intervalMs: number): number {
@@ -318,171 +200,6 @@ function useNow(intervalMs: number): number {
     return () => clearInterval(id);
   }, [intervalMs]);
   return now;
-}
-
-/**
- * 成员页签。**一次只看一个人** —— 四个人同时铺开时,消息与卡片会把彼此的结构淹掉
- * (这一版要修的就是那个)。形态照旧的 harness 角色页签(那个组件已删除,「一次
- * 只看一个角色」这条判据现在由这里承担),主体从「角色」换成「人」。
- *
- * 页签上可以有**两个**角标,而且它们回答的是不同的问题(所以 `title` 必须不同):
- *
- *   - `debt`(`memberDebt`)—— 「它欠着几件事」:库里的活 + 排空器要叫醒它的待办;
- *   - `issues`(`roleIssueCount`)—— 「这个**角色**的 harness 有几处需要注意」:
- *     缺单元 / 集合文件坏 / 越权被拒 / 未知工具名。它是原 harness 页页签角标
- *     的功能,合并后搬到这里 —— 不搬就等于把「这个角色的提示词/工具面有问题」
- *     这条可见性静默丢掉。
- */
-export function MemberRoleTabs({
-  members,
-  active,
-  onSelect,
-  activityOf,
-  issuesOf,
-  runtime,
-}: {
-  members: readonly MemberView[];
-  /** 当前选中的 `agentId`;`null` = 还没选(取第一个成员) */
-  active: string | null;
-  onSelect: (agentId: string) => void;
-  /** 取这个人在这份运行态快照里的那一条;没拿到快照时返回 `null` */
-  activityOf: (agentId: string) => MemberActivityView | null;
-  /** 这个**角色**身上需要注意的处数(`roleIssueCount`);没读到 harness 视图时返回 0 */
-  issuesOf: (role: ProjectRole) => number;
-  /** 这份快照的运行期来源;`null` = 还没拿到过快照 */
-  runtime: ProjectLiveView["runtime"] | null;
-}) {
-  return (
-    <div className="flex items-center gap-1.5 flex-wrap" role="tablist" aria-label="按成员查看">
-      {members.map((m) => {
-        const isActive = m.id === active;
-        const activity = activityOf(m.id);
-        const debt = memberDebt(activity);
-        const issues = issuesOf(m.role);
-        // ⚠️ 只有 `runtime === "host"` 时 `turn` 才是事实 —— 其余两种「不知道」
-        // 一律不许被读成「没在跑」,所以这里连点都不点亮的绿点也不给,只给灰点。
-        const turn = runtime === "host" ? (activity?.turn ?? null) : null;
-        const unknown = runtime !== "host";
-        return (
-          <button
-            key={m.id}
-            type="button"
-            role="tab"
-            aria-selected={isActive}
-            className="sansheng-button flex items-center"
-            onClick={() => onSelect(m.id)}
-            title={
-              `${m.displayName} · ${ROLE_LABEL[m.role]}\n` +
-              `agentId = ${m.id}` +
-              (turn !== null
-                ? `\n此刻有回合在它身上跑(${triggerText(turn.trigger)})`
-                : unknown
-                  ? `\n运行态${runtime === null ? "还没读到" : "读不到"} —— 不下结论`
-                  : "\n此刻没有回合在跑")
-            }
-            style={{
-              padding: "6px 10px",
-              gap: 6,
-              background: isActive ? "var(--ink-2)" : "transparent",
-              color: isActive ? "var(--bone)" : "var(--bone-dim)",
-              borderColor: isActive ? "var(--ink-4)" : "transparent",
-            }}
-          >
-            {/* ⚠️ 页签主体 = **角色名**(与 harness 的面板逐字相同,2026-10-06)。
-                人的名字(`agents.display_name`)进 tooltip:一人一角色的组织里它与
-                角色名一模一样,同时显示两遍就是用户说的「解释」。 */}
-            <span style={{ fontSize: 12 }}>{ROLE_LABEL[m.role]}</span>
-            {/* 有回合在跑 = 实时点(会呼吸);读不到 = 灰点且不动 —— 两种状态在
-                视觉上必须分得开,`.ss-live-dot[data-state="unknown"]` 正是为此存在。 */}
-            {turn !== null ? (
-              <span className="ss-live-dot" />
-            ) : unknown ? (
-              <span
-                className="ss-live-dot"
-                data-state="unknown"
-                title="运行态读不到 —— 这一刻不下任何结论"
-              />
-            ) : null}
-            {debt > 0 && (
-              <Pill
-                tone="cinnabar"
-                title={`欠 ${debt} 件:在做的活 + 排空器要叫醒的待办(两来源有重叠)`}
-              >
-                {debt}
-              </Pill>
-            )}
-            {/* ⚠️ 第二个角标:角色 harness 那边需要注意的处数。与上面那个「欠活」
-                角标**不是一回事**(一个说活、一个说配置),所以 title 必须不同 ——
-                两个 cinnabar 数字长得一样而没有各自的说明,就是把两件事糊成一个。 */}
-            {issues > 0 && (
-              <Pill
-                tone="cinnabar"
-                title={`harness 有 ${issues} 处要注意(配置问题,不是它手上的活)`}
-              >
-                {issues}
-              </Pill>
-            )}
-          </button>
-        );
-      })}
-    </div>
-  );
-}
-
-/**
- * 「此刻状态」那一格。三种「不知道」在这里被分开说(整个改版的判据都压在这上面)。
- *
- * 顺序刻意是**先判「有没有数据」再判「数据说没说不知道」**:
- * 没拿到快照时连 `runtime` 都不知道,断言「读不到」同样是提前下结论。
- */
-function turnStatusNode(
-  runtime: ProjectLiveView["runtime"] | null,
-  activity: MemberActivityView | null,
-  age: (ms: number) => string,
-): ReactNode {
-  if (activity === null || runtime === null) {
-    return (
-      <>
-        <span className="ss-live-dot" data-state="unknown" />
-        <span className="ss-meta" style={{ color: "var(--bone-dim)" }}>
-          正在读取运行态…
-        </span>
-      </>
-    );
-  }
-  if (runtime === "unavailable") {
-    return (
-      <>
-        <span className="ss-live-dot" data-state="unknown" />
-        <span
-          className="ss-meta"
-          style={{ color: "var(--amber)" }}
-          title="读不到运行态,不是「它停着」"
-        >
-          运行态读不到(该进程没接上运行期快照)
-        </span>
-        <Help id="member.runtime" />
-      </>
-    );
-  }
-  if (activity.turn !== null) {
-    return (
-      <>
-        <span className="ss-live-dot" />
-        <span className="ss-body" style={{ color: "var(--jade)" }}>
-          在跑 · 已跑 {age(activity.turn.elapsedMs)}
-        </span>
-        <span className="ss-meta">{triggerText(activity.turn.trigger)}</span>
-      </>
-    );
-  }
-  // 只有 host 快照 + turn === null 才允许说这一句。措辞是「没有回合在跑」而不是
-  // 「空闲」:后者还要看手上有没有活、排空器有没有待办。
-  return (
-    <span className="ss-meta" title="没有回合在跑 ≠ 它没事 · 看下面的活与待办">
-      此刻没有回合在跑
-    </span>
-  );
 }
 
 /**
@@ -587,7 +304,9 @@ export function MemberPane({
             </span>
           )}
           <span className="ss-meta font-mono">{member.id}</span>
-          <span className="flex items-center gap-1.5">{turnStatusNode(runtime, activity, age)}</span>
+          <span className="flex items-center gap-1.5">
+            <TurnStatus runtime={runtime} activity={activity} age={age} />
+          </span>
         </div>
 
         {/* ── ② 正在做什么:这一版新增的一块 ───────────────────────── */}
@@ -979,6 +698,23 @@ export function MembersPage() {
   /** 这份快照的运行期来源;`null` = 还没拿到过快照。 */
   const runtime = live.data?.runtime ?? null;
 
+  // ── 卡上的实时行:WS 在飞表按成员过滤(store 里现成,零新增请求)─────
+  const inFlight = useChatStore((s) => s.inFlight);
+  const inFlightOrder = useChatStore((s) => s.inFlightOrder);
+  const streamingTurns = useMemo(
+    () => inFlightTurns({ inFlight, inFlightOrder }).filter((t) => t.projectId === projectId),
+    [inFlight, inFlightOrder, projectId],
+  );
+  const liveTurnsOf = useCallback(
+    (agentId: string): readonly Turn[] => streamingTurns.filter((t) => t.agentId === agentId),
+    [streamingTurns],
+  );
+  /** 快照值 → 屏上此刻的年龄(本地 1s 时钟让它走起来;见 activity.ts)。 */
+  const age = useCallback(
+    (ms: number) => formatAge(ms + elapsedSinceFetch(live.fetchedAt, now)),
+    [live.fetchedAt, now],
+  );
+
   const activityOf = useCallback(
     (agentId: string) => live.data?.agents.find((a) => a.agentId === agentId) ?? null,
     [live.data],
@@ -1091,19 +827,20 @@ export function MembersPage() {
             <EmptyState>暂无成员</EmptyState>
           ) : (
         <>
-          {/* ── 按成员分栏:一次只看一个人(照 harness 的组织方式)─────
-              上一版把成员 KV / 每个人的对话 / 每个角色的能力面同时铺开,
-              4 个人 × 3 块内容挤在一屏里 —— 这一版要修的就是那个。
-              「一次只看一个角色」这条判据原来由 harness 页的角色页签承担,
-              那个组件已删 —— 现在由**这一行成员页签**承担(一人一角色),
-              断言见 `tests/web/members-activity.test.ts`。 */}
-          <MemberRoleTabs
+          {/* ── v5:全员并发板(2026-11-20 用户裁决)──────────────────
+              每成员一张卡、同屏常渲染 —— 谁在跑/跑了多久/欠什么一眼全见,
+              并发直接可见(忙闩键 = (项目, agent),并发是真的)。
+              点卡 ⇒ `?member=` 深链接,完整面板(MemberPane + harness 卡)
+              在板**之下**展开;「一次只渲染一个面板」的判据由它继续承担。 */}
+          <MemberBoard
             members={rows}
-            active={selected?.id ?? null}
+            selectedId={selected?.id ?? null}
             onSelect={setActiveId}
             activityOf={activityOf}
             issuesOf={issuesOf}
             runtime={runtime}
+            liveTurnsOf={liveTurnsOf}
+            age={age}
           />
 
           {selected !== null && (

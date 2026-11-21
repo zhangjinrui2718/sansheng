@@ -41,9 +41,11 @@ const render = (acceptance: ArtifactAcceptanceView): string =>
 describe("① 还没交付 ⇒ 说明等谁,且**不给**验收动作", () => {
   const html = render(open({ handedOver: false }));
 
-  it("说清「还没交付给你」,并把责任点出来(业务经理)", () => {
+  // 2026-11-20(v5 Wave C 去角色化):措辞不再点名业务经理 —— 判据本身不变
+  // (说清「还没交付给你」,且不给动作;责任主体在内部视图看)。
+  it("说清「还没交付给你」(去角色化后不点名内部角色),且**不给**验收动作", () => {
     expect(html).toContain("未交付");
-    expect(html).toContain("业务经理还没把这份交给你");
+    expect(html).toContain("还没把这份交给你");
   });
 
   it("负样本:不许出现「接受」/「要改」按钮(没收到货谈不上验收)", () => {
@@ -119,7 +121,8 @@ describe("⑤ 项目已收口 ⇒ **不给按钮**,而是说清这是历史事�
   it("写「已交付 · 未被验收」,并说明收口不可逆", () => {
     expect(html).toContain("已交付 · 未被验收");
     expect(html).toContain("收口不可逆");
-    expect(html).toContain("开下一个版本");
+    // 去角色化措辞:「让业务经理开下一个版本」→「要接着做就再开一个版本」
+    expect(html).toContain("再开一个版本");
   });
 
   it("**牙**:一个按钮都不许有(后端对收口项目一律 409 —— 兑现不了的按钮不是按钮)", () => {

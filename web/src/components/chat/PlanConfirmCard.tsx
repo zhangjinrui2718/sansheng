@@ -3,13 +3,12 @@
  * 之前不派工(migration 033 的 `works.confirmed_at` + 派工门)。这张卡是甲方
  * 表态的地方:目标 + 验收判据 + 拆解清单 + **确认开工**。
  *
- * ── 为什么它长在对话页头部之下,而不是消息流里 ──────────────────────
+ * ── v5(2026-11-20):它现在长在**对话流里**,不再是头部 band ──────────
  *
- * 提问是状态不是消息(待答 dock 的同一条推理):拆解完成后这张卡由前端按
- * `counts.unconfirmedWorks > 0` 渲染,确认之后随计数归零而消失 —— 插进消息流
- * 意味着「答完之后要从历史里删一条已经发生过的话」。它也不是平台通知
- * (`kind='system'`),不该落库 —— 它是**前端对库里事实的渲染**(工作项在库里,
- * 判据在计数里),刷新/换项目都会如实重现。
+ * 旧裁决「提问是状态不是消息(答完之后要从历史里删一条已经发生过的话)」被
+ * 2026-11-20 的用户裁决取代:表态卡进流,以**锚定时刻 + 完结塌缩**的方式
+ * (锚 = 最新一条未确认工作项的 createdAt,见 `lib/streamCards.ts` 文件头)。
+ * 确认之后这张卡塌缩成一行「已确认开工 · N 条」(`plan-confirmed`),历史不删除。
  *
  * ── 「要先调整」 ─────────────────────────────────────────────────
  *
@@ -18,30 +17,33 @@
  *
  * ── 数据 ────────────────────────────────────────────────────────
  *
- * goal / 验收判据来自 `ProjectSummary`(左栏同一份,不新增请求);
- * 拆解清单走 `useWorks`(挂载时取一次,`projectRevision` bump 时重拉)。
- * 开关判据是**服务端算好的** `counts.unconfirmedWorks`(调用方传入)——
- * 不在组件里自己数(计数漂移是这个项目反复吃过的亏)。
+ * 工作项清单由**调用方提升**(ChatSurface 持有唯一一份 `useWorks`,塌缩行的
+ * 批次判据也读它)—— 本组件只收 props,不再自己拉一份。
+ * 开关判据是**服务端算好的** `counts.unconfirmedWorks`(调用方传给
+ * `streamCardsOf`,那里判 >0 才发卡)—— 不在组件里自己数
+ * (计数漂移是这个项目反复吃过的亏)。
  */
 import { useState } from "react";
 import { confirmWorks } from "@/lib/api";
-import { useWorks } from "@/lib/data";
 import { Pill, RedMeta } from "@/components/ui/primitives";
+import type { WorkView } from "@shared/types/platform";
 
 export function PlanConfirmCard({
   projectId,
   goal,
   acceptanceCriteria,
+  works,
   onConfirmed,
 }: {
   projectId: string;
   goal: string;
   /** 结构化验收判据(migration 031;空数组 = 判据还在 goal 文本里,如实不编)。 */
   readonly acceptanceCriteria: readonly string[];
-  /** 确认成功后的收尾(调用方刷新左栏计数;计数归零 ⇒ 卡片消失)。 */
+  /** 拆解清单(调用方提升的唯一实例;这里不再自己 fetch)。 */
+  readonly works: { data: readonly WorkView[]; loading: boolean; error: string | null };
+  /** 确认成功后的收尾(调用方刷新左栏计数;计数归零 ⇒ 卡塌缩)。 */
   onConfirmed: () => void;
 }) {
-  const works = useWorks(projectId);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const plan = works.data.filter(
@@ -63,11 +65,11 @@ export function PlanConfirmCard({
 
   return (
     <div
-      className="flex-none sansheng-card"
-      style={{ margin: "10px 16px 0", padding: "12px 14px", borderColor: "var(--jade)" }}
+      className="sansheng-card p-3 w-full"
+      style={{ borderColor: "var(--jade)" }}
       data-role="plan-card"
     >
-      <div className="flex items-center gap-2 flex-none" style={{ marginBottom: 8 }}>
+      <div className="flex items-center gap-2" style={{ marginBottom: 8 }}>
         <span style={{ fontSize: 13, color: "var(--bone)", fontWeight: 500 }}>计划</span>
         <Pill tone="amber">等你确认开工</Pill>
       </div>

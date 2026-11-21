@@ -83,6 +83,7 @@ import type { SessionMessageKind, SessionMessageRow, SessionRow } from "../stora
 import type {
   ArtifactContentView,
   AgentConversationLineView, AgentConversationsResponse,
+  CodeServiceFileView, CodeServiceFilesView,
   HarnessView, MemberConversationView, MemberConversationsResponse,
   KnowledgeChunkView,
   PromptUnitView, RepoCommitsView, RoleHarnessView, SessionIndexEntry,
@@ -1080,6 +1081,125 @@ export function createPlatformApp(deps: HttpDeps): Hono {
       branch: meta.branch,
     };
     return c.json(ok);
+  });
+
+  /** 界面里读源码的预览上限。超限如实说「不支持预览」,不截断 —— 截断的代码看起来是完整的代码。 */
+  const FILE_PREVIEW_LIMIT_BYTES = 200 * 1024;
+
+  /**
+   * **交付时点的文件树**(v5,2026-11-20)—— 「工程师交的东西」从坐标卡走进
+   * 可以逐文件看的树。两条与 `/commits` 同款的纪律:
+   *   · 只有 `code_service` 交付物有树(否则 400,同款文案结构);
+   *   · 读的是 `deliverableCommit`,不是 HEAD —— 平台每回合提交工件,
+   *     按 HEAD 读树会让「交付的东西」随平台活动漂动。
+   */
+  app.get("/api/artifacts/:id/files", (c) => {
+    const row = getArtifact(db, c.req.param("id"));
+    if (row === null) return c.json(err("not_found", "工件不存在", 404).body, 404);
+    if (row.deliverableType !== "code_service") {
+      return c.json(
+        err(
+          "invalid_args",
+          `工件 ${row.id} 的 deliverableType 是 ${row.deliverableType ?? "null"},不是 code_service —— ` +
+            `只有代码服务交付物才有文件树可读。`,
+        ).body,
+        400,
+      );
+    }
+    const cs = deps.codeService;
+    const view = toArtifactView(db, row, (id) => getAgent(db, id)?.displayName ?? id);
+    const meta = view.codeService;
+    const notOk = (problem: string): CodeServiceFilesView => ({
+      runtime: "unavailable",
+      commit: meta?.deliverableCommit ?? null,
+      files: null,
+      problem,
+    });
+    if (cs === undefined) {
+      return c.json(notOk("本次装配没有接上代码服务核对面(HTTP 侧拿不到磁盘)"));
+    }
+    if (meta?.repoPath == null || meta.servicePath == null || meta.deliverableCommit === null) {
+      return c.json(notOk("这条交付物的坐标缺项(repoPath / servicePath / 交付版本),读不出文件树"));
+    }
+    if (!cs.isReachable({ repoPath: meta.repoPath, sha: meta.deliverableCommit })) {
+      return c.json(
+        notOk(
+          `这版交付物的提交 ${meta.deliverableCommit} 在仓库里已经不可达(git reset --hard 之后只剩 reflog)` +
+            ` —— 文件树读的是交付时点,那个时点已经不在了。回滚请用 git revert(设计 §3.2c)。`,
+        ),
+      );
+    }
+    const files = cs.listFilesAt({
+      repoPath: meta.repoPath,
+      servicePath: meta.servicePath,
+      sha: meta.deliverableCommit,
+    });
+    if (files === null) {
+      return c.json(notOk(`读不到仓库 ${meta.repoPath} 在 ${meta.deliverableCommit} 的文件树(目录被移走 / git 不可用)`));
+    }
+    const okView: CodeServiceFilesView = {
+      runtime: "ok",
+      commit: meta.deliverableCommit,
+      files,
+    };
+    return c.json(okView);
+  });
+
+  /**
+   * **交付时点的单个文件**(v5)—— 文件树的点击落点。
+   * `path` 必须是服务目录内的相对路径(绝对路径 / `..` 在这里就拒;
+   * 实现层 `readFileAt` 还会再拦一次拼接结果 —— 两道闸,因为这里是拼接点)。
+   */
+  app.get("/api/artifacts/:id/file", (c) => {
+    const row = getArtifact(db, c.req.param("id"));
+    if (row === null) return c.json(err("not_found", "工件不存在", 404).body, 404);
+    if (row.deliverableType !== "code_service") {
+      return c.json(
+        err(
+          "invalid_args",
+          `工件 ${row.id} 的 deliverableType 是 ${row.deliverableType ?? "null"},不是 code_service —— ` +
+            `只有代码服务交付物才有文件可读。`,
+        ).body,
+        400,
+      );
+    }
+    const p = c.req.query("path") ?? "";
+    if (p === "" || p.startsWith("/") || p.split("/").includes("..")) {
+      return c.json(
+        err("invalid_args", `path 必须是服务目录内的相对路径(收到「${p}」—— 绝对路径与 .. 不收)`).body,
+        400,
+      );
+    }
+    const cs = deps.codeService;
+    const view = toArtifactView(db, row, (id) => getAgent(db, id)?.displayName ?? id);
+    const meta = view.codeService;
+    const notOk = (problem: string): CodeServiceFileView => ({
+      runtime: "unavailable", path: p, content: null, bytes: null, problem,
+    });
+    if (cs === undefined) {
+      return c.json(notOk("本次装配没有接上代码服务核对面(HTTP 侧拿不到磁盘)"));
+    }
+    if (meta?.repoPath == null || meta.servicePath == null || meta.deliverableCommit === null) {
+      return c.json(notOk("这条交付物的坐标缺项,读不出文件内容"));
+    }
+    const r = cs.readFileAt({
+      repoPath: meta.repoPath,
+      servicePath: meta.servicePath,
+      path: p,
+      sha: meta.deliverableCommit,
+    });
+    if (r === null) {
+      return c.json(notOk(`读不到 ${p}(不在这版交付物里,或 git 不可用)—— 这不是空文件,是读不到`));
+    }
+    if (r.bytes > FILE_PREVIEW_LIMIT_BYTES) {
+      return c.json(
+        notOk(
+          `文件 ${r.bytes} 字节,超过预览上限(${FILE_PREVIEW_LIMIT_BYTES} 字节)—— ` +
+            `**不截断**(半份代码看起来是完整的代码);要看全文请在项目仓里用 git 读。`,
+        ),
+      );
+    }
+    return c.json({ runtime: "ok", path: p, content: r.content, bytes: r.bytes } satisfies CodeServiceFileView);
   });
 
   /**
