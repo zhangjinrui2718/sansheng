@@ -40,6 +40,7 @@ export function TopBar({
     <header className="ss-topbar">
       <div
         className="flex items-center gap-2.5 flex-none"
+        style={{ color: "var(--brand)" }}
         title={config ? `工作目录 ${config.cwd}` : "Sansheng"}
       >
         <Seal size={24} />
