@@ -1,10 +1,10 @@
 # 三生 · 领域模型与页面契约(事实底稿)
 
-> **地位**:事实,不是意图 —— 每一条都能用一条命令对着代码核出来(2026-11-17,
-> 基线:master @ 8287193 后)。以代码为准;改到相关结构时顺手更新本文。
-> **用途**:前端设计的判据底稿(设计见 `DESIGN-FRONTEND-UX.md`);哨兵测试可直接引用
-> 本文的端点与闭集。
-> **方法**:逐文件核对 —— `shared/types/platform.ts`(读模型)、`migrations/001–032`
+> **地位**:事实,不是意图 —— 每一条都能用一条命令对着代码核出来(2026-11-21
+> 复核,基线:master @ 6c8448e)。以代码为准;改到相关结构时顺手更新本文。
+> **用途**:前端设计的判据底稿(设计见 `DESIGN-FRONTEND-V2.md`,2026-11-21 起
+> 取代 UX/IA 两份旧设计书);哨兵测试可直接引用本文的端点与闭集。
+> **方法**:逐文件核对 —— `shared/types/platform.ts`(读模型)、`migrations/001–034`
 > (存储)、`src/platform/transport/http.ts`(端点)、`web/src/lib/api.ts` + `lib/ws.ts`
 > + `stores/chat.ts`(前端消费)、各路由文件(页面区块)。
 
@@ -22,6 +22,8 @@ erDiagram
         string goal "目标原文"
         json acceptance_criteria "结构化验收判据(031)"
         string status "draft|active|paused|done|abandoned"
+        datetime close_consented_at "甲方同意收口时刻(034,可空)"
+        int version "版本链(023)"
     }
     agents {
         string id PK
@@ -55,6 +57,7 @@ erDiagram
         string status "open|in_progress|blocked|done|failed|cancelled"
         string review_state "none|pending|done(013)"
         int priority "0-9 默认3(032)"
+        datetime confirmed_at "甲方确认开工(033,可空=派工门拒绝)"
     }
     work_deps {
         string work_id FK
@@ -228,8 +231,9 @@ erDiagram
    甲方验收(`POST /api/artifacts/:id/verdict`)→ 收口判据(11 条)→ 叫醒业务经理 →
    `project_close`。
 2. **问甲方**:`ask_client` → 两道限制(同项目未答 ≤2;问题必须锚定某条验收判据原文
-   ≥10 字)→ 台账 + WS `client_question` → 右栏待答 → 答复 → decision 工件 +
-   `answered_at` → 业务经理处置(`resume_client` → `consumed_at`)。
+   ≥10 字)→ 台账 + WS `client_question` → 流内待答卡(v5;V2 计划改为输入区上方的
+   行动区,见设计书 §4.1)→ 答复 → decision 工件 + `answered_at` →
+   业务经理处置(`resume_client` → `consumed_at`)。
 3. **汇报合并**:结果写 outbox → 攒 3 条或最老 5 分钟 → `report_downstream`;
    `work_failed` 与 high/critical 阻塞绕过窗口。
 4. **打断**:■ 停止 / ■ 中断 / Esc → WS `interrupt`(`channel:"client"`,只停甲方通道);
@@ -248,8 +252,10 @@ erDiagram
 
 ### 全局壳(App/TopBar)
 
-- **展示**:六页签+`?`;当前项目;健康点(5s `GET /api/health`:模型/供应商);回合与
-  累计用量;地址 `?project=` 坐标。
+- **展示**:五页签(对话/工作项/成员/记忆/设置)+ `?`(关于);`project` 与 `harness`
+  **无页签**(项目页入口 = 对话页头部「详情」链接;harness 入口 = 成员页 harness 卡);
+  当前项目;健康点(5s `GET /api/health`:模型/供应商);回合与累计用量;地址
+  `?project=` 坐标。左栏(项目列表+会话线)**只挂在对话路由**,其余路由全宽。
 - **接受**:页签点击;任意深链接。
 - **行为**:路由(未知回落对话页);`?project=` 落地切项目一次、过期即清;WS 单例
   (断线横幅、重连对账);0 项目 ⇒ 自动进接待。
@@ -340,18 +346,19 @@ client)· `ping`。
 `project_opened` `client_question` `client_question_answered` `artifact_created`
 `work_changed` `blocker_changed` `overdue_asks` `usage_recorded` `cascade_stopped`
 `error`。
-**未消费**:`usage_recorded`(store 无 case,成本读面靠 `GET /usage`);
-`artifact_created`(服务端发射点零调用方)。v5 起 `client_question` 的完整载荷已被流内卡消费(此前只 bump revision)。
+**未消费**:`artifact_created`(服务端发射点零调用方)。`usage_recorded` 自 F1 起
+store 已消费(顶栏 Σ 本次连接累计;权威值仍在 `GET /usage`);v5 起
+`client_question` 的完整载荷已被流内卡消费(此前只 bump revision)。
 
-## 7. 「存在但没有读者」清单(2026-11-17 实测)
+## 7. 「存在但没有读者」清单(2026-11-21 复核)
 
 | # | 事实 | 性质 |
 |---|---|---|
 | N1 | `PUT /api/profile/:key` 无页面调用 | 画像当前纯只读 |
-| N2 | WS `usage_recorded` store 不消费 | 背景回合的成本不上屏(轮次内成本靠 `message_end.usage`) |
 | N3 | WS 命令 `answer_client_question` 无 UI 使用 | 协议与实现分叉 |
 | N4 | MCP 端点族前端零包装 | 与 About 已知缺口第 6 条一致 |
 | N5 | `POST /api/projects` UI 从不调用 | 符合设计(立项只经对话),不是缺口 |
-| N6 | `works.review_state`(013)不在 `WorkView` 里 | 质检状态在库,界面上不了屏 |
 | N7 | `ClientQuestionList.answeredUnconsumed`(F3 计数)v5 起前端无读者 | 塌缩行改按 `answered[].consumedAt` 逐条说态;计数仍是 `resume_client` 的库内判据,仅界面侧无读者 |
 | N8 | 验收裁决无 GET 历史端点;`recentDeliveryVerdicts` 只给每份交付物**最新**一条 | 历史 append-only 在库;工件卡可改判,但流内塌缩行只显示最新 |
+| ~~N2~~ | ~~`usage_recorded` store 不消费~~ | **已解**(F1,2026-11-17):顶栏 Σ 本次连接累计 |
+| ~~N6~~ | ~~`works.review_state` 不在 `WorkView`~~ | **已解**(D7):`WorkView.reviewState` 原样透出 |

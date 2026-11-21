@@ -1,0 +1,142 @@
+/* Sansheng · V2 theme —— 组件语义层(Components / Product / Editor)
+ *
+ * 分层纪律(docs/DESIGN-FRONTEND-V2.md §5.2):
+ *   · 组件**只消费本文件的语义名**(`--ui-*` / `--status-*` / `--code-*`),
+ *     不直接写 tokens.css 的原始值;
+ *   · 每个语义名带 `var(--x, 默认值)` 别名 —— 调值不动组件;
+ *   · `--status-*` 是**状态色唯一映射表**:工作项六状态/质检/双裁决/优先级
+ *     全部映射到语义四件套,任何地方不许再造色(哨兵量它)。
+ */
+
+:root {
+  /* —— 导航(左栏/页签)—— */
+  --ui-nav-item-height: var(--nav-item-height, 32px);
+  --ui-nav-item-color: var(--nav-item-color, var(--text-2));
+  --ui-nav-item-hover: var(--nav-item-hover-bg, var(--surface-hover));
+  --ui-nav-item-active: var(--nav-item-active-bg, var(--surface-selected));
+  --ui-nav-item-active-color: var(--nav-item-active-color, var(--text-1));
+
+  /* —— 按钮 —— */
+  --ui-button-height: var(--button-height-default, 2rem);
+  --ui-button-radius: var(--radius-m);
+  --ui-button-primary-bg: var(--brand);
+  --ui-button-primary-fg: var(--brand-foreground);
+  --ui-button-quiet-bg: var(--surface-raised);
+  --ui-button-quiet-fg: var(--text-1);
+  --ui-button-danger-bg: var(--danger);
+  --ui-button-danger-fg: oklch(0.15 0.01 260); /* 红底配深字:白字在此红上只有 ~2.6:1 */
+
+  /* —— 输入 —— */
+  --ui-input-bg: var(--surface-raised);
+  --ui-input-border: var(--input-border);
+  --ui-input-radius: var(--radius-m);
+
+  /* —— 行动区(对话页输入区上方的表态行,见设计书 §4.1)—— */
+  --ui-action-row-bg: var(--surface);
+  --ui-action-row-border: var(--surface-border);
+  --ui-action-row-hover: var(--surface-hover);
+  --ui-action-radius: var(--radius-l);
+
+  /* —— 页面卡(frame 上的圆角页卡,布局语言见设计书 §3.1)—— */
+  --ui-page-radius: var(--radius-xl);
+  --ui-page-bg: var(--page-canvas);
+  --ui-page-border: var(--surface-border);
+
+  /* —— 列表行 —— */
+  --ui-row-height: var(--row-height, 36px);
+  --ui-row-hover: var(--surface-hover);
+  --ui-row-selected: var(--surface-selected);
+
+  /* ============================================================
+   * 状态色唯一映射表(语义四件套的唯一消费者)
+   * 键名与 shared/types/platform.ts 的闭集逐项对齐;
+   * 改任何一枚 = 改判据,要过 vocab 对照测试。
+   * ============================================================ */
+
+  /* 工作项六状态(WorkStatus) */
+  --status-work-open: var(--text-3);            /* 未开工:安静 */
+  --status-work-in-progress: var(--brand);      /* 进行中:品牌蓝 */
+  --status-work-blocked: var(--danger);
+  --status-work-done: var(--ok);
+  --status-work-failed: var(--danger);
+  --status-work-cancelled: var(--text-3);
+
+  /* 质检(works.review_state + review_verdicts.verdict) */
+  --status-review-pending: var(--warn);         /* 待质检:等待 */
+  --status-review-done: var(--text-3);          /* 已审:常态不上屏 */
+  --status-verdict-pass: var(--ok);
+  --status-verdict-fail: var(--danger);
+
+  /* 甲方裁决(delivery_verdicts.verdict) */
+  --status-accept: var(--ok);
+  --status-reject: var(--danger);
+
+  /* 甲方等待态(四状态点,行动区徽标用) */
+  --status-wait-confirm: var(--warn);           /* ① 确认开工 */
+  --status-wait-question: var(--info);          /* ② 答问 */
+  --status-wait-acceptance: var(--brand);       /* ③ 验收 */
+  --status-wait-close: var(--ok);               /* ④ 收口 */
+
+  /* 优先级(works.priority,0 最高) */
+  --status-priority-urgent: var(--danger);      /* 0-1 */
+  --status-priority-high: var(--warn);          /* 2 */
+  --status-priority-normal: var(--text-3);      /* 3+ 默认 */
+
+  /* 阻塞严重度(blockers.severity) */
+  --status-severity-critical: var(--danger);
+  --status-severity-high: var(--danger);
+  --status-severity-medium: var(--warn);
+  --status-severity-low: var(--text-3);
+
+  /* 项目派生态(ProjectSummary.status) */
+  --status-project-active: var(--brand);
+  --status-project-awaiting: var(--warn);       /* awaiting_acceptance 待收货 */
+  --status-project-done: var(--ok);
+  --status-project-paused: var(--text-3);
+  --status-project-abandoned: var(--text-3);
+
+  /* 交付物定稿(ArtifactStatus) */
+  --status-artifact-accepted: var(--ok);        /* 定稿(≠甲方验收) */
+  --status-artifact-rejected: var(--danger);
+  --status-artifact-superseded: var(--text-3);
+  --status-artifact-open: var(--text-2);
+
+  /* 运行态(ProjectLiveView.runtime / 连接) */
+  --status-runtime-host: var(--ok);
+  --status-runtime-unavailable: var(--text-3);  /* 读不到:不上色不装死 */
+  --status-socket-open: var(--ok);
+  --status-socket-connecting: var(--warn);
+  --status-socket-closed: var(--danger);
+
+  /* —— 左栏脉搏点(全站唯一非用户触发动效:在跑项目)—— */
+  --pulse-dot: var(--brand);
+  --pulse-period: 2.4s;
+}
+
+/* —— 编辑器内容(markdown:对话流/工件正文;令 token 化,批次 2 接线)—— */
+:root {
+  --md-link: var(--brand);
+  --md-link-underline: oklch(0.7 0.13 255 / 40%);
+  --md-quote-bar: oklch(1 0 0 / 14%);
+  --md-quote-fg: var(--text-2);
+  --md-hr: var(--border);
+  --md-table-header-bg: oklch(1 0 0 / 4%);
+  --md-table-border: var(--border);
+  --md-code-bg: oklch(1 0 0 / 5%);
+  --md-code-fg: oklch(0.86 0.02 260);
+  --md-code-block-bg: oklch(0.16 0.006 260);
+  --md-code-keyword: oklch(0.72 0.12 255);
+  --md-code-string: oklch(0.72 0.12 155);
+  --md-code-comment: var(--text-3);
+  --md-code-number: oklch(0.74 0.12 50);
+  --md-code-function: oklch(0.72 0.1 280);
+}
+
+/* 脉搏点动画(遵守 prefers-reduced-motion) */
+@keyframes ss-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .ss-pulse { animation: none !important; }
+}

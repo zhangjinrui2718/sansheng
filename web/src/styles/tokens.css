@@ -1,50 +1,158 @@
-/* Sansheng · 水墨青玄 design tokens —— 「砚」方向(2026-11-17,frontend-design 流程)
+/* Sansheng · V2 design tokens —— Foundations 层(深色科技办公)
  *
- * 题材即选择:水墨的世界里墨分五色,底色是**中性偏暖的真墨**,不是蓝黑;
- * 矿物色只有两个有声音:石绿(可点)与印朱(不可逆/失败),其余退后。
- * 层级靠墨阶深浅,不靠框;一屏一声,朱砂是唯一强声。
+ * 体系:参照 Multica 的四层 token(Foundations → Components → Layout → Editor),
+ * 数值纪律见 docs/DESIGN-FRONTEND-V2.md §5:
+ *   · 表面六阶亮度阶梯(oklch 近纯灰,彩度 0.005–0.008,冷调 hue 260),
+ *     层级靠亮度阶与白透明发丝线,不靠阴影堆叠;
+ *   · 品牌单强调(工程蓝),状态/优先级一律映射到语义四件套,不另造色
+ *     (映射表在 theme.css 的 --status-*,唯一一份);
+ *   · 字号与行高成对定义;数字一律 tabular-nums;
+ *   · 对比度是检查不是口号:tests/web/theme-contrast.test.ts 量 WCAG。
+ *
+ * ⚠️ 组件**只消费 theme.css 的语义名**,不直接写本文件的原始值
+ *    (新组件;旧组件经底部兼容别名间接消费,批次 5 删)。
+ * ⚠️ V2 只交付深色;`.theme-light` 结构留待将来(色相不变、亮度镜像)。
  */
+
 :root {
-  /* —— 墨阶(surfaces):中性偏暖,五阶 —— */
-  --ink-0: #121310;
-  --ink-1: #171816;
-  --ink-2: #1D1E1B;
-  --ink-3: #242521;
-  --ink-4: #2D2E29;
+  color-scheme: dark;
 
-  /* —— 宣(文字)—— */
-  --bone: #E9E6DC;
-  --bone-dim: #B5AE9E;
-  --bone-mute: #8B8375;
+  /* —— 表面六阶(surfaces):frame → 页卡 → 卡面 → 浮层 → 悬停 → 选中 —— */
+  --app-shell: oklch(0.165 0.006 260);        /* frame:顶栏/左栏底 */
+  --page-canvas: oklch(0.19 0.006 260);       /* 页面卡底 */
+  --surface: oklch(0.215 0.007 260);          /* 卡片/面板 */
+  --surface-raised: oklch(0.245 0.008 260);   /* 菜单/浮层/输入区 */
+  --surface-hover: oklch(0.28 0.008 260);     /* 行与卡悬停 */
+  --surface-selected: oklch(0.31 0.008 260);  /* 选中行/激活导航 */
+  --surface-border: oklch(1 0 0 / 9%);        /* 卡与页卡的发丝边 */
+  --border: oklch(1 0 0 / 7%);                /* 分隔线/表线 */
+  --input-border: oklch(1 0 0 / 15%);         /* 输入框边 */
 
-  /* —— 石绿(主行动:可点、进行中)—— */
-  --jade: #6E9381;
-  --jade-soft: rgba(110, 147, 129, 0.16);
+  /* —— 文字三级(AA 钉定:1/2 级 ≥4.5:1,3 级非文本 ≥3:1)—— */
+  --text-1: oklch(0.93 0.004 260);            /* 正文 */
+  --text-2: oklch(0.72 0.008 260);            /* 次要(对比度哨兵量它) */
+  --text-3: oklch(0.615 0.012 260);           /* 装饰/占位/箭头 */
 
-  /* —— 赭石(警示/等待)—— */
-  --ochre: #B98A4A;
+  /* —— 品牌单强调(工程蓝:可点/进行中/链接/选中)—— */
+  --brand: oklch(0.7 0.13 255);
+  --brand-strong: oklch(0.78 0.12 255);
+  --brand-soft: oklch(0.7 0.13 255 / 14%);
+  --brand-foreground: oklch(0.14 0.01 260);   /* 品牌填充上的文字 */
 
-  /* —— 印朱(唯一强声:破坏性、失败、印章)—— */
-  --cinnabar: #C3402E;
-  --cinnabar-soft: rgba(195, 64, 46, 0.12);
+  /* —— 语义四件套(状态映射的目标色,唯一来源;不另造色)—— */
+  --ok: oklch(0.72 0.13 155);                 /* 成功/通过/完成 */
+  --ok-soft: oklch(0.72 0.13 155 / 14%);
+  --warn: oklch(0.76 0.13 85);                /* 警示/等待/待办 */
+  --warn-soft: oklch(0.76 0.13 85 / 15%);
+  --danger: oklch(0.7 0.16 25);               /* 失败/拒/不可逆 */
+  --danger-soft: oklch(0.7 0.16 25 / 13%);
+  --info: oklch(0.7 0.12 230);                /* 中性信息 */
+  --info-soft: oklch(0.7 0.12 230 / 13%);
 
-  --bamboo: #7BA876;
-  --amber: #C9963C;
-  --amber-soft: rgba(201, 150, 60, 0.16);
+  /* —— 字号阶梯(size 与 line-height 成对;--font-scale 全局可调)—— */
+  --font-scale: 1;
+  --text-micro: calc(11px * var(--font-scale));
+  --text-micro--line-height: calc(15px * var(--font-scale));   /* 计数/时间戳 */
+  --text-caption: calc(12px * var(--font-scale));
+  --text-caption--line-height: calc(16px * var(--font-scale)); /* 徽标/提示 */
+  --text-label: calc(13px * var(--font-scale));
+  --text-label--line-height: calc(18px * var(--font-scale));   /* 元数据行/表头 */
+  --text-body: calc(14px * var(--font-scale));
+  --text-body--line-height: calc(20px * var(--font-scale));    /* 界面正文 */
+  --text-body-lg: calc(15px * var(--font-scale));
+  --text-body-lg--line-height: calc(22px * var(--font-scale)); /* 对话正文 */
+  --text-title: calc(16px * var(--font-scale));
+  --text-title--line-height: calc(24px * var(--font-scale));
+  --text-title-lg: calc(18px * var(--font-scale));
+  --text-title-lg--line-height: calc(28px * var(--font-scale));
+  --text-display: calc(24px * var(--font-scale));
+  --text-display--line-height: calc(32px * var(--font-scale)); /* 页标题 */
 
-  /* —— 石青(链接/指路)—— */
-  --cyan: #58A39B;
-  --cyan-soft: rgba(88, 163, 155, 0.16);
+  /* —— 字体(CJK 工程)——
+     等宽栈故意不列中文字体:等宽网格只对拉丁字符成立,列 CJK 是虚假的
+     对齐承诺(数字/时间/token/id/代码用它)。 */
+  --font-ui: system-ui, -apple-system, "Segoe UI", "PingFang SC",
+    "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  --font-mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+  --content-leading: 1.625;                   /* 拉丁正文行高 */
+  --content-leading-cjk: 1.75;                /* 中文正文行高放宽 */
+  font-variant-numeric: tabular-nums;         /* 数字一律等宽数字 */
 
+  /* —— 控件几何 —— */
+  --button-height-xs: 1.5rem;                 /* 24px */
+  --button-height-sm: 1.75rem;                /* 28px */
+  --button-height-default: 2rem;              /* 32px */
+  --button-height-lg: 2.25rem;                /* 36px */
+  --button-padding-x: 0.625rem;
+  --button-gap: 0.375rem;
+
+  /* —— 圆角族(从基准派生)—— */
+  --radius: 8px;
+  --radius-s: calc(var(--radius) * 0.5);      /* 4px:徽标/小件 */
+  --radius-m: calc(var(--radius) * 0.75);     /* 6px:按钮/输入 */
+  --radius-l: var(--radius);                  /* 8px:卡 */
+  --radius-xl: calc(var(--radius) * 1.5);     /* 12px:页卡/浮层 */
+
+  /* —— 间距阶梯 —— */
+  --space-xs: 0.5rem;
+  --space-sm: 0.75rem;
+  --space-md: 1rem;
+  --space-lg: 1.5rem;
+  --space-xl: 2rem;
+
+  /* —— 密度基准 —— */
+  --row-height: 36px;                         /* 列表行高(工作项/消息摘要) */
+  --nav-item-height: 32px;                    /* 导航行 */
+  --sidebar-width: 264px;                     /* 左栏宽(可折叠成 48px) */
+  --sidebar-width-collapsed: 48px;
+
+  /* —— 阴影(克制:浮层才用,平级层级靠亮度阶)—— */
+  --shadow-card: 0 1px 2px oklch(0 0 0 / 0.25);
+  --shadow-floating: 0 12px 32px oklch(0 0 0 / 0.45), 0 2px 8px oklch(0 0 0 / 0.3);
+  --shadow-menu: 0 8px 24px oklch(0 0 0 / 0.35), 0 2px 6px oklch(0 0 0 / 0.2);
+  --focus-ring: 0 0 0 3px var(--brand-soft);
+
+  /* —— 滚动条 —— */
+  --scrollbar-thumb: oklch(1 0 0 / 8%);
+  --scrollbar-thumb-hover: oklch(1 0 0 / 16%);
+
+  /* —— 动效(只答应用户动作;非用户触发仅左栏脉搏一处)—— */
   --ease-out: cubic-bezier(0.2, 0.7, 0.2, 1);
   --duration-120: 120ms;
   --duration-160: 160ms;
   --duration-200: 200ms;
 
-  --shadow-ink-sm: 0 1px 2px rgba(10, 10, 8, 0.4);
-  --shadow-ink: 0 2px 8px rgba(10, 10, 8, 0.45), 0 1px 2px rgba(10, 10, 8, 0.3);
-  --shadow-ink-lg: 0 8px 24px rgba(10, 10, 8, 0.5), 0 2px 4px rgba(10, 10, 8, 0.35);
-  --shadow-jade-glow: 0 0 0 3px var(--jade-soft);
+  --gutter: 24px;                             /* 页卡外留白 */
+}
 
-  --gutter: 24px;
+/* —— 旧变量名兼容别名(「砚」→ V2 的映射;旧组件经它间接换皮) ——
+ * ⚠️ 仅过渡用:批次 5 删旧目录时整块删除,别在新代码里引用这些名字。
+ * 语义映射依据 2026-11-21 实测用法:
+ *   ink-3 主要作边框(30+ 次)兼浅底 → 亮灰阶;ink-0 页面底;ink-1 卡底;
+ *   ink-2 更亮底/hover;jade=可点/进行中 → brand(石绿→工程蓝,最大视觉变化);
+ *   ochre/amber 都偏警示等待 → 归并 warn;cyan 链接 → brand。
+ */
+:root {
+  --ink-0: var(--app-shell);
+  --ink-1: var(--surface);
+  --ink-2: var(--surface-raised);
+  --ink-3: var(--surface-selected);
+  --ink-4: oklch(0.36 0.008 260);
+  --bone: var(--text-1);
+  --bone-dim: var(--text-2);
+  --bone-mute: var(--text-3);
+  --jade: var(--brand);
+  --jade-soft: var(--brand-soft);
+  --ochre: var(--warn);
+  --cinnabar: var(--danger);
+  --cinnabar-soft: var(--danger-soft);
+  --bamboo: var(--ok);
+  --amber: var(--warn);
+  --amber-soft: var(--warn-soft);
+  --cyan: var(--brand);
+  --cyan-soft: var(--brand-soft);
+  --shadow-ink-sm: var(--shadow-card);
+  --shadow-ink: var(--shadow-menu);
+  --shadow-ink-lg: var(--shadow-floating);
+  --shadow-jade-glow: var(--focus-ring);
 }
