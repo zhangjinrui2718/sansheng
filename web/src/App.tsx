@@ -22,7 +22,7 @@ import type { AppConfigResponse, HealthResponse } from "@shared/types/platform";
 import { AppShell } from "./app/AppShell";
 import { Sidebar } from "./app/Sidebar";
 import { TopBar } from "./components/shell/TopBar";
-import { ChatSurface } from "./components/chat/ChatSurface";
+import { ChatSurface } from "./features/chat/ChatSurface";
 import { SettingsPanel } from "./components/settings/SettingsPanel";
 import { ProjectDetailPage } from "./routes/ProjectDetail";
 import { WorksPage } from "./routes/Works";

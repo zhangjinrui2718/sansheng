@@ -62,28 +62,32 @@ const cjkCount = (s: string): number => (s.match(/[\u4e00-\u9fff]/g) ?? []).leng
 const BASELINE: Record<string, number> = {
   "App.tsx": 18,
   "components/brand/Seal.tsx": 2,
-  "components/chat/ChatComposer.tsx": 136,
+  "features/chat/ChatComposer.tsx": 136,
   // 2026-11-17(IA v4 走检):317 → 329(+12,头部「详情」入口;placeholder 键位段删除)
-  "components/chat/ChatSurface.tsx": 297,
-  "components/chat/Markdown.tsx": 0,
+  "features/chat/ChatSurface.tsx": 297,
+  "features/chat/Markdown.tsx": 0,
   // 2026-11-17(D3):「计划」卡 —— 新 UI(目标/判据摘要 + 拆解清单 + 确认开工)。
   // 2026-11-20(v5):117 → 57 —— band 形态退场,卡身随表态卡进流(判据在
-  // lib/streamCards.ts),works 取数上移到 ChatSurface(组件只收 props)。
-  "components/chat/PlanConfirmCard.tsx": 57,
+  // entities/streamCards.ts),works 取数上移到 ChatSurface(组件只收 props)。
+  "features/chat/PlanConfirmCard.tsx": 57,
     // 2026-11-17(文案裁决):103 → 128(+25,HiddenNotice 的落点指引移进悬停 ——
   // 屏上散文退场,指针保留在 title)。2026-11-20(v5):流尾「读不到」行不加悬停
   // (可见正文由判据层给出),维持 128。
-  "components/chat/MessageList.tsx": 124,
+  "features/chat/MessageList.tsx": 124,
   // 2026-11-20(v5):表态卡的渲染层 —— 可操作卡复用三份既有卡身,塌缩事实行
   // 是居中小字;悬停一律不加(⑨ 的条数棘轮)。
   // 2026-11-20(v5 Wave B):32 → 40(+8,验收卡的「查看正文/收起正文」——
   // 流内展开的最小一对按钮;正文懒加载,点开才取)。
-  "components/chat/StreamCards.tsx": 40,
-  "components/chat/ThinkingBlock.tsx": 25,
-  "components/chat/ToolCallCard.tsx": 0,
+  // 2026-11-21(V2):可操作卡退场 → 行动区(ActionRail,四状态点一行摘要 +
+  // 展开 verb)+ StreamFacts(塌缩事实行,文案从 v5 逐字继承,40→24 是可操作
+  // 卡文案随卡身搬走)。
+  "features/chat/ActionRail.tsx": 50,
+  "features/chat/StreamFacts.tsx": 24,
+  "features/chat/ThinkingBlock.tsx": 25,
+  "features/chat/ToolCallCard.tsx": 0,
   // 2026-11-20(v5):Inbox.tsx(111)与 ChatRightRail.tsx(0)退役 —— 收件箱
-  // 融合队列被「表态卡进流」取代(判据在 lib/streamCards.ts,见下面那条)。
-  "components/client/ClientQuestionCard.tsx": 177,
+  // 融合队列被「表态卡进流」取代(判据在 entities/streamCards.ts,见下面那条)。
+  "features/chat/ClientQuestionCard.tsx": 177,
   // 2026-11-17(F3):125 → 151(+26,「已答复 · 业务经理整理中」一行 + 判据注释
   // 进了 title;对照 S-A 的删减净下降)。
   "components/dashboard/DashboardCards.tsx": 17,
@@ -158,15 +162,15 @@ const BASELINE: Record<string, number> = {
   // 只在 review_state = pending 时出现,none/done 是常态不上屏)。
   "lib/entityMeta.ts": 156,
   "lib/knowledgeState.ts": 210,
-  "lib/markdown.ts": 0,
+  "shared/lib/markdown.ts": 0,
   "lib/orgState.ts": 345,
   "lib/platformNotices.ts": 22,
-  "lib/questionScope.ts": 0,
+  "entities/questionScope.ts": 0,
   "lib/relations.ts": 107,
   "app/router.ts": 0,
-  "lib/scroll.ts": 0,
+  "shared/lib/scroll.ts": 0,
   // 2026-11-20(v5):表态卡进流的判据层(锚定/塌缩/读不到文案的唯一落点)
-  "lib/streamCards.ts": 21,
+  "entities/streamCards.ts": 21,
   "lib/timeline.ts": 17,
   "lib/vocab.ts": 168,
   "lib/workGraph.ts": 0,

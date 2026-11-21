@@ -24,8 +24,8 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { ConversationStream, TurnView, splitWorkLog } from "@/components/chat/MessageList";
-import { THINKING_DEFAULT_OPEN, ThinkingDisclosure } from "@/components/chat/ThinkingBlock";
+import { ConversationStream, TurnView, splitWorkLog } from "@/features/chat/MessageList";
+import { THINKING_DEFAULT_OPEN, ThinkingDisclosure } from "@/features/chat/ThinkingBlock";
 import type { ConversationPartition } from "@/lib/data";
 import type { Turn } from "@/stores/chat";
 
@@ -221,7 +221,7 @@ describe("A4 · `thinking` 默认折叠(折叠时 DOM 里没有推理正文)", (
    */
   it("折叠状态在组件内:用 useState,不引 store", () => {
     const src = readFileSync(
-      join(process.cwd(), "web/src/components/chat/ThinkingBlock.tsx"),
+      join(process.cwd(), "web/src/features/chat/ThinkingBlock.tsx"),
       "utf8",
     ).replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
     expect(src).toMatch(/useState\(THINKING_DEFAULT_OPEN\)/);

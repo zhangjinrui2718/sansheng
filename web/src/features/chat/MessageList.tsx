@@ -52,22 +52,22 @@
  * ── 旧版留下的两件事(未改)────────────────────────────────────
  *
  * 1. **正文按 markdown 渲染**(此前是裸 `{text}`,业务经理的 `**加粗**` / 表格 /
- *    代码块在屏幕上是字面量)。解析在 `@/lib/markdown`,安全边界也在那里。
+ *    代码块在屏幕上是字面量)。解析在 `@/shared/lib/markdown`,安全边界也在那里。
  *    用户自己键入的那条**仍按字面渲染** —— 把人打的字重新排版成标题/表格,
  *    是替他改写输入,不是他要的。
  *
  * 2. **滚动语义手写**(不用 react-virtuoso:实测 +193.3 kB raw / +61.3 kB gzip,
  *    换来的虚拟化在 14 条消息的会话里是过早优化)。三条行为与判据在
- *    `@/lib/scroll`,这里只做 DOM 侧的接线:
+ *    `@/shared/lib/scroll`,这里只做 DOM 侧的接线:
  *      · 贴底 → 新内容跟随(节流 80ms,避免流式高频更新把主线程压住)
  *      · 用户上滚 → 关闭跟随 + 显示「回到底部」;自己滚回底部 → 恢复跟随
- *      · 滚到顶加载历史 → **未做**(后端无分页/游标,见 lib/scroll.ts 文件头)
+ *      · 滚到顶加载历史 → **未做**(后端无分页/游标,见 shared/lib/scroll.ts 文件头)
  *
  * ── v5(2026-11-20):表态卡进流 ────────────────────────────────
  *
  * 四类「等你表态」的卡(提问 / 验收 / 计划 / 及它们的塌缩事实行)按**锚定时刻**
- * 归并进历史流(`lib/streamCards.ts` 的 `mergeStream`,判据在那里)。本组件
- * 只做两件事:接 `cards` prop 并归并;渲染 `StreamCardView`。**判据不在这里**
+ * 归并进历史流(`entities/streamCards.ts` 的 `mergeStream`,判据在那里)。本组件
+ * 只做两件事:接 `facts` prop 并归并;渲染 `StreamFactView`。**判据不在这里**
  * —— 哪些卡存在、锚在哪、什么时候塌缩,全部在判据层。
  */
 import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -82,11 +82,11 @@ import {
 } from "@/lib/data";
 import {
   mergeStream,
-  streamCardKey,
-  type StreamCard,
+  streamFactKey,
+  type StreamFact,
   type StreamItem,
-} from "@/lib/streamCards";
-import { StreamCardView, type PlanCardContext } from "./StreamCards";
+} from "@/entities/streamCards";
+import { StreamFactView } from "./StreamFacts";
 import {
   INITIAL_FOLLOW,
   observeFollow,
@@ -96,7 +96,7 @@ import {
   type FollowObservation,
   type FollowState,
   type ScrollMetrics,
-} from "@/lib/scroll";
+} from "@/shared/lib/scroll";
 import { Markdown } from "./Markdown";
 import { ThinkingBlock } from "./ThinkingBlock";
 import { ToolCallCard } from "./ToolCallCard";
@@ -390,16 +390,11 @@ export function splitWorkLog(text: string): TextSegment[] {
 }
 
 export function MessageList({
-  cards = [],
-  cardsUnavailable = null,
-  plan = null,
+  facts = [],
 }: {
-  /** 表态卡(判据在 `streamCardsOf`;由 `ChatSurface` 从它持有的取数实例算出)。 */
-  cards?: readonly StreamCard[];
-  /** 「表态清单读不到」那一行;null = 没有读失败(加载中不是读失败)。 */
-  cardsUnavailable?: string | null;
-  /** 计划卡需要的上下文;null 时计划卡不渲染(其它卡不受影响)。 */
-  plan?: PlanCardContext | null;
+  /** 塌缩事实行(判据在 `entities/streamCards.ts` 的 streamFactsOf;
+   *  未完结表态在行动区 ActionRail —— V2 起 `MessageList` 不再渲染可操作卡)。 */
+  facts?: readonly StreamFact[];
 }) {
   const turns = useChatStore((s) => s.turns);
   // ⚠️ 选择器只取**引用稳定**的字段:`inFlightTurns(s)` 每次调用都返回新数组,
@@ -433,8 +428,8 @@ export function MessageList({
   );
 
   const history = useMemo(() => partitionTurns(turns, ctx), [turns, ctx]);
-  /** 表态卡按锚定时刻归并进历史(判据在 lib/streamCards.ts;进行中的轮不参与归并)。 */
-  const items = useMemo(() => mergeStream(history.timeline, cards), [history.timeline, cards]);
+  /** 表态卡按锚定时刻归并进历史(判据在 entities/streamCards.ts;进行中的轮不参与归并)。 */
+  const items = useMemo(() => mergeStream(history.timeline, facts), [history.timeline, facts]);
   const live = useMemo(() => partitionTurns(streaming, ctx), [streaming, ctx]);
   const hidden = history.hidden + live.hidden;
   const notices = history.notices + live.notices;
@@ -503,8 +498,8 @@ export function MessageList({
   //    不跟随(本批次修掉的那一半)。
   const contentSignal = useMemo(
     // 卡的数量与「读不到」行也改变流的内容:新卡出现时要能触发跟随。
-    () => contentSignalOf(turns, streaming) + `:${cards.length}:${cardsUnavailable ?? ""}`,
-    [turns, streaming, cards.length, cardsUnavailable],
+    () => contentSignalOf(turns, streaming) + `:${facts.length}`,
+    [turns, streaming, facts.length],
   );
   useEffect(() => {
     const el = ref.current;
@@ -522,7 +517,7 @@ export function MessageList({
     doScroll(scrollBehaviorFor("reset"));
   }, [projectId, intakeActive, apply, doScroll]);
 
-  /** 用户滚回底部 → 恢复跟随;上滚 → 关闭跟随(见 lib/scroll.ts 的方向判据)。 */
+  /** 用户滚回底部 → 恢复跟随;上滚 → 关闭跟随(见 shared/lib/scroll.ts 的方向判据)。 */
   function handleScroll() {
     const el = ref.current;
     if (!el) return;
@@ -539,7 +534,7 @@ export function MessageList({
   // 而不是「有没有可见的轮」**:全是内部角色的发言时不能显示空态 —— 那等于告诉甲方
   // 「什么都没发生」,而实际上团队刚说了 20 句(下面的条数提示才是对的回答)。
   // 表态卡也算内容:一个刚拆解完、消息还没落库的项目,计划卡不该被空态吃掉。
-  if (turns.length === 0 && streaming.length === 0 && cards.length === 0) return <Empty />;
+  if (turns.length === 0 && streaming.length === 0 && facts.length === 0) return <Empty />;
 
   return (
     <div className="flex-1 relative flex flex-col" style={{ minHeight: 0 }}>
@@ -554,8 +549,6 @@ export function MessageList({
             history={items}
             streaming={live.timeline}
             hiddenNote={hiddenNote}
-            cardsUnavailable={cardsUnavailable}
-            plan={plan}
           />
           {/*
             ⚠️ **`busy` 那一条不是故障,但它必须看得见** ——
@@ -614,18 +607,12 @@ export function ConversationStream({
   history,
   streaming,
   hiddenNote,
-  cardsUnavailable = null,
-  plan = null,
 }: {
   /** 归并后的流(v5:轮 + 表态卡;纯轮的旧形状见 `StreamItem`)。 */
   history: readonly StreamItem[];
   streaming: ConversationPartition["timeline"];
   /** 「不在这一屏里的东西」那一行(内部回合 + 平台通知的条数);`null` = 一条都没有 */
   hiddenNote: string | null;
-  /** 「表态清单读不到」那一行;`null` = 没有读失败。 */
-  cardsUnavailable?: string | null;
-  /** 计划卡上下文(`StreamCardView` 只在 plan 卡上用它)。 */
-  plan?: PlanCardContext | null;
 }) {
   // ⚠️ 2026-10-05:**类型上只可能有 `client`**。平台通知与内部回合都被
   // `partitionTurns` 挡在外面了(前者只留条数,全文与状态在项目页的「组织运行态」)——
@@ -637,20 +624,13 @@ export function ConversationStream({
         item.kind === "turn" ? (
           <TurnView key={item.turn.id} turn={item.turn} />
         ) : (
-          <StreamCardView key={streamCardKey(item.card)} card={item.card} plan={plan} />
+          <StreamFactView key={streamFactKey(item.fact)} fact={item.fact} />
         ),
       )}
       {streaming.map(({ turn }) => (
         <TurnView key={turn.id} turn={turn} streaming />
       ))}
       {hiddenNote !== null && <HiddenNotice note={hiddenNote} />}
-      {cardsUnavailable !== null && (
-        <div className="flex justify-center" data-role="cards-unavailable">
-          <div className="ss-note" style={{ fontSize: 11, textAlign: "center" }}>
-            {cardsUnavailable}
-          </div>
-        </div>
-      )}
     </>
   );
 }
@@ -714,7 +694,7 @@ function HiddenNotice({ note }: { note: string }) {
  * 导出是给测试用的:`tests/web/message-list.test.ts` 直接渲染它(纯 props、
  * 不碰 store)—— 「哪一类块走 markdown、流式时怎么处置表格」这条判据在这里,
  * 而 store 在 SSR 下读的是 zustand 的 server snapshot(store 创建时的初值),
- * 驱动不了。滚动那部分另走纯函数测试(见 lib/scroll.ts)。
+ * 驱动不了。滚动那部分另走纯函数测试(见 shared/lib/scroll.ts)。
  */
 export const TurnView = memo(function TurnView({
   turn,

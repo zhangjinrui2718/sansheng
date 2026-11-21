@@ -1,14 +1,14 @@
 /**
- * 表态卡进流(v5,2026-11-20)—— 原 inbox 判据的继承与变更
+ * 表态(V2,2026-11-21)—— 行动区 + 流内塌缩事实的双判据
  *
- * ⚠️ **判据变更记录**(2026-11-20,用户裁决「待答和验收的交互都放在聊天框里面」):
- *   · 右栏收件箱(`ChatRightRail` + `Inbox`)退场,四类表态卡按**锚定时刻**归并进
- *     对话流(取代 2026-11-17 R-A 的「融合队列」,也取代 PlanConfirmCard 旧推理
- *     「提问是状态不是消息」—— 新形态:锚定 + 完结塌缩,历史不删除);
- *   · 判据全部住在 `web/src/lib/streamCards.ts`(纯函数),本文件直接打它;
- *   · 「只拉一次详情」判据的落点随迁:ChatSurface(哨兵在 project-dashboard.test.ts);
+ * ⚠️ **判据变更记录**(V2,用户对 v5 流内卡不满:随对话滚动漂移、可发现性不稳):
+ *   · 未完结表态 → **行动区**(`features/chat/ActionRail.tsx`,钉在输入区上方,
+ *     位置恒定;零待办整区消失);判据 `actionItemsOf`(四状态点);
+ *   · 完结表态 → 仍在流里**原地塌缩成一行事实**(v5 塌缩判据逐字继承);
+ *     判据 `streamFactsOf`;
+ *   · 两者同源(同一份 StreamCardsInput),不会两处说法漂移。
  *   · 诚实纪律**逐字继承**:加载中/读失败不许渲染成「没有」;已收口项目的提问
- *     只数不渲染;F3「已答复 · 整理中」窗口要可见(现在以 consumedAt 区分两态)。
+ *     只数不渲染;F3「已答复 · 整理中」窗口要可见(consumedAt 区分两态)。
  */
 import { describe, expect, it } from "vitest";
 import { existsSync, readFileSync } from "node:fs";
@@ -22,15 +22,18 @@ import type {
   Turn,
   WorkView,
 } from "../../shared/types/platform";
-import type { StreamCardsInput } from "../../web/src/lib/streamCards";
+import type { ActionItem, StreamCardsInput } from "../../web/src/entities/streamCards";
 import {
+  actionItemKey,
+  actionItemsOf,
   cardsUnavailableOf,
   mergeStream,
-  streamCardKey,
-  streamCardsOf,
-} from "../../web/src/lib/streamCards";
-import { ConversationStream } from "../../web/src/components/chat/MessageList";
-import { StreamCardView, type PlanCardContext } from "../../web/src/components/chat/StreamCards";
+  streamFactKey,
+  streamFactsOf,
+} from "../../web/src/entities/streamCards";
+import { ConversationStream } from "../../web/src/features/chat/MessageList";
+import { StreamFactView } from "../../web/src/features/chat/StreamFacts";
+import { ActionRail } from "../../web/src/features/chat/ActionRail";
 
 const WEB_SRC = join(process.cwd(), "web/src");
 const source = (rel: string): string =>
@@ -125,67 +128,79 @@ const input = (over: Partial<StreamCardsInput> = {}): StreamCardsInput => ({
   ...over,
 });
 
-const renderCard = (card: Parameters<typeof StreamCardView>[0]["card"], plan: PlanCardContext | null = null) =>
-  renderToStaticMarkup(createElement(StreamCardView, { card, plan }));
+const renderFact = (fact: Parameters<typeof StreamFactView>[0]["fact"]) =>
+  renderToStaticMarkup(createElement(StreamFactView, { fact }));
 
-// ── 判据:卡的存在与锚定 ──────────────────────────────────────────
+const renderRail = (actions: readonly ActionItem[], unavailable: string | null = null) =>
+  renderToStaticMarkup(createElement(ActionRail, { actions, unavailable, plan: null }));
 
-describe("streamCardsOf · 卡从哪来、锚在哪", () => {
-  it("四类卡都发,且各自锚在自己的时刻上", () => {
-    const cards = streamCardsOf(
+// ── 判据:行动项(未完结 → 行动区)──────────────────────────────
+
+describe("actionItemsOf · 行动项从哪来、锚在哪", () => {
+  it("三类行动项都发,且各自锚在自己的时刻上(验收=交付时刻/提问=提问时刻)", () => {
+    const items = actionItemsOf(
       input({
         works: { data: [work({ confirmedAt: null })], loading: false, error: null },
         unconfirmedCount: 1,
       }),
     );
-    const atOf = (kind: string) => cards.filter((c) => c.kind === kind).map((c) => c.at);
-    expect(atOf("acceptance")).toEqual([1_700_000_100_000]); // 交付时刻
-    expect(atOf("verdict")).toEqual([1_700_000_050_000]); // 裁决落库时刻
-    expect(atOf("question")).toEqual([1_700_000_200_000]); // 提问时刻
-    expect(atOf("answered")).toEqual([1_700_000_300_000]); // 答复时刻
-    expect(atOf("plan")).toEqual([1_700_000_150_000]); // 最新一条未确认工作项的产生时刻
+    const atOf = (type: ActionItem["type"]) =>
+      items.filter((i) => i.type === type).map((i) => i.at);
+    expect(atOf("acceptance")).toEqual([1_700_000_100_000]);
+    expect(atOf("question")).toEqual([1_700_000_200_000]);
+    expect(atOf("confirm")).toEqual([1_700_000_150_000]); // 最新一条未确认工作项的产生时刻
   });
 
-  it("接待会话(无项目)⇒ 一张卡都没有;非主对话线 ⇒ 同样没有", () => {
-    expect(streamCardsOf(input({ projectId: null }))).toEqual([]);
-    expect(streamCardsOf(input({ isMainSession: false }))).toEqual([]);
+  it("排序 = 最早等你的事在最上(锚定时刻升序)", () => {
+    const items = actionItemsOf(input());
+    const ats = items.map((i) => i.at);
+    expect([...ats].sort((a, b) => a - b)).toEqual(ats);
   });
 
-  it("**加载中不发卡**:详情/提问还在拉 ⇒ 那两类卡不出(不渲染成「没有」,也不编锚)", () => {
-    expect(streamCardsOf(input({ detail: { detail: null, loading: true, error: null } })).filter((c) => c.kind === "acceptance")).toEqual([]);
+  it("接待会话(无项目)⇒ 一项都没有;非主对话线 ⇒ 同样没有", () => {
+    expect(actionItemsOf(input({ projectId: null }))).toEqual([]);
+    expect(actionItemsOf(input({ isMainSession: false }))).toEqual([]);
+  });
+
+  it("**加载中不发项**(详情/提问还在拉 ⇒ 那两类不出,不渲染成「没有」,也不编锚)", () => {
     expect(
-      streamCardsOf(input({ questions: { data: [], closedProjectQuestions: [], answered: [], loading: true, error: null } })).filter((c) => c.kind === "question"),
+      actionItemsOf(input({ detail: { detail: null, loading: true, error: null } })).filter((i) => i.type === "acceptance"),
+    ).toEqual([]);
+    expect(
+      actionItemsOf(
+        input({ questions: { data: [], closedProjectQuestions: [], answered: [], loading: true, error: null } }),
+      ).filter((i) => i.type === "question"),
     ).toEqual([]);
   });
 
-  it("计划卡判的是「行在不在手」,不是「在不在取」:首载无行 ⇒ 不出;重取期间旧行在手 ⇒ 照常出", () => {
-    // 首载:计数 > 0 但一行都没拿到 ⇒ 不出计划卡(锚点还没有,不编一个)
+  it("确认开工判的是「行在不在手」,不是「在不在取」:首载无行 ⇒ 不出;重取期间旧行在手 ⇒ 照常出", () => {
     expect(
-      streamCardsOf(input({ works: { data: [], loading: true, error: null }, unconfirmedCount: 3 })).filter((c) => c.kind === "plan"),
+      actionItemsOf(input({ works: { data: [], loading: true, error: null }, unconfirmedCount: 3 })).filter((i) => i.type === "confirm"),
     ).toEqual([]);
-    // 重取(useLoad 保留旧数据):行在手 ⇒ 照常出卡 —— 按 loading 拦会让卡在
-    // 每次 WS revision bump 时闪没(变异自检抓出来的判据修正)。
     expect(
-      streamCardsOf(input({ works: { data: [work({ confirmedAt: null })], loading: true, error: null }, unconfirmedCount: 3 })).map((c) => c.kind),
-    ).toContain("plan");
+      actionItemsOf(input({ works: { data: [work({ confirmedAt: null })], loading: true, error: null }, unconfirmedCount: 3 })).map((i) => i.type),
+    ).toContain("confirm");
   });
 
-  it("收口提议(intent=close)与普通提问同为 question 卡(渲染层按 intent 分叉)", () => {
-    const cards = streamCardsOf(
+  it("收口提议(intent=close)是独立的第四类(type=close),普通提问是 question", () => {
+    const items = actionItemsOf(
       input({
-        // 清掉默认夹具里的验收/裁决卡 —— 本条只看提问这一类。
         detail: { detail: null, loading: false, error: null },
-        questions: { data: [question({ intent: "close" })], closedProjectQuestions: [], answered: [], loading: false, error: null },
+        questions: {
+          data: [question({ intent: "close" })],
+          closedProjectQuestions: [],
+          answered: [],
+          loading: false,
+          error: null,
+        },
       }),
     );
-    expect(cards).toHaveLength(1);
-    expect(cards[0]?.kind).toBe("question");
+    expect(items).toHaveLength(1);
+    expect(items[0]?.type).toBe("close");
   });
 
   it("已收口项目的提问只数不渲染:那批经同一道筛进不来(2026-10-07 纪律不变)", () => {
-    // 项目 p1 已收口 ⇒ 它的提问在 closedProjectQuestions(带坐标),不在 data 里。
-    // 判据:同一道筛(scopeClientQuestions)保证它们出不了卡 —— 想渲染也拿不到。
-    const cards = streamCardsOf(
+    const items = actionItemsOf(
       input({
         detail: { detail: null, loading: false, error: null },
         questions: {
@@ -197,11 +212,47 @@ describe("streamCardsOf · 卡从哪来、锚在哪", () => {
         },
       }),
     );
-    expect(cards.filter((c) => c.kind === "question")).toEqual([]);
+    expect(items.filter((i) => i.type === "question" || i.type === "close")).toEqual([]);
+  });
+});
+
+// ── 判据:塌缩事实(完结 → 留在流里)────────────────────────────
+
+describe("streamFactsOf · 事实行从哪来、锚在哪", () => {
+  it("三类事实都发,且各自锚在自己的时刻上(裁决=落库时刻/答复=答复时刻)", () => {
+    const facts = streamFactsOf(input());
+    const atOf = (kind: string) => facts.filter((f) => f.kind === kind).map((f) => f.at);
+    expect(atOf("verdict")).toEqual([1_700_000_050_000]);
+    expect(atOf("answered")).toEqual([1_700_000_300_000]);
+  });
+
+  it("接待/非主线 ⇒ 没有事实行", () => {
+    expect(streamFactsOf(input({ projectId: null }))).toEqual([]);
+    expect(streamFactsOf(input({ isMainSession: false }))).toEqual([]);
+  });
+
+  it("未处置(consumedAt=null)经判据函数产出 consumed:false —— F3 窗口不许在判据层塌掉", () => {
+    // ⚠️ 这条必须从**判据函数**出发:直接构造 fact 对象会绕过 consumedAt 的换算,
+    // 变异「consumed: true」在那种写法下抓不到(变异自检 M5 抓出来的盲区)。
+    const facts = streamFactsOf(
+      input({
+        questions: {
+          data: [],
+          closedProjectQuestions: [],
+          answered: [answered({ consumedAt: null })],
+          loading: false,
+          error: null,
+        },
+      }),
+    );
+    const row = facts.find((f) => f.kind === "answered");
+    expect(row).toBeDefined();
+    expect(row?.kind === "answered" && row.consumed).toBe(false);
+    expect(renderFact(row!)).toContain("整理中");
   });
 
   it("plan-confirmed 按 confirmedAt 分批:同一毫秒一批,一条事实行", () => {
-    const cards = streamCardsOf(
+    const facts = streamFactsOf(
       input({
         works: {
           data: [
@@ -214,9 +265,9 @@ describe("streamCardsOf · 卡从哪来、锚在哪", () => {
         },
       }),
     );
-    const confirmed = cards.filter((c) => c.kind === "plan-confirmed");
-    expect(confirmed).toHaveLength(2); // 两个批次时刻,不是三条工作项
-    expect(confirmed.map((c) => (c.kind === "plan-confirmed" ? c.count : 0)).sort()).toEqual([1, 2]);
+    const confirmed = facts.filter((f) => f.kind === "plan-confirmed");
+    expect(confirmed).toHaveLength(2);
+    expect(confirmed.map((f) => (f.kind === "plan-confirmed" ? f.count : 0)).sort()).toEqual([1, 2]);
   });
 });
 
@@ -224,27 +275,29 @@ describe("mergeStream · 归并", () => {
   it("按锚定时刻归并排序;同一时刻轮在前(稳定)", () => {
     const items = mergeStream(
       [turn("t_early", 1_700_000_100_000), turn("t_late", 1_700_000_300_000)].map((t) => ({ turn: t })),
-      streamCardsOf(input()),
+      streamFactsOf(input()),
     );
-    const kinds = items.map((i) => (i.kind === "turn" ? `turn:${i.turn.id}` : `card:${i.card.kind}`));
+    const kinds = items.map((i) => (i.kind === "turn" ? `turn:${i.turn.id}` : `fact:${i.fact.kind}`));
     expect(kinds).toEqual([
-      "card:verdict", // 50s
+      "fact:verdict", // 50s
       "turn:t_early", // 100s
-      "card:acceptance", // 100s —— 与轮并列,轮在前
-      "card:question", // 200s
-      "turn:t_late", // 300s
-      "card:answered", // 300s —— 与轮并列,轮在前
+      "turn:t_late", // 300s —— 与事实并列,轮在前(先 push 轮)
+      "fact:answered", // 300s
     ]);
   });
 
   it("流 key 稳定且互不相同(同类同实体共享 key 会复用错 DOM)", () => {
-    const cards = streamCardsOf(input());
-    const keys = cards.map(streamCardKey);
+    const facts = streamFactsOf(input());
+    const keys = facts.map(streamFactKey);
     expect(new Set(keys).size).toBe(keys.length);
-    // 同一交付物的两次裁决是两行事实,key 按 (artifact, 时刻) 区分
-    const k1 = streamCardKey({ kind: "verdict", at: 1, artifactId: "a", title: "t", verdict: "accept", note: null });
-    const k2 = streamCardKey({ kind: "verdict", at: 2, artifactId: "a", title: "t", verdict: "reject", note: null });
+    const k1 = streamFactKey({ kind: "verdict", at: 1, artifactId: "a", title: "t", verdict: "accept", note: null });
+    const k2 = streamFactKey({ kind: "verdict", at: 2, artifactId: "a", title: "t", verdict: "reject", note: null });
     expect(k1).not.toBe(k2);
+  });
+
+  it("行动项 key 也稳定(confirm 恒 plan;question/close 按 q.id)", () => {
+    const keys = actionItemsOf(input({ works: { data: [work({ confirmedAt: null })], loading: false, error: null }, unconfirmedCount: 1 })).map(actionItemKey);
+    expect(new Set(keys).size).toBe(keys.length);
   });
 });
 
@@ -262,83 +315,87 @@ describe("cardsUnavailableOf · 读不到不许静默", () => {
   });
 });
 
-// ── 渲染:可操作卡 vs 塌缩事实行 ─────────────────────────────────
+// ── 渲染:行动区 vs 塌缩事实行 ───────────────────────────────────
 
-describe("StreamCardView · 渲染", () => {
-  it("验收卡 = 实体卡 + 两个动作(接受/要改),标题与交付时刻在场", () => {
-    const html = renderCard({ kind: "acceptance", at: 1, a: acceptance() });
-    expect(html).toContain("最终交付物");
-    expect(html).toContain(">接受<");
-    expect(html).toContain(">要改<");
-    expect(html).toContain("等你验收");
+describe("ActionRail · 行动区渲染", () => {
+  it("每件待办一行:类型词 + 摘要 + 动词(四状态点各自的词都在场)", () => {
+    const items = actionItemsOf(
+      input({
+        works: { data: [work({ confirmedAt: null })], loading: false, error: null },
+        unconfirmedCount: 1,
+        questions: {
+          data: [question(), question({ id: "q_close", intent: "close", createdAt: 1_700_000_250_000 })],
+          closedProjectQuestions: [],
+          answered: [],
+          loading: false,
+          error: null,
+        },
+      }),
+    );
+    const html = renderRail(items);
+    expect(html).toContain("确认开工");
+    expect(html).toContain("答问");
+    expect(html).toContain("收口");
+    expect(html).toContain("验收");
+    expect(html).toContain("最终交付物"); // 验收摘要 = 交付物标题
+    expect(html).toContain("现金账户档位选哪个"); // 答问摘要
   });
 
-  it("提问卡复用 ClientQuestionCard(问题 + 选项 + 提交),收口提议分叉照旧", () => {
-    const html = renderCard({ kind: "question", at: 1, q: question() });
-    expect(html).toContain("现金账户档位选哪个?");
-    expect(html).toContain("PDT 档");
-    expect(html).toContain("提交答案");
-    const close = renderCard({ kind: "question", at: 1, q: question({ intent: "close" }) });
-    expect(close).toContain("同意收口");
-    expect(close).toContain("先不收");
+  it("零待办且读得到 ⇒ 整区消失(「没有事等你」不是信息)", () => {
+    expect(renderRail([])).toBe("");
   });
 
-  it("塌缩行:已答复(已处置)落 decision 工件;未处置 = 整理中(F3 窗口)", () => {
-    const done = renderCard({ kind: "answered", at: 1, id: "q_1", question: "现金账户档位选哪个?", consumed: true });
+  it("读不到 ⇒ 一行「读不到」常驻(不静默;不出假行动项)", () => {
+    const html = renderRail([], "表态清单读不到(项目详情)—— 稍后自动重试");
+    expect(html).toContain("表态清单读不到");
+    expect(html).not.toContain("确认开工");
+  });
+
+  it("展开表单复用既有卡身(动作只有一份实现,ActionRail 不重写提交逻辑)", () => {
+    const s = source("features/chat/ActionRail.tsx");
+    expect(s).toContain("<ClientQuestionCard");
+    expect(s).toContain("<DeliveryVerdictActions");
+    expect(s).toContain("<PlanConfirmCard");
+    // 懒加载纪律照旧:正文点开才挂
+    expect(s).toContain("{showBody && <InlineDeliverableBody");
+  });
+});
+
+describe("StreamFactView · 塌缩事实行渲染", () => {
+  it("已答复(已处置)落 decision 工件;未处置 = 整理中(F3 窗口)", () => {
+    const done = renderFact({ kind: "answered", at: 1, id: "q_1", question: "现金账户档位选哪个?", consumed: true });
     expect(done).toContain("已落 decision 工件");
     expect(done).not.toContain("提交答案");
-    const pending = renderCard({ kind: "answered", at: 1, id: "q_1", question: "现金账户档位选哪个?", consumed: false });
+    const pending = renderFact({ kind: "answered", at: 1, id: "q_1", question: "现金账户档位选哪个?", consumed: false });
     expect(pending).toContain("整理中");
   });
 
   it("裁决塌缩行带结论与附言;计划确认塌缩行带条数", () => {
-    const v = renderCard({ kind: "verdict", at: 1, artifactId: "a", title: "最终交付物", verdict: "reject", note: "数据源错了" });
+    const v = renderFact({ kind: "verdict", at: 1, artifactId: "a", title: "最终交付物", verdict: "reject", note: "数据源错了" });
     expect(v).toContain("要改");
     expect(v).toContain("数据源错了");
-    const p = renderCard({ kind: "plan-confirmed", at: 1, count: 4 });
+    const p = renderFact({ kind: "plan-confirmed", at: 1, count: 4 });
     expect(p).toContain("已确认开工 · 4 条");
     expect(p).not.toContain("确认开工</button>");
   });
-
-  it("计划卡 = 确认开工入口(需要 plan 上下文;没有上下文不渲染)", () => {
-    const plan: PlanCardContext = {
-      projectId: "p1",
-      goal: "做一个量化平台",
-      acceptanceCriteria: ["能跑"],
-      works: { data: [work()], loading: false, error: null },
-      onConfirmed: () => {},
-    };
-    const html = renderCard({ kind: "plan", at: 1 }, plan);
-    expect(html).toContain("等你确认开工");
-    expect(html).toContain("确认开工");
-    expect(renderCard({ kind: "plan", at: 1 }, null)).toBe("");
-  });
 });
 
-describe("ConversationStream · 轮与卡同一条流", () => {
-  it("轮与卡按锚定时刻交错渲染;读不到行在流尾", () => {
+describe("ConversationStream · 轮与事实同一条流", () => {
+  it("轮与塌缩事实按锚定时刻交错渲染(可操作表态不在这条流里 —— 在行动区)", () => {
     const items = mergeStream(
       [turn("t_1", 1_700_000_100_000)].map((t) => ({ turn: t })),
-      streamCardsOf(input()),
+      streamFactsOf(input()),
     );
     const html = renderToStaticMarkup(
-      createElement(ConversationStream, {
-        history: items,
-        streaming: [],
-        hiddenNote: null,
-        cardsUnavailable: "表态清单读不到(项目详情)—— 稍后自动重试",
-        plan: null,
-      }),
+      createElement(ConversationStream, { history: items, streaming: [], hiddenNote: null }),
     );
-    const iMsg = html.indexOf("消息 t_1");
-    const iAcc = html.indexOf("最终交付物");
-    expect(iMsg).toBeGreaterThan(-1);
-    expect(iAcc).toBeGreaterThan(-1);
-    // 交付(100s)在轮(100s)之后(并列轮在前),提问(200s)在更后
-    const iQ = html.indexOf("现金账户档位选哪个?");
-    expect(iAcc).toBeGreaterThan(iMsg);
-    expect(iQ).toBeGreaterThan(iAcc);
-    expect(html).toContain("表态清单读不到");
+    expect(html).toContain("消息 t_1");
+    expect(html).toContain("已答复"); // answered 事实行(300s)在轮之后(问题原文可在事实行里)
+    // ⚠️ 未完结表态的**操作面**不进流 —— V2 判据:它们长在行动区。
+    // (answered 事实行含问题原文是塌缩判据的一部分,不算「操作面」。)
+    expect(html).not.toContain("最终交付物"); // 验收卡(可操作)不在流里
+    expect(html).not.toContain("提交答案");
+    expect(html).not.toContain(">接受<");
   });
 
   it("真的什么都没有 ⇒ 流为空(空态由 MessageList 的 Empty 判,不在这里渲染「暂无」)", () => {
@@ -352,14 +409,15 @@ describe("ConversationStream · 轮与卡同一条流", () => {
 
 // ── 落点与退役哨兵 ───────────────────────────────────────────────
 
-describe("落点哨兵 · v5 判据变更", () => {
-  it("右栏收件箱两个文件已退役,不许复活", () => {
+describe("落点哨兵 · V2 判据变更", () => {
+  it("v5 收件箱两件与流内可操作卡都不许复活", () => {
     expect(existsSync(join(WEB_SRC, "components/shell/ChatRightRail.tsx"))).toBe(false);
-    expect(existsSync(join(WEB_SRC, "components/client/Inbox.tsx"))).toBe(false);
+    expect(existsSync(join(WEB_SRC, "features/chat/Inbox.tsx"))).toBe(false);
+    expect(existsSync(join(WEB_SRC, "features/chat/StreamCards.tsx"))).toBe(false);
   });
 
   it("旧 dock 的名字不许在 web/src 里回来(剥注释后)", () => {
-    const chat = source("components/chat/ChatSurface.tsx");
+    const chat = source("features/chat/ChatSurface.tsx");
     const app = source("App.tsx");
     for (const src of [chat, app]) {
       expect(src).not.toContain("AcceptanceDock");
@@ -369,21 +427,32 @@ describe("落点哨兵 · v5 判据变更", () => {
     }
   });
 
-  it("ChatSurface 真的在算卡并传给 MessageList;计划 band 挂载点已退场", () => {
-    const chat = source("components/chat/ChatSurface.tsx");
-    expect(chat).toContain("streamCardsOf(");
+  it("ChatSurface 真的在算行动项与事实并分别接线(MessageList 收 facts,ActionRail 收 actions)", () => {
+    const chat = source("features/chat/ChatSurface.tsx");
+    expect(chat).toContain("actionItemsOf(");
+    expect(chat).toContain("streamFactsOf(");
     expect(chat).toContain("cardsUnavailableOf(");
-    expect(chat).toMatch(/<MessageList\s+cards=\{cards\}/);
-    expect(chat).not.toMatch(/<PlanConfirmCard/); // band 形态退场;卡身由 StreamCards 渲染
+    expect(chat).toMatch(/<MessageList\s+facts=\{facts\}/);
+    expect(chat).toMatch(/<ActionRail\s+actions=\{actions\}/);
   });
 
-  it("MessageList 真的在归并(不是把卡渲染成另一条带)", () => {
-    const list = source("components/chat/MessageList.tsx");
+  it("ActionRail 钉在输入区上方(MessageList 之后、ChatComposer 之前 —— 位置恒定)", () => {
+    const chat = source("features/chat/ChatSurface.tsx");
+    const iList = chat.indexOf("<MessageList");
+    const iRail = chat.indexOf("<ActionRail");
+    const iComposer = chat.indexOf("<ChatComposer");
+    expect(iList).toBeGreaterThan(-1);
+    expect(iRail).toBeGreaterThan(iList);
+    expect(iComposer).toBeGreaterThan(iRail);
+  });
+
+  it("MessageList 真的在归并(不是把事实渲染成另一条带)", () => {
+    const list = source("features/chat/MessageList.tsx");
     expect(list).toContain("mergeStream(");
-    expect(list).toContain("StreamCardView");
+    expect(list).toContain("StreamFactView");
   });
 
   it("对话页头部仍有「详情」入口(项目页签退场后的常驻路径,判据随迁)", () => {
-    expect(source("components/chat/ChatSurface.tsx")).toContain('href="#/project"');
+    expect(source("features/chat/ChatSurface.tsx")).toContain('href="#/project"');
   });
 });

@@ -50,7 +50,7 @@ import {
   InternalProcessDisclosure,
   INTERNAL_PROCESS_DEFAULT_OPEN,
   layerBlocks,
-} from "@/components/chat/MessageList";
+} from "@/features/chat/MessageList";
 import { inFlightTurns, useChatStore, type Turn } from "@/stores/chat";
 
 const P = "p-w2";

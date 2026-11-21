@@ -45,7 +45,7 @@ import {
   WORK_LOG_LINE,
   turnIsWorkLog,
 } from "@/lib/data";
-import { splitWorkLog } from "@/components/chat/MessageList";
+import { splitWorkLog } from "@/features/chat/MessageList";
 import { useChatStore, type Turn } from "@/stores/chat";
 
 const P = "p-worklog";

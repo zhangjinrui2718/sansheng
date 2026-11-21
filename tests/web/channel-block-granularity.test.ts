@@ -36,7 +36,7 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { MemberView, ProjectRole, TriggerTodoKind } from "@shared/types/platform";
 import { channelContextOf, channelOf, partitionTurns, type ChannelContext } from "@/lib/data";
-import { InternalProcessDisclosure, layerBlocks, TurnView } from "@/components/chat/MessageList";
+import { InternalProcessDisclosure, layerBlocks, TurnView } from "@/features/chat/MessageList";
 import type { Turn } from "@/stores/chat";
 
 const MEMBERS: MemberView[] = [

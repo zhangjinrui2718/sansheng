@@ -35,7 +35,7 @@ import type { MemberView, SessionMessageView } from "@shared/types/platform";
 import {
   channelContextOf, partitionTurns,
 } from "@/lib/data";
-import { splitWorkLog } from "@/components/chat/MessageList";
+import { splitWorkLog } from "@/features/chat/MessageList";
 import { useChatStore, type Turn } from "@/stores/chat";
 
 const MESSAGES = join(process.cwd(), ".probe", "w3-e2e-messages.json");

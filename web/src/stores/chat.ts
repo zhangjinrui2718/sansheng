@@ -317,7 +317,7 @@ export interface ChatState {
    * 它**不是**存储 —— 存储是上面的 `inFlight`。
    *
    * ⚠️ **今天它在 `web/src/` 里没有读者**(A2 写下这段时说「渲染层只读这一个
-   * 字段」,而 A3 已经落地:`components/chat/MessageList.tsx` 现在消费
+   * 字段」,而 A3 已经落地:`features/chat/MessageList.tsx` 现在消费
    * `inFlightTurns()` 并把结果过一遍 `partitionTurns`,不再看这个指针)。
    * 保留并继续维护它有两个理由:
    *   1. `web/src/stores/chat.ts` 之外仍有测试在读它;
@@ -654,7 +654,7 @@ function withTurn(
  * 进行中的轮,按**开始顺序**(渲染层在 `turns` 之后接着渲染这一段)。
  *
  * A2 交出去的那两件事**A3 已经落地**,今天的读者是
- * `components/chat/MessageList.tsx`:
+ * `features/chat/MessageList.tsx`:
  *   1. 它把 `inFlightTurns(...)` 的结果接在 `turns` 之后渲染(不再是单槽
  *      `currentTurn`)—— §2.10.3「流式期间同时看到两轮」在屏幕上成立;
  *   2. 它把那一段也过一遍 `partitionTurns(turns/live, ctx)`,`ctx` 由

@@ -75,7 +75,7 @@ describe("C10 · TopBar 不再渲染恒 0 的 currentUsage 承诺", () => {
 
 describe("C10 · ChatComposer 的「Esc 中断」要么接线要么不承诺", () => {
   it("出现「Esc 中断」文案时必须同时有 Escape keydown 接线", () => {
-    const src = stripComments(read("components/chat/ChatComposer.tsx"));
+    const src = stripComments(read("features/chat/ChatComposer.tsx"));
     const promisesEsc = src.includes("Esc 中断");
     const wired = /Escape/.test(src);
     expect(promisesEsc && !wired).toBe(false);

@@ -21,7 +21,7 @@
 import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { scopeClientQuestions } from "../../web/src/lib/questionScope";
+import { scopeClientQuestions } from "../../web/src/entities/questionScope";
 import type { ClientQuestionView } from "@shared/types/platform";
 
 const WEB_SRC = join(process.cwd(), "web/src");
@@ -148,10 +148,10 @@ describe("scopeClientQuestions · 只显示当前项目的待答", () => {
 
 describe("接线 · 这道筛真的有人用(v5:读者从收件箱迁到流内卡判据)", () => {
   // 2026-11-20 判据变更记录:原读者 Inbox.tsx(右栏收件箱)退役;「只显示当前
-  // 项目的待答」这道筛的唯一读者现在是 `lib/streamCards.ts`(表态卡进流)。
+  // 项目的待答」这道筛的唯一读者现在是 `entities/streamCards.ts`(表态卡进流)。
   // 判据本身没变 —— 变的是谁在调它。
-  const cards = (): string => source("lib/streamCards.ts");
-  const scope = (): string => source("lib/questionScope.ts");
+  const cards = (): string => source("entities/streamCards.ts");
+  const scope = (): string => source("entities/questionScope.ts");
 
   it("判据层走的是**筛的输出**(不是把全局列表整个发卡)", () => {
     const s = cards();

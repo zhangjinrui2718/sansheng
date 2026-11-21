@@ -38,7 +38,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import type { ProjectLiveView } from "@shared/types/platform";
 import { interruptAvailableOf, staleTurnIds, type ChannelActivity } from "@/lib/data";
-import { ChatComposer } from "@/components/chat/ChatComposer";
+import { ChatComposer } from "@/features/chat/ChatComposer";
 import { useChatStore, type Turn } from "@/stores/chat";
 import { PlatformSocket } from "@/lib/ws";
 import * as api from "@/lib/api";
@@ -59,8 +59,8 @@ vi.mock("@/lib/api", async (importOriginal) => {
 const here = dirname(fileURLToPath(import.meta.url));
 const read = (rel: string): string => readFileSync(join(here, "..", "..", rel), "utf8");
 
-const chatSurface = read("web/src/components/chat/ChatSurface.tsx");
-const chatComposer = read("web/src/components/chat/ChatComposer.tsx");
+const chatSurface = read("web/src/features/chat/ChatSurface.tsx");
+const chatComposer = read("web/src/features/chat/ChatComposer.tsx");
 const wsSrc = read("web/src/lib/ws.ts");
 const storeSrc = read("web/src/stores/chat.ts");
 

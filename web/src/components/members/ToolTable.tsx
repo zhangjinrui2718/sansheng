@@ -21,7 +21,7 @@
  * 本组件只负责画有内容的那张表(`length === 0` 返回 `null`)。
  */
 import type { ToolBriefView } from "@shared/types/platform";
-import { Markdown } from "@/components/chat/Markdown";
+import { Markdown } from "@/features/chat/Markdown";
 
 export function ToolTable({ briefs }: { briefs: readonly ToolBriefView[] }) {
   if (briefs.length === 0) return null;

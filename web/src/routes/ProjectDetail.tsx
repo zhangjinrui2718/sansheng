@@ -41,7 +41,7 @@ import { useCallback, useMemo, useState } from "react";
 import { PageHeader, Pill, Section, StatStrip, EmptyState, Flag, Disclosure, Clamp } from "@/components/ui/primitives";
 import { DataState, remoteListOf, remoteOf } from "@/components/ui/DataState";
 import { Help } from "@/components/ui/Help";
-import { ClientQuestionCard } from "@/components/client/ClientQuestionCard";
+import { ClientQuestionCard } from "@/features/chat/ClientQuestionCard";
 
 import {
   useProjectAsks, useProjectChanges, useProjectDetail, useProjectLive, useProjectMessages,
@@ -550,7 +550,7 @@ export function ProjectDetailPage() {
 
           {/* ⚠️ **「待你验收」不在这一页了**(2026-10-12,用户裁决)。它原来长在
             「工作项」与「待你回答」之间,现在搬到**对话页右栏的「本项目」下面**
-            (`components/client/AcceptanceDock.tsx`)—— 与「待答」同一类数据:
+            (`features/chat/AcceptanceDock.tsx`)—— 与「待答」同一类数据:
             球在甲方那边,而甲方 90% 的时间在对话页。
             ⇒ 下面的 `待验收` 计数**留着**:删掉它等于「有事在等你」在这页上
             又变成没人知道(真机第一条 `client_question` 就是这么被漏掉的)。 */}

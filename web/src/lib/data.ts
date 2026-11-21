@@ -796,7 +796,7 @@ export function channelOf(turn: Turn, ctx: ChannelContext): TurnChannel {
 /**
  * 工作记录标记的行首判据 —— **行首**,不是包含(设计 1 §2.10.2c 的 ④)。
  *
- * ⚠️ **`web/src/components/chat/MessageList.tsx` 的 `splitWorkLog` 与本函数共用它**
+ * ⚠️ **`web/src/features/chat/MessageList.tsx` 的 `splitWorkLog` 与本函数共用它**
  * (那条路径按段渲染,这条按通道分流)。`src/platform/host/serve.ts` 里还有一份
  * 逐字相同的 —— 那份**不能**从这里取:server 侧禁 `@shared` 的 value import,
  * 而这条是值不是类型。三处的语义必须一致,改这里就去看那两处。

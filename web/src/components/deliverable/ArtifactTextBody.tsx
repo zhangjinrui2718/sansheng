@@ -5,7 +5,7 @@
  * 长在路由文件里的话,交付物组件就得 import 一条路由(方向反了)。
  * 搬家 ≠ 改写:判据逐字保留,只把裸 `<pre>` 换成 markdown 渲染 ——
  * 存量交付物与 decision 工件的正文本来就是 markdown,此前印的是字面量
- * (`**加粗**`、表格线)。渲染器与对话同款,清洗边界在 `lib/markdown.ts`。
+ * (`**加粗**`、表格线)。渲染器与对话同款,清洗边界在 `shared/lib/markdown.ts`。
  *
  * ── 三态必须分开(原判据,逐字继承)────────────────────────────
  *
@@ -14,7 +14,7 @@
  * 读不到时印 `problem` 那一行,**不许**留空。
  */
 import { useArtifactContent } from "@/lib/data";
-import { Markdown } from "@/components/chat/Markdown";
+import { Markdown } from "@/features/chat/Markdown";
 import { ContentDriftNote } from "./ContentDriftNote";
 import { RedNote } from "@/components/ui/primitives";
 

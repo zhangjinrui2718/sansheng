@@ -1,7 +1,7 @@
 /**
  * 会话正文 markdown 渲染 —— 把「流式未闭合输入」的实测结论固化成测试
  *
- * 这一批的选型与安全边界都写在 `web/src/lib/markdown.ts` 的文件头里。这里守的是
+ * 这一批的选型与安全边界都写在 `web/src/shared/lib/markdown.ts` 的文件头里。这里守的是
  * 两组**必须一直成立**的性质:
  *
  *   ① **未闭合的流式输入永不抛异常**,且优雅降级。上一批已经用
@@ -13,7 +13,7 @@
  * 流式中表现为幽灵空单元格)—— 处置方式与依据见下面 "未闭合表格" 一节。
  */
 import { describe, expect, it } from "vitest";
-import { holdBackIncompleteTableRow, markdownToHtml } from "../../web/src/lib/markdown.js";
+import { holdBackIncompleteTableRow, markdownToHtml } from "../../web/src/shared/lib/markdown.js";
 
 /** micromark 生成的表格在标签之间带换行;断言「形状」时先去掉换行。 */
 const flat = (html: string): string => html.replace(/\n/g, "");

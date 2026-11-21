@@ -49,7 +49,7 @@ import {
   type ChannelContext,
 } from "@/lib/data";
 import { inFlightTurns, useChatStore, type Turn } from "@/stores/chat";
-import { SurfaceStatusIndicator } from "@/components/chat/ChatSurface";
+import { SurfaceStatusIndicator } from "@/features/chat/ChatSurface";
 
 const PA = "p-alpha";
 const PB = "p-beta";

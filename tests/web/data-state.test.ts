@@ -235,7 +235,7 @@ describe("ratchet:四态的判据只有一处", () => {
       "components/members/RoleHarness.tsx",
       // 2026-11-20(v5):Inbox.tsx 退役出列 —— 它那份「列表读面」在流内卡里
       // 不复存在:卡「数据没到终值就不出现」,没有列表加载/空态可手搓
-      // (读失败由 cardsUnavailableOf 在流尾如实说,判据在 lib/streamCards.ts)。
+      // (读失败由 cardsUnavailableOf 在流尾如实说,判据在 entities/streamCards.ts)。
     ];
     const missing = files.filter((f) => {
       const hit = WEB_FILES.find((x) => x.path.endsWith(f));

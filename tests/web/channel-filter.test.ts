@@ -35,7 +35,7 @@ import {
   partitionTurns,
   type ChannelContext,
 } from "@/lib/data";
-import { ConversationStream, contentSignalOf } from "@/components/chat/MessageList";
+import { ConversationStream, contentSignalOf } from "@/features/chat/MessageList";
 import type { Turn } from "@/stores/chat";
 
 /**

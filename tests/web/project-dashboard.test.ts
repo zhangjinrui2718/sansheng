@@ -33,7 +33,7 @@ const read = (rel: string): string => readFileSync(join(here, "..", "..", rel), 
 const projectDetail = read("web/src/routes/ProjectDetail.tsx");
 const dashboard = read("web/src/lib/dashboard.ts");
 // v5(2026-11-20):右栏收件箱退场,详情实例的唯一落点搬到了对话页本体。
-const chatSurface = read("web/src/components/chat/ChatSurface.tsx");
+const chatSurface = read("web/src/features/chat/ChatSurface.tsx");
 
 /** 去掉注释再找 —— 注释里写着反面教材会让 grep 命中假阳性。 */
 const stripComments = (src: string): string =>

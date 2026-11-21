@@ -48,7 +48,7 @@ import type { RepoCommitsView } from "@shared/types/platform";
 import type { CodeServiceView } from "@shared/types/platform";
 import { dockerCommands, shortSha } from "@/lib/deliverable";
 import { useArtifactContent } from "@/lib/data";
-import { Markdown } from "@/components/chat/Markdown";
+import { Markdown } from "@/features/chat/Markdown";
 import { ContentDriftNote } from "./ContentDriftNote";
 import { RedMeta, RedNote } from "@/components/ui/primitives";
 
@@ -233,8 +233,8 @@ function CommitList({ artifactId }: { artifactId: string }) {
  * 在屏幕上长得一样,而处置完全不同。
  *
  * v5(2026-11-20):正文按 markdown 渲染(说明一直就是 markdown;此前裸 `<pre>`
- * 把标题/表格印成了字面量)。渲染器与对话同款(`components/chat/Markdown.tsx`,
- * 清洗边界在 `lib/markdown.ts`)。
+ * 把标题/表格印成了字面量)。渲染器与对话同款(`features/chat/Markdown.tsx`,
+ * 清洗边界在 `shared/lib/markdown.ts`)。
  */
 function ServiceBody({ artifactId, at }: { artifactId: string; at?: string }) {
   const { data, loading, error } = useArtifactContent(artifactId, at ?? null);

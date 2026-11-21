@@ -35,7 +35,8 @@ import { ChatComposer } from "./ChatComposer";
 import { Pill, RedNote } from "@/components/ui/primitives";
 import { projectLocation } from "@/lib/entityMeta";
 import { toHash } from "@/app/router";
-import { cardsUnavailableOf, streamCardsOf } from "@/lib/streamCards";
+import { actionItemsOf, cardsUnavailableOf, streamFactsOf } from "@/entities/streamCards";
+import { ActionRail } from "./ActionRail";
 import {
   channelActivityOf,
   channelContextOf,
@@ -242,35 +243,38 @@ export function ChatSurface() {
   const detailState = useProjectDetail(projectId, { pollMs: 5000 });
   const questionsState = useClientQuestions();
   const worksState = useWorks(projectId);
-  /** 表态卡只渲染在主对话线(kind='main')—— 判据见 lib/streamCards.ts 文件头。 */
+  /** 表态卡只渲染在主对话线(kind='main')—— 判据见 entities/streamCards.ts 文件头。 */
   const isMainSession = useMemo(() => {
     if (intakeActive || projectId === null) return false;
     if (sessionId === null) return true; // 还没选线 ⇒ 还没有流,这个值此时不影响渲染
     const hit = (sessionsByProject[projectId] ?? []).find((s) => s.id === sessionId);
     return hit === undefined ? true : hit.kind === "main";
   }, [intakeActive, projectId, sessionId, sessionsByProject]);
-  const cards = useMemo(
-    () =>
-      streamCardsOf({
-        projectId: intakeActive ? null : projectId,
-        isMainSession,
-        detail: {
-          detail: detailState.detail,
-          loading: detailState.loading,
-          error: detailState.error,
-        },
-        questions: {
-          data: questionsState.data,
-          closedProjectQuestions: questionsState.closedProjectQuestions,
-          answered: questionsState.answered,
-          loading: questionsState.loading,
-          error: questionsState.error,
-        },
-        works: { data: worksState.data, loading: worksState.loading, error: worksState.error },
-        unconfirmedCount: project?.counts.unconfirmedWorks ?? 0,
-      }),
+  const streamInput = useMemo(
+    () => ({
+      projectId: intakeActive ? null : projectId,
+      isMainSession,
+      detail: {
+        detail: detailState.detail,
+        loading: detailState.loading,
+        error: detailState.error,
+      },
+      questions: {
+        data: questionsState.data,
+        closedProjectQuestions: questionsState.closedProjectQuestions,
+        answered: questionsState.answered,
+        loading: questionsState.loading,
+        error: questionsState.error,
+      },
+      works: { data: worksState.data, loading: worksState.loading, error: worksState.error },
+      unconfirmedCount: project?.counts.unconfirmedWorks ?? 0,
+    }),
     [intakeActive, projectId, isMainSession, detailState, questionsState, worksState, project],
   );
+  // V2(2026-11-21):未完结表态 → 行动区(钉在输入区上方,判据 actionItemsOf);
+  // 完结表态 → 流里原地塌缩(streamFactsOf)。同一份输入,不会两处说法漂移。
+  const actions = useMemo(() => actionItemsOf(streamInput), [streamInput]);
+  const facts = useMemo(() => streamFactsOf(streamInput), [streamInput]);
   const cardsUnavailable = cardsUnavailableOf({
     projectId: intakeActive ? null : projectId,
     detailError: detailState.error,
@@ -497,7 +501,11 @@ export function ChatSurface() {
         </RedNote>
       )}
 
-      <MessageList cards={cards} cardsUnavailable={cardsUnavailable} plan={planContext} />
+      <MessageList facts={facts} />
+
+      {/* V2 行动区:四个「等你动作」状态点钉在输入区上方 —— 位置恒定,
+          不随对话滚动漂移(v5 流内卡的病);零待办整区消失。 */}
+      <ActionRail actions={actions} unavailable={cardsUnavailable} plan={planContext} />
 
       <ChatComposer
         value={input}

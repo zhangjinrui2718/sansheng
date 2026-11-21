@@ -3,7 +3,7 @@
  *
  * 三条判据,各有一个「写反了是空白/漂移」的失败形态:
  *   ① **markdown 化**:正文本来就是 markdown(存量交付物 / code_service 说明),
- *      裸 `<pre>` 把标题与表格印成字面量;渲染器与对话同款(清洗边界 lib/markdown.ts)。
+ *      裸 `<pre>` 把标题与表格印成字面量;渲染器与对话同款(清洗边界 shared/lib/markdown.ts)。
  *   ② **流内展开**:验收卡的「查看正文」懒加载 —— 点开才挂正文组件(流不背常驻请求),
  *      分发走 `bodyMode` 唯一判据(deliverable-render.test.ts 的老朋友)。
  *   ③ **交付时点文件树**:树读 `deliverableCommit`,不读 HEAD —— 平台提交工件
@@ -17,7 +17,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import type { CodeServiceFilesView } from "../../shared/types/platform";
 import type { AwaitingAcceptanceView } from "../../shared/types/platform";
 import { FileTreeView } from "../../web/src/components/deliverable/CodeService";
-import { AcceptanceCard } from "../../web/src/components/chat/StreamCards";
+import { ActionRail } from "../../web/src/features/chat/ActionRail";
 
 const WEB_SRC = join(process.cwd(), "web/src");
 const source = (rel: string): string =>
@@ -26,7 +26,7 @@ const source = (rel: string): string =>
 // ── ① markdown 化 ────────────────────────────────────────────────
 
 describe("① 正文按 markdown 渲染(裸 <pre> 退场)", () => {
-  it("ArtifactTextBody 用对话同款渲染器(清洗边界在 lib/markdown.ts,不另立一份)", () => {
+  it("ArtifactTextBody 用对话同款渲染器(清洗边界在 shared/lib/markdown.ts,不另立一份)", () => {
     const s = source("components/deliverable/ArtifactTextBody.tsx");
     expect(s).toContain("<Markdown text={data.content} />");
     expect(s).not.toMatch(/<pre/); // 字面量形态退场
@@ -64,12 +64,19 @@ describe("② 验收卡的「查看正文」(懒加载,bodyMode 唯一分发)", 
     deliverableType: "html_report",
   };
 
-  it("收起态:只有按钮,不挂正文(流不背常驻请求;展开态挂 InlineDeliverableBody)", () => {
-    const html = renderToStaticMarkup(createElement(AcceptanceCard, { a: acc }));
-    expect(html).toContain("查看正文");
-    expect(html).not.toContain("读取工件详情"); // 没点开就不取详情
-    const s = source("components/chat/StreamCards.tsx");
-    expect(s).toContain("{open && <InlineDeliverableBody");
+  it("行动区收起态:只有按钮,不挂正文(流不背常驻请求;展开态挂 InlineDeliverableBody)", () => {
+    // V2(2026-11-21):验收操作从流内卡搬进**行动区**(输入区上方),判据不变。
+    const rail = renderToStaticMarkup(
+      createElement(ActionRail, {
+        actions: [{ type: "acceptance", at: 1, a: acc }],
+        unavailable: null,
+        plan: null,
+      }),
+    );
+    expect(rail).toContain("验收");
+    expect(rail).not.toContain("读取工件详情"); // 没点开就不取详情
+    const s = source("features/chat/ActionRail.tsx");
+    expect(s).toContain("{showBody && <InlineDeliverableBody");
   });
 
   it("展开的分发只走 bodyMode(不另立第二份类型判据)", () => {

@@ -45,7 +45,7 @@ import type {
 } from "@shared/types/platform";
 import { Pill } from "@/components/ui/primitives";
 import { DataState, remoteListOf } from "@/components/ui/DataState";
-import { Markdown } from "@/components/chat/Markdown";
+import { Markdown } from "@/features/chat/Markdown";
 import { useAgentConversations } from "@/lib/data";
 import { inFlightTurns, useChatStore, type Turn } from "@/stores/chat";
 import { MESSAGE_KIND_LABEL, fmtTime } from "@/lib/vocab";

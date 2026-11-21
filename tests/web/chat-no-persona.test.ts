@@ -9,8 +9,8 @@
  *   · **扫的是字面量**(剥注释后):五个角色中文名不许出现在甲方对话面的源码里。
  *     数据驱动的名字(`askedByName` 等)不在扫描范围 —— 那一侧的处置是卡头
  *     不再打印它(见 ClientQuestionCard)。
- *   · **范围 = 甲方对话面**:`components/chat/**`(流与工作台)+ 
- *     `components/client/**`(提问卡等甲方动作面)+ `components/deliverable/**`
+ *   · **范围 = 甲方对话面**:`features/chat/**`(流与工作台)+ 
+ *     `features/chat/**`(提问卡等甲方动作面)+ `components/deliverable/**`
  *     (交付物查看,现在就长在流里)+ `components/shell/HistoryRail.tsx`(工作台左栏)。
  *   · **明确不扫**:成员页 / 工作项页 / harness / 词汇表 / 关于页 —— 那是**内部视图**
  *     (给用户自己看的组织现场),角色名在那里是事实,不是人格泄漏。
@@ -38,8 +38,7 @@ function walk(dir: string, out: string[] = []): string[] {
 }
 
 const PERSONA_DIRS = [
-  "components/chat",
-  "components/client",
+  "features/chat",
   "components/deliverable",
 ];
 /** 左栏是工作台的一部分(对话页三件套之一),单列。 */
@@ -55,8 +54,8 @@ const files = [
 describe("甲方对话面 · 角色名零字面量", () => {
   it("扫描范围里有文件(仪器对着空气 = 假绿)", () => {
     expect(files.length).toBeGreaterThan(10);
-    expect(files).toContain("components/chat/ChatSurface.tsx");
-    expect(files).toContain("components/chat/MessageList.tsx");
+    expect(files).toContain("features/chat/ChatSurface.tsx");
+    expect(files).toContain("features/chat/MessageList.tsx");
     expect(files).toContain("components/deliverable/DeliveryVerdictActions.tsx");
     expect(files).toContain("components/shell/HistoryRail.tsx");
   });

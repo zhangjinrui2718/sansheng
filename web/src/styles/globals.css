@@ -610,8 +610,8 @@
    * ═══════════════════════════════════════════════════════════════════════
    *
    * 内容是 micromark 产出的**裸 HTML 字符串**(没有 class 可挂),所以样式只能写在
-   * 这里的选择器上,不能在 jsx 里给标签加 class。渲染入口:`components/chat/Markdown.tsx`,
-   * 安全边界:`lib/markdown.ts` 文件头。
+   * 这里的选择器上,不能在 jsx 里给标签加 class。渲染入口:`features/chat/Markdown.tsx`,
+   * 安全边界:`shared/lib/markdown.ts` 文件头。
    *
    * 只做「读得下去」这一件事:**不引代码高亮器** —— 实测高亮器体积与本项目
    * 需要的 markdown 解析器同量级甚至更重,而等宽 + 底色已经够用。
@@ -953,4 +953,62 @@
 }
 .ss-pulse {
   animation: ss-pulse var(--pulse-period) var(--ease-out) infinite;
+}
+
+/* ── V2 行动区(设计书 §4.1:四状态点钉在输入区上方;零待办整区消失)── */
+@layer components {
+  .ss-action-row {
+    border: 1px solid var(--ui-action-row-border);
+    border-radius: var(--ui-action-radius);
+    background: var(--ui-action-row-bg);
+    overflow: hidden;
+  }
+  .ss-action-row:hover {
+    background: var(--ui-action-row-hover);
+  }
+  .ss-action-line {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    min-height: 34px;
+    padding: 4px 10px;
+    background: none;
+    border: none;
+    cursor: pointer;
+    text-align: left;
+    font-size: 12px;
+    color: var(--text-1);
+  }
+  .ss-action-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    flex: none;
+  }
+  .ss-action-label {
+    flex: none;
+    color: var(--text-2);
+  }
+  .ss-action-summary {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .ss-action-verb {
+    flex: none;
+    font-size: 11px;
+    color: var(--brand);
+  }
+  .ss-action-form {
+    padding: 10px;
+    border-top: 1px solid var(--surface-border);
+  }
+  .ss-action-unavailable {
+    padding: 6px 10px;
+    font-size: 11px;
+    color: var(--text-3);
+  }
 }

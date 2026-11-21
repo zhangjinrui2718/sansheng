@@ -10,7 +10,7 @@
  * 三种做法的取舍:
  *
  *   ① `dangerouslySetInnerHTML` + 事后过滤  → 少写一次过滤就是 XSS。
- *      本项目已经因为这个理由在 `lib/markdown.ts` 选过 micromark 而不是 marked:
+ *      本项目已经因为这个理由在 `shared/lib/markdown.ts` 选过 micromark 而不是 marked:
  *      「安全性不来自事后过滤,而来自编译器结构上不产生危险 HTML」。
  *   ② `<iframe sandbox="" srcDoc>`          → **本文件**。
  *      空值 sandbox 的语义是:脚本、表单、弹窗、`allow-same-origin`

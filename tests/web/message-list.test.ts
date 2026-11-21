@@ -2,7 +2,7 @@
  * 消息渲染面 —— 把「业务经理的输出此前是裸文本」这件事钉在组件层
  *
  * 上一批的 markdown 探针是**运行时探针**(手工喂字符串看输出);这里把它变成真测试,
- * 并且穿过真实组件(Bubble → Markdown),而不只是调 `lib/markdown.ts` —— 这一批
+ * 并且穿过真实组件(Bubble → Markdown),而不只是调 `shared/lib/markdown.ts` —— 这一批
  * 最容易漏的一环不是解析,而是「组件有没有真的用上它」「哪一类块该用、哪一类不该用」。
  *
  * 形态:node 环境 + `react-dom/server` 的 `renderToStaticMarkup`,**不引 jsdom/RTL**
@@ -17,7 +17,7 @@
 import { describe, expect, it } from "vitest";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { TurnView } from "@/components/chat/MessageList";
+import { TurnView } from "@/features/chat/MessageList";
 import type { Turn } from "@/stores/chat";
 
 function turn(

@@ -1,7 +1,7 @@
 /**
  * 对话滚动语义 —— 三条行为的判定逻辑单测
  *
- * 实现对半分:判定逻辑全在 `web/src/lib/scroll.ts` 的纯函数里(可在这里直测),
+ * 实现对半分:判定逻辑全在 `web/src/shared/lib/scroll.ts` 的纯函数里(可在这里直测),
  * `MessageList.tsx` 只负责把 DOM 的 `scrollTop/clientHeight/scrollHeight` 喂进来、
  * 按判定结果调 `scrollTo`。**没有引入 jsdom/RTL** —— 这个项目里 web 侧没有 DOM
  * 测试基建,而这三条行为真正会写错的地方全是判定,不是 DOM 调用。
@@ -11,7 +11,7 @@
  *
  * ③ 是这类代码最常见的 bug:用 `isProgrammatic` 标志位去挡,但 `scrollTo()` 之后
  * scroll 事件是**异步**派发的,标志位早在事件到达前就被清掉了 —— 于是「我自己滚到底」
- * 被当成「用户上滚」,跟随永久关闭。所以判据改成**方向**(见 lib/scroll.ts 文件头)。
+ * 被当成「用户上滚」,跟随永久关闭。所以判据改成**方向**(见 shared/lib/scroll.ts 文件头)。
  */
 import { describe, expect, it } from "vitest";
 import {
@@ -25,7 +25,7 @@ import {
   throttleDelay,
   type FollowState,
   type ScrollMetrics,
-} from "../../web/src/lib/scroll.js";
+} from "../../web/src/shared/lib/scroll.js";
 
 /** 视口高 600、内容 2000:底部 = scrollTop 1400。 */
 const m = (scrollTop: number, scrollHeight = 2000, clientHeight = 600): ScrollMetrics => ({
