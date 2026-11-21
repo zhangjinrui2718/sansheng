@@ -146,7 +146,8 @@ const BASELINE: Record<string, number> = {
   "components/shell/TopBar.tsx": 54,
   // ── 2026-11-21(V2 外壳):AppShell(折叠钮 title/aria)与 Sidebar(五枚
   //    导航标签 —— 对话/项目/工作项/成员/记忆,功能性文字)逐文件登记。──
-  "app/AppShell.tsx": 22,
+  // 2026-11-22(移动端适配):滑出式左栏的 aria/title(打开/收起导航)。
+  "app/AppShell.tsx": 30,
   // 2026-11-21(工件一等公民):导航 5→4 项(工作项/成员退到工件内部)。
   "app/Sidebar.tsx": 11,
   "components/ui/DataState.tsx": 14,

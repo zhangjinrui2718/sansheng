@@ -1099,3 +1099,64 @@
     background: var(--surface-raised);
   }
 }
+
+/* ── 移动端(<880px):左栏滑出式,页卡全宽;开合钮左下浮动 ── */
+.ss-sidebar-scrim {
+  display: none;
+}
+.ss-mobile-burger {
+  display: none;
+}
+@media (max-width: 880px) {
+  .ss-sidebar {
+    position: fixed;
+    top: 44px;
+    left: 0;
+    bottom: 0;
+    z-index: 30;
+    width: 272px !important;
+    background: var(--app-shell);
+    transform: translateX(-100%);
+    transition: transform var(--duration-200) var(--ease-out);
+    border-right: 1px solid var(--surface-border);
+  }
+  .ss-sidebar[data-mobile-open="true"] {
+    transform: none;
+    box-shadow: var(--shadow-floating);
+  }
+  .ss-sidebar-scrim {
+    display: block;
+    position: fixed;
+    inset: 44px 0 0 0;
+    z-index: 29;
+    background: oklch(0 0 0 / 55%);
+  }
+  .ss-sidebar-collapse {
+    display: none; /* 小屏用左下浮动钮,不用栏内折叠钮 */
+  }
+  .ss-shell-body {
+    padding: 8px;
+    gap: 8px;
+  }
+  .ss-page-card {
+    border-radius: var(--radius-l);
+  }
+  .ss-mobile-burger {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    position: fixed;
+    left: 14px;
+    bottom: 18px;
+    z-index: 31;
+    width: 44px;
+    height: 44px;
+    border-radius: 50%;
+    border: 1px solid var(--surface-border);
+    background: var(--surface-raised);
+    color: var(--text-1);
+    font-size: 16px;
+    cursor: pointer;
+    box-shadow: var(--shadow-menu);
+  }
+}
