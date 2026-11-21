@@ -38,7 +38,7 @@
  */
 import { useEffect, useRef } from "react";
 import { useChatStore } from "@/stores/chat";
-import { paramOf, useAppLocation } from "./route";
+import { paramOf, useAppLocation } from "./router";
 
 /**
  * 「地址里的项目坐标」该不该切项目。**纯函数**。

@@ -18,7 +18,7 @@
  *
  * ⚠️ 第 3 条是本文件最容易变成「恒真断言」的地方:一个 `to` 拼错了字段名,
  * 测试如果只断言「有个 to」就照样绿。所以这里断言的是**地址本身**
- * (route + params 的逐字相等),而地址由 `lib/route.ts` 的 `toHash` 序列化 ——
+ * (route + params 的逐字相等),而地址由 `app/router.ts` 的 `toHash` 序列化 ——
  * 「拼错」会在这里当场变红。
  */
 import { describe, expect, it } from "vitest";
@@ -30,7 +30,7 @@ import {
   workLocation,
   workMeta,
 } from "../../web/src/lib/entityMeta";
-import { toHash } from "../../web/src/lib/route";
+import { toHash } from "../../web/src/app/router";
 import type { ArtifactView, BlockerView, WorkView } from "../../shared/types/platform";
 
 const artifact = (over: Partial<ArtifactView> = {}): ArtifactView => ({

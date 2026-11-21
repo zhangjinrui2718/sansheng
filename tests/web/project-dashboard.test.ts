@@ -24,7 +24,7 @@ import { dirname, join } from "node:path";
 import { PRIORITY, countCards, nextThing, costWarning } from "../../web/src/lib/dashboard";
 import type { DashboardFacts, NextThingKey } from "../../web/src/lib/dashboard";
 import { DashboardCards } from "../../web/src/components/dashboard/DashboardCards";
-import { toHash } from "../../web/src/lib/route";
+import { toHash } from "../../web/src/app/router";
 import type { BlockerView, ProjectLiveView, WorkView } from "../../shared/types/platform";
 
 const here = dirname(fileURLToPath(import.meta.url));

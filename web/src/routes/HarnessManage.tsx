@@ -47,7 +47,7 @@ import {
   type HarnessGlobalIssue,
 } from "@/components/harness/judgments";
 import { useHarnessWorkspace } from "@/components/harness/useHarnessWorkspace";
-import { paramOf, useAppLocation } from "@/lib/route";
+import { paramOf, useAppLocation } from "@/app/router";
 
 /**
  * 顶部一行**全局状态**:哪几类问题现在存在(跨角色聚合,判据

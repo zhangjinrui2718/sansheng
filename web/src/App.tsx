@@ -1,46 +1,27 @@
 /**
- * Sansheng · 应用外壳与路由
+ * Sansheng · 应用外壳与路由(V2)
  *
- * ── 相对旧版改了什么 ────────────────────────────────────────────
+ * ── V2 改了什么 ────────────────────────────────────────────────
+ * 布局换成 AppShell(app/AppShell.tsx):frame + 左栏(恒在、可折叠)+ 圆角页卡。
+ * 左栏 = 导航(app/Sidebar.tsx,项目恢复一级)+ 项目列表(HistoryRail 原样嵌入,
+ * 判据不动)。此前左栏只挂在 chat 路由、其余页全宽 —— 「项目页藏在对话页
+ * 头部链接里」的动线断裂由此修掉。
  *
- *  1. **路由表换成新模型的页面**:旧的是「对话 / Agent / 总线 / 记忆 / 工件 /
- *     目标 / Harness / 设置」。其中「总线」在新架构里已删除(MessageBus 没了),
- *     「目标」是计划时代的投影(已换成工作项),「Agent」的主体变成了项目成员。
- *     新的:`chat / project / works / members / memory / settings`。
- *     **「工件」页签已并入「工作项」**(用户要求:推进图上本来
- *     就同时画着工作项与工件,点绿色条 ⇒ 下面显示它挂着的工件),所以 `Route` 里
- *     没有工件这个成员 —— 合并后的唯一页面是 `routes/Works.tsx` 的 `WorksPage`。
- *     **「Harness」页签已并入「成员」**(2026-10-06,用户原话:「成员的 harness
- *     管理可以放在成员的 tab 下面,可以把「成员」「harness」这两个 tab 也合并了」)
- *     —— 角色 harness 现在是成员面板里的一块(`components/members/RoleHarness.tsx`
- *     的 `RoleHarnessSection`),所以 `Route` 里也没有 `harness` 这个成员,
- *     顶层不再有那个页面。
- *     **「待办」页签已并入「对话」**(同日,用户原话:「把待办放到对话这个页面的
- *     右下角」)—— 它是**唯一需要甲方动手**的数据,而甲方 90% 的时间在对话页,
- *     而一个不带计数的页签等于「有事在等你」这件事没人知道(真机第一条
- *     `client_question` 落地时它就是这么被漏掉的)。现在它是
- *     `components/client/ClientQuestionDock.tsx`,长在对话页右下角。
- *     **「待你验收」也同样搬了过来**(2026-10-12,用户裁决)—— 它与「待答」是
- *     同一类数据(球在甲方那边),原来长在「项目」页里,而甲方 90% 的时间不在那儿。
- *     现在对话页右栏是**三块**:`components/shell/ChatRightRail.tsx`。
- *  2. **`POST /api/kernel/reset` 已不存在**,「重置 Kernel」按钮删除;相关的
- *     `vecLoaded` 降级提示也删除 —— 新契约的 `HealthResponse` 里没有 `vecLoaded`,
- *     旧 `/api/health` 的 `d.ts`(服务器时间)同样不在契约里,所以顶栏改为显示
- *     真实存在的字段(连接状态 + 模型)。
- *  3. **所有请求经 `lib/api.ts`**:`/api/config` 与 `/api/health` 也不再裸 fetch。
- *  4. 项目列表的加载收在这里(所有路由都挂着)并按 `projectsRevision` 重拉,
- *     各页面只读 store,不各自拉一份。
- *  5. **「Harness 管理」回场(2026-11-14)但仍然没有页签** —— 它是一个跨角色的
- *     管理一屏(`routes/HarnessManage.tsx`:左列 5 角色 + 右列三段),入口在成员页
- *     的 harness 卡上(`RoleHarnessDisclosure` 的 aside 链接,带当前角色参数)。
- *     与 2026-10-06 删掉的顶层「Harness 站」不是一回事:那一刀删的是「平级的一站 +
- *     一行角色页签」,导航恒 6 项的用户裁决不变;这次只加一条**可分享的地址**。
+ * ── 保留的纪律(一个字没动)────────────────────────────────────
+ * 1. 路由表在 `app/router.ts`(**地址是唯一真相**);此处 re-export 一次,
+ *    新增路由只改那个文件。
+ * 2. App 级 socket 单例 mount 即连;项目列表 App 唯一负责(所有路由都挂着),
+ *    按 `projectsRevision` 重拉,各页面只读 store。
+ * 3. 零项目 ⇒ 自动进接待会话(`decideInitialContext`,必须等列表拉回再决定)。
+ * 4. 地址 `?project=` 坐标全应用只挂一处(`useProjectCoordinate`)。
+ * 5. 所有请求经 `lib/api.ts`。
  */
 import { useEffect, useState } from "react";
 import type { ReactNode } from "react";
 import type { AppConfigResponse, HealthResponse } from "@shared/types/platform";
+import { AppShell } from "./app/AppShell";
+import { Sidebar } from "./app/Sidebar";
 import { TopBar } from "./components/shell/TopBar";
-import { HistoryRail } from "./components/shell/HistoryRail";
 import { ChatSurface } from "./components/chat/ChatSurface";
 import { SettingsPanel } from "./components/settings/SettingsPanel";
 import { ProjectDetailPage } from "./routes/ProjectDetail";
@@ -53,16 +34,16 @@ import { useSettingsStore, activeProviderOf } from "./stores/settings";
 import { useChatStore } from "./stores/chat";
 import { initAppSocket } from "./lib/appSocket";
 import { getConfig, getHealth } from "./lib/api";
-import { useAppLocation, toRoute } from "./lib/route";
-import { useProjectCoordinate } from "./lib/deepLink";
-import type { Route } from "./lib/route";
+import { useAppLocation, toRoute } from "./app/router";
+import { useProjectCoordinate } from "./app/deepLink";
+import type { Route } from "./app/router";
 
 /**
- * 路由态在 `lib/route.ts`(**地址是唯一真相**,不是组件 state)。
- * 这里 re-export 一次,好让 `TopBar` 继续 `import type { Route }`;
+ * 路由态在 `app/router.ts`(**地址是唯一真相**,不是组件 state)。
+ * 这里 re-export 一次,好让 `TopBar`/`Sidebar` 继续 `import type { Route}`;
  * 新增路由只改那个文件,不会出现「两处各写一份字面量然后悄悄漂移」。
  */
-export type { Route } from "./lib/route";
+export type { Route } from "./app/router";
 
 export function App() {
   const { loc, navigate } = useAppLocation();
@@ -95,14 +76,8 @@ export function App() {
 
   /**
    * 首屏上下文:**一个项目都没有 → 直接进接待会话**。
-   *
-   * 这是本批次补上的那个架构缺口:在此之前,没有项目时用户无处可去 ——
-   * 界面只能摆一张 name / client / goal 表单,提交时撞上 `project_open` 的参数校验
-   * 报「goal 不能为空」。而正确形态是:用户与**业务经理**聊,由业务经理立项。
-   *
    * 判断落在 store 里(`decideInitialContext`),因为**必须等列表拉回来再决定**;
-   * 写成依赖 `projectsLoading` 的 effect 会读到本次渲染的旧值,把有项目的用户也
-   * 丢进接待会话。有项目时它什么都不做(保持「未选项目」的旧行为)。
+   * 有项目时它什么都不做(保持「未选项目」的旧行为)。
    */
   useEffect(() => {
     void decideInitialContext();
@@ -110,10 +85,8 @@ export function App() {
 
   /**
    * 地址里的 `?project=`(跨项目地址带的**坐标**)在这里落地。
-   *
    * ⚠️ **整个应用只挂这一处** —— 挂多处就会有多份「切过了哪个」的记据,
    * 它们互相看不见,于是地址与当前项目来回抢(「点左栏没反应」)。
-   * 判据在 `lib/deepLink.ts` 的 `shouldApplyProjectCoordinate`(纯函数)。
    */
   useProjectCoordinate();
 
@@ -139,35 +112,32 @@ export function App() {
   const active = activeProviderOf(settings);
   const needsSetup = !settings || settings.providers.length === 0 || !active?.hasApiKey;
 
-  /**
-   * 非对话路由的统一外壳:滚动容器 + <main> 只在这里出现一次。
-   * 各路由组件自己只渲染 `<div className="ss-page">`。
-   */
+  /** 页卡内的滚动容器 —— 滚动只在这里出现一次,各路由渲染自己的内容块。 */
   const page = (node: ReactNode) => (
-    <main className="overflow-y-auto" style={{ background: "var(--ink-0)", minHeight: 0 }}>
+    <div className="overflow-y-auto" style={{ minHeight: 0, height: "100%" }}>
       {node}
-    </main>
+    </div>
   );
 
   return (
-    <div className="sansheng-shell">
-      <TopBar
-        config={cfg}
-        health={health}
-        route={route}
-        onRoute={go}
-        currentUsage={currentUsage}
-        totalUsage={totalUsage}
-        status={status}
-      />
-      {route === "chat" ? (
-        // v5(2026-11-20):两栏。右栏收件箱退场 —— 「等你表态」的四类卡(提问 /
-        // 验收 / 计划 / 塌缩事实行)按锚定时刻长进了消息流本体(判据在
-        // lib/streamCards.ts;取数实例的唯一落点在 ChatSurface)。
-        <main className="grid grid-cols-app gap-3 px-4 pb-4" style={{ minHeight: 0 }}>
-          <HistoryRail />
-          {needsSetup ? <SetupHint onGo={() => go("settings")} /> : <ChatSurface />}
-        </main>
+    <AppShell
+      topbar={
+        <TopBar
+          config={cfg}
+          health={health}
+          route={route}
+          onRoute={go}
+          currentUsage={currentUsage}
+          totalUsage={totalUsage}
+          status={status}
+        />
+      }
+      sidebar={<Sidebar route={route} onRoute={go} />}
+    >
+      {needsSetup && route !== "settings" ? (
+        <SetupHint onGo={() => go("settings")} />
+      ) : route === "chat" ? (
+        page(<ChatSurface />)
       ) : route === "project" ? (
         page(<ProjectDetailPage />)
       ) : route === "works" ? (
@@ -175,46 +145,54 @@ export function App() {
       ) : route === "members" ? (
         page(<MembersPage />)
       ) : route === "about" ? (
-        <AboutPage />
+        page(<AboutPage />)
       ) : route === "harness" ? (
         page(<HarnessManagePage />)
       ) : route === "memory" ? (
         page(<MemoryPage />)
       ) : (
-        <main className="overflow-y-auto" style={{ background: "var(--ink-0)", minHeight: 0 }}>
+        page(
           <div className="ss-page" style={{ maxWidth: 720 }}>
             <SettingsPanel />
-          </div>
-        </main>
+          </div>,
+        )
       )}
-    </div>
+    </AppShell>
   );
 }
 
 function SetupHint({ onGo }: { onGo: () => void }) {
   return (
-    <section
-      className="sansheng-card overflow-hidden flex flex-col items-center justify-center"
-      style={{ minHeight: 0 }}
-    >
-      <div className="flex flex-col items-center gap-3 max-w-md text-center px-6">
-        <svg width="44" height="44" viewBox="0 0 64 64">
-          <g stroke="#C76B4A" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" fill="none">
-            <path d="M16 22 L32 14 L48 22 L48 42 L32 50 L16 42 Z" />
-            <path d="M32 14 L32 50" />
-          </g>
-          <circle cx="32" cy="32" r="3.5" fill="#C76B4A" />
-        </svg>
-        <div className="font-serif text-lg" style={{ color: "var(--bone)", letterSpacing: ".06em" }}>
-          未配置 API Key
+    <div className="h-full flex items-center justify-center p-6">
+      <section
+        className="rounded-lg overflow-hidden flex flex-col items-center justify-center"
+        style={{
+          minHeight: 0,
+          background: "var(--surface)",
+          border: "1px solid var(--surface-border)",
+          maxWidth: 420,
+          padding: 32,
+        }}
+      >
+        <div className="flex flex-col items-center gap-3 max-w-md text-center px-6">
+          <svg width="40" height="40" viewBox="0 0 64 64">
+            <g stroke="var(--brand)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" fill="none">
+              <path d="M16 22 L32 14 L48 22 L48 42 L32 50 L16 42 Z" />
+              <path d="M32 14 L32 50" />
+            </g>
+            <circle cx="32" cy="32" r="3.5" fill="var(--brand)" />
+          </svg>
+          <div style={{ color: "var(--text-1)", letterSpacing: ".04em", fontSize: 15 }}>
+            未配置 API Key
+          </div>
+          <p style={{ color: "var(--text-2)", fontSize: 12, lineHeight: 1.7 }}>
+            至少配一个 LLM Provider 的 API Key 才能开始工作。
+          </p>
+          <button className="ss-button-primary" onClick={onGo} style={{ padding: "8px 16px" }}>
+            去设置 →
+          </button>
         </div>
-        <p className="sansheng-text-dim" style={{ fontSize: 12, lineHeight: 1.7 }}>
-          至少配一个 LLM Provider 的 API Key 才能开始工作。
-        </p>
-        <button className="sansheng-button-primary" onClick={onGo} style={{ padding: "8px 16px" }}>
-          去设置 →
-        </button>
-      </div>
-    </section>
+      </section>
+    </div>
   );
 }

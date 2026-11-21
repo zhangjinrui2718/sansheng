@@ -117,36 +117,38 @@ describe("关于页 · 已知不实之处", () => {
 describe("接线 · 「关于」是 `?`,不是第七个页签", () => {
   it("TopBar 里有那个入口,且它走 `onRoute(\"about\")`", () => {
     const tb = source("components/shell/TopBar.tsx");
-    expect(tb).toContain('label="?"');
     expect(tb).toContain('onRoute("about")');
   });
 
-  it("**`TABS` 恒 5 项(IA v4:对话+项目合并为工作台),且里面没有 about**", () => {
-    // 判据变更记录(2026-11-17,用户裁决「完完全全重构」):对话页 + 项目页
-    // 合并为**工作台**;项目页退为「项目详情」视图(路由 #/project 保留,
-    // 从工作台头部的「详情」进入),不再是页签。
-    const tb = source("components/shell/TopBar.tsx");
-    const block = tb.slice(tb.indexOf("const TABS"), tb.indexOf("];", tb.indexOf("const TABS")));
+  it("**左栏导航 `TABS` 恒 5 项(V2:对话/项目/工作项/成员/记忆),且里面没有 about/settings**", () => {
+    // 判据变更记录(2026-11-21,V2 重做):导航从 TopBar 挪进左栏 Sidebar;
+    // **项目恢复一级**(v4 把它并进工作台、入口藏二级链接 —— V2 修掉动线断裂);
+    // 设置退为顶栏图标(低频配置不占一级导航)。
+    const sb = source("app/Sidebar.tsx");
+    const block = sb.slice(sb.indexOf("const TABS"), sb.indexOf("];", sb.indexOf("const TABS")));
     const routes = block.match(/\{ route: "/g) ?? [];
     expect(routes.length).toBe(5);
     expect(block).not.toContain('"about"');
-    expect(block).toContain('label: "工作台"');
+    expect(block).not.toContain('"settings"');
+    expect(block).toContain('route: "chat", label: "对话"');
+    expect(block).toContain('route: "project", label: "项目"');
     // 变异自检:把 about 塞进 TABS ⇒ 上面两条当场变红(这里模拟一次)
-    const mutated = block.replace('{ route: "chat", label: "工作台" },', '{ route: "chat", label: "工作台" },\n  { route: "about", label: "关于" },');
+    const mutated = block.replace('{ route: "chat", label: "对话", icon: <IconChat /> },', '{ route: "chat", label: "对话", icon: <IconChat /> },\n  { route: "about", label: "关于" },');
     expect(mutated).toContain('"about"');
     expect((mutated.match(/\{ route: "/g) ?? []).length).toBe(6);
   });
 
-  it("`about` 是一条真的路由(union 在 lib/route.ts 里,由 App 接到分支)", () => {
+  it("`about` 是一条真的路由(union 在 app/router.ts 里,由 App 接到分支)", () => {
     const app = source("App.tsx");
     // 判据没变:**必须在闭合集合里**,且**真的接到一条分支**。
-    // ⚠️ 落点从 App.tsx 换到了 lib/route.ts(2026-10-26,路由搬进地址) ——
+    // ⚠️ 落点从 App.tsx 换到了 app/router.ts(2026-10-26,路由搬进地址) ——
     //    这不意味着 App 不再声明路由,而是「声明」与「分支」分居两个文件。
-    expect(source("lib/route.ts")).toMatch(/\| "about"/);
+    expect(source("app/router.ts")).toMatch(/\| "about"/);
     expect(app).toContain('import { AboutPage } from "./routes/About"');
     expect(app).toContain('<AboutPage />');
     // 变异自检:只加 union 不接分支 ⇒ 这一格必须能抓到
-    const unionOnly = app.replace("        <AboutPage />\n", "");
+    // (V2 布局:分支形态是 page(<AboutPage />) —— replace 必须真的删掉它)
+    const unionOnly = app.replace("page(<AboutPage />)", "");
     expect(unionOnly).not.toContain("<AboutPage />");
   });
 });

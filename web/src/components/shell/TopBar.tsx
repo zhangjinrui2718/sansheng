@@ -1,30 +1,19 @@
 /**
- * Sansheng · 顶栏
+ * Sansheng · 顶栏(V2 状态条)
  *
- * ── 相对旧版改了什么 ────────────────────────────────────────────
+ * ── V2 改了什么 ────────────────────────────────────────────────
+ * 导航(5 页签)挪进左栏 Sidebar(app/Sidebar.tsx),顶栏只留**运行态**:
+ * 身份(Seal+名字)· 成本 · 连接 · 模型,右侧两个图标入口(设置 / ?)。
+ * ? 仍在顶栏末尾(它是一份说明书,不与工作区抢位置);设置从页签退为图标
+ * (低频配置不占一级导航)。
  *
- *  1. **导航项换成新模型**:旧的是「对话 / Agent / 总线 / 记忆 / 工件 / 目标 /
- *     Harness / 设置」—— 「总线」在新架构里已删除,「目标」是 M7 的未实现投影
- *     (计划概念已删),「Agent」现在是项目成员。新的见 `TABS`。
- *     ⚠️ **「工件」页签已删除**:它并入「工作项」(推进图上本来就同时画着工作项与
- *     工件,点绿色条 ⇒ 下面显示它挂着的工件)—— 所以导航里没有工件这一项。
- *     ⚠️ **「Harness」页签已删除**(2026-10-06,用户原话:「成员的 harness 管理
- *     可以放在成员的 tab 下面,可以把「成员」「harness」这两个 tab 也合并了」)
- *     —— 角色 harness 现在是成员面板里的一块,一个项目的 harness 属于那个项目的
- *     成员,不该是顶层平级的一站。
- *     ⚠️ **「待办」页签已删除**(同日,用户原话:「把待办放到对话这个页面的右下角」)
- *     —— 它是**唯一需要甲方动手**的数据,而甲方 90% 的时间在「对话」页;一个
- *     不带计数的页签等于「有事在等你」没人知道(真机第一条 `client_question` 就
- *     是这么被漏掉的)。现在它是 `components/client/ClientQuestionDock.tsx`,
- *     长在对话页右下角,新提问落地时自己展开。数据与答案路径一个字没变。
- *  2. **右侧运行态不再有「服务器时间」**:它读的是旧 `/api/health` 的 `d.ts`,
- *     而新契约的 `HealthResponse` 里**没有 `ts`**,也没有 `vecLoaded`
- *     (`ok/version/modelId/provider/cwd/dataDir`)。继续显示一个本地编造的时间
- *     就是撒谎,所以改成显示**真实存在的字段**:连接状态 + 当前模型。
- *  3. cost 仍只在有真数时渲染(不硬编码「本轮 idle」)。
+ * ── 保留的纪律 ────────────────────────────────────────────────
+ * · 右侧不再有「服务器时间」:新契约 HealthResponse 里没有 ts,编一个本地
+ *   时间是撒谎 —— 只显示真实存在的字段(连接状态 + 当前模型)。
+ * · cost 只在有真数时渲染(恒 0 时不写常量文案,C10 哨兵钉着)。
  */
 import { Seal } from "../brand/Seal";
-import type { Route } from "../../App";
+import type { Route } from "@/app/router";
 import type { AppConfigResponse, HealthResponse } from "@shared/types/platform";
 
 interface Props {
@@ -37,15 +26,6 @@ interface Props {
   status: "idle" | "streaming" | "error" | "connecting";
 }
 
-/** 导航项:声明式单一来源,顺序即视觉顺序。 */
-const TABS: ReadonlyArray<{ route: Route; label: string }> = [
-  { route: "chat", label: "工作台" },
-  { route: "works", label: "工作项" },
-  { route: "members", label: "成员" },
-  { route: "memory", label: "记忆" },
-  { route: "settings", label: "设置" },
-];
-
 export function TopBar({
   config,
   health,
@@ -57,42 +37,23 @@ export function TopBar({
 }: Props) {
   const connected = health?.ok === true;
   return (
-    <header
-      className="flex items-center gap-4 px-5"
-      style={{
-        borderBottom: "1px solid var(--ink-3)",
-        background: "rgba(11,15,20,0.6)",
-        backdropFilter: "blur(12px)",
-      }}
-    >
+    <header className="ss-topbar">
       <div
         className="flex items-center gap-2.5 flex-none"
         title={config ? `工作目录 ${config.cwd}` : "Sansheng"}
       >
-        <Seal size={26} />
-        <span className="font-serif" style={{ fontSize: 16, color: "var(--bone)", letterSpacing: "0.05em" }}>
+        <Seal size={24} />
+        <span style={{ fontSize: 13, color: "var(--text-1)", letterSpacing: "0.04em" }}>
           {config?.personaName ?? "三生"}
         </span>
         {status === "streaming" && (
-          <span className="font-mono sansheng-text-jade animate-pulse-soft" style={{ fontSize: 10 }}>
+          <span className="ss-pulse" aria-label="推演中" style={{ color: "var(--brand)", fontSize: 10 }}>
             ●
           </span>
         )}
       </div>
 
-      <nav className="flex items-center gap-0.5 flex-1 min-w-0 overflow-x-auto justify-center">
-        {TABS.map((t) => (
-          <NavTab
-            key={t.route}
-            label={t.label}
-            active={route === t.route}
-            onClick={() => onRoute(t.route)}
-          />
-        ))}
-        {/* 「关于」—— 说明书不占页签位(导航恒 6 项)。它**在导航末尾而不在右上角**:
-            右上角是运行态与成本,那里每一格都在报一个数。 */}
-        <NavTab label="?" active={route === "about"} onClick={() => onRoute("about")} />
-      </nav>
+      <div className="flex-1" />
 
       <div className="flex items-center gap-3 flex-none ss-meta">
         <CostDisplay current={currentUsage} total={totalUsage} />
@@ -102,11 +63,11 @@ export function TopBar({
             style={{
               width: 6,
               height: 6,
-              background: connected ? "var(--bamboo)" : "var(--ochre)",
+              background: connected ? "var(--ok)" : "var(--warn)",
             }}
           />
           <span
-            className="sansheng-text-dim"
+            style={{ color: "var(--text-2)" }}
             title={
               health
                 ? `cwd ${health.cwd} · 数据目录 ${health.dataDir} · provider ${health.provider ?? "未配置"}`
@@ -116,6 +77,31 @@ export function TopBar({
             {health ? (health.modelId ?? "未配模型") : "未连接"}
           </span>
         </span>
+        {/* 设置:低频配置,从页签退为顶栏图标(V2)。当前页高亮提示落点。 */}
+        <button
+          type="button"
+          className="ss-topbar-icon"
+          data-active={route === "settings" ? "true" : undefined}
+          onClick={() => onRoute("settings")}
+          title="设置"
+          aria-label="设置"
+        >
+          <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round">
+            <circle cx="8" cy="8" r="2.2" />
+            <path d="M8 1.8v1.6M8 12.6v1.6M1.8 8h1.6M12.6 8h1.6M3.6 3.6l1.1 1.1M11.3 11.3l1.1 1.1M12.4 3.6l-1.1 1.1M4.7 11.3l-1.1 1.1" />
+          </svg>
+        </button>
+        {/* 关于:说明书不占导航位 —— 顶栏末尾的 ?。 */}
+        <button
+          type="button"
+          className="ss-topbar-icon"
+          data-active={route === "about" ? "true" : undefined}
+          onClick={() => onRoute("about")}
+          title="关于"
+          aria-label="关于"
+        >
+          ?
+        </button>
       </div>
     </header>
   );
@@ -135,7 +121,7 @@ function CostDisplay({
   return (
     <span className="flex items-center gap-1.5">
       {live > 0 && (
-        <span className="sansheng-text-jade">
+        <span style={{ color: "var(--brand)" }}>
           ▸ {current.input + current.output} tok
         </span>
       )}
@@ -145,23 +131,5 @@ function CostDisplay({
         </span>
       )}
     </span>
-  );
-}
-
-function NavTab({ label, active = false, onClick }: { label: string; active?: boolean; onClick: () => void }) {
-  return (
-    <button
-      onClick={onClick}
-      className="sansheng-button flex-none"
-      style={{
-        padding: "5px 9px",
-        background: active ? "var(--ink-2)" : "transparent",
-        color: active ? "var(--bone)" : "var(--bone-dim)",
-        borderColor: active ? "var(--ink-4)" : "transparent",
-      }}
-      title={label}
-    >
-      <span style={{ fontSize: 12 }}>{label}</span>
-    </button>
   );
 }

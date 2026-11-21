@@ -49,7 +49,7 @@ import * as api from "@/lib/api";
 import { errorMessage } from "@/lib/api";
 import { corpusStatus, corpusTone, fmtSpan, pendingTotal } from "@/lib/knowledgeState";
 import { chunkSourceLabel, chunkSourceLocation } from "@/lib/entityMeta";
-import { toHash } from "@/lib/route";
+import { toHash } from "@/app/router";
 import { fmtTime } from "@/lib/vocab";
 import { DataState, ReadError, remoteListOf, remoteOf } from "@/components/ui/DataState";
 import { RedNote } from "@/components/ui/primitives";

@@ -129,7 +129,7 @@ import {
   toneColor,
 } from "@/components/ui/primitives";
 import { useArtifactContent, useArtifacts, useBlockers, useProjectLive, useWorks } from "@/lib/data";
-import { useAppLocation, paramOf, shouldClearSelection, type ProjectChangeState } from "@/lib/route";
+import { useAppLocation, paramOf, shouldClearSelection, type ProjectChangeState } from "@/app/router";
 import { useChatStore } from "@/stores/chat";
 import { errorMessage, getArtifact } from "@/lib/api";
 import {
@@ -1877,14 +1877,14 @@ export function WorksPage() {
    * ⚠️ **首帧不清** —— 改版前这里在挂载时就跑一遍 `setPicked(undefined)`,
    * 于是 `#/works?work=w_1` **一打开就被抹掉**:深链接(发给别人 / F5 回来)
    * 落地时选中项已经没了,而症状是「页面就是没选中」—— 看着像用户自己点错了。
-   * ⇒ 判断本身在 `lib/route.ts` 的 `shouldClearSelection`(可单测)。
+   * ⇒ 判断本身在 `app/router.ts` 的 `shouldClearSelection`(可单测)。
    */
   const selState = useRef<ProjectChangeState>({ mounted: false, projectId: scope });
   /**
    * 地址里的**项目坐标**(`?project=`)—— 这次换项目是不是**地址带来的**。
    * 深链接(`#/works?work=w_1&project=p_2`)落地时,坐标把应用带到 p_2,
    * 而 `?work=w_1` 本来就是给 p_2 写的 ⇒ 那种换项目**不清**选中项。
-   * 判据在 `lib/route.ts` 的 `shouldClearSelection`(第三格)。
+   * 判据在 `app/router.ts` 的 `shouldClearSelection`(第三格)。
    */
   const addressProject = paramOf(loc, "project");
   useEffect(() => {

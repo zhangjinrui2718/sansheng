@@ -67,7 +67,7 @@ import { RelationsRail } from "@/components/relations/RelationsRail";
 import { DashboardCards } from "@/components/dashboard/DashboardCards";
 import { countCards, nextThing, costWarning } from "@/lib/dashboard";
 import type { RelationContext } from "@/lib/relations";
-import { useAppLocation, paramOf } from "@/lib/route";
+import { useAppLocation, paramOf } from "@/app/router";
 
 /**
  * 悬停时补一句「这一类意味着什么」。类名本身只有一处
@@ -195,7 +195,7 @@ export function ProjectDetailPage() {
    * 效果（与当前项目不同时就 `selectProject`），它每次渲染都看地址 ⇒
    * **用户从左栏切了项目**（地址没变）⇒ 那个效果又把他拽回去 ⇒
    * 「切项目」这个动作被撤销，症状是「点左栏没反应」。
-   * ⇒ 现在这件事**只有一处**做：`lib/deepLink.ts` 的 `useProjectCoordinate`
+   * ⇒ 现在这件事**只有一处**做：`app/deepLink.ts` 的 `useProjectCoordinate`
    * （`App.tsx` 挂一次，且**只切一次** —— 坐标过期之后不再生效）。
    *
    * ⇒ 这一页**不需要读**这个参数：坐标的落地不在页面里，而在应用外壳上。

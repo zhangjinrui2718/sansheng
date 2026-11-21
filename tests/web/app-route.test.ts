@@ -1,11 +1,11 @@
 /**
- * `lib/route.ts` 的判据 —— 「UI 状态住在地址里」这件事必须可验
+ * `app/router.ts` 的判据 —— 「UI 状态住在地址里」这件事必须可验
  *
  * 三条要钉住的东西:
  *   ① **地址 ↔ 状态是可逆的**(解析 → 序列化 → 解析,得到同一份);
  *   ② **坏地址不白屏**(未知路由 ⇒ `chat`,而不是 undefined 的分支);
  *   ③ **它真的被接上了**(App 不再自己 `useState<Route>`,成员页的选中项读地址)。
- *      ③ 单独写一条源码级断言 —— 一个没人调用的 `lib/route.ts` 与本文件描述的
+ *      ③ 单独写一条源码级断言 —— 一个没人调用的 `app/router.ts` 与本文件描述的
  *      行为在界面上完全一样,而「代码里写了逻辑 ≠ 它有读者」是这仓库的复发性事故。
  */
 import { describe, expect, it } from "vitest";
@@ -19,7 +19,7 @@ import {
   toHash,
   toRoute,
   withParam,
-} from "../../web/src/lib/route";
+} from "../../web/src/app/router";
 
 const source = (rel: string): string =>
   readFileSync(resolve(__dirname, "../../web/src", rel), "utf8");
@@ -139,10 +139,10 @@ describe("接线:这一层真的有人在用", () => {
   });
 
   it("路由 union 只有一处声明(App re-export,不复制一份)", () => {
-    const routes = source("lib/route.ts");
+    const routes = source("app/router.ts");
     expect(routes).toContain("export type Route =");
     const app = source("App.tsx");
-    expect(app).toContain('export type { Route } from "./lib/route"');
+    expect(app).toContain('export type { Route } from "./app/router"');
     expect(app).not.toMatch(/export type Route\s*=/);
   });
 });

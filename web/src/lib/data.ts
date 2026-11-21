@@ -53,7 +53,7 @@ import type {
 import * as api from "./api";
 import { errorMessage } from "./api";
 import { memberLocation, projectLocation } from "./entityMeta";
-import { toHash } from "./route";
+import { toHash } from "../app/router";
 import { useChatStore, type ChatStatus, type Turn } from "../stores/chat";
 // ⚠️ **type-only**:只要「连接状态」这个类型,不要传输层本身
 // (`lib/ws.ts` 会在浏览器里 new WebSocket,而 `lib/data.ts` 被 node 里的测试直接引用)。

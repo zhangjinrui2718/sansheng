@@ -20,7 +20,7 @@ import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { shouldClearSelection } from "../../web/src/lib/route";
+import { shouldClearSelection } from "../../web/src/app/router";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const read = (rel: string): string =>
@@ -31,7 +31,7 @@ const members = read("web/src/routes/Members.tsx");
 const projectDetail = read("web/src/routes/ProjectDetail.tsx");
 const relations = read("web/src/lib/relations.ts");
 const rail = read("web/src/components/relations/RelationsRail.tsx");
-const deepLink = read("web/src/lib/deepLink.ts");
+const deepLink = read("web/src/app/deepLink.ts");
 const app = read("web/src/App.tsx");
 
 /** 去掉注释再找 —— 注释里写着反面教材会让 grep 命中假阳性。 */
@@ -74,7 +74,7 @@ describe("接线:地址参数真的有人读", () => {
     // 那个落点有一个**真 bug**：它每次渲染都看地址里的项目 ⇒ **用户从左栏切了项目**
     // （地址没变）⇒ 那个效果又把他拽回去 ⇒ 「切项目」这个动作被撤销，
     // 症状是「点左栏没反应」。
-    // ⇒ 落点搬到 `lib/deepLink.ts`（**只有一处**），由 `App.tsx` 挂一次。
+    // ⇒ 落点搬到 `app/deepLink.ts`（**只有一处**），由 `App.tsx` 挂一次。
     expect(deepLink).toContain('paramOf(loc, "project")');
     expect(app).toContain("useProjectCoordinate()");
     // ⚠️ 而且**不许**再有第二个判据：页面自己切项目 = 两处判断互相撤销。

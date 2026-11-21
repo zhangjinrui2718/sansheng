@@ -34,7 +34,7 @@ import { join } from "node:path";
 import type {
   HarnessView, ProjectRole, PromptUnitView, RoleHarnessView, ToolSetFileView,
 } from "@shared/types/platform";
-import { parseHash, toHash, toRoute } from "../../web/src/lib/route";
+import { parseHash, toHash, toRoute } from "../../web/src/app/router";
 import {
   GlobalStatusBar,
   HarnessManagePage,
@@ -165,11 +165,11 @@ describe("① 路由注册:地址可解析,页签不加", () => {
     expect(app).toContain("HarnessManagePage");
   });
 
-  it("TopBar **没有**这个页签(导航恒 6 项的用户裁决不回潮)", () => {
-    const tabs = source("components/shell/TopBar.tsx");
+  it("导航(左栏 Sidebar)**没有**这个页签(harness 保持深链入口的裁决不回潮;V2 导航从 TopBar 挪进 Sidebar)", () => {
+    const sidebar = source("app/Sidebar.tsx");
     // 正样本自检:扫描器认得出「页签表里的一条」
-    expect(/route:\s*"chat"/.test(tabs)).toBe(true);
-    expect(/route:\s*"harness"/.test(tabs), "harness 混进了顶栏页签表").toBe(false);
+    expect(/route:\s*"chat"/.test(sidebar)).toBe(true);
+    expect(/route:\s*"harness"/.test(sidebar), "harness 混进了左栏导航表").toBe(false);
   });
 
   it("✅ 正样本:把 harness 塞进页签表,哨兵必须当场变红(证明上一条不是空转)", () => {

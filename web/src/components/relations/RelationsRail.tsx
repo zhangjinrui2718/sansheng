@@ -26,8 +26,8 @@
  *   摘要说「没有」是撒谎,但摘要什么都不说不是(细节在详情里)。
  *   ⇒ 摘要只说**已经算出来的东西**;详情把「哪些没算出来」也说出来。
  */
-import { toHash } from "@/lib/route";
-import type { AppLocation } from "@/lib/route";
+import { toHash } from "@/app/router";
+import type { AppLocation } from "@/app/router";
 import { relationsOf } from "@/lib/relations";
 import type { RelationContext, RelationItem, RelationSubject } from "@/lib/relations";
 

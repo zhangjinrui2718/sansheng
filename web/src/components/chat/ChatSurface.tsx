@@ -34,7 +34,7 @@ import { MessageList } from "./MessageList";
 import { ChatComposer } from "./ChatComposer";
 import { Pill, RedNote } from "@/components/ui/primitives";
 import { projectLocation } from "@/lib/entityMeta";
-import { toHash } from "@/lib/route";
+import { toHash } from "@/app/router";
 import { cardsUnavailableOf, streamCardsOf } from "@/lib/streamCards";
 import {
   channelActivityOf,

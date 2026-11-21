@@ -145,7 +145,7 @@ import { DataState, remoteListOf } from "@/components/ui/DataState";
 import { Help } from "@/components/ui/Help";
 import { EntityLink, MetadataStrip } from "@/components/ui/MetadataStrip";
 import { RelationsRail } from "@/components/relations/RelationsRail";
-import { useAppLocation, paramOf } from "@/lib/route";
+import { useAppLocation, paramOf } from "@/app/router";
 import { artifactLocation, artifactMeta } from "@/lib/entityMeta";
 import type { RelationContext } from "@/lib/relations";
 import { RoleHarnessSection, roleIssueCount } from "@/components/members/RoleHarness";

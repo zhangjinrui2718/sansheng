@@ -20,8 +20,8 @@
  */
 import type { ReactNode } from "react";
 import type { MetaItem } from "@/lib/entityMeta";
-import { toHash } from "@/lib/route";
-import type { AppLocation } from "@/lib/route";
+import { toHash } from "@/app/router";
+import type { AppLocation } from "@/app/router";
 import { Pill, toneColor } from "./primitives";
 
 function MetaCell({ item }: { item: MetaItem }) {
@@ -80,7 +80,7 @@ export function MetadataStrip({
  * 一格**可点的身份** —— 单独抽出来给「卡片标题」用。
  *
  * ⚠️ 它**不自己**改 hash:真 `<a href>` 让浏览器去改,
- * `lib/route.ts` 的 `useAppLocation` 监听 `hashchange` 接手 ——
+ * `app/router.ts` 的 `useAppLocation` 监听 `hashchange` 接手 ——
  * 于是「后退键」与「分享链接」是同一套机制的两个好处,不是两套代码。
  */
 export function EntityLink({

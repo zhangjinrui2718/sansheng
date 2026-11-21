@@ -26,7 +26,7 @@
  *
  * `MetaItem.links` 是「一圈邻居」的那根线:从一份工件能走到产出它的环节,
  * 从环节能走到负责人,从负责人能走回他的产出。
- * ⚠️ 链接的目标必须是**真地址**(`lib/route.ts` 的 `AppLocation`),
+ * ⚠️ 链接的目标必须是**真地址**(`app/router.ts` 的 `AppLocation`),
  * 不是字符串拼的 —— 手拼 `#/works?work=` + id 会在某处漏掉 encode,
  * 而一个漏 encode 的地址在工件 id 里带斜杠时会指向别的东西。
  *
@@ -58,7 +58,7 @@ import {
   workStatusLabel,
   workStatusTone,
 } from "./vocab";
-import type { AppLocation } from "./route";
+import type { AppLocation } from "../app/router";
 
 /** 身份条上的一格。`value` 是**已格式化**的文本 —— 格式化判据只有这一处。 */
 export interface MetaItem {

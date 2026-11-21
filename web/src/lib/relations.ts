@@ -50,7 +50,7 @@
  *
  * 纯数据 ⇒ 单测可以直接比对「两次调用给出同一组关系」,不必渲染组件。
  */
-import type { AppLocation } from "./route";
+import type { AppLocation } from "../app/router";
 import {
   artifactLocation,
   blockerLocation,

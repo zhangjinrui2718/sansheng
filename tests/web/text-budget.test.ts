@@ -132,7 +132,13 @@ const BASELINE: Record<string, number> = {
   "components/shell/HistoryRail.tsx": 210,
   // 2026-11-17(F1):37 → 56(+19,Σ 的口径悬停 —— 「本次连接以来;权威值在项目页成本段」,
   // 防止把会话内合计读成全历史)。
-  "components/shell/TopBar.tsx": 55,
+  // 2026-11-21(V2):导航挪进左栏,TopBar 只剩状态条 —— 55 → 54(设置/关于
+  // 两个图标 title + aria;成本与连接措辞原样)。
+  "components/shell/TopBar.tsx": 54,
+  // ── 2026-11-21(V2 外壳):AppShell(折叠钮 title/aria)与 Sidebar(五枚
+  //    导航标签 —— 对话/项目/工作项/成员/记忆,功能性文字)逐文件登记。──
+  "app/AppShell.tsx": 22,
+  "app/Sidebar.tsx": 14,
   "components/ui/DataState.tsx": 14,
   "components/ui/Help.tsx": 12,
   "components/ui/MetadataStrip.tsx": 0,
@@ -146,7 +152,7 @@ const BASELINE: Record<string, number> = {
   // 判据与屏上措辞同层(与 orgState/liveHeadline 同一条先例),词表拆出去会变成两处)。
   // 2026-11-17(IA v4 走检):169 → 105(channelNoteText 短式 + projectNowOf 的 · 串退场)
   "lib/data.ts": 105,
-  "lib/deepLink.ts": 0,
+  "app/deepLink.ts": 0,
   "lib/deliverable.ts": 2,
     // 2026-11-17(D7):143 → 156(+13,环节面板的「质检 · 待质检」一格 ——
   // 只在 review_state = pending 时出现,none/done 是常态不上屏)。
@@ -157,7 +163,7 @@ const BASELINE: Record<string, number> = {
   "lib/platformNotices.ts": 22,
   "lib/questionScope.ts": 0,
   "lib/relations.ts": 107,
-  "lib/route.ts": 0,
+  "app/router.ts": 0,
   "lib/scroll.ts": 0,
   // 2026-11-20(v5):表态卡进流的判据层(锚定/塌缩/读不到文案的唯一落点)
   "lib/streamCards.ts": 21,

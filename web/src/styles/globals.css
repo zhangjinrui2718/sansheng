@@ -787,3 +787,170 @@
     opacity: 1;
   }
 }
+
+/* ══════════════════════════════════════════════════════════════
+ * V2 外壳(AppShell/Sidebar/TopBar,设计书 §3.1「frame + 页卡」)
+ * 语义 token 见 theme.css;旧 .sansheng-shell/.grid-cols-app 随旧目录
+ * 在批次 5 一并退场。
+ * ══════════════════════════════════════════════════════════════ */
+@layer components {
+  .ss-app-frame {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    background: var(--app-shell);
+  }
+  .ss-topbar {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    padding: 0 16px;
+    height: 44px;
+    flex: none;
+    border-bottom: 1px solid var(--surface-border);
+    color: var(--text-2);
+    font-size: 12px;
+  }
+  .ss-topbar-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    height: 28px;
+    border-radius: var(--radius-m);
+    border: 1px solid transparent;
+    background: none;
+    color: var(--text-2);
+    cursor: pointer;
+    font-size: 13px;
+    transition: background var(--duration-120) var(--ease-out),
+      color var(--duration-120) var(--ease-out);
+  }
+  .ss-topbar-icon:hover {
+    background: var(--surface-hover);
+    color: var(--text-1);
+  }
+  .ss-topbar-icon[data-active="true"] {
+    background: var(--surface-selected);
+    color: var(--text-1);
+  }
+  .ss-shell-body {
+    flex: 1;
+    display: flex;
+    gap: 12px;
+    min-height: 0;
+    padding: 12px;
+  }
+  .ss-sidebar {
+    display: flex;
+    flex-direction: column;
+    flex: none;
+    min-height: 0;
+    position: relative;
+    border-right: 1px solid var(--surface-border);
+    transition: width var(--duration-200) var(--ease-out);
+  }
+  .ss-sidebar-inner {
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    flex: 1;
+    overflow: hidden;
+  }
+  .ss-nav {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding: 6px;
+    flex: none;
+  }
+  .ss-nav-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    height: 32px;
+    padding: 0 8px;
+    border-radius: var(--radius-m);
+    border: none;
+    background: none;
+    color: var(--ui-nav-item-color);
+    font-size: 13px;
+    text-align: left;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: background var(--duration-120) var(--ease-out),
+      color var(--duration-120) var(--ease-out);
+  }
+  .ss-nav-item:hover {
+    background: var(--ui-nav-item-hover);
+    color: var(--text-1);
+  }
+  .ss-nav-item[data-active="true"] {
+    background: var(--ui-nav-item-active);
+    color: var(--ui-nav-item-active-color);
+  }
+  .ss-sidebar[data-collapsed="true"] .ss-nav-label {
+    display: none;
+  }
+  .ss-sidebar[data-collapsed="true"] .ss-nav-item {
+    justify-content: center;
+    padding: 0;
+  }
+  .ss-sidebar[data-collapsed="true"] .ss-sidebar-divider,
+  .ss-sidebar[data-collapsed="true"] .ss-sidebar-rail {
+    display: none;
+  }
+  .ss-sidebar-divider {
+    height: 1px;
+    flex: none;
+    margin: 4px 10px;
+    background: var(--border);
+  }
+  .ss-sidebar-rail {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    padding: 0 6px 6px;
+  }
+  .ss-sidebar-collapse {
+    flex: none;
+    height: 26px;
+    margin: 0 6px 2px;
+    border-radius: var(--radius-s);
+    border: none;
+    background: none;
+    color: var(--text-3);
+    font-size: 11px;
+    cursor: pointer;
+  }
+  .ss-sidebar-collapse:hover {
+    background: var(--surface-hover);
+    color: var(--text-1);
+  }
+  .ss-page-card {
+    flex: 1;
+    min-width: 0;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    border-radius: var(--ui-page-radius);
+    border: 1px solid var(--ui-page-border);
+    background: var(--ui-page-bg);
+    overflow: hidden;
+  }
+  .ss-button-primary {
+    background: var(--ui-button-primary-bg);
+    color: var(--ui-button-primary-fg);
+    border: none;
+    border-radius: var(--ui-button-radius);
+    cursor: pointer;
+    font-size: 13px;
+  }
+  .ss-button-primary:hover {
+    background: var(--brand-strong);
+  }
+}
+.ss-pulse {
+  animation: ss-pulse var(--pulse-period) var(--ease-out) infinite;
+}

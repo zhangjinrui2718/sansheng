@@ -157,7 +157,7 @@ import {
 } from "@/components/harness/judgments";
 import { useHarnessWorkspace } from "@/components/harness/useHarnessWorkspace";
 import { ROLE_LABEL } from "@/lib/vocab";
-import { toHash, toRoute } from "@/lib/route";
+import { toHash, toRoute } from "@/app/router";
 
 // ── 兼容再导出:老 import 路径(`@/components/members/RoleHarness`)继续成立 ──
 // 判据的实现搬去了 `components/harness/`,但成员页与两份既有测试仍从这里 import

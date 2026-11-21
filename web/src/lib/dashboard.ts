@@ -25,7 +25,7 @@
  * 3. **没有待办就说没有** —— 但**不许**编一件出来充数
  *    (「一切顺利」不是待办,「没有需要你动作的事」才是事实)。
  */
-import type { AppLocation } from "./route";
+import type { AppLocation } from "../app/router";
 import { blockerLocation, projectLocation, workLocation } from "./entityMeta";
 import type { BlockerView, ProjectLiveView, WorkView } from "@shared/types/platform";
 

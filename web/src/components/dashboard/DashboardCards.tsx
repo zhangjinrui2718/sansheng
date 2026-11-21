@@ -20,8 +20,8 @@
  * 3. **「最要紧」是排序不是评价** —— 判据在 `lib/dashboard.ts`,
  *    全部来自库里读到的状态,一条也不来自模型。
  */
-import { toHash } from "@/lib/route";
-import type { AppLocation } from "@/lib/route";
+import { toHash } from "@/app/router";
+import type { AppLocation } from "@/app/router";
 import type { CountCard, NextThing } from "@/lib/dashboard";
 
 export function DashboardCards({

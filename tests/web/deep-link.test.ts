@@ -11,7 +11,7 @@
  * ⚠️ **这个机制踩过一个坑**:改版前 `routes/ProjectDetail.tsx` 有一份自己的
  * `?project=` 效果(每次渲染都看地址里的项目就切过去)⇒ **用户从左栏切了项目**
  * ⇒ 那个效果又把他拽回去 ⇒ 「切项目」这个动作被撤销,症状是「点左栏没反应」。
- * ⇒ 现在这件事**只有一处**做(`lib/deepLink.ts`),并且**坐标过期就清掉**。
+ * ⇒ 现在这件事**只有一处**做(`app/deepLink.ts`),并且**坐标过期就清掉**。
  *
  * ── 测什么 ────────────────────────────────────────────────────────
  *
@@ -27,14 +27,14 @@ import {
   INITIAL_COORDINATE_STATE,
   decideCoordinate,
   shouldApplyProjectCoordinate,
-} from "../../web/src/lib/deepLink";
+} from "../../web/src/app/deepLink";
 import {
   chunkSourceLabel,
   chunkSourceLocation,
   withProjectCoordinate,
 } from "../../web/src/lib/entityMeta";
-import { toHash } from "../../web/src/lib/route";
-import { shouldClearSelection } from "../../web/src/lib/route";
+import { toHash } from "../../web/src/app/router";
+import { shouldClearSelection } from "../../web/src/app/router";
 import type { KnowledgeChunkView } from "../../shared/types/platform";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -44,7 +44,7 @@ const read = (rel: string): string =>
 const stripComments = (src: string): string =>
   src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/.*$/gm, "$1");
 
-const deepLink = read("web/src/lib/deepLink.ts");
+const deepLink = read("web/src/app/deepLink.ts");
 const app = read("web/src/App.tsx");
 const projectDetail = read("web/src/routes/ProjectDetail.tsx");
 const memory = read("web/src/routes/Memory.tsx");
