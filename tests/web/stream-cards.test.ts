@@ -352,12 +352,17 @@ describe("ActionRail · 行动区渲染", () => {
   });
 
   it("展开表单复用既有卡身(动作只有一份实现,ActionRail 不重写提交逻辑)", () => {
+    // 2026-11-21:验收面板抽成共享件 components/deliverable/AcceptancePanel
+    // (行动区与工件序列页两处消费);提问/计划卡身仍直接复用。
     const s = source("features/chat/ActionRail.tsx");
     expect(s).toContain("<ClientQuestionCard");
-    expect(s).toContain("<DeliveryVerdictActions");
     expect(s).toContain("<PlanConfirmCard");
+    expect(s).toContain("<AcceptancePanel");
+    expect(s).not.toContain("<DeliveryVerdictActions"); // 不经面板直引 = 出现第二份组装
+    const panel = source("components/deliverable/AcceptancePanel.tsx");
+    expect(panel).toContain("<DeliveryVerdictActions");
     // 懒加载纪律照旧:正文点开才挂
-    expect(s).toContain("{showBody && <InlineDeliverableBody");
+    expect(panel).toContain("{showBody && <InlineDeliverableBody");
   });
 });
 

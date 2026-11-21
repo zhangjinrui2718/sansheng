@@ -13,8 +13,7 @@
  * ⚠️ 状态点颜色 = theme.css 的 --status-wait-*(四状态点映射表,唯一一份)。
  */
 import { useState } from "react";
-import { DeliveryVerdictActions } from "@/components/deliverable/DeliveryVerdictActions";
-import { InlineDeliverableBody } from "@/components/deliverable/InlineDeliverableBody";
+import { AcceptancePanel } from "@/components/deliverable/AcceptancePanel";
 import { ClientQuestionCard } from "./ClientQuestionCard";
 import { PlanConfirmCard } from "./PlanConfirmCard";
 import { excerpt } from "@/lib/vocab";
@@ -99,7 +98,7 @@ export function ActionRail(props: {
                   <ClientQuestionCard q={item.q} />
                 )}
                 {item.type === "acceptance" && (
-                  <AcceptanceForm artifactId={item.a.artifactId} title={item.a.title} />
+                  <AcceptancePanel artifactId={item.a.artifactId} title={item.a.title} />
                 )}
               </div>
             )}
@@ -113,30 +112,3 @@ export function ActionRail(props: {
   );
 }
 
-/** 验收展开表单:裁决动作 + 「查看正文」懒加载(v5 AcceptanceCard 的动作原样)。 */
-function AcceptanceForm(props: { artifactId: string; title: string }) {
-  const [showBody, setShowBody] = useState(false);
-  return (
-    <div className="flex flex-col gap-2">
-      <DeliveryVerdictActions
-        artifactId={props.artifactId}
-        title={props.title}
-        // awaitingAcceptance 只含「已交付、还没表态」的 ⇒ 这里恒为未表态;
-        // 裁决之后这张行动项消失,塌缩行(stream-facts)承载结果。
-        acceptance={{ handedOver: true, verdict: null, note: null, at: null, projectClosed: false }}
-      />
-      <div>
-        <button
-          type="button"
-          className="sansheng-button"
-          style={{ padding: "2px 10px", fontSize: 11 }}
-          onClick={() => setShowBody((v) => !v)}
-          data-role="acceptance-toggle"
-        >
-          {showBody ? "收起正文" : "查看正文"}
-        </button>
-      </div>
-      {showBody && <InlineDeliverableBody artifactId={props.artifactId} title={props.title} />}
-    </div>
-  );
-}

@@ -23,6 +23,7 @@ import { DataState, remoteListOf } from "@/components/ui/DataState";
 import { EmptyState } from "@/components/ui/primitives";
 import { EntityInspector } from "@/components/shell/EntityInspector";
 import { InlineDeliverableBody } from "@/components/deliverable/InlineDeliverableBody";
+import { AcceptancePanel } from "@/components/deliverable/AcceptancePanel";
 import { artifactMeta } from "@/lib/entityMeta";
 import {
   artifactKindLabel,
@@ -35,6 +36,8 @@ import type { ArtifactView } from "@shared/types/platform";
 /** 交付物的裁决态行(甲方视角的那一句话;非交付物没有这一段,显示定稿状态)。 */
 function verdictLabelOf(a: ArtifactView): { label: string; color: string } | null {
   if (a.deliverableType === null || a.acceptance === null) return null;
+  // 被替代的旧版:版本态优先于裁决态(它的裁决已被新版接管)。
+  if (a.status === "superseded") return { label: "已被替代", color: "var(--text-3)" };
   const acc = a.acceptance;
   if (!acc.handedOver) return { label: "未交付", color: "var(--text-3)" };
   if (acc.verdict === null) return { label: "待你验收", color: "var(--status-wait-acceptance)" };
@@ -51,6 +54,8 @@ export function ArtifactFlowPage() {
   const artifactsState = useArtifacts({ projectId: effectiveProjectId });
   const [onlyDeliverables, setOnlyDeliverables] = useState(false);
   const [openId, setOpenId] = useState<string | null>(null);
+  /** 行内验收展开的工件 id(四状态点③直接在工件上完成 —— 一等公民)。 */
+  const [acceptingId, setAcceptingId] = useState<string | null>(null);
 
   const works = detailState.detail?.works ?? [];
   const inspected = useMemo(
@@ -108,9 +113,18 @@ export function ArtifactFlowPage() {
                   {sorted.map((a) => {
                     const verdict = verdictLabelOf(a);
                     const isDeliverable = a.deliverableType !== null;
+                    const superseded = a.status === "superseded";
+                    const accepting =
+                      acceptingId === a.id &&
+                      verdict !== null &&
+                      verdict.label === "待你验收";
                     return (
-                      <button
+                      <div
                         key={a.id}
+                        className="ss-artifact-item"
+                        data-superseded={superseded ? "true" : undefined}
+                      >
+                      <button
                         type="button"
                         className="ss-artifact-row"
                         data-deliverable={isDeliverable ? "true" : undefined}
@@ -135,7 +149,34 @@ export function ArtifactFlowPage() {
                             {artifactStatusLabel(a.status)}
                           </span>
                         )}
+                        {/* 待验收 ⇒ 行内直达验收(一等公民:验收发生在工件上,
+                            不用切回对话页找行动区)。 */}
+                        {verdict?.label === "待你验收" && (
+                          <span
+                            role="button"
+                            tabIndex={0}
+                            className="ss-artifact-accept"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setAcceptingId(accepting ? null : a.id);
+                            }}
+                            onKeyDown={(e) => {
+                              if (e.key === "Enter" || e.key === " ") {
+                                e.stopPropagation();
+                                setAcceptingId(accepting ? null : a.id);
+                              }
+                            }}
+                          >
+                            {accepting ? "收起" : "验收"}
+                          </span>
+                        )}
                       </button>
+                      {accepting && (
+                        <div className="ss-artifact-accept-form">
+                          <AcceptancePanel artifactId={a.id} title={a.title} />
+                        </div>
+                      )}
+                      </div>
                     );
                   })}
                 </div>

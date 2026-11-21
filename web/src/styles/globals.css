@@ -1070,3 +1070,32 @@
     font-size: 12px;
   }
 }
+
+/* 工件序列:被替代的旧版降淡;行内验收入口 */
+@layer components {
+  .ss-artifact-item[data-superseded="true"] .ss-artifact-row {
+    opacity: 0.55;
+  }
+  .ss-artifact-item[data-superseded="true"] .ss-artifact-title {
+    text-decoration: line-through;
+    text-decoration-color: var(--text-3);
+  }
+  .ss-artifact-accept {
+    flex: none;
+    font-size: 12px;
+    color: var(--brand);
+    cursor: pointer;
+    padding: 2px 8px;
+    border-radius: var(--radius-s);
+    border: 1px solid var(--brand-soft);
+  }
+  .ss-artifact-accept:hover {
+    background: var(--brand-soft);
+  }
+  .ss-artifact-accept-form {
+    padding: 10px 12px;
+    border-top: 1px dashed var(--surface-border);
+    border-radius: 0 0 var(--radius-m) var(--radius-m);
+    background: var(--surface-raised);
+  }
+}

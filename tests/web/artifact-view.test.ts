@@ -75,7 +75,9 @@ describe("② 验收卡的「查看正文」(懒加载,bodyMode 唯一分发)", 
     );
     expect(rail).toContain("验收");
     expect(rail).not.toContain("读取工件详情"); // 没点开就不取详情
-    const s = source("features/chat/ActionRail.tsx");
+    // 2026-11-21:验收面板抽成共享件(components/deliverable/AcceptancePanel),
+    // 行动区与工件序列页两处消费 —— 动作只有一份实现。
+    const s = source("components/deliverable/AcceptancePanel.tsx");
     expect(s).toContain("{showBody && <InlineDeliverableBody");
   });
 

@@ -83,7 +83,8 @@ const BASELINE: Record<string, number> = {
   // 卡文案随卡身搬走)。
   "features/chat/ActionRail.tsx": 50,
   // 2026-11-21(工件一等公民):交付序列页 —— 裁决态行/空态/引导的功能性文字。
-  "features/artifacts/ArtifactFlow.tsx": 118,
+    // 2026-11-21(批次3):行内验收(待你验收⇒工件上直接展开)+ 已被替代降淡。
+  "features/artifacts/ArtifactFlow.tsx": 134,
   "features/chat/StreamFacts.tsx": 24,
   "features/chat/ThinkingBlock.tsx": 25,
   "features/chat/ToolCallCard.tsx": 0,
@@ -95,6 +96,8 @@ const BASELINE: Record<string, number> = {
   "components/dashboard/DashboardCards.tsx": 17,
   // 2026-11-20(v5 Wave B):484 → 468 —— 一级条目拼接行被交付时点文件树取代
   // (树 + 选中预览;新增文案砍掉了悬停与尾巴短语后净降)。
+    // 2026-11-21(批次3):验收面板抽成共享件(行动区+工件序列两处消费)。
+  "components/deliverable/AcceptancePanel.tsx": 8,
   "components/deliverable/CodeService.tsx": 468,
   // 2026-11-20(v5 Wave B):从 routes/Works.tsx 搬出(流内展开共用一份),
   // 裸 <pre> 换 markdown;三态判据逐字继承。
