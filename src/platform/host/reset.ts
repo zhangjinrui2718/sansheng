@@ -60,6 +60,11 @@ export const PLATFORM_DATA_TABLES: readonly string[] = [
   "dispatch_events",
   "dispatch_attempts",
   "turn_usage",
+  // 2026-11-22(multica 借鉴批次):三张新表 —— 都引 projects(/ agents / works),
+  // 与上面三张同一条「子先于父」的外键安全顺序。
+  "turn_events",
+  "queued_client_messages",
+  "wakeups",
   // BC-020 甲方提问台账
   //
   // ⚠️ 它同时引 `artifacts` 与 `projects` ⇒ 必须排在**两者之前**(外键安全顺序:

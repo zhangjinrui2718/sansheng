@@ -246,6 +246,11 @@ export interface WorkRow {
    * 本仓储对 `listWorks` 的排序保持 `created_at`(读面的既有次序,别顺手改)。
    */
   priority: number;
+  /**
+   * **工作项级验收判据**(037,JSON 数组,与 031 的项目级同形)。
+   * 空数组 = 还没有结构化判据(存量行/没写)—— 读面如实显示,质检退回 goal 口径。
+   */
+  acceptanceCriteria: string[];
   assigneeAgentId: string;
   createdAt: number;
   updatedAt: number;
@@ -261,6 +266,7 @@ interface RawWork {
   review_state: string;
   confirmed_at: number | null;
   priority: number;
+  acceptance_criteria: string | null;
   assignee_agent_id: string;
   created_at: number;
   updated_at: number;
@@ -278,6 +284,18 @@ function rowToWork(raw: RawWork): WorkRow {
   if (typeof raw.priority !== "number" || !Number.isFinite(raw.priority)) {
     throw new Error(`works 表里出现未定义 priority「${raw.priority}」(id=${raw.id})`);
   }
+  // 判据解析容错(037,照抄 repo/projects.ts 031 的处置):坏 JSON / 类型不对
+  // ⇒ 空数组且不抛 —— 一个判据存坏了不该让工作项读不出来;空数组 =
+  // 「还没有结构化判据」,调用方按各自的口径如实呈现。
+  let acceptanceCriteria: string[] = [];
+  try {
+    const parsed: unknown = JSON.parse(raw.acceptance_criteria ?? "[]");
+    if (Array.isArray(parsed)) {
+      acceptanceCriteria = parsed.filter((x): x is string => typeof x === "string");
+    }
+  } catch {
+    /* 坏值按空数组处理 */
+  }
   return {
     id: raw.id,
     projectId: raw.project_id,
@@ -288,6 +306,7 @@ function rowToWork(raw: RawWork): WorkRow {
     reviewState: raw.review_state,
     confirmedAt: raw.confirmed_at,
     priority: raw.priority,
+    acceptanceCriteria,
     assigneeAgentId: raw.assignee_agent_id,
     createdAt: raw.created_at,
     updatedAt: raw.updated_at,
@@ -310,9 +329,11 @@ function initialReviewState(status: WorkStatus): ReviewState {
  * `priority` 同理可省(缺省 {@link DEFAULT_WORK_PRIORITY});显式给的值在
  * 这里再 clamp 一次,让「写口只出 0–9 的整数」不依赖每个调用方都记得 clamp。
  */
-export type NewWorkRow = Omit<WorkRow, "reviewState" | "priority" | "confirmedAt"> & {
+export type NewWorkRow = Omit<WorkRow, "reviewState" | "priority" | "confirmedAt" | "acceptanceCriteria"> & {
   readonly reviewState?: ReviewState;
   readonly priority?: number;
+  /** 工作项级验收判据(037);缺省 = 空数组(还没有结构化判据,如实)。 */
+  readonly acceptanceCriteria?: string[];
   /**
    * 显式给 `confirmedAt` 只为重建历史数据;正常新建**恒为未确认**(NULL)——
    * D3:确认开工是甲方的那一刻,不是项目经理的。
@@ -323,13 +344,15 @@ export type NewWorkRow = Omit<WorkRow, "reviewState" | "priority" | "confirmedAt
 export function insertWork(db: Database.Database, row: NewWorkRow): void {
   db.prepare(
     `INSERT INTO works (id, project_id, parent_work_id, title, goal, status, review_state,
-                        confirmed_at, priority, assignee_agent_id, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                        confirmed_at, priority, acceptance_criteria, assignee_agent_id, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     row.id, row.projectId, row.parentWorkId, row.title, row.goal,
     row.status, row.reviewState ?? initialReviewState(row.status),
     row.confirmedAt ?? null,
-    clampWorkPriority(row.priority ?? DEFAULT_WORK_PRIORITY), row.assigneeAgentId,
+    clampWorkPriority(row.priority ?? DEFAULT_WORK_PRIORITY),
+    JSON.stringify(row.acceptanceCriteria ?? []),
+    row.assigneeAgentId,
     row.createdAt, row.updatedAt,
   );
 }
@@ -352,6 +375,23 @@ export function confirmWorks(db: Database.Database, projectId: string, now: numb
 export function getWork(db: Database.Database, id: string): WorkRow | null {
   const raw = db.prepare(`SELECT * FROM works WHERE id = ?`).get(id) as RawWork | undefined;
   return raw ? rowToWork(raw) : null;
+}
+
+/**
+ * 整体替换工作项的验收判据(037)。与 `setWorkDeps` 同一条语义:给 `[]` = 清空
+ * (「这条没有结构化判据了」也是一个合法的显式动作),不是「没改」。
+ * 只动这一列 —— 判据是拆解期字段,不构成流水线状态迁移,不推 `updated_at`
+ * (它不是 `works.status` 那种「目标行版本」,见 `DriverTodo.targetState` 的语义)。
+ */
+export function updateWorkAcceptance(
+  db: Database.Database,
+  id: string,
+  criteria: readonly string[],
+): boolean {
+  const r = db
+    .prepare(`UPDATE works SET acceptance_criteria = ? WHERE id = ?`)
+    .run(JSON.stringify(criteria), id);
+  return r.changes > 0;
 }
 
 export interface ListWorksFilter {

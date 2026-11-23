@@ -60,6 +60,8 @@ import { resetPlatformData } from "./reset.js";
 import {
   appendSessionMessage, getSession, type SessionChannel,
 } from "../storage/repo/sessions.js";
+import { insertQueuedClientMessage } from "../storage/repo/queuedClientMessages.js";
+import { cancelExhaustedWakeups } from "../storage/repo/wakeups.js";
 import { ROLE_SPECS } from "../identity/role.js";
 import { resolveClientQuestion } from "../tools/client.js";
 import { listProjectSummaries, type LiveCollectOptions } from "../transport/views.js";
@@ -1341,6 +1343,33 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
     }
   }
 
+  /**
+   * 丢掉**一条**常驻会话(精确到 `(上下文, 线, 角色)`)—— 2026-11-22(⑥):
+   * context overflow 的处置是「换新会话」,不是「换家」(别的会话没病),
+   * 也不是「丢整个上下文」(那会把无辜角色的上下文一起清掉)。
+   * 下一次 `getOrCreateSession` 会重建,新会话从库里重放历史
+   * (`renderConversationHistory`,2026-10-07 那套)。
+   */
+  function disposeOneSession(
+    projectId: string | null,
+    sessionId: string,
+    agentId: string,
+    why: string,
+  ): void {
+    const key = pooledKey(projectId, sessionId, agentId);
+    const s = sessions.get(key);
+    if (s === undefined) return; // 幂等:本来就没有
+    try {
+      s.dispose();
+    } catch {
+      /* dispose 失败不影响「这条会话已经不该再用」这个事实 */
+    }
+    sessions.delete(key);
+    log.muted(
+      `platform: 已丢弃${channelLabel(projectId)}上 ${agentId} 在会话 ${sessionId} 的常驻会话(${why})`,
+    );
+  }
+
   /** 丢掉全部常驻会话(设置变更 / 数据重置 / 关闭)。 */
   function disposeAllSessions(why: string): void {
     const n = sessions.size;
@@ -1380,6 +1409,9 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
     {
       onUserMessage: async (projectId, content, sessionId) => {
         await handleUserMessage(projectId, content, sessionId);
+      },
+      onUserMessageQueued: async (projectId, content, sessionId) => {
+        await handleUserMessageWhileBusy(projectId, content, sessionId);
       },
       onAnswerQuestion: async (questionId, answer) => {
         // ⚠️ **答复要落一条 `decision` 工件,而工件正文住项目仓里的文件** ——
@@ -1474,6 +1506,94 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
    * 把接待会话的消息迁进新项目、丢掉接待会话、广播 `project_opened` 让前端切过去。
    * **用户从不需要填「创建项目」表单**:立项是业务经理的动作。
    */
+  /**
+   * 解析「甲方这句话发到哪条对话线」—— `handleUserMessage` 与
+   * `handleUserMessageWhileBusy`(036)共用的**唯一**判据。
+   *
+   * ⚠️ **校验它属于这个项目** —— 不校验就是「一条线可以被任意项目引用」,消息会
+   * 落进一个甲方在当前界面**看不见**的会话,而界面上什么都不显示
+   * (7-N:见不到的现场等于没有现场)。
+   *
+   * ⚠️ **接待会话不接受 `sessionId`**:全局只有一条(`idx_session_single_intake`),
+   * 给了别的 id 只会是一条不属于这里的会话。
+   *
+   * 返回 `null` = 解析失败(错误已广播,调用方直接 return)。
+   */
+  function resolveClientTargetSession(
+    projectId: string | null,
+    onSession: string | undefined,
+  ): string | null {
+    if (onSession !== undefined) {
+      const row = getSession(db, onSession);
+      if (row === null || row.projectId !== projectId) {
+        hub.broadcast({
+          type: "error", projectId,
+          error: {
+            code: "not_found",
+            message: `对话 ${onSession} 不在这个项目里 —— 消息没有落进去(而不是落到某处你看不见的地方)`,
+          },
+        });
+        return null;
+      }
+      return onSession;
+    }
+    // **未指定线 = 主对话**(`ensureMainSession`)—— 与「甲方在界面上发消息」那条路
+    // 一致:前端总是把当前选中的线带上(`line ?? undefined`),而它默认选中的就是
+    // `kind='main'`。
+    return ensureMainSession(db, projectId, now(), newId);
+  }
+
+  /**
+   * **忙时排队**(036,2026-11-22):收件人正跑回合时甲方又说了话。
+   *
+   * 消息**照常落库并广播**(它本来就是一条会话消息,对话页要显示),多做的
+   * 只有两件事:记一条排队账(`queued_client_messages`)+ 广播 `message_queued`
+   * (「他现在顾不上,但这句话没有丢」)。**不跑回合** —— 收件人还占着
+   * `(项目, 业务经理)` 那条闩;排空器的 `answer_client_message` 待办会在他
+   * 空出来时(下一次 tick,≤10s)把同一条线上排队的所有话一并带上。
+   *
+   * ⚠️ **只可能被 hub 的忙分支叫到**(那里已同步判过忙闩,同 tick 无竞态);
+   * 这里的项目存在性校验与 `handleUserMessage` 同一条判据 —— 不存在的话
+   * 消息无处落,如实报错而不是悄悄丢。
+   */
+  async function handleUserMessageWhileBusy(
+    projectId: string,
+    content: string,
+    onSession?: string,
+  ): Promise<void> {
+    if (getProjectRow(db, projectId) === null) {
+      hub.broadcast({
+        type: "error", projectId,
+        error: { code: "not_found", message: "项目不存在" },
+      });
+      return;
+    }
+    ensureOrg(db, now());
+    const at = now();
+    const sessionId = resolveClientTargetSession(projectId, onSession);
+    if (sessionId === null) return;
+
+    const userMessageId = newId("m");
+    appendSessionMessage(db, {
+      id: userMessageId, sessionId, agentId: null, kind: "user", content, createdAt: at,
+      // 与 `handleUserMessage` 同一份封套:排队的那句**也是甲方亲口发起的**,
+      // 只是它的回合还没跑 —— 判据写的是「这句话从哪来」,不是「它何时被回应」。
+      originSource: "turn", triggerKind: "user",
+    });
+    hub.emitMessageStart(projectId, sessionId, userMessageId, "user", null, { kind: "user" });
+    hub.emitDelta(projectId, sessionId, userMessageId, content);
+    hub.emitMessageEnd(projectId, sessionId, userMessageId);
+
+    insertQueuedClientMessage(db, {
+      id: newId("qm"), projectId, sessionId,
+      messageId: userMessageId, createdAt: at, consumedAt: null,
+    });
+    hub.broadcast({ type: "message_queued", projectId, sessionId, messageId: userMessageId });
+    log.muted(
+      `platform: 甲方在忙时说了话,已排队(${sessionId} · ${userMessageId})—— 收件人下一轮带上`,
+    );
+  }
+
   async function handleUserMessage(
     projectId: string | null,
     content: string,
@@ -1507,35 +1627,11 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
     const at = now();
     // ── 解析「发到哪条对话线」(migration 024)────────────────────────
     //
-    // ⚠️ **校验它属于这个项目** —— 不校验就是「一条线可以被任意项目引用」,消息会
-    // 落进一个甲方在当前界面**看不见**的会话,而界面上什么都不显示
-    // (7-N:见不到的现场等于没有现场)。
-    //
-    // ⚠️ **接待会话不接受 `sessionId`**:全局只有一条(`idx_session_single_intake`),
-    // 给了别的 id 只会是一条不属于这里的会话。
-    let target = onSession;
-    if (target !== undefined) {
-      const row = getSession(db, target);
-      if (row === null || row.projectId !== projectId) {
-        hub.broadcast({
-          type: "error", projectId,
-          error: {
-            code: "not_found",
-            message: `对话 ${target} 不在这个项目里 —— 消息没有落进去(而不是落到某处你看不见的地方)`,
-          },
-        });
-        return;
-      }
-    } else {
-      // **未指定线 = 主对话**(`ensureMainSession`)—— 与「甲方在界面上发消息」那条路
-      // 一致:前端总是把当前选中的线带上(`line ?? undefined`),而它默认选中的就是
-      // `kind='main'`。⚠️ 这里原来是 `ensureSession(..., 'client')`,注释写着「交付
-      // 对话开出来之后它落在那场交付的对话里」—— 那条规矩让**同一个甲方的两句话
-      // 落在两条不同的线**上(界面发的落主对话、API 发的落交付线),见
-      // `ensureMainSession` 的注释里那张对照表。
-      target = ensureMainSession(db, projectId, at, newId);
-    }
-    const sessionId = target;
+    // ⚠️ **判据与文案只有一份**(2026-11-22 提取):`handleUserMessageWhileBusy`
+    // (忙时排队,036)与这条路解析的是**同一件事**,两处各写一遍的那天就是
+    // 「排队的消息落错了线、而两条路的报错长得不一样」的那天。
+    const sessionId = resolveClientTargetSession(projectId, onSession);
+    if (sessionId === null) return;
 
     // 1. 用户消息先落库 —— 落库和广播的顺序反了会出现「用户看见自己说了话,
     //    刷新后它没了」
@@ -2119,6 +2215,19 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
           // 并让「叫醒三次」的预算真被烧掉一次 —— 外部在拒绝时烧掉那个
           // **给人用**的预算才是对的)。
           providerRejected = true;
+          // ── ⑥(2026-11-22):上下文超长 = 病在会话,不在供应商 ──────────
+          // 换新会话(dispose 精确到这一条),甲方下一次说话自动从库里重放历史。
+          // 不刹车(下面那个 if 按 retryable 判,context_overflow 本就不进任何轴)。
+          if (failure.kind === "context_overflow") {
+            disposeOneSession(
+              projectId, sessionId, agentId,
+              "context overflow(resume-unsafe,下一轮换新会话)",
+            );
+            log.warn(
+              `platform: ${channelLabel(projectId)}上 ${agentId} 的对话回合撞上上下文超长 —— ` +
+                `已丢弃这条常驻会话,下一轮从库里重放历史开新会话`,
+            );
+          }
           // ── 全局刹车(批次 31 建立短轴;2026-11-14 双轴化)──────────
           // 降不了 ⇒ 进退避,暂停自动派发:限流/断网/5xx 走**短轴**(30s→8min,
           // 窗口自己会好);**quota 走长轴**(30min→24h,探测式恢复:额度这类
@@ -2158,9 +2267,11 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
         const nextStep =
           degraded !== null
             ? "已切到备用 provider,请重发一次"
-            : failure.retryable
-              ? "可以稍后重试,或到「设置」里换一个 provider"
-              : "需要到「设置」里换 provider 或检查账号额度/凭据";
+            : failure.kind === "context_overflow"
+              ? "这条会话太长了 —— 平台已换新会话,请再发一次(历史会自动带过去)"
+              : failure.retryable
+                ? "可以稍后重试,或到「设置」里换一个 provider"
+                : "需要到「设置」里换 provider 或检查账号额度/凭据";
         hub.broadcast({
           type: "error", projectId,
           error: {
@@ -2376,6 +2487,8 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
       let providerMarkedFailed = false;
       /** 刹车路径(批次 31):可重试 + 零工具调用 + 降不了 ⇒ 不记 failed,进退避。 */
       let providerBrakePaused = false;
+      /** ⑥:上下文超长 ⇒ 换新会话重试(不记 failed、不重置预算,见报告字段)。 */
+      let providerSessionReset = false;
       if (execution.turn.providerError != null) {
         const failure = execution.turn.providerError;
         const retries = execution.turn.providerRetries ?? 0;
@@ -2414,6 +2527,37 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
                 retries,
                 `${degraded.provider}/${degraded.modelId}`,
                 "已切到备用 provider,这条工作项会被重新派发",
+              ),
+            },
+          });
+        } else if (failure.kind === "context_overflow") {
+          // ── ⑥(2026-11-22):上下文超长 —— 病在会话,不在供应商 ──────────
+          //
+          // 换家没用(分类器因此 `retryable:false`)、等也没用(窗口不会变大)。
+          // 处置 = **换新会话**:dispose 这条 `(项目, 线, 角色)` 的常驻会话,
+          // 下一次派发 `getOrCreateSession` 会重建,新会话从库里重放历史
+          // (2026-10-07 那套)。工作项**不记 failed**(仍在 `board.runnable`,
+          // 下一次 tick 自动重派),**不重置预算**(重试买的是新会话;若历史
+          // 本身就超限,新会话一样撞 —— 三次之后升级换人,预算正是那道闸)。
+          providerSessionReset = true;
+          disposeOneSession(
+            projectId, sessionId, agentId,
+            "context overflow(resume-unsafe,下一次派发换新会话)",
+          );
+          log.warn(
+            `platform: 工作项 ${workId}「${execution.work.title}」的回合撞上上下文超长 —— ` +
+              `已丢弃这条常驻会话,活儿原封不动等下一次派发(新会话重放历史;` +
+              `连续 3 次会升级换人)`,
+          );
+          hub.broadcast({
+            type: "error", projectId,
+            error: {
+              code: "provider_error",
+              message: providerFailureMessage(
+                failure,
+                retries,
+                null,
+                "这条会话太长了 —— 平台已换新会话重试;若历史本身超限,三次后会升级处置",
               ),
             },
           });
@@ -2563,6 +2707,7 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
         // `board.runnable` 里),dispatcher 见到它同样重置尝试预算 ——
         // 刹车到期后定时器自动重派,不需要任何人动手。
         ...(providerBrakePaused ? { brakePaused: true } : {}),
+        ...(providerSessionReset ? { sessionReset: true } : {}),
       };
     } catch (e) {
       outcomeLabel = aborted ? "被中断" : "失败";
@@ -2815,6 +2960,35 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
       log.muted(`platform: ${channelLabel(projectId)}的业务经理正在跟甲方说话,跳过本次排空`);
       return null;
     }
+    // ── 熔断扫描(⑤,038,2026-11-22)────────────────────────────────
+    //
+    // 预算烧穿的 pending 唤醒不许变僵尸:自动 `cancelled` + 落一条 `⚠️ 定时`
+    // 系统消息(multica 的 autopilot 高失败率自动暂停同款)。放在**宿主**这一侧
+    // 而不是规则的 `if` 里 —— 规则是纯查询(§11.3 的结构保证),写库的活归宿主。
+    // 幂等:cancelled 是终态,扫过就不再命中;**每趟排空前扫一遍**的成本是
+    // 一条 SQL(它是 `wakeup_due` 那条待办不再产出的对称面)。
+    for (const w of cancelExhaustedWakeups(db, projectId)) {
+      log.warn(
+        `platform:${channelLabel(projectId)}的定时唤醒 ${w.id} 连续叫不醒(尝试预算到顶)` +
+          `—— 已自动取消:${w.note}`,
+      );
+      // ⚠️ 首行前缀 `⚠️ 定时`:与 `⚠️ 供应商` / `⚠️ 工作区` 同族 —— 前端
+      // `platformNotices.ts` 按首行前缀分类,不认识的前缀落「记录」桶,如实渲染。
+      const sessionId = ensureSession(db, projectId, now(), newId, "internal");
+      appendSessionMessage(db, {
+        id: newId("m"),
+        sessionId,
+        agentId: null,
+        kind: "system",
+        content:
+          `⚠️ 定时:唤醒已自动取消 —— ${w.id}(「${w.note}」)连续叫醒到尝试预算上限` +
+          `仍没有跑成一轮,平台不再重复点火(多半是 provider 或上下文的问题)。` +
+          `需要的话让业务经理重排一个。`,
+        createdAt: now(),
+        // 平台通知不属于任何封套(与 `announceProviderFailover` 同)。
+        originSource: null, triggerKind: null,
+      });
+    }
     /** 这一轮排空被用户中断过 —— 传进 dispatcher 让它立刻停 */
     let cancelled = false;
     // ⚠️ 这里**没有** `hub.setBusy(projectId, …)`,也**没有** `inflight.delete(projectId)`:
@@ -2839,9 +3013,13 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
       // 把它翻成契约的 `trigger` —— 这是「runtime 的待办种类」跨到「回合为什么
       // 存在」的**唯一**一处接缝:`runAgentTurn` 不可能自己知道,因为它拿到的
       // 只是 `(agentId, task)`。
-      runAgentTurn: async (agentId, task, todoKind): Promise<DrainTurnReport> => {
+      runAgentTurn: async (agentId, task, todoKind, sessionId): Promise<DrainTurnReport> => {
         return withTurnLatch(projectId, agentId, { kind: "todo", todoKind }, async () => {
-          const r = await runAgentTurn(projectId, agentId, task, { kind: "todo", todoKind });
+          // `sessionId`(036):answer_client_message 的回应落在甲方排队的那条线;
+          // 其余待办不传 ⇒ runAgentTurn 自己取主对话(缺省行为不变)。
+          const r = await runAgentTurn(
+            projectId, agentId, task, { kind: "todo", todoKind }, sessionId,
+          );
           if (r.aborted) cancelled = true;
           return {
             aborted: r.aborted, timedOut: r.timedOut, text: r.text, toolCalls: r.toolCalls,

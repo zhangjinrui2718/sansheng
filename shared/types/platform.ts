@@ -288,6 +288,12 @@ export interface WorkView {
    * 存量行恒为 3(DEFAULT,不回填)。
    */
   priority: number;
+  /**
+   * 工作项级验收判据(migration 037,与项目级 031 同形):每条一个可检验的句子。
+   * 空数组 = 还没有结构化判据(读面如实显示「未给」,质检退回 goal 口径)。
+   * 类型可选与 `reviewState` 同一条先例:后端必给,存量测试夹具不必逐个补字段。
+   */
+  acceptanceCriteria?: string[];
   createdAt: number;
   updatedAt: number;
   /**
@@ -1418,6 +1424,45 @@ export interface AgentConversationsResponse {
   truncated: boolean;
 }
 
+// ── 执行日志(一个回合「做了什么」;migration 035 的 `turn_events`)──
+//
+// 与 `session_messages`(他说了什么)/ `turn_usage`(烧了多少)三种粒度
+// 三张表不混装 —— 这一份只回答「他做了什么」:逐次工具调用、provider 故障、
+// 回合级标记(墙钟打断 / 无下文)。正文不在这里(在对话),账不在这里(在用量)。
+export interface TurnEventItemView {
+  /** 回合内单调(1 起)—— 读面按它排序,不按时间戳(同批写入同毫秒) */
+  seq: number;
+  kind: "tool" | "provider_error" | "marker";
+  /** `kind='tool'` 时的工具名;其余 `null` */
+  tool: string | null;
+  argsSummary: string;
+  resultSummary: string;
+  isError: boolean;
+  /** `kind='tool'` 时的调用时长(毫秒);其余 `null` */
+  durationMs: number | null;
+}
+
+/** 一个回合的完整轨迹(同一 `turnId` 的全部行,按 `seq` 升序)。 */
+export interface AgentTurnView {
+  turnId: string;
+  sessionId: string | null;
+  workId: string | null;
+  createdAt: number;
+  events: TurnEventItemView[];
+}
+
+/**
+ * `GET /api/projects/:id/agents/:agentId/turn-events` —— 成员页「他做了什么」。
+ *
+ * 空的 `turns` 是合法答案(他还没跑过任何留下轨迹的回合),不是读不到。
+ */
+export interface AgentTurnEventsResponse {
+  projectId: string;
+  agentId: string;
+  /** 最新回合在前 */
+  turns: AgentTurnView[];
+}
+
 // ── 用量(回合烧了多少 token;migration 018 的 `turn_usage`)────────
 //
 // ⚠️ **只报 token 数,不报金额** —— SDK 的 `Usage` 上有 `cost`,但用户已定
@@ -1650,6 +1695,18 @@ export type TriggerTodoKind =
   /** 甲方答复了业务经理的提问、而他还没处置(020 + `resume_client` 规则) */
   | "resume_client"
   /**
+   * **甲方在业务经理正跑回合时说了话 —— 排队等下一轮带上**(036 +
+   * `answer_client_message` 规则)。与 `resume_client` 同族:「有人刚对你说话」,
+   * 只是这一条的载体是排队消息(`queued_client_messages`),不是已答复的提问。
+   */
+  | "answer_client_message"
+  /**
+   * **定时唤醒到点了**(038 + `wakeup_due` 规则):业务经理自己排的时间锚
+   * (`wakeups`,at 一次性 / every 周期)。正文按 note 的意思走 ——
+   * 该向甲方说话时业务经理用 `tell_client`(那条通道不受这格影响)。
+   */
+  | "wakeup_due"
+  /**
    * 质检判了「不通过」,这份产出回到**写它的人**手上返工(2026-10-07 真机事故补)。
    *
    * ⚠️ 它不是「退回」这个动作的别名:fail 只是写下**一行结构化结论**
@@ -1744,6 +1801,9 @@ export const CLIENT_FACING_TODO_KINDS: ReadonlySet<TriggerTodoKind> = new Set<Tr
   "handover",
   "report_downstream",
   "resume_client",
+  // 2026-11-22(036):这一轮的存在原因就是「甲方说了话等回应」——
+  // 正文按定义就是冲着甲方去的(与 resume_client 同一条推理)。
+  "answer_client_message",
 ]);
 
 /**
@@ -2014,6 +2074,14 @@ export type ServerEvent =
    * 而库不会。
    */
   | { type: "usage_recorded"; projectId: string | null; usage: TurnUsageView }
+  /**
+   * **甲方那句话排上了队**(036):收件人正跑回合,这句话会在它下一轮带上。
+   *
+   * 消息本体已照常落库并通过 `message_start` / `delta` / `message_end` 广播
+   * (对话页照常显示);这条事件说的是**那句之外的另一件事** —— 「他现在还
+   * 顾不上,但这句话没有丢」。前端据此给一句状态提示,不改动消息本身。
+   */
+  | { type: "message_queued"; projectId: string; sessionId: string; messageId: string }
   /**
    * **驱动者循环停在了异常的位置** —— 撞上单次级联上限,或检测到「同一个待办
    * 在项目状态没变的情况下被反复唤醒」。

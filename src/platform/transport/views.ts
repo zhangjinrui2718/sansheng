@@ -135,6 +135,9 @@ export function toWorkView(db: Database.Database, row: WorkRow, name: (id: strin
     // migration 032:显式优先级原样透出(0=最高 … 9=最低;列 NOT NULL DEFAULT 3,
     // 这里不做任何换算 —— 换算是判据,判据只有一个落点:排空器的 collectTodos)。
     priority: row.priority,
+    // migration 037:工作项级验收判据原样透出(空数组 = 还没有结构化判据,
+    // 读面如实显示「未给」,不编一条充数)。
+    acceptanceCriteria: row.acceptanceCriteria,
     // migration 033:甲方确认开工的时刻原样透出(null = 未确认)—— 对话流的
     // 「计划」卡塌缩行(「已确认开工 · N 条」)的锚。换算同样不在这里做。
     confirmedAt: row.confirmedAt,

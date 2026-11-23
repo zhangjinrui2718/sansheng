@@ -12,7 +12,8 @@
  * 每一条判据都能被一次「改回按项目记」弄红:
  *
  *   ① worker 在跑时甲方**能发出去**(而不是 `code=busy`),且两条回合真的**重叠**
- *   ② 业务经理自己正在回你时再发一条 → **仍然被拒**(负样本:证明不是什么都不拦)
+ *   ② 业务经理自己正在回你时再发一条 → **排队**(036:不再拒收;这条仍是
+ *      负样本 —— 证明不是「什么都不拦」:排队的那条不进 getOrCreateSession)
  *   ③ 同项目两个角色同时在跑时,一次中断**两个都停**(负样本:只停最后一个)
  *   ④ 排空并发上界不变 —— 那几条由 `d1-d4-parallel-projects.test.ts` 钉着
  *   ⑤ 同项目**同 agent** 并发两条 → 恰好一条被拒
@@ -540,10 +541,17 @@ describe("① 排空在跑执行角色时,甲方对业务经理说的话**发得
   });
 });
 
-// ── ② 业务经理正在回你时仍然被拒(负样本)──────────────────────
+// ── ② 业务经理正在回你时再发一条 → 排队,不再拒收(036,2026-11-22)────
+//
+// 旧判据(「仍然被拒 code=busy」)被 036 取代:拒收 = 甲方那句话哪儿都没落,
+// 而服务端指的那条路(「先中断」)在界面上可能根本没有入口。现在第二条
+// **落库排队**(queued_client_messages + `message_queued` 事件),第一回合
+// 结束后由 `answer_client_message` 待办带上 —— 那条链的回归在
+// `tests/platform/busy-queue.test.ts`;这里只钉**忙闩那一半**:
+// 排队的那条**不进 getOrCreateSession**(不会建出第二条会话)。
 
-describe("② 业务经理自己正在回你时,再发一条**仍然被拒** `code=busy`", () => {
-  itT("恰好一条被拒,且被拒的不是第一条(它照常跑完)", async () => {
+describe("② 业务经理自己正在回你时,再发一条 → 排队(不建第二条会话)", () => {
+  itT("第二条不拒收、不建会话;第一回合照常一个回合跑完", async () => {
     const s = await startHost();
     const db = s.db();
     seedProject(db, "pA", null);
@@ -556,18 +564,27 @@ describe("② 业务经理自己正在回你时,再发一条**仍然被拒** `co
     ).toBe(true);
     s.send({ type: "send", projectId: "pA", content: "第二条" });
 
+    // 排队是同步判据后的落库:账上很快出现一行 pending。
     expect(
-      await until(() => busyErrors().length === 1),
-      `业务经理那条会话正被占用 ⇒ 第二条必须拿 \`code=busy\` —— ${diag()}`,
+      await until(() =>
+        (db.prepare(`SELECT COUNT(*) AS n FROM queued_client_messages WHERE project_id = 'pA' AND consumed_at IS NULL`).get() as { n: number }).n === 1),
+      `业务经理那条会话正被占用 ⇒ 第二条必须**排队**(036)—— ${diag()}`,
     ).toBe(true);
-    expect(busyErrors()[0]!.projectId).toBe("pA");
+    expect(busyErrors().length, "项目会话不再拒收(只有接待会话保留 code=busy)").toBe(0);
 
     releaseTurn(h, "pA", BM, null);
-    expect(await until(() => bmTurns("pA").length === 1), diag()).toBe(true);
-    await sleep(150);
-    expect(bmTurns("pA").length, "第二条没有跑成第二个回合").toBe(1);
-    expect(busyErrors().length, "拒绝必须只有一次").toBe(1);
-    expect(h.maxPerSession).toBe(1);
+    // 第一回合结束的门铃(nudge)会立刻叫醒 answer_client_message ⇒ 排队那句
+    // 在**同一条常驻会话**上被带上(不需要等定时器)。
+    expect(
+      await until(() => bmTurns("pA").length >= 2),
+      `第一回合结束 ⇒ 排队的那句被带上(第二个业务经理回合)—— ${diag()}`,
+    ).toBe(true);
+    expect(
+      await until(() =>
+        (db.prepare(`SELECT COUNT(*) AS n FROM queued_client_messages WHERE project_id = 'pA' AND consumed_at IS NULL`).get() as { n: number }).n === 0),
+      `带上之后账要被消费(回合成功结束)—— ${diag()}`,
+    ).toBe(true);
+    expect(h.maxPerSession, "排队不进 getOrCreateSession ⇒ 仍然只有一条会话").toBe(1);
   });
 });
 
@@ -741,7 +758,10 @@ describe("⑧ 雷 (a):排空正在唤醒业务经理时,甲方那条消息**不�
     // 排空同步握住 `(pA, bm)` 那把闩,然后卡在 `await createPlatformSession` 里
     await sleep(30);
     s.send({ type: "send", projectId: "pA", content: "在吗" });
-    const busy = await until(() => busyErrors().length === 1, 3000);
+    // 036(2026-11-22):闩在排空手里 ⇒ 甲方这条**排队**(不再 code=busy)。
+    // 排队不调 getOrCreateSession —— 这正是雷 (a) 要防的那条缝的另一面。
+    const queued = await until(() =>
+      (db.prepare(`SELECT COUNT(*) AS n FROM queued_client_messages WHERE project_id = 'pA' AND consumed_at IS NULL`).get() as { n: number }).n === 1, 3000);
 
     await pass;
     await sleep(200);
@@ -756,8 +776,9 @@ describe("⑧ 雷 (a):排空正在唤醒业务经理时,甲方那条消息**不�
       `跑过 ${keys.size} 个 (上下文, 角色) ⇒ 只许建 ${keys.size} 条会话` +
         `(建多了就是两条路各自读到 sessions.get()===undefined)—— ${diag()}`,
     ).toBe(keys.size);
-    expect(busy, `闩在排空手里 ⇒ 甲方这条必须被拒(而不是并排进 getOrCreateSession)—— ${diag()}`).toBe(true);
-  });
+    expect(queued, `闩在排空手里 ⇒ 甲方这条必须排队(而不是并排进 getOrCreateSession)—— ${diag()}`).toBe(true);
+  },
+  );
 });
 
 // ── 活 2:usage 的两行接线 ───────────────────────────────────────

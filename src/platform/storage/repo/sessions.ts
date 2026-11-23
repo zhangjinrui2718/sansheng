@@ -580,6 +580,22 @@ export function listSessionMessages(
 }
 
 /**
+ * 按 id 取一条消息(`null` = 没有)。
+ *
+ * 读者是 `renderTask` 的 `answer_client_message`:排队账只存 `message_id`,
+ * 任务正文要按 id 取**甲方原话**(与 `renderRejectedPacket` 搬 note 同一条例外)。
+ */
+export function getSessionMessage(
+  db: Database.Database,
+  id: string,
+): SessionMessageRow | null {
+  const r = db
+    .prepare(`SELECT * FROM session_messages WHERE id = ?`)
+    .get(id) as RawMessage | undefined;
+  return r === undefined ? null : toSessionMessageRow(r);
+}
+
+/**
  * 一行原始消息 → {@link SessionMessageRow}(**闭集校验只写一处**)。
  *
  * ⚠️ `kind` 与封套那两列**逐列验闭集**(与写口同一条纪律:表里的未定义值是

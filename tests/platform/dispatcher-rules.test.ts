@@ -153,8 +153,13 @@ describe("B1 · 规则表:每个 `TodoKind` 恰好一条规则(C3 之后 10 条,
     // 2026-10-08(029)补上第 18 条 `rework_rejected_delivery`:甲方拒收之后
     // **没有规则认领「这份交付物要重做」** —— 而收口门又要求它被接受 ⇒
     // 项目永远 `active` 且没有任何人在动(与第 14/15 条同一个形态)。
-    expect(RULES).toHaveLength(18);
-    expect(TODO_KINDS).toHaveLength(18);
+    // 2026-11-22(036)补上第 19 条 `answer_client_message`:忙时拒收
+    // (`code:"busy"`)改成排队之后,**排队账必须有人读** —— 否则就是
+    // 020 那次事故的形状(账在库里,排空器每 10 秒读到「无事可做」)。
+    // 2026-11-22(038)补上第 20 条 `wakeup_due`:「过两小时再查 / 每天早报」
+    // 此前没有载体 —— 时间表达不出来,说过就忘。
+    expect(RULES).toHaveLength(20);
+    expect(TODO_KINDS).toHaveLength(20);
     // 集合相等 ⇒ 「表产出的 kind」与「闭集」是同一个集合
     expect([...kinds].sort()).toEqual([...TODO_KINDS].sort());
     // 且没有两条规则争同一个 kind(否则「谁负责这一条」没有答案)

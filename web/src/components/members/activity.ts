@@ -31,6 +31,10 @@ const TODO_KIND_LABEL: Record<TriggerTodoKind, string> = {
   handover: "交付交接",
   report_downstream: "向甲方汇报下游结果",
   resume_client: "处置甲方的答复",
+  // 036:忙时排队的那句话,下一轮带上。
+  answer_client_message: "带上甲方在忙时排的话",
+  // 038:自己排的时间锚到点了。
+  wakeup_due: "处理到点的定时唤醒",
   close_project: "判断项目是否收口",
   escalate_stalled_work: "处置平台已经不再叫醒的待办",
   review_undelivered_project: "判断项目为什么没有交付物",

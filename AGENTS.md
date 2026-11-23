@@ -138,7 +138,7 @@
   判据的一部分:同一对节点上两类边**方向一致**时不是环(真机那份数据就是这样),方向相反
   才是环(`mutualPairs` 会点名是哪两条边)。写反会让「交付」跑到最左、并且把一个不存在的
   环报出来(`web/src/lib/workGraph.ts` 的 `collectEdges`)。
-- 基线:**2680 passed / 147 test files**(2026-11-20 v5 五波之后)· 两条 typecheck 0 error · `check:design` E1–E14 全绿(5 角色)。
+- 基线:**2736 passed / 3 failed(model-catalog,工作区里 pi-ai 版本漂移,先于 2026-11-22 批次存在)/ 157 test files**(2026-11-22 multica 借鉴批次之后实测)· 两条 typecheck 0 error · `check:design` E1–E14 全绿(5 角色)。
 - **角色中文名只有一处**:`src/platform/runtime/org.ts` 的 `ORG`(播种 / `roleDisplayName()` /
   `RoleHarnessView.displayName` / **系统提示里的「# 你的角色:X」**全走它);
   前端兜底表 `web/src/lib/vocab.ts` 的 `ROLE_LABEL` 必须逐项相同,由
@@ -181,7 +181,7 @@ src/platform/client/     ClientChannel 端口
 shared/types/            跨端协议类型(platform.ts / settings.ts)
 ```
 
-工具表合计 **48 个工具 = 41 平台 + 7 SDK 内置**,能力 **37** 条 —— 这几个数字由 `check:design`
+工具表合计 **51 个工具 = 44 平台 + 7 SDK 内置**,能力 **38** 条 —— 这几个数字由 `check:design`
 (能力/工具)与 `tests/platform/client.test.ts` 的哨兵(已实现工具数)每次核对。
 
 > **不要按「单向分层」的假设推理依赖方向。** 实测 `identity ↔ harness` 之间有**值级 import 环**(`src/platform/identity/role.ts` 从 `src/platform/harness/capability.ts` 取能力表,`src/platform/harness/authorize.ts` 从 `src/platform/identity/role.ts` 取 `ROLE_SPECS`),`transport` 也会向上引 `host`。这是现状,不代表可以随手加新的反向依赖。
@@ -619,6 +619,82 @@ dev/prod + CI/CD」,09:54 业务经理只回了一句「我先看下你之前留
 - ~~**降级落库可观测**~~:**读面已补**(2026-11-13)—— `GET /api/diagnostics/provider-failover`(从 `⚠️ 供应商` 会话消息聚合,近 20 条,设置页「供应商切换历史」默认折叠)。**结构化表仍没有**(KNOWN_GAPS 第 5 条照旧成立:这是审计聚合,不是遥测);
 - **自动切回原 provider**:不做(要么靠健康探测、要么靠墙钟启发式,本项目两条都拒绝);
 - **运行期证据**:`auto_retry_start` 只证到**源码级**(`agent-session.d.ts` 的事件定义 + `agent-session.js` 的发射点),**没做过一次真机 429**。
+
+## multica 借鉴批次(2026-11-22 · migrations 035–038)
+
+**背景**:对 `/Users/fuyao/Downloads/multica-main`(把 agent 当队友的 issue 驱动工作台)做了三路机制调研,
+与三生逐项对照后落地六件借鉴 —— 每一件都对着三生已记录过的真机痛点;组织编排的核心(排空器/三道门/验收门)
+两边是**相互印证**(multica 的 "done stays human" ≈ 甲方验收裁决 + 收口同意门;「队列在 DB、唤醒可丢失」≈ 批次 21 的无状态判定),**没有动**。
+
+### ① 执行日志 `turn_events`(035):「他做了什么」落成可回放的行
+
+- 症状:`TurnResult.toolCalls` 在回合内存里抓得全,却只被 `renderExecutionReport` 渲染成**散文**随日志漂走 ——
+  排查 unanswered_turn / 墙钟超时 / 空转只能翻 stdout。
+- 现在:`runTurn` 收口的 `finally` 单点写入(与 `insertTurnUsage` 同一处、同一条纪律,两条出口各跑一次);
+  一回合一组(`turn_id`),组内 `seq` 单调(**重发顺序契约**,读面按 seq 排不按时间戳 —— 同批写入同毫秒)。
+  kind ∈ `tool | provider_error | marker`(超时打断 / SDK 重试 / 无下文;闭集在 `repo/turnEvents.ts`,不建 CHECK)。
+  **三种粒度三张表不混装**:正文(session_messages)/ 账(turn_usage)/ 轨迹(turn_events)。
+- 读面:`GET /api/projects/:id/agents/:agentId/turn-events`(空 turns 是合法答案,不是读不到);
+  成员面板「他说了什么」之下新增**「他做了什么」**(`components/members/AgentTurnLog.tsx`,词汇表 `member.turn-events`)。
+  ⚠️ **只有已结束的回合**(写入点在收口)—— 进行中的看实时流,边界在屏上说清。
+
+### ② 忙时排队(036):甲方在忙时说的话不再拒收
+
+- 症状:`hub.ts` 的 `send` 忙时回 `code:"busy"` —— 那句话**哪儿都没落**,而服务端指的路(「先中断」)在
+  刷新/断线后的界面上可能根本没有入口(批次 32 的现场)。
+- 现在:hub 忙分支走 `onUserMessageQueued`(接待会话与未接线宿主维持拒收)⇒
+  `handleUserMessageWhileBusy`:消息**照常落库广播**(它本来就是一条会话消息)+ 记账
+  (`queued_client_messages.consumed_at IS NULL`)+ 广播 `message_queued`(前端一行「已排队,下一轮带上」,
+  那条线的 `agent_end` 即过期)。**不跑回合** —— 收件人还占着闩。
+- 读者是**新规则 `answer_client_message`**(与 `resume_client` 同族「有人刚对你说话」,PRIORITY 同档 1):
+  **按线分组**(一条线一条待办,`DriverTodo.sessionId` 随待办传给宿主 —— 「排空器回合一律落主对话」的
+  **显式例外**:回应必须落在甲方排队的那条线上,否则说得对但看不见);同线多条一轮全部带上
+  (multica 的 "joined this run")。消费 at-least-once:回合成功才写 `consumed_at`。
+- ⚠️ **renderTask 的两跳**:refs 存**账行 id**(消费用它),正文要 账行 → `messageId` → `session_messages`。
+  第一版一跳直查消息表,每一句都渲染成「已不存在」—— 把接线错了说成数据没了(M4 变异钉住)。
+- 唤醒有两条路:忙着的回合**结束时的门铃**(nudge,`drainProjectLoop` 不看项目 status ⇒ 收口项目也通)
+  与 10s tick。三条旧断言(busy-latch ②⑧ / d1-d4 ④)按新契约改写(拒收 → 排队、不建第二条会话)。
+
+### ③ 工作项级验收判据(037):「审什么」挂到被审的单元上
+
+- 031 已把**项目级**判据结构化;multica 放 issue 级 —— 同一个道理:质检审的是每条产出。
+- `works.acceptance_criteria` JSON 数组(纯加列,解析容错与 031 同款);`work_create` 可带 /
+  `work_update` 整体替换(与 dependsOn 同一条语义,`[]` = 清空;严格读法 `readAcceptanceArg` ——
+  类型错拒收,不静默当没给)。质检的 `renderPendingReviews` 逐条摆出(没给就明说「未给」);
+  判据优先级阶梯里工作项级判据是**第 1 层**(在 goal 与 brief 之前);拆解提示要求逐条给;
+  「计划」确认卡与工作项面板逐条显示。
+
+### ④⑤ 结构化唤醒 `wakeups`(038)+ 保险丝:时间终于有了载体
+
+- 「过两小时再查」「每天早报」此前没有载体 —— 排空器判据全是「库里的现状」,唯独时间不在其中。
+- `wakeup_create / wakeup_list / wakeup_cancel`(新能力 `schedule.manage`,**只给业务经理** —— 排的是它
+  对甲方与项目的自查节奏,不是执行角色的第二套排空器;`schedule.` 进 `PROJECT_SCOPED_PREFIXES`,
+  收口后不再排新)。**工具数 41 → 44,能力 37 → 38** —— 设计两份文档的表/矩阵/计数同步过了一次显式评审
+  (conformance E1–E8 全绿),client.test/tool-briefs 的计数哨兵同步。
+- 判据铁律与批次 21 同条:到期是纯函数(`dueWakeups`),`wakeup_due` 规则只认 `tick`;消费
+  (`markWakeupFired`:at → done / every → `last_fired_at` 续期)在回合成功之后。**保险丝三条**:
+  错过折叠(every 超期 N 倍也只有一条待办)、预算闸(key 稳定 + `targetState` = 续期锚,点火成功预算清零)、
+  **熔断**(`serve.ts` 排空前扫 `cancelExhaustedWakeups`:账本 `notified_at` 非空的 pending 唤醒自动
+  `cancelled` + 落一条 `⚠️ 定时` 系统消息 —— 前端零改动,未知前缀落「记录」桶)。
+  ⚠️ 熔断扫描在**宿主**侧不在规则里 —— 规则是纯查询,写库的活归宿主(§11.3 的结构保证)。
+- cron 与条件唤醒(--until)如实不做(KNOWN_GAPS 同款处置)。
+
+### ⑥ resume-unsafe:上下文超长换会话,不换家、不烧闸
+
+- `classifyProviderFailure` 新 kind `context_overflow`(词表只收**带上下文语**的短语,裸 "too long" 不收;
+  判序在限流之前 —— 400+超长不是限流,换了家也一样撞)。`retryable=false`(换家没用)。
+- 处置 = **换新会话**:`disposeOneSession`(精确到 `(上下文, 线, 角色)`,不动无辜角色);工作项**不记 failed**
+  (仍 in_progress,下一 tick 重派,新会话从库里重放历史);**不刹车**(病在会话不在供应商)。
+- 新报告标志 `sessionReset`:不消费、`failed:false`,但**与 `brakePaused` 差一条 —— 不重置尝试预算**:
+  重试买的是新会话,历史本身超限时新会话一样撞,「叫醒三次」的预算正是防无限换会话的那道闸(multica 的
+  resume-unsafe 同款推理)。
+
+**回归**:`tests/platform/turn-events.test.ts`(9)· `busy-queue.test.ts`(3,真 WS 端到端含跨线)·
+`work-acceptance.test.ts`(8)· `wakeups.test.ts`(8)· `context-overflow.test.ts`(4);
+`dispatcher-rules` 闭合计数 18 → **20**;`reset.ts` 清单 +3 表;`tool-briefs`/`client` 计数 41 → **44**;
+web 侧 `text-budget` 基线 9,425 → **9,609**(全部是本轮带回归的新 UI 文字)。
+**变异自检**:`.probe/mutation-multica-borrow.py` —— **13 条全部实测变红**(M9/M10 第一轮漏网,
+补了「负样本也有账本行」与「周期边界差一分钟」两条判据后才咬合 —— 漏网是判据弱,不是变异弱)。
 
 ## 跨项目地址带项目坐标(2026-10-26 · Wave 2e)
 
@@ -1119,7 +1195,15 @@ M8 工作项列表复活 · M9 页面自己判档位 · M10 卡片不是链接)�
 **029 甲方的验收裁决**(`delivery_verdicts`:append-only,`verdict CHECK IN ('accept','reject')`
 + `note` + 两条索引;**纯加法、不重建任何表** —— 见下「甲方验收」一节),
 **030 语料分级**(`knowledge_chunks.tier`;**纯加法、可空、不建 CHECK**,与 022 同一条先例
-—— 取值域在读写两侧的 TS 里;`PRAGMA table_info` 实测列已加)。
+—— 取值域在读写两侧的 TS 里;`PRAGMA table_info` 实测列已加),
+**031 项目级验收判据**(`projects.acceptance_criteria` JSON 数组,纯加列;详见下「multica 借鉴批次」),
+**035 执行日志**(`turn_events`:回合逐事件轨迹,`turn_id` 分组 + `seq` 单调;
+可空性与外键**逐列照抄 018** 的裁决,FK 边数 +1 的账记在迁移文件头),
+**036 忙时排队**(`queued_client_messages`:忙时甲方的话**不再拒收**;
+`message_id` 有 FK(正文只存 `session_messages` 一处),`session_id` 刻意无外键),
+**037 工作项级验收判据**(`works.acceptance_criteria`,与 031 同形;质检逐条对照),
+**038 结构化唤醒**(`wakeups`:`at`/`every` 两种,闭集在 TS;**取 multica issue_wakeup 的时间轴子集**,
+cron 与条件唤醒如实不做)。
 - ⚠️ **`artifacts.work_id` 一条边承载两个语义**(「产出」∪「关于」,migration 014):执行角色写 `evidence` 是产出,质检把 `review_finding` 挂到**被审的那条**上是「关于」。取「这条工作项交付了什么」必须自己区分(`runtime/execution.ts` 用 `work_id` + 作者 + `kind ∉ ABOUT_ONLY_ARTIFACT_KINDS` 三条判据);**不要删那些边** —— 它是 `review_finding` 唯一能表达「审的是哪一条」的地方。
 - `artifacts` 直接挂项目 —— **没有 blackboard 容器层**。记忆在 `memory_fragments` / `memory_profile`,不是 `fragments`:`fragments` 是旧名字,001 已占用。
 - 平台表**不得复用旧表名**:`CREATE TABLE IF NOT EXISTS` 撞名时静默无操作,新表根本建不出来(见下 §三类静默失败)。加表前先 `ls migrations/` 查名。

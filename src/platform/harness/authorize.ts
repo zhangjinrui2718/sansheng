@@ -142,6 +142,9 @@ const PROJECT_SCOPED_PREFIXES = [
   "mcp.",
   "change.",
   "blocker.",
+  // 038(2026-11-22):唤醒是项目内的定时器 —— 项目收口后不该再点火
+  // (「每天汇报」跟着项目走;下一个版本重排)。
+  "schedule.",
 ] as const;
 
 /**

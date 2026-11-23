@@ -132,8 +132,15 @@ import {
 import {
   consumeClientAnswers, getClientQuestions, listUnconsumedClientAnswers, type ClientQuestionRow,
 } from "../storage/repo/clientQuestions.js";
+import {
+  consumeQueuedClientMessages, getQueuedClientMessage, pendingQueuedClientMessages,
+  type QueuedClientMessageRow,
+} from "../storage/repo/queuedClientMessages.js";
+import {
+  dueWakeups, getWakeup, markWakeupFired, type WakeupRow,
+} from "../storage/repo/wakeups.js";
 import { ROLE_SPECS, isProjectRole, isExecutorRole, EXECUTOR_ROLES, type ProjectRole } from "../identity/role.js";
-import { openDeliverableSession } from "../storage/repo/sessions.js";
+import { getSessionMessage, openDeliverableSession } from "../storage/repo/sessions.js";
 import type { Capability } from "../harness/capability.js";
 import type { ProjectStatus } from "../harness/authorize.js";
 import type { ToolCallRecord } from "./turn.js";
@@ -264,6 +271,28 @@ export const TODO_KINDS = [
    */
   "resume_client",
   /**
+   * **甲方在业务经理正跑回合时说了话 —— 排队等下一轮带上**(036,2026-11-22)。
+   *
+   * 与 `resume_client` 同族(「有人刚对你说话」),只是载体不是已答复的提问,
+   * 而是**排队消息**(`queued_client_messages`,`consumed_at IS NULL`)。
+   * 此前那条路的形态是 `code:"busy"` 拒收 —— 甲方的话哪儿都没落,
+   * 而服务端指的那条路(「先中断」)在界面上可能根本没有入口(批次 32 的现场)。
+   *
+   * ⚠️ **待办按线分组**(key 带 sessionId):一句话排进了哪条线,回应就落在
+   * 哪条线 —— 否则答复会出现在甲方看不见的另一条线上。这是「排空器触发的
+   * 回合一律落主对话」纪律的**显式例外**,理由就写在那条待办自己身上。
+   */
+  "answer_client_message",
+  /**
+   * **定时唤醒到点了**(038,2026-11-22):业务经理排的 `wakeups` 有一条到期。
+   *
+   * 判据是纯查询(`repo/wakeups.ts` 的 `dueWakeups`),唤醒只是「到点 ⇒ 多这一类
+   * 待办」,不携带任何跨排空状态 —— 与 nudge 同一条铁律。消费(`markWakeupFired`)
+   * 在回合成功结束之后;`every` 的续期锚是 `last_fired_at`,它同时是尝试预算的
+   * `targetState`(点火成功 ⇒ 预算清零)。
+   */
+  "wakeup_due",
+  /**
    * **平台已经不再叫醒某条待办了 —— 换个人来处置**(2026-10-07 补)。
    *
    * 用户原话:「如果项目没有交付,且一段时间内没有任何角色在干活,系统去问问 PM 现在进度」。
@@ -341,6 +370,9 @@ export type TodoKind = (typeof TODO_KINDS)[number];
 const PRIORITY: Readonly<Record<TodoKind, number>> = {
   answer_ask: 0,
   resume_client: 1,
+  // 与 `resume_client` 同族同档:「甲方刚对你说话」—— 排在别的待办前面,
+  // 否则一次汇报待办会把回应再推一轮(那正是排队要治的病)。
+  answer_client_message: 1,
   attend_meeting: 2,
   review_change: 3,
   // 两条「修」的待办挨着:派活错了与活被卡住都是**项目经理的存量修复**,
@@ -368,6 +400,8 @@ const PRIORITY: Readonly<Record<TodoKind, number>> = {
   integrate: 10,
   handover: 11,
   report_downstream: 12,
+  // 定时唤醒与汇报同档:都是业务经理**自己的节奏**类活,排在执行/审查之后。
+  wakeup_due: 12,
   // 收口排**最后**:它成立的前提是「上面每一条都不成立」,所以它排在最后不是
   // 优先级偏好,是**顺序依赖** —— 有任何一件没做完的事,这条就压根不成立。
   close_project: 13,
@@ -405,6 +439,14 @@ export interface DriverTodo {
    * 加列前完全一致,「缺省 3」不是一次新的判断,是「没判断过」的表达。
    */
   readonly workPriority?: number;
+  /**
+   * **这条待办的回合跑在哪条对话线上**(036,`answer_client_message` 专用)。
+   *
+   * 缺省 = 主对话(其余全部待办走这条纪律)。只有「甲方在某条线上排了队、
+   * 回应必须落在同一条线」的那类待办才带它 —— 回应落在别的线上,是
+   * 「说得对、但甲方看不见」的静默错。
+   */
+  readonly sessionId?: string;
   /** 已经叫醒过几次(来自库里的预算账本) */
   readonly attempts: number;
   /** 人读的一行 */
@@ -713,6 +755,22 @@ export interface RuleFacts {
    * 规则一旦开始做语义猜测,「不需要大模型判断」就失效了)。
    */
   readonly unconsumedClientAnswers: readonly ClientQuestionRow[];
+  /**
+   * **甲方在忙时排了队、还没被带上**的话(036,`queued_client_messages` 的
+   * `consumed_at IS NULL`)。与上面那个字段同族:「球回到我这边了」——
+   * 只是这一条的载体是排队消息,不是已答复的提问。
+   *
+   * 只读账上的列(id / sessionId / messageId / createdAt),**不读正文** ——
+   * §2.11.3 的纪律从这里就开始成立;正文只在 `renderTask` 按 id 取
+   * (与 `renderRejectedPacket` 搬甲方原话同一条例外)。
+   */
+  readonly pendingQueuedClientMessages: readonly QueuedClientMessageRow[];
+  /**
+   * **到点的定时唤醒**(038,`repo/wakeups.ts` 的 `dueWakeups`,纯谓词)。
+   * 只读结构化列,`note` **不在这里读**(§2.11.3)—— 任务正文渲染时才带原话
+   * (与排队消息同一条例外:模型没有别的地方能读到它)。
+   */
+  readonly dueWakeups: readonly WakeupRow[];
   /**
    * **挂着至少一个未解决阻塞**(`status ∈ {open, acknowledged}`)的工作项 id。
    *
@@ -1550,6 +1608,86 @@ export const RULES: readonly Rule[] = [
       "每 10 秒叫醒他一次就是空转(与 `resolve_blocked_work` 的抑制条件同一条纪律的两面)。",
   },
   {
+    id: "answer_client_message",
+    // 排队账由 WS 的忙分支写(`transport/hub.ts`),没有任何**工具**会写它 ⇒
+    // 唯一的触发就是 `tick`:忙闩一释放,下一次 10s 兜底轮询就查到 —— 不需要
+    // 事件,判定永远重查库(批次 21 的纪律;multica 的 "joined this run" 同款)。
+    on: ["tick"],
+    if: (q) => {
+      const bm = q.members.find((m) => m.role === "business_manager");
+      if (bm === undefined || q.pendingQueuedClientMessages.length === 0) return [];
+      // **按线分组**:一句话排进了哪条线,回应就落在哪条线(`sessionId` 随待办
+      // 传给宿主)。同线多条 ⇒ 同一条待办、一轮全部带上 —— 这就是「合并」。
+      // 集合谓词,与 `answer_ask` / `resume_client` 同形:消费一条集合就缩小
+      // ⇒ 自动拿到新预算。
+      const byLine = new Map<string, QueuedClientMessageRow[]>();
+      for (const m of q.pendingQueuedClientMessages) {
+        const list = byLine.get(m.sessionId);
+        if (list === undefined) byLine.set(m.sessionId, [m]);
+        else list.push(m);
+      }
+      return [...byLine.entries()]
+        .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+        .map(([sid, rows]) => {
+          const ids = rows.map((r) => r.id).sort();
+          return {
+            agentId: bm.agentId, role: "business_manager", kind: "answer_client_message",
+            key: `answer_client_message:${sid}:${ids.join("+")}`,
+            target: null, refs: ids, targetState: null,
+            sessionId: sid,
+            label: `带上甲方在忙时排队的 ${ids.length} 句话`,
+          };
+        });
+    },
+    then: { kind: "answer_client_message", targetRole: "business_manager" },
+    why:
+      "此前那条路的形态是 `code:\"busy\"` 拒收(transport/hub.ts):甲方的话**哪儿都没落**," +
+      "而服务端指的那条路(「先中断」)在刷新/断线后的界面上可能根本没有入口(批次 32 的" +
+      "现场)—— 服务端指的路界面走不通。036 把拒收改成**排队**:消息照常落库," +
+      "账落在 `queued_client_messages.consumed_at`。本规则就是那条账的读者:" +
+      "`consumed_at IS NULL` ⇒ 甲方说了话、还没被带上。与 `resume_client` 同族" +
+      "(「有人刚对你说话」),同一对失败路径:账不落 ⇒ 待办不存在(拒收退回旧形态," +
+      "如实可见);账落了没人读 ⇒ 就是 020 那次事故的形状,所以判据必须落在一列上。" +
+      "⚠️ **收口之后这条规则照常成立**:收口项目里甲方仍可说话(2026-10-06 裁决:" +
+      "收口不是只读墓碑),忙时排队照常发生。唤醒有两条路:活跃项目吃 10s `tick` 兜底;" +
+      "而**忙着的那个回合结束时本来就会敲门铃**(`handleUserMessage` 末尾的 nudge," +
+      "`drainProjectLoop` 不看项目 status)—— 所以最常见形态(他正回你的话时你又说了" +
+      "一句)是「他一说完就被叫醒带上」,不用等 tick。这条待办只要求业务经理**说话**," +
+      "不调任何 `work.*`,收口后授权门拦不到它。",
+  },
+  {
+    id: "wakeup_due",
+    // 唤醒行由工具写(`wakeup_create`),没有工具调用之后的「状态迁移」可蹭
+    // (排一个未来的闹钟不动任何流水线状态)⇒ 唯一的触发就是 `tick`:
+    // 10s 兜底轮询足够(到点误差 ≤10s,对「过两小时再查」这类用途无感)。
+    on: ["tick"],
+    if: (q) => {
+      const bm = q.members.find((m) => m.role === "business_manager");
+      if (bm === undefined || q.dueWakeups.length === 0) return [];
+      // 一条到期唤醒 ⇒ 一条待办(key 稳定,`targetState` = 续期锚:
+      // 点火成功 ⇒ `last_fired_at` 变 ⇒ 预算清零;叫不醒 ⇒ 预算烧穿后由
+      // 宿主的熔断扫描 `cancelExhaustedWakeups` 收尸,不会无限重试)。
+      return q.dueWakeups.map((w) => ({
+        agentId: bm.agentId, role: "business_manager", kind: "wakeup_due",
+        key: `wakeup_due:${w.id}`, target: w.id, refs: [w.id],
+        targetState: w.lastFiredAt ?? w.createdAt,
+        label: `定时唤醒:${w.note.slice(0, 30)}`,
+      }));
+    },
+    then: { kind: "wakeup_due", targetRole: "business_manager" },
+    why:
+      "「过两小时再查一次」「每天早上汇报进展」此前没有载体 —— 说给模型听就是说过就忘," +
+      "库里没有任何一行能表达时间(排空器的判据全部是「库里的现状」,唯独时间不在其中)。" +
+      "038 把它落成 `wakeups` 的行,本规则是它的读者:`dueWakeups`(纯谓词)到期 ⇒ 叫醒" +
+      "排它的人。与 multica 的 issue_wakeup 同构,但取的是它的时间轴子集(at / every;" +
+      "cron 与条件唤醒如实不做)。保险丝两条:错过折叠(every 错过 N 个周期也只有一条" +
+      "待办)与预算闸(key 稳定 + targetState=续期锚,叫不醒 3 次后由宿主熔断扫描收尸)。" +
+      "⚠️ 收口之后:已排的唤醒照样到期、待办照样产出(判据读库,不看 status)," +
+      "回合成功即照常消费(at→done / every→续期);而**排新的**会被授权门拦住" +
+      "(`schedule.` 在 `PROJECT_SCOPED_PREFIXES` 里 —— 项目收口,定时器跟着停," +
+      "下一个版本由业务经理重排)。回合失败烧完预算的,由熔断扫描收尸并播报。",
+  },
+  {
     id: "close_finished_project",
     // 判据的每一半都只可能因为「新落了一件事」或「一件东西不再是那样」而变:
     // 工作项状态迁移、交付物落库、答复被消费。而 `tick` 是**重启后补跑**的唯一载体
@@ -1984,6 +2122,8 @@ function collectRuleFacts(
       limit: 500,
     }).length > 0,
     unconsumedClientAnswers: listUnconsumedClientAnswers(db, projectId),
+    pendingQueuedClientMessages: pendingQueuedClientMessages(db, projectId),
+    dueWakeups: dueWakeups(db, projectId, now),
     blockedByBlockerWorks: worksWithUnresolvedBlocker(db, projectId),
     acceptedDeliverables: listArtifacts(db, projectId, {
       kind: "deliverable",
@@ -2273,8 +2413,9 @@ export function renderTask(db: Database.Database, todo: DriverTodo): string {
         "# 现在轮到你了:把项目拆成工作项\n\n" +
         "项目刚立起来,**一个工作项都还没有**。这是你的第一件事。\n\n" +
         "1. 先 `board_list` 看黑板上有没有人已经做过什么(重复规划是最贵的错误)\n" +
-        "2. 用 `work_create` 拆出**能各自独立开工**的工作项;每个都给负责人与" +
-        "**可验证的判据**,依赖关系用 `dependsOn` 显式写出来\n" +
+        "2. 用 `work_create` 拆出**能各自独立开工**的工作项;每个都给负责人、" +
+        "**可验证的判据**(`acceptanceCriteria` 逐条给 —— 质检将逐条对照," +
+        "甲方确认开工时逐条看到;判据给成散文 = 质检只能猜),依赖关系用 `dependsOn` 显式写出来\n" +
         `   —— 负责人只能是**执行角色**:${EXECUTOR_ROLES.join(" / ")},别的角色不执行工作项\n` +
         "   —— **这两个角色的区别是「要交出什么东西」,选错不会报错,只会产出错的东西**:\n" +
         "     · `research_worker`(研究员)→ 交**信息**:技术方案 / 架构图 / 调研结论 /\n" +
@@ -2300,9 +2441,10 @@ export function renderTask(db: Database.Database, todo: DriverTodo): string {
         // 执行,4 条判据全部满足」,而甲方明确否掉过「七份子文档」这个形态。
         // **brief 可以定义「怎么做」,不能定义「做成什么」**。
         "**判据按这个优先级来,不许倒过来**:\n\n" +
-        "1. **这条工作项的 `goal`**(上面已给)—— 它是这条产出的**靶子**\n" +
-        "2. **项目的 `goal`**(上面已给)—— 用来判「这一条是不是在为总靶子服务」\n" +
-        "3. work_brief / 整改要求 —— **只定义「怎么做」**\n\n" +
+        "1. **这条工作项的 `acceptanceCriteria`**(上面逐条给了;没给就退到 goal)—— 它是这条产出**做成什么样算做完**的机器判据\n" +
+        "2. **这条工作项的 `goal`**(上面已给)—— 它是这条产出的**靶子**\n" +
+        "3. **项目的 `goal`**(上面已给)—— 用来判「这一条是不是在为总靶子服务」\n" +
+        "4. work_brief / 整改要求 —— **只定义「怎么做」**\n\n" +
         "⚠️ **若 3 与 1 或 2 冲突,以 1 / 2 为准,并把冲突原样写进 `review_finding`** —— " +
         "不要拿 brief 覆盖 goal,也不要因为「brief 做到了」就判通过。" +
         "2026-10-06 那次就是「brief 把『一份』定义成一份目录,于是甲方要的『一份』" +
@@ -2517,6 +2659,59 @@ export function renderTask(db: Database.Database, todo: DriverTodo): string {
         "3. 它与你**先前告诉甲方的说法冲突**吗?冲突要当面说清,不要默默改口\n\n" +
         "**不要在没读答复正文的情况下凭标题作答** —— 甲方答的常常不是标题里那个问题。"
       );
+    case "answer_client_message": {
+      // ⚠️ **这里搬甲方原话**(与 `renderRejectedPacket` 同一条例外):待办的
+      // 判据只读账上的列(§2.11.3),但任务正文必须带上他们说了什么 ——
+      // 那是这一轮存在的全部原因,让模型自己去 `board_*` 里找一句**没有工件**的
+      // 对话消息是找不到的。
+      const lines: string[] = [
+        "# 现在轮到你了:你上一轮还在跑的时候,甲方又说了话",
+        "",
+        "下面这些话按先后排好 —— 它们都已经落在这条对话线上,但**你还没有看到过**:",
+        "",
+      ];
+      for (const id of todo.refs) {
+        // **两跳**:refs 存的是**账行 id**(消费用它),正文先账行 → messageId
+        // → `session_messages`。一跳直查消息表会把账行 id 当消息 id,
+        // 每一句都「已不存在」—— 那是把接线错了说成数据没了。
+        const q = getQueuedClientMessage(db, id);
+        const m = q === null ? null : getSessionMessage(db, q.messageId);
+        if (q === null || m === null) {
+          // 账在、消息没了(级联删过的历史线)—— 如实报,不跳过:跳过会让
+          // 「有一句没带」静默,而这里列得出来说「带不上」比漏掉诚实。
+          lines.push(`- (一条排队消息 ${id} 已不存在 —— 它落的那条消息被删过)`);
+          continue;
+        }
+        lines.push(`- ${new Date(m.createdAt).toISOString()}:${m.content}`);
+      }
+      lines.push(
+        "",
+        "它们不是提问清单,不需要逐条「作答」—— 按话里的意思接着对话:该答的答、" +
+          "该做的做(要动活就 `work_create` / `ask_client`),该澄清的澄清。",
+        "",
+        "**不要只挑最后一句回**:排在前面的话他同样在等下文。",
+      );
+      return lines.join("\n");
+    }
+    case "wakeup_due": {
+      // ⚠️ **note 原样带回**(与排队消息同一条例外):那是排唤醒的人写给到点的
+      // 自己的一句话,模型没有别的地方能读到它。
+      const w = todo.target !== null ? getWakeup(db, todo.target) : null;
+      const note = w?.note ?? "(唤醒行已不存在)";
+      const shape = w === null
+        ? ""
+        : w.kind === "at"
+          ? "(一次性)"
+          : `(每 ${Math.round((w.intervalMs ?? 0) / 60_000)} 分钟,已点火 ${w.firedCount} 次)`;
+      return (
+        "# 现在轮到你了:你排的定时唤醒到点了\n\n" +
+        `> ${note}\n\n${shape}\n` +
+        "这是**你自己之前排的时间锚**,不是平台的指令。按 note 的意思做该做的事:" +
+        "该查的查(`project_read` / `board_list`),该向甲方说的用 `tell_client`," +
+        "活儿本身变成待办的用 `work_create` 走正路。\n\n" +
+        "周期性的这条点完这一轮会自动续期;不再需要就 `wakeup_cancel`。"
+      );
+    }
     case "close_project":
       // 与 `resume_client` 同纪律:**摆事实、说你来判断**。
       // ⚠️ 平台**不自动关闭项目**:收口不可逆(`closeProject` 直接 `throw`),
@@ -2799,6 +2994,14 @@ function renderPendingReviews(db: Database.Database, todo: DriverTodo): string {
         ? "  **要达成什么**:⚠️ 这条工作项的 `goal` 是空的 —— 那就没有判据。"
         : `  **要达成什么**:${goal.slice(0, GOAL_HEAD_CHARS)}${goal.length > GOAL_HEAD_CHARS ? "…" : ""}`,
     );
+    // 工作项级验收判据(037):给了就**逐条**摆出来 —— 质检逐条对照,而不是
+    // 对着 goal 散文猜「怎么算做完」。没给就明说(「未给」是事实,不是空缺)。
+    lines.push(
+      w.acceptanceCriteria.length > 0
+        ? `  **验收判据(逐条,037)**:\n` +
+          w.acceptanceCriteria.map((c, i) => `    ${i + 1}. ${c}`).join("\n")
+        : "  **验收判据**:未给(037 结构化判据为空)—— 只能对照上面的 goal 判断",
+    );
   }
   return lines.join("\n");
 }
@@ -2917,6 +3120,16 @@ export interface DrainTurnReport {
    * (账号/配置问题,烧预算 → 升级 → 交代甲方才是对的)。
    */
   readonly brakePaused?: boolean;
+  /**
+   * **这条回合因上下文超长被换掉了会话**(⑥,2026-11-22):常驻会话已 dispose,
+   * 活儿原封不动地等下一次派发(新会话从库里重放历史)。
+   *
+   * ⚠️ **与 `brakePaused` 的差别只有一条:不重置尝试预算**。刹车是供应商的病
+   * (窗口会好,不该烧「叫醒三次」);这是**会话的病**(重试买一个新会话,
+   * 若历史本身就超限,新会话一样撞 —— 连撞三次就该升级,预算正是那道闸)。
+   * 其余语义相同:不记 failed、不消费、`failed: false`。
+   */
+  readonly sessionReset?: boolean;
 }
 
 export interface DrainWorkReport extends DrainTurnReport {
@@ -2949,6 +3162,12 @@ export interface DrainDeps {
     agentId: string,
     task: string,
     todoKind: TodoKind,
+    /**
+     * 回合跑在**哪条对话线上**(036,`answer_client_message` 专用;其余待办不传
+     * = 主对话)。值只能从 `todo.sessionId` 传过来,宿主不自己猜 ——
+     * 猜错了回应会落在甲方看不见的另一条线上(说得对、但看不见)。
+     */
+    sessionId?: string,
   ) => Promise<DrainTurnReport>;
   /**
    * 跑一个工作项(宿主走 `runWorkItem`)。`todoKind` 的理由与
@@ -3274,6 +3493,8 @@ export async function drainProject(deps: DrainDeps): Promise<DrainResult> {
     let failoverApplied = false;
     /** 这一轮是不是「provider 故障 + 降不了 + 可重试 + 零工具调用」(刹车路径) */
     let brakePaused = false;
+    /** ⑥:这一轮因上下文超长被换掉了会话(语义见 `DrainTurnReport.sessionReset`)。 */
+    let sessionReset = false;
     try {
       if (todo.kind === "execute_work") {
         if (todo.target === null) {
@@ -3288,14 +3509,23 @@ export async function drainProject(deps: DrainDeps): Promise<DrainResult> {
         refused = r.refused === true;
         failoverApplied = r.failoverApplied === true;
         brakePaused = r.brakePaused === true;
+        sessionReset = r.sessionReset === true;
         detail = r.detail ?? null;
       } else {
-        const r = await deps.runAgentTurn(todo.agentId, renderTask(deps.db, todo), todo.kind);
+        // `todo.sessionId`(036,answer_client_message):回应落在甲方排队的
+        // 那条线上 —— 缺省 undefined = 主对话(其余全部待办的纪律)。
+        const r = await deps.runAgentTurn(
+          todo.agentId,
+          renderTask(deps.db, todo),
+          todo.kind,
+          todo.sessionId,
+        );
         aborted = r.aborted;
         failed = r.failed === true;
         refused = r.refused === true;
         failoverApplied = r.failoverApplied === true;
         brakePaused = r.brakePaused === true;
+        sessionReset = r.sessionReset === true;
         detail = r.detail ?? null;
       }
     } catch (err) {
@@ -3364,7 +3594,10 @@ export async function drainProject(deps: DrainDeps): Promise<DrainResult> {
     // ⚠️ **`failoverApplied`(已降级)也不消费**:那一轮**没跑起来** ——
     // 它只是把 provider 换了一家,活儿一件没办。消费了就是把「没办」
     // 说成「办过了」(而 `report_downstream` 消费掉的就是「已向甲方交代」)。
-    if (!aborted && !failed && !failoverApplied && !brakePaused) {
+    // ⑥:`sessionReset` 同样不消费(那一轮被 provider 拒了,活没办);
+    // 但它**不重置预算** —— 重试买的是新会话,历史本身超限时新会话一样撞,
+    // 预算(3 次)正是防止「无限换会话无限撞」的那道闸。
+    if (!aborted && !failed && !failoverApplied && !brakePaused && !sessionReset) {
       if (todo.kind === "review_work") {
         // ⚠️ **021 之后,判据从「回合成功结束」翻成「存在一条 pass 结论」。**
         //
@@ -3394,6 +3627,28 @@ export async function drainProject(deps: DrainDeps): Promise<DrainResult> {
       // 甲方的一次答复 —— 那正是这次事故的形态(答复在库里,永远没人看)。
       if (todo.kind === "resume_client") {
         consumeClientAnswers(deps.db, deps.projectId, todo.agentId, deps.now());
+      }
+      // ── 第五支(036):忙时排队消息的**终点** ────────────────────────
+      //
+      // 与上面两支同一条纪律:回合**成功结束**才记「带上了」(at-least-once ——
+      // 宁可多说一次,不能静默丢甲方一句话)。`todo.refs` 就是排队账的行 id。
+      // ── 第六支(038):定时唤醒的**点火** ────────────────────────────
+      //
+      // 回合成功结束才记账(at → done;every → last_fired_at = now,续期锚,
+      // 同时让尝试预算清零)。失败/被中断不点 —— 下一次排空重来(at-least-once)。
+      if (todo.kind === "wakeup_due" && todo.target !== null) {
+        markWakeupFired(deps.db, todo.target, deps.now());
+      }
+      if (todo.kind === "answer_client_message") {
+        const n = consumeQueuedClientMessages(deps.db, todo.refs, deps.now());
+        if (n < todo.refs.length) {
+          // 有几行的账已经不在(consumed_at 已写过或行被级联删)—— 幂等,不报错;
+          // 但差异要能看见,「带上了 N 句」的那句话只在真的带上了时才成立。
+          deps.log(
+            `dispatcher: answer_client_message 消费了 ${n}/${todo.refs.length} 条排队消息` +
+              "(其余已消费过或已不存在)",
+          );
+        }
       }
       // ── 第三支(C4):交付那一环的**终点** ────────────────────────
       //

@@ -46,6 +46,9 @@ import { insertDeliveryVerdict } from "../../src/platform/storage/repo/deliveryV
 import { insertSession, appendSessionMessage } from "../../src/platform/storage/repo/sessions.js";
 import { insertDispatchEvent, bumpAttempt } from "../../src/platform/storage/repo/dispatch.js";
 import { insertTurnUsage } from "../../src/platform/storage/repo/usage.js";
+import { insertTurnEvents } from "../../src/platform/storage/repo/turnEvents.js";
+import { insertQueuedClientMessage } from "../../src/platform/storage/repo/queuedClientMessages.js";
+import { insertWakeup } from "../../src/platform/storage/repo/wakeups.js";
 import { insertBlocker } from "../../src/platform/storage/repo/blockers.js";
 import { insertChange } from "../../src/platform/storage/repo/changes.js";
 import { insertAsk } from "../../src/platform/storage/repo/asks.js";
@@ -263,6 +266,21 @@ async function seedEverything(): Promise<{ project: string; work: string; agent:
   insertTurnUsage(db, {
     id: "u_intake", projectId: null, sessionId: null, agentId: agent, workId: null,
     model: null, inputTokens: 1, outputTokens: 1, cacheRead: 0, createdAt: NOW,
+  });
+  // 2026-11-22(multica 借鉴批次)三张新表:执行轨迹 / 忙时排队账 / 定时唤醒。
+  insertTurnEvents(db, [{
+    id: "te_test", turnId: "turn_test", projectId: project, sessionId: "s_test",
+    agentId: agent, workId: root, seq: 1, kind: "tool", tool: "board_list",
+    argsSummary: "", resultSummary: "夹具", isError: false, durationMs: 1, createdAt: NOW,
+  }]);
+  insertQueuedClientMessage(db, {
+    id: "qm_test", projectId: project, sessionId: "s_test", messageId: "m_test",
+    createdAt: NOW, consumedAt: null,
+  });
+  insertWakeup(db, {
+    id: "wu_test", projectId: project, createdByAgentId: agent, note: "夹具自查",
+    kind: "every", at: null, intervalMs: 600_000, status: "pending",
+    lastFiredAt: null, firedCount: 0, createdAt: NOW,
   });
   // memory_fragments:走端口实现(唯一写口)
   await new SqliteMemory(db, { newId: (p) => `${p}_test`, now: () => NOW }).remember({

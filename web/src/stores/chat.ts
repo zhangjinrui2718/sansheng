@@ -402,6 +402,18 @@ export interface ChatState {
   provider: string | null;
   status: ChatStatus;
   error: { code: string; message: string } | null;
+  /**
+   * **最近一句排队提示**(036,2026-11-22):甲方在收件人正跑回合时说了话,
+   * 服务端落库排队并广播 `message_queued` —— 这格存的是那条事件。
+   *
+   * ⚠️ **消息本体照常进消息流**(它已落库并广播),这格只服务**那一句之外的
+   * 话**:「他现在顾不上,这句话会在他下一轮带上」。渲染层只在
+   * `sessionId` 与当前线一致时显示(别的那线的排队不该在这条线下面冒一行)。
+   *
+   * 过期:那条线上一次 `agent_end`(回应回合的边界)即清 —— 与
+   * `code:"busy"` 错误同一条「回合收口时过期」的纪律。
+   */
+  queuedNote: { projectId: string; sessionId: string; messageId: string } | null;
   currentUsage: { input: number; output: number };
   totalUsage: { input: number; output: number };
   socket: PlatformSocket | null;
@@ -787,6 +799,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   provider: null,
   status: "connecting",
   error: null,
+  queuedNote: null,
   currentUsage: { input: 0, output: 0 },
   totalUsage: { input: 0, output: 0 },
   socket: null,
@@ -1519,6 +1532,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
             // 那一轮停了,这句话就成了**过期的事实**（「他在跑」而他已经不跑了）。
             // 别的错误**不许**在这里被清掉(失败现场要留着,见 7-N)。
             error: s.error?.code === "busy" ? null : s.error,
+            // 排队提示同一条「回合收口时过期」的纪律:**那条线上**的回应回合
+            // 结束了(排队消息要么被带上、要么那条待办失败待重试——后者会有
+            // 自己的可见路径),这行提示不再描述现在。
+            queuedNote: s.queuedNote !== null && s.queuedNote.sessionId === e.sessionId
+              ? null
+              : s.queuedNote,
             // 兼容指针只在**它指向的轮真的被收口**时交接:`withTurn` 的语义是
             // 「最近一次被写入的进行中轮」,所以交接给还活着的那一轮(没有才 null)。
             // 直接置 null 会让别的项目收口把本项目的指针打空 —— 与「清空轮表」
@@ -1632,6 +1651,16 @@ export const useChatStore = create<ChatState>((set, get) => ({
           projectsRevision: s.projectsRevision + 1,
           projectRevision: s.projectRevision + (pid === active ? 1 : 0),
         }));
+        return;
+      }
+
+      case "message_queued": {
+        // 036:甲方在收件人正跑回合时说了话 —— 消息本体已照常进流
+        // (`message_start`/`delta`/`message_end` 那三条),这一条说的是另一件事:
+        // 「这句话排上了队,他下一轮带上」。只记**当前项目**的(别的项目排队
+        // 不该在这里冒一行);过期点在下面 `agent_end`。
+        if (e.projectId !== get().projectId) return;
+        set({ queuedNote: { projectId: e.projectId, sessionId: e.sessionId, messageId: e.messageId } });
         return;
       }
 

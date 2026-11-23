@@ -1432,6 +1432,27 @@ export function WorkNodePanel({
           </>
         )}
 
+        {/*
+          工作项级验收判据(037):有就逐条摆(质检对照的是它,甲方验收看的也是它);
+          没有就明说「未给」—— 空与未给是事实,不是要藏的难堪(不编一条充数)。
+        */}
+        {(work.acceptanceCriteria ?? []).length > 0 ? (
+          <div>
+            <div className="ss-section" style={{ fontSize: 12 }}>
+              验收判据({(work.acceptanceCriteria ?? []).length} 条)
+            </div>
+            <div className="flex flex-col" style={{ gap: 2, fontSize: 12 }}>
+              {(work.acceptanceCriteria ?? []).map((c, i) => (
+                <div key={i} className="ss-body">
+                  {`${i + 1}. ${c}`}
+                </div>
+              ))}
+            </div>
+          </div>
+        ) : (
+          <div className="ss-note">未给验收判据 —— 质检只能对照上面的目标散文判断。</div>
+        )}
+
         <div>
           <div className="ss-section" style={{ fontSize: 12 }}>
             它挂着的工件({artifacts.length})

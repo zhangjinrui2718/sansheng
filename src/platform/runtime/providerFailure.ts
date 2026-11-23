@@ -39,6 +39,16 @@ export type ProviderFailureKind =
   | "network"
   /** 供应商服务端 5xx */
   | "server"
+  /**
+   * **上下文超长**(2026-11-22,⑥):这条会话的累计输入超过了模型的上下文窗口。
+   *
+   * ⚠️ 它与上面几种都不同:**病在会话,不在供应商** —— 换一家 provider 没用
+   * (`retryable` = false 的原因),等一会儿也没用(窗口不会自己变大)。
+   * 正确的处置是「丢掉这条常驻会话、下次从库里重放历史开新会话」
+   * (`serve.ts` 的 `disposeOneSession`)—— 即 multica 所说的 **resume-unsafe**:
+   * 重试安全的前提是「续跑同一份上下文」,而这里恰恰是那份上下文本身超了限。
+   */
+  | "context_overflow"
   /** 归不了类 —— **不猜**(猜错的处置比不处置更坏) */
   | "unknown";
 
@@ -109,6 +119,30 @@ const AUTH_WORDS: readonly string[] = [
   "余额",
 ];
 
+/**
+ * 上下文超长的触发词(2026-11-22,⑥)。来自真实 provider 的报错原文:
+ * OpenAI `context_length_exceeded` / "maximum context length";
+ * Anthropic "prompt is too long";各网关的中文化措辞。
+ * ⚠️ 不收录裸的 "too long"(误伤面太大),只收**带上下文语**的短语。
+ */
+const CONTEXT_OVERFLOW_WORDS: readonly string[] = [
+  "prompt is too long",
+  "prompt too long",
+  "context length",
+  "context_length",
+  "context window",
+  "maximum context",
+  "context overflow",
+  "input too long",
+  "too many input tokens",
+  "上下文过长",
+  "上下文长度",
+  "上下文超出",
+  "输入过长",
+  "输入超长",
+  "超出上下文",
+];
+
 const RATE_LIMIT_WORDS: readonly string[] = [
   "rate limit",
   "rate_limit",
@@ -163,6 +197,8 @@ const TYPE_KINDS: Readonly<Record<string, ProviderFailureKind>> = {
   overloaded_error: "server",
   timeout_error: "network",
   connection_error: "network",
+  context_overflow: "context_overflow",
+  context_length_exceeded: "context_overflow",
 };
 
 /**
@@ -320,6 +356,9 @@ function pickKind(
   if (matchesAny(lower, QUOTA_WORDS)) return "quota";
   if (status !== undefined && AUTH_STATUSES.has(status)) return "auth";
   if (matchesAny(lower, AUTH_WORDS)) return "auth";
+  // ⑥ 上下文超长在限流之前:它常以 400 出现,而病在会话不在供应商 ——
+  // 判成可重试的限流会去换家,换了也一样(那份上下文还超着)。
+  if (matchesAny(lower, CONTEXT_OVERFLOW_WORDS)) return "context_overflow";
   if (
     (status !== undefined && RATE_LIMIT_STATUSES.has(status)) ||
     matchesAny(lower, RATE_LIMIT_WORDS)
@@ -386,6 +425,8 @@ export function providerFailureLabel(kind: ProviderFailureKind): string {
       return "网络故障";
     case "server":
       return "供应商服务端错误";
+    case "context_overflow":
+      return "上下文超长(会话累计输入超过模型窗口)";
     case "unknown":
       return "供应商故障(未能归类)";
   }

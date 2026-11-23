@@ -12,6 +12,7 @@ import {
 import {
   insertWork, getWork, listWorks, updateWorkStatus, assignWork, setWorkPriority,
   setWorkDeps, checkWorkTransition, listDeps, listDependents, depState, isWorkStatus,
+  updateWorkAcceptance,
   clampWorkPriority, DEFAULT_WORK_PRIORITY, WORK_PRIORITY_MAX, WORK_PRIORITY_MIN,
   WORK_STATUSES, type WorkStatus, type WorkStatusChange,
 } from "../storage/repo/works.js";
@@ -74,6 +75,38 @@ function readPriorityArg(args: Readonly<Record<string, unknown>>): PriorityArg {
     };
   }
   return { ok: true, value: clampWorkPriority(raw) };
+}
+
+type AcceptanceArg =
+  | { ok: true; value: string[] | undefined }
+  | { ok: false; result: ToolResult };
+
+/**
+ * `acceptanceCriteria` 入参的**严格**读法(037)。
+ *
+ * 与 `readPriorityArg` 同一条纪律:区分「没提供」(`undefined` = 不动)与
+ * 「提供了但不是字符串数组」(拒收并说清形状)—— 用 `readString` 类的宽松读法
+ * 会把类型错的调用静默折成「没提供」,模型以为写了判据、库里没有。
+ */
+function readAcceptanceArg(args: Readonly<Record<string, unknown>>): AcceptanceArg {
+  const raw = args["acceptanceCriteria"];
+  if (raw === undefined) return { ok: true, value: undefined };
+  if (
+    !Array.isArray(raw) ||
+    !raw.every((x): x is string => typeof x === "string" && x.trim() !== "")
+  ) {
+    return {
+      ok: false,
+      result: fail(
+        "invalid_args",
+        "acceptanceCriteria 必须是字符串数组(收到 " +
+          JSON.stringify(raw).slice(0, 120) +
+          ")。每条一个可检验的判据句子;给 [] = 清空这条工作项的结构化判据",
+      ),
+    };
+  }
+  // 与 HTTP 立项那条路同一道清洗:条内去空白,空条不进库(空判据比没有更糟)。
+  return { ok: true, value: raw.map((x) => x.trim()) };
 }
 
 /** 工作项摘要行 —— 列表与详情统一格式,避免两处漂移。
@@ -722,6 +755,11 @@ const workCreate: PlatformTool = {
         `优先级:${WORK_PRIORITY_MIN}(最紧急)– ${WORK_PRIORITY_MAX}(最低),缺省 ${DEFAULT_WORK_PRIORITY}。` +
         "排空器同优先级内保持创建次序、数字小的先派;越界收进边界,非整数取最近的整数",
     })),
+    acceptanceCriteria: Type.Optional(Type.Array(Type.String(), {
+      description:
+        "验收判据(037,逐条):这条工作项**做成什么样算做完**。每条一个可检验的句子" +
+        "(质检逐条对照、甲方确认开工时逐条看到)。缺省 = 没有结构化判据,质检只能对照 goal 散文",
+    })),
   }),
   run(args, ctx): ToolResult {
     const proj = requireProject(ctx, "work_create");
@@ -740,6 +778,8 @@ const workCreate: PlatformTool = {
     const deps = depsArg.value ?? [];
     const priorityArg = readPriorityArg(args);
     if (!priorityArg.ok) return priorityArg.result;
+    const criteriaArg = readAcceptanceArg(args);
+    if (!criteriaArg.ok) return criteriaArg.result;
 
     const resolved = resolveAssignee(
       ctx.db, pid, args["assigneeRole"], args["assigneeSpec"],
@@ -760,6 +800,7 @@ const workCreate: PlatformTool = {
         id, projectId: pid, parentWorkId: parentWorkId ?? null,
         title: title.value, goal: goal.value, status: "open",
         ...(priorityArg.value !== undefined ? { priority: priorityArg.value } : {}),
+        ...(criteriaArg.value !== undefined ? { acceptanceCriteria: criteriaArg.value } : {}),
         assigneeAgentId: resolved.agentId, createdAt: at, updatedAt: at,
       });
     } catch (err) {
@@ -810,6 +851,11 @@ const workUpdate: PlatformTool = {
         `优先级:${WORK_PRIORITY_MIN}(最紧急)– ${WORK_PRIORITY_MAX}(最低)。` +
         "排空器数字小的先派;越界收进边界,非整数取最近的整数",
     })),
+    acceptanceCriteria: Type.Optional(Type.Array(Type.String(), {
+      description:
+        "验收判据(037)的**整体替换**(与 dependsOn 同一条语义,给 [] = 清空)。" +
+        "拆解后发现判据给错/给漏时改它,不要靠追加 goal 文本",
+    })),
   }),
   run(args, ctx): ToolResult {
     const workId = requireString(args, "workId");
@@ -825,10 +871,15 @@ const workUpdate: PlatformTool = {
     if (!depsArg.ok) return depsArg.result;
     const priorityArg = readPriorityArg(args);
     if (!priorityArg.ok) return priorityArg.result;
-    if (statusArg === undefined && depsArg.value === undefined && priorityArg.value === undefined) {
+    const criteriaArg = readAcceptanceArg(args);
+    if (!criteriaArg.ok) return criteriaArg.result;
+    if (
+      statusArg === undefined && depsArg.value === undefined &&
+      priorityArg.value === undefined && criteriaArg.value === undefined
+    ) {
       return fail(
         "invalid_args",
-        "work_update 至少要给 status、dependsOn、priority 之一 —— 都不给等于什么都不改",
+        "work_update 至少要给 status、dependsOn、priority、acceptanceCriteria 之一 —— 都不给等于什么都不改",
       );
     }
 
@@ -869,6 +920,19 @@ const workUpdate: PlatformTool = {
         r.changed
           ? `优先级:${r.from} → ${r.to}(数字小 = 更紧急,先被派发)`
           : `(优先级已经是「${r.to}」,没有变化)`,
+      );
+    }
+
+    if (criteriaArg.value !== undefined) {
+      // 判据(037):整体替换,与 dependsOn 同一条语义。放在状态写之前 ——
+      // 它不是流水线状态迁移,不触发 work_status_changed 语义,失败也留不下
+      // 半成品(单列替换,一个 UPDATE)。
+      const changed = updateWorkAcceptance(ctx.db, workId.value, criteriaArg.value);
+      if (!changed) return fail("not_found", `找不到工作项 ${workId.value}(判据没有写入)`);
+      lines.push(
+        criteriaArg.value.length > 0
+          ? `验收判据已整体替换(${criteriaArg.value.length} 条)`
+          : "验收判据已清空(这条工作项没有结构化判据了)",
       );
     }
 

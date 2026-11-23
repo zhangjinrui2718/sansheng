@@ -64,12 +64,12 @@ const BASELINE: Record<string, number> = {
   "components/brand/Seal.tsx": 2,
   "features/chat/ChatComposer.tsx": 136,
   // 2026-11-17(IA v4 走检):317 → 329(+12,头部「详情」入口;placeholder 键位段删除)
-  "features/chat/ChatSurface.tsx": 297,
+  "features/chat/ChatSurface.tsx": 316,
   "features/chat/Markdown.tsx": 0,
   // 2026-11-17(D3):「计划」卡 —— 新 UI(目标/判据摘要 + 拆解清单 + 确认开工)。
   // 2026-11-20(v5):117 → 57 —— band 形态退场,卡身随表态卡进流(判据在
   // entities/streamCards.ts),works 取数上移到 ChatSurface(组件只收 props)。
-  "features/chat/PlanConfirmCard.tsx": 57,
+  "features/chat/PlanConfirmCard.tsx": 59,
     // 2026-11-17(文案裁决):103 → 128(+25,HiddenNotice 的落点指引移进悬停 ——
   // 屏上散文退场,指针保留在 title)。2026-11-20(v5):流尾「读不到」行不加悬停
   // (可见正文由判据层给出),维持 128。
@@ -110,6 +110,7 @@ const BASELINE: Record<string, number> = {
   "components/deliverable/HtmlReport.tsx": 113,
   // 2026-11-17(IA v4 走检):256 → 239(描述句「只在实时流里看得见…」退场)
   "components/members/AgentConversations.tsx": 239,
+  "components/members/AgentTurnLog.tsx": 107,
   // 2026-11-14:1051 → 332。编辑器 / 纯判据 / 告警与工具面段落 / 有状态工作台
   // 搬去 `components/harness/`(那边逐文件登记),本文件只剩成员页那张卡的形状
   // 与入口链接 —— 是搬家,不是删文案。
@@ -185,9 +186,9 @@ const BASELINE: Record<string, number> = {
   "main.tsx": 0,
   // 2026-11-20(v5 Wave D):927 → 578 —— 页签组件退役,活动判据搬到
   // components/members/activity.ts(板与面板共用;下面三条新账)。
-  "routes/Members.tsx": 578,
+  "routes/Members.tsx": 611,
   // 活动判据(欠什么/为什么在跑/年龄)—— MemberCard 与 MemberPane 共用。
-  "components/members/activity.ts": 171,
+  "components/members/activity.ts": 190,
   // 「此刻状态」三态行(读不到 ≠ 空闲;没拿到 ≠ 读不到)—— 板与面板共用一份。
   "components/members/TurnStatus.tsx": 53,
   // 全员并发板的卡面(谁在跑/手上活/欠什么/实时行;悬停只有角标口径)。
@@ -202,7 +203,7 @@ const BASELINE: Record<string, number> = {
   // 静态图例退场,运行态说明名称式;DAG 节点增「待质检」标记)
   // 2026-11-20(v5 Wave B):1262 → 1209 —— 文本正文搬到 ArtifactTextBody
   // (markdown 化,流内展开共用)。
-  "routes/Works.tsx": 1209,
+  "routes/Works.tsx": 1235,
   "stores/chat.ts": 111,
   "stores/settings.ts": 0,
 };
@@ -237,7 +238,10 @@ describe("可见文字预算:屏上的中文只许减不许增", () => {
     // ⚠️ v3 §1.6 的 ≤7,500 目标**仍未达标**(差 1,925)—— 剩余大头是记录卡内的
     // why/行动行(组织推进的呈现判据,2026-10-07 兜底裁决的呈现面)与 CodeService
     // 技术事实;再压需要逐条裁决,留作下一波。
-    expect(total).toBeLessThanOrEqual(9425);
+    // 2026-11-22(multica 借鉴批次):9,425 → 9,609(+184:成员页「他做了什么」+107、
+    // 对话页排队提示行 +19、计划卡/工作项页验收判据逐条 +28、ChatSurface/Members
+    // 接线小幅 +30;每一段都有对应回归文件,不是顺手堆的说明字)。
+    expect(total).toBeLessThanOrEqual(9609);
   });
 
   it("② 基线表覆盖所有文件(不许有文件悄悄逃出仪器)", () => {

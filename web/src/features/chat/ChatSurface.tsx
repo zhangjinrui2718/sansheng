@@ -139,6 +139,9 @@ export function ChatSurface() {
    * (乐观上屏已经让它看起来发出去了)。
    */
   const socketStatus = useChatStore((s) => s.socketStatus);
+  // 036:最近一句「已排队」提示 —— 只在**当前这条线**上显示(别的那线排队的
+  // 话,这一行在这里冒出来就是答非所问)。
+  const queuedNote = useChatStore((s) => s.queuedNote);
   const contextNotice = useChatStore((s) => s.contextNotice);
   /** 「连接断了所以没发出去」那一类错误 —— 它**不是**回合的错,得单独说。 */
   const transportError = useChatStore((s) => s.error);
@@ -499,6 +502,25 @@ export function ChatSurface() {
         >
           {transportError.message}
         </RedNote>
+      )}
+
+      {/*
+        036(2026-11-22):「已排队」那一行 —— 甲方在收件人正跑回合时说了话,
+        服务端落库排队(不再拒收)。消息本体就在上面那条流里;这一行说的是
+        **它之外的另一件事**:「他现在顾不上,这句话会在他下一轮带上」。
+        只在当前这条线上显示;那条线的回合收口(agent_end)即过期。
+      */}
+      {queuedNote !== null && queuedNote.sessionId === sessionId && (
+        <div
+          className="flex-none"
+          style={{
+            padding: "4px 16px", fontSize: 11, lineHeight: "1.6",
+            color: "var(--bone-dim)",
+            borderTop: "1px solid var(--ink-3)",
+          }}
+        >
+          这句话已排队 —— 他这一轮结束就会带上,不会丢。
+        </div>
       )}
 
       <MessageList facts={facts} />

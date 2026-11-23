@@ -234,6 +234,9 @@ export const ROLE_SPECS: Readonly<Record<ProjectRole, RoleSpec>> = {
       // server、谁开着,但**开不开由人(HTTP)决定** —— 它是甲方接口,不该
       // 替甲方扩权。
       "mcp.read",
+      // 038(2026-11-22):结构化唤醒 —— 排「到点再叫醒我」(早报/稍后再查)。
+      // 只给业务经理:排的是他对甲方与项目的自查节奏,不是执行角色的第二套排空器。
+      "schedule.manage",
     ],
     writeKinds: ["project_brief", "decision", "note"],
     promptUnits: [

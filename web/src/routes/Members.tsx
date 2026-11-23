@@ -150,6 +150,7 @@ import { artifactLocation, artifactMeta } from "@/lib/entityMeta";
 import type { RelationContext } from "@/lib/relations";
 import { RoleHarnessSection, roleIssueCount } from "@/components/members/RoleHarness";
 import { AgentConversations } from "@/components/members/AgentConversations";
+import { AgentTurnLog } from "@/components/members/AgentTurnLog";
 import { MemberBoard } from "@/components/members/MemberCard";
 import { TurnStatus } from "@/components/members/TurnStatus";
 import { inFlightTurns, type Turn } from "@/stores/chat";
@@ -493,6 +494,25 @@ export function MemberPane({
             // ⚠️ `key` = 换人时重置「选中哪条线」:上一个成员选的那条线对
             // 新成员多半没有意义(它不在他的线里),留着会让新面板一开始
             // 指向一条不属于他的线。
+            key={member.id}
+            projectId={projectId}
+            agentId={member.id}
+            agentName={ROLE_LABEL[member.role]}
+          />
+        </div>
+
+        {/* ── ③b 他做了什么(migration 035 的执行轨迹)──────────────
+            「他说了什么」答正文(session_messages),这一块答动作(turn_events:
+            逐次工具调用 / provider 故障 / 回合级标记)。排查「卡在哪一步」看这里。 */}
+        <div className="flex flex-col gap-1.5" style={{ borderTop: "1px solid var(--ink-3)", paddingTop: 8 }}>
+          <span
+            className="ss-meta flex items-center gap-1"
+            title="按回合分组的工具调用轨迹(只有已结束的回合;进行中的看实时流)"
+          >
+            他做了什么
+            <Help id="member.turn-events" />
+          </span>
+          <AgentTurnLog
             key={member.id}
             projectId={projectId}
             agentId={member.id}

@@ -110,6 +110,20 @@ export interface HubHandlers {
     content: string,
     sessionId?: string,
   ) => Promise<void>;
+  /**
+   * **忙时排队**(036,2026-11-22):收件人(业务经理)正跑回合时甲方又说了话
+   * —— host 负责把消息落库、记账(`queued_client_messages`)并广播
+   * `message_queued`;排空器的 `answer_client_message` 待办会在他空出来时带上。
+   *
+   * **可选**:没接这条的宿主(旧测试桩)维持旧行为 —— `code:"busy"` 拒收。
+   * 接待会话(`projectId === null`)不排队(排空器按项目查待办,接待会话
+   * 没有「下一轮」的载体),维持拒收。
+   */
+  readonly onUserMessageQueued?: (
+    projectId: string,
+    content: string,
+    sessionId?: string,
+  ) => Promise<void>;
   /** 用户答了一个 client_question */
   readonly onAnswerQuestion: (questionId: string, answer: string) => Promise<void>;
   /**
@@ -149,8 +163,9 @@ export class PlatformHub {
    * 排空器按回合记账(`dispatch_attempts`),跳过会被记成「叫醒过一次却没动」,
    * 三次就把那条待办的预算烧光,然后广播一条**假的** `cascade_stopped`。
    *
-   * 甲方那条路**不排队**:它由 `send` 的判据直接拒掉(`code=busy`)—— 那正是
-   * 验收里的负样本(「业务经理正在回你时再发一条 → 仍然被拒」)。
+   * 甲方那条路**不占这个队列**(2026-11-22 起也不再拒收):忙时它走
+   * `onUserMessageQueued` 落库排队(036),空出来由排空器带上 —— 与这里的
+   * FIFO 等待队列是两套机制:这里排的是**回合闩**,那边排的是**甲方的话**。
    */
   private readonly waiters = new Map<string, Array<{ trigger: TurnTrigger; resolve: () => void }>>();
 
@@ -320,6 +335,23 @@ export class PlatformHub {
           const taken =
             to !== null ? this.isBusy(cmd.projectId, to) : this.isBusy(cmd.projectId);
           if (taken) {
+            // ── 忙时不再拒收,而是排队(036,2026-11-22)──────────────────
+            //
+            // 旧文案「等它结束或先中断」指的那条路,在刷新/断线的界面上可能
+            // 根本没有中断入口(批次 32 的现场)—— 服务端指的路界面走不通;
+            // 而拒收 = 甲方那句话哪儿都没落,他多半以为自己说过了。
+            // ⇒ 项目会话:消息照常落库 + 记一条排队账,他下一轮带上
+            //   (multica 的 "joined this run" 语义;排空器 `answer_client_message`)。
+            // ⇒ 接待会话(没有项目,排空器无从查起)与未接线宿主:维持拒收。
+            if (
+              cmd.projectId !== null &&
+              this.handlers.onUserMessageQueued !== undefined
+            ) {
+              await this.handlers.onUserMessageQueued(
+                cmd.projectId, cmd.content, cmd.sessionId,
+              );
+              return;
+            }
             this.sendTo(ws, {
               type: "error", projectId: cmd.projectId,
               error: {

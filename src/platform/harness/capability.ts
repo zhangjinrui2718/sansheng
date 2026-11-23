@@ -76,7 +76,11 @@ export type Capability =
   | "work.report"
   // ── 021:审查结论。**平台只认这个工具调用**,不解析 review_finding 的正文 ——
   // 见 tools/review.ts 文件头(事故 2026-10-06 08:57)。
-  | "work.review_verdict";
+  | "work.review_verdict"
+  // ── 038(2026-11-22):结构化唤醒 —— 「到点再叫醒我」落成库里的行。
+  // 只给业务经理:排的是**他对甲方/项目的自查节奏**(早报、稍后再查),
+  // 不是给执行角色加第二套排空器。
+  | "schedule.manage";
 
 /** 闭合集数组形式 —— 遍历/校验用。顺序与设计文档一致。 */
 export const CAPABILITIES = [
@@ -117,6 +121,7 @@ export const CAPABILITIES = [
   "code.exec",
   "work.report",
   "work.review_verdict",
+  "schedule.manage",
 ] as const satisfies readonly Capability[];
 
 /**
@@ -182,6 +187,7 @@ export const CAPABILITY_GROUP: Readonly<Record<Capability, string>> = {
   "code.exec": "本机操作",
   "work.report": "汇报",
   "work.review_verdict": "审查",
+  "schedule.manage": "定时",
 };
 
 /** 一个能力的中文分组(界面用)。键是闭合联合,所以这里不会漏项。 */
@@ -213,7 +219,8 @@ export type PlatformToolName =
   | "mcp_list" | "mcp_grant" | "mcp_revoke"
   | "ask_client" | "tell_client"
   | "report"
-  | "review_verdict";
+  | "review_verdict"
+  | "wakeup_create" | "wakeup_list" | "wakeup_cancel";
 
 export type ToolName = SdkToolName | PlatformToolName;
 
@@ -284,6 +291,7 @@ export const CAPABILITY_TOOLS: Readonly<Record<Capability, readonly ToolName[]>>
   "code.exec": ["bash"],
   "work.report": ["report"],
   "work.review_verdict": ["review_verdict"],
+  "schedule.manage": ["wakeup_create", "wakeup_list", "wakeup_cancel"],
 };
 
 /** SDK 内置工具名集合。**必须先于 PLATFORM_TOOLS 初始化** —— 后者在模块加载期

@@ -49,6 +49,7 @@ export type GlossaryId =
   | "member.runtime"
   | "member.todos"
   | "member.conversations"
+  | "member.turn-events"
   | "agent.busy"
   | "artifact.body-index"
   | "artifact.drift"
@@ -167,6 +168,11 @@ export const GLOSSARY: Record<GlossaryId, GlossaryEntry> = {
     line: "他说了什么:只读的对话全文",
     basis: "transport/http.ts 的 agentConversations(只取本人发言与甲方的话)",
     source: "GET /api/projects/:id/agents/:agentId/conversations",
+  },
+  "member.turn-events": {
+    line: "他做了什么:逐次工具调用的落库轨迹",
+    basis: "runtime/turn.ts 收口写 turn_events(migration 035),按回合分组",
+    source: "GET /api/projects/:id/agents/:agentId/turn-events",
   },
   "agent.busy": {
     line: "在跑是内存忙闩,不是工作项状态",

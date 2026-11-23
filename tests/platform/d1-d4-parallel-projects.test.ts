@@ -539,31 +539,41 @@ describe("③ D3:A 排空期间 B 敲门 → B 立刻被处理(不等下一个 t
 
 // ── ④ hub.busy 语义不变 ─────────────────────────────────────────
 
-describe("④ hub.busy 语义不变:同一个项目并发两条用户消息被拒 code=busy", () => {
-  it("第二条 `send` 收到 busy,且**只有一条** BM 回合被建起来", async () => {
+describe("④ hub.busy 语义(036 起:同项目并发第二条 → 排队,不再拒收)", () => {
+  it("第二条 `send` 落库排队;收件人空出来后带上(仍然只有一条 BM 会话)", async () => {
     const s = await startHost();
     const db = s.db();
     seedProject(db, "pA", null);
-    h.blockedAll.add("pA");
+    // ⚠️ 用 **spin(延迟)** 而不是 block:blockedAll 每项目只挂一个 release 槽,
+    // boot 排空的 PM 回合会占住它 ⇒ 甲方第一回合挂不上、nudge 被吞。spin 让
+    // 回合「跑得慢但不堵」—— 忙闩同样占着(判据要的正是这个),而谁都收得了尾。
+    h.spinByProject.set("pA", 600);
 
     s.send({ type: "send", projectId: "pA", content: "第一条" });
     expect(await until(() => h.inflight > 0)).toBe(true);
+    // 第一回合还在 spin 里 ⇒ 忙闩占着,第二条立刻发。
     s.send({ type: "send", projectId: "pA", content: "第二条" });
 
     expect(
-      await until(() => events.some((e) => (e.error as { code?: string } | undefined)?.code === "busy")),
-      "同一个项目并发两条消息必须被 `code=busy` 拒掉",
+      await until(() => events.some((e) => e.type === "message_queued")),
+      "同一个项目并发两条消息 ⇒ 第二条必须排队(message_queued)",
     ).toBe(true);
-    // 拒绝必须是**第二条**,不是把第一条也拒了
-    const busy = events.filter((e) => (e.error as { code?: string } | undefined)?.code === "busy");
-    expect(busy.length).toBe(1);
-    expect((busy[0]!.projectId as string)).toBe("pA");
+    expect(
+      events.some((e) => (e.error as { code?: string } | undefined)?.code === "busy"),
+      "项目会话不再吃 code=busy(那是 036 之前的形态)",
+    ).toBe(false);
 
-    release("pA");
-    expect(await until(() => h.turns.filter((t) => t.projectId === "pA").length === 1)).toBe(true);
-    // 另一条消息没有跑成第二个回合
-    await sleep(150);
-    expect(h.turns.filter((t) => t.projectId === "pA").length).toBe(1);
+    // 第一回合结束的门铃立刻叫醒 answer_client_message ⇒ 排队的那句被带上
+    //(第二个 pA 回合;同样 spin,不需要 release)。
+    expect(
+      await until(() => h.turns.filter((t) => t.projectId === "pA" && t.workId === null).length >= 2, 8000),
+      "排队的那句在收件人空出来后被带上",
+    ).toBe(true);
+    expect(
+      await until(() =>
+        (db.prepare(`SELECT COUNT(*) AS n FROM queued_client_messages WHERE project_id = 'pA' AND consumed_at IS NULL`).get() as { n: number }).n === 0, 8000),
+      "带上之后账被消费(回合成功结束)",
+    ).toBe(true);
   });
 });
 

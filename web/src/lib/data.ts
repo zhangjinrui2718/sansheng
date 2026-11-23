@@ -29,6 +29,7 @@ import { useCallback, useEffect, useState } from "react";
 import { todoKindReachesClient } from "@shared/types/platform";
 import type {
   AgentConversationsResponse,
+  AgentTurnEventsResponse,
   AnsweredClientQuestionView,
   ArtifactContentView,
   ArtifactView,
@@ -490,6 +491,34 @@ export function useAgentConversations(
         ? api.listAgentConversations(projectId, agentId, { sessionId: sessionId ?? undefined })
         : Promise.resolve(null),
     [projectId, agentId, sessionId ?? null, revision],
+  );
+  return { data: r.data, loading: r.loading, error: r.error };
+}
+
+/**
+ * 「他做了什么」—— 某个成员的**执行轨迹**(migration 035 的 `turn_events`)。
+ *
+ * 与 `useAgentConversations` 的分工:那条答「他说了什么」(对话全文,回合的
+ * **正文**),这条答「他做了什么」(逐次工具调用 / provider 故障 / 回合级
+ * 标记,回合**结束**时整批落库)。真机排查「它到底卡在哪一步」要的是这一面。
+ *
+ * ⚠️ **只有已结束的回合** —— 正在跑的那一轮轨迹还没写(写入点在回合收口),
+ * 进行中要看 `AgentConversations` 的实时流那一块。两块的边界在界面上说清,
+ * 不把「已结束的轨迹」说成「全部过程」。
+ *
+ * `data === null` 的语义与刷新机制同 `useAgentConversations` 一条纪律。
+ */
+export function useAgentTurnEvents(
+  projectId: string | null,
+  agentId: string | null,
+): Loaded<AgentTurnEventsResponse | null> {
+  const revision = useChatStore((s) => s.projectRevision);
+  const r = useLoad(
+    () =>
+      projectId !== null && agentId !== null
+        ? api.listAgentTurnEvents(projectId, agentId)
+        : Promise.resolve(null),
+    [projectId, agentId, revision],
   );
   return { data: r.data, loading: r.loading, error: r.error };
 }

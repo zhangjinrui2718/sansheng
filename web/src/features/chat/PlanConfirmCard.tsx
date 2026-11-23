@@ -106,17 +106,30 @@ export function PlanConfirmCard({
         ) : (
           <div className="grid" style={{ gap: 2 }}>
             {plan.map((w, i) => (
-              <div key={w.id} className="flex items-baseline gap-2" style={{ paddingLeft: 12, fontSize: 12 }}>
-                <span className="ss-meta" style={{ flex: "none" }}>
-                  {i + 1}
-                </span>
-                <span className="ss-body truncate" style={{ color: "var(--bone)" }} title={w.title}>
-                  {w.title}
-                </span>
-                <span className="ss-meta" style={{ flex: "none" }}>
-                  {w.assigneeName}
-                  {w.dependsOn.length > 0 ? ` · 前置 ${w.dependsOn.length} 项` : " · 无前置"}
-                </span>
+              <div key={w.id} style={{ paddingLeft: 12, fontSize: 12 }}>
+                <div className="flex items-baseline gap-2">
+                  <span className="ss-meta" style={{ flex: "none" }}>
+                    {i + 1}
+                  </span>
+                  <span className="ss-body truncate" style={{ color: "var(--bone)" }} title={w.title}>
+                    {w.title}
+                  </span>
+                  <span className="ss-meta" style={{ flex: "none" }}>
+                    {w.assigneeName}
+                    {w.dependsOn.length > 0 ? ` · 前置 ${w.dependsOn.length} 项` : " · 无前置"}
+                  </span>
+                </div>
+                {/* 工作项级验收判据(037):给逐条就摆出来 —— 甲方确认的是
+                    「这些活做成什么样算完」,不是一列标题。空 = 未给,不编。 */}
+                {(w.acceptanceCriteria ?? []).length > 0 && (
+                  <div className="ss-meta" style={{ paddingLeft: 18 }}>
+                    {(w.acceptanceCriteria ?? []).map((c, j) => (
+                      <div key={j} className="truncate" title={c}>
+                        {`验收 ${j + 1}:${c}`}
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
             ))}
           </div>

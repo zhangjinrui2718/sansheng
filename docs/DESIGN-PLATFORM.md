@@ -1237,6 +1237,7 @@ export type Capability =
   // 审查结论(migration 021):平台**只认** `review_verdict` 这一个工具调用,
   // 不解析 `review_finding` 的正文 —— 见 §3.2 后面那段。
   | "work.review_verdict" // 质检:通过 / 不通过
+  | "schedule.manage" // 定时唤醒(038):到点由排空器叫醒 —— 只给业务经理
 ```
 
 > **2026-10-03 补录**:上表在首版里漏了 8 条,全部属于同一类缺陷 —— **有动词却无法发现动词的输入**。最严重的两条是 `collab.meeting.respond` / `collab.meeting.conclude`:§5.4 描述了完整的会议流程并引用了这两个动词,但联合里没有定义,意味着**会议一旦发起就永远无法表态、无法收尾**。另外 `collab.read` 是修这一批时发现的同类问题:`collab.answer` 要 `askId`,但没有任何能力能**发现**待答的提问。
@@ -1285,12 +1286,15 @@ export type Capability =
 | `code.exec` | `bash` | SDK 内置 | |
 | `work.report` | `report` | workId, status, summary, artifacts? |
 | `work.review_verdict` | `review_verdict` | workId, verdict(pass\|fail), severity, findingArtifactId?, note? | 质检的结论 | |
+| `schedule.manage` | `wakeup_create`, `wakeup_list`, `wakeup_cancel` | `wakeup_create`: note, kind(at\|every), atMs?/intervalMs? · `wakeup_cancel`: wakeupId | 定时唤醒:到点由排空器 `wakeup_due` 叫醒(038;只给业务经理) |
 
-**37 条 capability 展开成 48 个工具。**
+**38 条 capability 展开成 51 个工具。**
 
 > 2026-10-16:35 → 37 条(MCP 的 `mcp.read` / `mcp.grant`)、45 → **48** 个工具
 > (新增 `mcp_list` / `mcp_grant` / `mcp_revoke` 三条 —— **是三条不是两条**,
 > 因为 `mcp.grant` 展开成 grant + revoke 两个工具,粒度与 `blackboard.read` 同纪律)。
+> 2026-11-22(038):37 → **38** 条(`schedule.manage`)、48 → **51** 个工具
+> (`wakeup_create` / `wakeup_list` / `wakeup_cancel` —— 结构化唤醒)。
 
 ### 3.3 角色解析:工具收角色,存储存 agent
 

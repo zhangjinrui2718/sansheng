@@ -96,6 +96,7 @@
 | `memory.write` | 写入长期记忆 —— **仅本角色持有**(见 §11) |
 | `knowledge.read` | 检索项目语料(对话 / 工件正文;索引由平台做,只读) |
 | `mcp.read` | 列外部工具(MCP)server 目录与各角色授权 ← **只有「读」,没有「授权」**:它是甲方接口,不该替甲方扩权 |
+| `schedule.manage` | 排**定时唤醒**(038:到点由排空器叫醒,note 原样带回)← 仅本角色持有:排的是它对甲方与项目的自查节奏,不是执行角色的第二套排空器 |
 | **`client.ask`** | **向甲方提问** ← 仅本角色持有 |
 | **`client.message`** | **向甲方播报** ← 仅本角色持有 |
 
@@ -116,6 +117,7 @@
     "blocker_open", "blocker_update", "blocker_list", "blocker_read",
     "memory_search", "memory_remember", "knowledge_search", "knowledge_read",
     "mcp_list",
+    "wakeup_create", "wakeup_list", "wakeup_cancel",
     "ask_client", "tell_client"
   ],
   "deny": ["work_create", "work_update", "work_assign", "work_list", "work_read",
@@ -123,7 +125,7 @@
 }
 ```
 
-**30 个工具。**(2026-11-13 更正:首版写「26 个」—— 上面 `allow` 数组就是 30 项,与 `factoryToolset("business_manager")` 实测一致,是首版数错了。)注意 `clientFacing: true` 是它能拿到最后两个的唯一原因 —— `ScopeGate` 规则 1。
+**33 个工具。**(2026-11-13 更正:首版写「26 个」—— 上面 `allow` 数组就是 30 项,与 `factoryToolset("business_manager")` 实测一致,是首版数错了。)注意 `clientFacing: true` 是它能拿到最后两个的唯一原因 —— `ScopeGate` 规则 1。
 
 `deny` 列出它的两条边界:**不拆解工作**(`work.*` 全族)与**不碰代码**(SDK 七件)。业务经理收敛诉求,不排期也不干活。
 
@@ -507,13 +509,14 @@
 | `mcp.grant` | — | ✅ | — | — | — |
 | `work.report` | — | ✅ | ✅ | ✅ | — |
 | `work.review_verdict` | — | — | — | — | ✅ |
+| `schedule.manage` | ✅ | — | — | — | — |
 | `code.read` | — | — | ✅ | ✅ | — |
 | `code.write` | — | — | — | ✅ | — |
 | `code.exec` | — | — | ✅ | ✅ | — |
 | **`client.ask`** | **✅** | — | — | — | — |
 | **`client.message`** | **✅** | — | — | — | — |
 
-**共 37 条 capability。** 读这张表最该看的是**最后两行** —— 整个组织里只有一个角色能跟甲方说话,这不是提示词里的约定,是这张表的形状决定的。
+**共 38 条 capability。** 读这张表最该看的是**最后两行** —— 整个组织里只有一个角色能跟甲方说话,这不是提示词里的约定,是这张表的形状决定的。
 
 三处值得单独注意:
 

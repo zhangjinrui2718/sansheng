@@ -102,6 +102,7 @@ import {
 } from "./providerFailure.js";
 import { listSessionMessages } from "../storage/repo/sessions.js";
 import { insertTurnUsage, type TurnUsageRow } from "../storage/repo/usage.js";
+import { insertTurnEvents, type TurnEventRow } from "../storage/repo/turnEvents.js";
 
 /** 一次工具调用的现场记录。 */
 export interface ToolCallRecord {
@@ -921,6 +922,116 @@ export async function runTurn(opts: RunTurnOptions): Promise<TurnResult> {
   /** 落库那一行的现场(见 `TurnResult.usage`);没写账时为 `undefined`。 */
   let recordedUsage: TurnUsageTotal | undefined;
 
+  /**
+   * 这个回合的分组键(`turn_events.turn_id`,migration 035)。
+   * 在回合开始时生成**一次**,`finally` 里写轨迹与(成功的)返回共用同一份 ——
+   * 在两处各生成一个会得到两个不同的「回合」。
+   */
+  const turnId = (opts.newId ?? defaultUsageId)("turn");
+
+  /**
+   * 「甲方那边没有下文」的判定结果 —— 在 `finally` 里算好(写轨迹的
+   * `unanswered` 标记要它),返回值复用同一个变量,不判第二遍
+   * (判据写两遍 = 漂的开端)。
+   */
+  let turnText = "";
+  let unanswered: TurnResult["unanswered"] = null;
+
+  /**
+   * 把这一回合的轨迹落成 `turn_events` 的若干行(migration 035)。
+   *
+   * 与 `recordTurnUsage` 同一条纪律:**单点写入、两条出口各跑一次、失败不毁
+   * 回合但绝不静默**。事实全部来自本回合已累积的现场(`toolCalls` /
+   * `providerError` / 墙钟超时现场),不在这里再订阅任何东西。
+   *
+   * 什么都没发生的回合(零工具、零故障、零标记)**一行都不写** ——
+   * 与 `turn_usage` 的「没买到输出不写账」同一条诚实纪律。
+   */
+  const recordTurnEvents = (): void => {
+    const rows: TurnEventRow[] = [];
+    let seq = 0;
+    const at = Date.now();
+    const nextId = opts.newId ?? defaultUsageId;
+    for (const t of toolCalls) {
+      seq += 1;
+      rows.push({
+        id: nextId("te"), turnId,
+        projectId: pid, sessionId: opts.sessionId ?? null,
+        agentId: opts.agentId, workId: opts.workId ?? null,
+        seq, kind: "tool", tool: t.name,
+        argsSummary: t.argsSummary, resultSummary: t.resultSummary,
+        isError: t.isError, durationMs: t.durationMs, createdAt: at,
+      });
+    }
+    if (providerError !== undefined) {
+      seq += 1;
+      rows.push({
+        id: nextId("te"), turnId,
+        projectId: pid, sessionId: opts.sessionId ?? null,
+        agentId: opts.agentId, workId: opts.workId ?? null,
+        seq, kind: "provider_error", tool: null,
+        argsSummary: "",
+        resultSummary: `${providerError.kind} · ${providerError.message}`,
+        isError: true, durationMs: null, createdAt: at,
+      });
+    }
+    if (wallClockExceeded) {
+      seq += 1;
+      rows.push({
+        id: nextId("te"), turnId,
+        projectId: pid, sessionId: opts.sessionId ?? null,
+        agentId: opts.agentId, workId: opts.workId ?? null,
+        seq, kind: "marker", tool: null,
+        argsSummary: "",
+        resultSummary:
+          `墙钟上界 ${wallClockMs}ms 到点打断(已跑 ${elapsedAtInterruptMs}ms,` +
+          `已完成工具 ${completedAtInterrupt} 次;打断瞬间` +
+          (interruptedTool === null
+            ? "没有在跑的工具"
+            : `在跑 ${interruptedTool.name}(${interruptedTool.runningMs}ms)` +
+              (interruptedTool.argsSummary !== "" ? ` 参数:${interruptedTool.argsSummary}` : "")) +
+          ")",
+        isError: true, durationMs: null, createdAt: at,
+      });
+    }
+    if (providerRetries > 0) {
+      seq += 1;
+      rows.push({
+        id: nextId("te"), turnId,
+        projectId: pid, sessionId: opts.sessionId ?? null,
+        agentId: opts.agentId, workId: opts.workId ?? null,
+        seq, kind: "marker", tool: null,
+        argsSummary: "",
+        resultSummary: `SDK 自动重试 ${providerRetries} 次`,
+        isError: false, durationMs: null, createdAt: at,
+      });
+    }
+    if (unanswered !== null && unanswered !== undefined) {
+      seq += 1;
+      rows.push({
+        id: nextId("te"), turnId,
+        projectId: pid, sessionId: opts.sessionId ?? null,
+        agentId: opts.agentId, workId: opts.workId ?? null,
+        seq, kind: "marker", tool: null,
+        argsSummary: "",
+        resultSummary:
+          `回合没有给出下文(${unanswered.kind === "no_text" ? "全程无正文" : "最后一次工具结果之后没有正文"};` +
+          `正文 ${unanswered.textChars} 字 / 推理 ${unanswered.thinkingChars} 字 / 工具 ${unanswered.toolCalls} 次)`,
+        isError: true, durationMs: null, createdAt: at,
+      });
+    }
+    if (rows.length === 0) return;
+    try {
+      insertTurnEvents(opts.db, rows);
+    } catch (err: unknown) {
+      log.error(
+        `turn: 轨迹落库失败(${opts.agentId} · 项目 ${pid ?? "(接待会话)"} · ` +
+          `${rows.length} 行)—— 这一段现场记不上了:` +
+          (err instanceof Error ? err.message : String(err)),
+      );
+    }
+  };
+
   // ⚠️ **登记必须发生在第一次 `await` 之前。** 放在 `await opts.session.prompt()`
   // 之后等于永远登记不上:到点时回合早就结束了(或者早就该被打断了)——
   // 批次 19 修前端中断时,死接线正是藏在这个缝隙里(一个从来没人 `set` 的
@@ -1105,6 +1216,40 @@ export async function runTurn(opts: RunTurnOptions): Promise<TurnResult> {
     unsub();
     // ★ 单点写入 —— `finally` 对「正常返回」与「prompt() 抛错」两条出口各跑一次
     recordedUsage = recordTurnUsage();
+
+    // ── 「甲方那边没有下文」的判据(2026-10-07)────────────────────
+    //
+    // **打断与超时一律不算**:那两条路已经有各自的现场与告警(`timeout` / 中断日志),
+    // 在这里再报一次「没下文」等于把一个已知状态说成另一个,反而更难查。
+    //
+    // ⚠️ **provider 故障也不算**(2026-10-22 批次补):限流 / 断网 / 5xx 之后
+    // 模型确实一个字都没说,但那不是「他说完了没有下文」,而是「provider 把他掐了」。
+    // 两个故障叠在一起报 = 报多了就没人看了 ⇒ provider 故障走 `providerError`
+    // 那一条通道,这里判 `null`。
+    //
+    // 在 `finally` 里算(而不是返回前)是为了 `recordTurnEvents` 能把这条判定
+    // 落成轨迹的 `unanswered` 标记 —— 返回值复用同一个变量,判据只有一份。
+    turnText = text.join("");
+    unanswered =
+      abortRequested || timedOut || providerError !== undefined
+        ? null
+        : turnText.trim() === ""
+          ? {
+              kind: "no_text",
+              textChars: 0,
+              thinkingChars: thinking.join("").length,
+              toolCalls: toolCalls.length,
+            }
+          : toolCalls.length > 0 && !textSinceLastTool
+            ? {
+                kind: "no_text_after_tools",
+                textChars: turnText.trim().length,
+                thinkingChars: thinking.join("").length,
+                toolCalls: toolCalls.length,
+              }
+            : null;
+    // ★ 轨迹单点写入(与用量同一处、同一条纪律)。
+    recordTurnEvents();
   }
 
   const timeout: TurnTimeoutScene | undefined = wallClockExceeded
@@ -1120,34 +1265,9 @@ export async function runTurn(opts: RunTurnOptions): Promise<TurnResult> {
       }
     : undefined;
 
-  // ── 「甲方那边没有下文」的判据(2026-10-07)──────────────────────
-  //
-  // **打断与超时一律不算**:那两条路已经有各自的现场与告警(`timeout` / 中断日志),
-  // 在这里再报一次「没下文」等于把一个已知状态说成另一个,反而更难查。
-  //
-  // ⚠️ **provider 故障也不算**(2026-10-22 批次补):限流 / 断网 / 5xx 之后
-  // 模型确实一个字都没说,但那不是「他说完了没有下文」,而是「provider 把他掐了」。
-  // 两个故障叠在一起报 = 报多了就没人看了 ⇒ provider 故障走 `providerError`
-  // 那一条通道,这里判 `null`。
-  const turnText = text.join("");
-  const unanswered: TurnResult["unanswered"] =
-    abortRequested || timedOut || providerError !== undefined
-      ? null
-      : turnText.trim() === ""
-        ? {
-            kind: "no_text",
-            textChars: 0,
-            thinkingChars: thinking.join("").length,
-            toolCalls: toolCalls.length,
-          }
-        : toolCalls.length > 0 && !textSinceLastTool
-          ? {
-              kind: "no_text_after_tools",
-              textChars: turnText.trim().length,
-              thinkingChars: thinking.join("").length,
-              toolCalls: toolCalls.length,
-            }
-          : null;
+  // `unanswered` 与 `turnText` 已在 `finally` 里算好(见上),这里只消费 ——
+  // 判据若写第二遍,两处漂开的那天就是「轨迹里说无下文、TurnResult 说有」的那天。
+
 
   return {
     text: turnText,

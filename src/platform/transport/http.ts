@@ -73,6 +73,7 @@ import {
 import {
   aggregateProjectUsage, normalizeUsageDayLimit, normalizeUsageDays,
 } from "../storage/repo/usage.js";
+import { listTurnEventsByAgent } from "../storage/repo/turnEvents.js";
 import { ensureSession } from "../transport/hub.js";
 import {
   getSession, insertSession, listAllSessions, listSessions, listSessionMessages,
@@ -83,6 +84,7 @@ import type { SessionMessageKind, SessionMessageRow, SessionRow } from "../stora
 import type {
   ArtifactContentView,
   AgentConversationLineView, AgentConversationsResponse,
+  AgentTurnEventsResponse, AgentTurnView,
   CodeServiceFileView, CodeServiceFilesView,
   HarnessView, MemberConversationView, MemberConversationsResponse,
   KnowledgeChunkView,
@@ -754,6 +756,30 @@ export function createPlatformApp(deps: HttpDeps): Hono {
     return c.json(
       agentConversations(db, id, agentId, sessionId ?? null, limit),
     );
+  });
+
+  /**
+   * 「**某一个成员做了什么**」—— 成员页的执行轨迹读面(migration 035)。
+   *
+   * 与上一条 `/conversations` 的分工:那条是「他说了什么」(全文),这条是
+   * 「他做了什么」(工具调用 / provider 故障 / 回合级标记,按回合分组)。
+   *
+   * 404 的语义与 `/conversations` 同一条:只给「地址指向空气」(项目或成员
+   * 不存在);「他是成员、但一个留下过轨迹的回合都没有」是合法答案,
+   * 200 + 空 `turns` —— 空与读不到不是一回事。
+   */
+  app.get("/api/projects/:id/agents/:agentId/turn-events", (c) => {
+    const id = c.req.param("id");
+    if (getProjectRow(db, id) === null) return c.json(err("not_found", "项目不存在", 404).body, 404);
+    const agentId = c.req.param("agentId");
+    if (getAgent(db, agentId) === null) {
+      return c.json(err("not_found", `成员 ${agentId} 不存在`, 404).body, 404);
+    }
+    const raw = Number(c.req.query("limit"));
+    const limit = Number.isFinite(raw) && raw > 0
+      ? Math.min(Math.floor(raw), AGENT_TURNS_LIMIT_MAX)
+      : AGENT_TURNS_LIMIT_DEFAULT;
+    return c.json(agentTurnEvents(db, id, agentId, limit));
   });
 
   // ── 接待会话(第一个项目之前)──────────────────────────────────
@@ -2414,4 +2440,54 @@ export function agentConversations(
   //    `limit + 1` 那一条是**唯一**可靠的判据(它问的是「库里还有没有」)。
 
   return { projectId, agentId, lines, sessionId: picked, messages, truncated };
+}
+
+// ── 执行日志(成员页「他做了什么」;migration 035 的 turn_events)────
+//
+// 与上面 `agentConversations` 的分工:那条答「他说了什么」(对话全文),
+// 这条答「**他做了什么**」(逐次工具调用 / provider 故障 / 回合级标记,
+// 按回合分组、组内按 `seq` 排序)。真机上排查「它到底卡在哪一步」
+// (unanswered_turn / 墙钟超时 / 空转归因)要的就是这一面 —— 此前它只在
+// stdout 日志里。
+const AGENT_TURNS_LIMIT_DEFAULT = 50;
+const AGENT_TURNS_LIMIT_MAX = 200;
+
+/**
+ * 一个成员最近 N 个回合的完整轨迹。
+ *
+ * ⚠️ **整回合一起出**(`listTurnEventsByAgent` 的纪律):半截回合比没有更坏
+ * —— 读者会把「后面没了」读成「它就干到这」。
+ */
+export function agentTurnEvents(
+  db: Database.Database,
+  projectId: string,
+  agentId: string,
+  maxTurns: number,
+): AgentTurnEventsResponse {
+  const rows = listTurnEventsByAgent(db, projectId, agentId, maxTurns);
+  // 按回合分组(行已按 created_at DESC 排 ⇒ 先见到的回合更新),
+  // 组内按 seq 升序重排一次 —— 分组遍历不保证组内顺序。
+  const grouped = new Map<string, AgentTurnView>();
+  for (const r of rows) {
+    let turn = grouped.get(r.turnId);
+    if (turn === undefined) {
+      turn = {
+        turnId: r.turnId, sessionId: r.sessionId, workId: r.workId,
+        createdAt: r.createdAt, events: [],
+      };
+      grouped.set(r.turnId, turn);
+    }
+    turn.events.push({
+      seq: r.seq, kind: r.kind, tool: r.tool,
+      argsSummary: r.argsSummary, resultSummary: r.resultSummary,
+      isError: r.isError, durationMs: r.durationMs,
+    });
+  }
+  for (const turn of grouped.values()) {
+    turn.events.sort((a, b) => a.seq - b.seq);
+  }
+  return {
+    projectId, agentId,
+    turns: [...grouped.values()].sort((a, b) => b.createdAt - a.createdAt),
+  };
 }

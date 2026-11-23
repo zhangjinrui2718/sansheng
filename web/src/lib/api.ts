@@ -33,6 +33,7 @@
  */
 import type {
   AgentConversationsResponse,
+  AgentTurnEventsResponse,
   AppConfigResponse,
   ArtifactAcceptanceView,
   ArtifactContentView,
@@ -312,6 +313,25 @@ export function listAgentConversations(
   const q = params.toString();
   return request<AgentConversationsResponse>(
     `/projects/${encodeURIComponent(id)}/agents/${encodeURIComponent(agentId)}/conversations${q === "" ? "" : `?${q}`}`,
+  );
+}
+
+/**
+ * 「他做了什么」—— 某个成员的执行轨迹(migration 035 的 `turn_events`)。
+ *
+ * 与 `listAgentConversations` 的分工:那条答「他说了什么」(对话全文),
+ * 这条答「他做了什么」(逐次工具调用 / provider 故障 / 回合级标记,按回合分组)。
+ */
+export function listAgentTurnEvents(
+  id: string,
+  agentId: string,
+  opts?: { limit?: number },
+): Promise<AgentTurnEventsResponse> {
+  const params = new URLSearchParams();
+  if (opts?.limit !== undefined) params.set("limit", String(opts.limit));
+  const q = params.toString();
+  return request<AgentTurnEventsResponse>(
+    `/projects/${encodeURIComponent(id)}/agents/${encodeURIComponent(agentId)}/turn-events${q === "" ? "" : `?${q}`}`,
   );
 }
 
