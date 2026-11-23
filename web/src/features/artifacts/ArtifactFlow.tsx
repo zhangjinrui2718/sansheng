@@ -18,13 +18,14 @@
  */
 import { useMemo, useState } from "react";
 import { useChatStore } from "@/stores/chat";
-import { useArtifacts, useProjectDetail } from "@/lib/data";
+import { useArtifacts, useProjectDetail, useProjectLive } from "@/lib/data";
 import { DataState, remoteListOf } from "@/components/ui/DataState";
 import { EmptyState } from "@/components/ui/primitives";
 import { EntityInspector } from "@/components/shell/EntityInspector";
 import { InlineDeliverableBody } from "@/components/deliverable/InlineDeliverableBody";
 import { AcceptancePanel } from "@/components/deliverable/AcceptancePanel";
 import { artifactMeta } from "@/lib/entityMeta";
+import { workRunningState } from "@/lib/workGraph";
 import {
   artifactKindLabel,
   artifactStatusLabel,
@@ -58,6 +59,21 @@ export function ArtifactFlowPage() {
   const [acceptingId, setAcceptingId] = useState<string | null>(null);
 
   const works = detailState.detail?.works ?? [];
+  /**
+   * 「在跑」标记的运行态来源 —— 与工作项页同一条纪律(`workRunningState` 的
+   * 两条判据):live 出错时把快照按「读不到」处理,拿旧快照点亮呼吸点等于
+   * 把过去冒充现场。
+   */
+  const liveLoad = useProjectLive(effectiveProjectId);
+  const live = liveLoad.error === null ? liveLoad.data : null;
+  const runOf = useMemo(() => {
+    const byWorkId = new Map(works.map((w) => [w.id, w]));
+    return (artifact: ArtifactView) => {
+      if (artifact.workId === null) return null;
+      const work = byWorkId.get(artifact.workId);
+      return work === undefined ? null : workRunningState(work, live);
+    };
+  }, [works, live]);
   const inspected = useMemo(
     () => artifactsState.data.find((a) => a.id === openId) ?? null,
     [artifactsState.data, openId],
@@ -114,6 +130,7 @@ export function ArtifactFlowPage() {
                     const verdict = verdictLabelOf(a);
                     const isDeliverable = a.deliverableType !== null;
                     const superseded = a.status === "superseded";
+                    const run = runOf(a);
                     const accepting =
                       acceptingId === a.id &&
                       verdict !== null &&
@@ -140,6 +157,25 @@ export function ArtifactFlowPage() {
                         <span className="ss-artifact-meta">
                           {a.authorName} · {fmtTime(a.createdAt)}
                         </span>
+                        {/* 「在跑」= 产出它的环节此刻在跑 —— 与工作项页同一个判据
+                            (`workRunningState`:live 回合 + 库里 in_progress)。
+                            读不到 ⇒ 灰点,不点亮、不冒充「空闲」。 */}
+                        {run !== null && run.running && (
+                          <span
+                            className="ss-artifact-run"
+                            title={
+                              run.unknown
+                                ? "运行态读不到:产出它的环节在库里还标着「进行中」,但这一刻没有可信的回合快照"
+                                : "产出这条工件的环节此刻有回合在跑,它可能正在被更新"
+                            }
+                          >
+                            <span
+                              className="ss-live-dot"
+                              data-state={run.unknown ? "unknown" : undefined}
+                            />
+                            {!run.unknown && "在跑"}
+                          </span>
+                        )}
                         {verdict !== null ? (
                           <span className="ss-artifact-verdict" style={{ color: verdict.color }}>
                             {verdict.label}

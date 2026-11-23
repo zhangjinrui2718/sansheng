@@ -84,7 +84,9 @@ const BASELINE: Record<string, number> = {
   "features/chat/ActionRail.tsx": 50,
   // 2026-11-21(工件一等公民):交付序列页 —— 裁决态行/空态/引导的功能性文字。
     // 2026-11-21(批次3):行内验收(待你验收⇒工件上直接展开)+ 已被替代降淡。
-  "features/artifacts/ArtifactFlow.tsx": 134,
+    // 2026-11-22(在跑标记):134 → 194(+60:「在跑」二字 + 两条悬停判据 ——
+    // 呼吸点/灰点本体不带字,文字全部在 title,与工作项页 DAG 同一套措辞)。
+  "features/artifacts/ArtifactFlow.tsx": 194,
   "features/chat/StreamFacts.tsx": 24,
   "features/chat/ThinkingBlock.tsx": 25,
   "features/chat/ToolCallCard.tsx": 0,
@@ -241,7 +243,9 @@ describe("可见文字预算:屏上的中文只许减不许增", () => {
     // 2026-11-22(multica 借鉴批次):9,425 → 9,609(+184:成员页「他做了什么」+107、
     // 对话页排队提示行 +19、计划卡/工作项页验收判据逐条 +28、ChatSurface/Members
     // 接线小幅 +30;每一段都有对应回归文件,不是顺手堆的说明字)。
-    expect(total).toBeLessThanOrEqual(9609);
+    // 2026-11-22(工件序列「在跑」标记):9,609 → 9,669(+60,全部在
+    // ArtifactFlow:「在跑」二字 + 两条悬停判据,措辞与工作项页 DAG 同源)。
+    expect(total).toBeLessThanOrEqual(9669);
   });
 
   it("② 基线表覆盖所有文件(不许有文件悄悄逃出仪器)", () => {
