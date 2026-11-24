@@ -210,6 +210,18 @@ describe("turn_events · provider 故障与回合级标记", () => {
     expect(markers[0]!.resultSummary).toContain("墙钟上界");
     expect(markers[0]!.isError).toBe(true);
   }, 10_000);
+
+  it("看门狗到点(无进展)同样一行 marker,写明是哪一道闸(2026-11-25)", async () => {
+    await turn(
+      () => "never",
+      { timeoutMs: 60_000, idleTimeoutMs: 30, abortGraceMs: 50 },
+    );
+    const markers = listTurnEventsByAgent(db, "p1", "bm").filter((r) => r.kind === "marker");
+    expect(markers).toHaveLength(1);
+    expect(markers[0]!.resultSummary).toContain("无进展 30ms 到点打断");
+    expect(markers[0]!.resultSummary).not.toContain("墙钟上界");
+    expect(markers[0]!.isError).toBe(true);
+  }, 10_000);
 });
 
 // ── ③ 读面 ──────────────────────────────────────────────────────

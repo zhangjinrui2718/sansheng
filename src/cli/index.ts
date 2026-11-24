@@ -107,8 +107,23 @@ program
   )
   .option(
     "--turn-wall-clock-ms <ms>",
-    "一个 agent 回合的墙钟上界(毫秒;到点真的 abort 打断;默认 600000 = 10 分钟)",
+    "一个 agent 回合的总时长上界(毫秒;到点真的 abort 打断;默认 0 = 不设,由看门狗兜底)",
+    "0",
+  )
+  .option(
+    "--turn-idle-ms <ms>",
+    "看门狗·无进展窗口(毫秒;没有任何事件也没有工具在跑这么久就打断;默认 600000 = 10 分钟)",
     "600000",
+  )
+  .option(
+    "--turn-tool-ms <ms>",
+    "看门狗·单工具窗口(毫秒;一个工具跑这么久还没结束就打断,也是 bash 命令的默认超时;默认 600000)",
+    "600000",
+  )
+  .option(
+    "--turn-max-tool-calls <n>",
+    "看门狗·每回合工具调用次数上限(次;默认 200)",
+    "200",
   )
   .option(
     "--report-batch-size <n>",
@@ -128,13 +143,17 @@ program
   .action(async (opts: {
     host: string; port: string; cwd?: string; data?: string; open: boolean;
     maxCascadeRounds: string; schedulerInterval: string; dispatchInterval: string;
-    turnWallClockMs: string; reportBatchSize: string; reportMaxDelayMs: string;
+    turnWallClockMs: string; turnIdleMs: string; turnToolMs: string; turnMaxToolCalls: string;
+    reportBatchSize: string; reportMaxDelayMs: string;
     maxConcurrentProjects: string;
   }) => {
     const rounds = Number(opts.maxCascadeRounds);
     const interval = Number(opts.schedulerInterval);
     const dispatchInterval = Number(opts.dispatchInterval);
     const turnWallClock = Number(opts.turnWallClockMs);
+    const turnIdle = Number(opts.turnIdleMs);
+    const turnTool = Number(opts.turnToolMs);
+    const turnMaxToolCalls = Number(opts.turnMaxToolCalls);
     const reportBatch = Number(opts.reportBatchSize);
     const reportDelay = Number(opts.reportMaxDelayMs);
     const maxProjects = Number(opts.maxConcurrentProjects);
@@ -145,13 +164,20 @@ program
       ...(opts.cwd !== undefined ? { cwd: opts.cwd } : {}),
       version: "0.1.0",
       open: opts.open,
-      // 非法值不静默退回默认 —— 那会让「我调了上界」和「它根本没生效」长得一样
+      // 非法值不静默退回默认 —— 那会让「我调了上界」与「它根本没生效」长得一样
       maxCascadeRounds: Number.isFinite(rounds) && rounds > 0 ? rounds : 8,
       schedulerIntervalMs: Number.isFinite(interval) && interval > 0 ? interval : 60_000,
       dispatchIntervalMs:
         Number.isFinite(dispatchInterval) && dispatchInterval > 0 ? dispatchInterval : 10_000,
-      turnWallClockMs:
-        Number.isFinite(turnWallClock) && turnWallClock > 0 ? turnWallClock : 600_000,
+      // 总时长上界:0 = 不设(2026-11-25 起的缺省;看门狗兜底)。**0 必须原样传下去** ——
+      // 这里若写「非正数取 600000」,缺省就又变回 10 分钟总时长,看门狗形同虚设。
+      turnWallClockMs: Number.isFinite(turnWallClock) && turnWallClock >= 0 ? turnWallClock : 0,
+      // 看门狗三道闸:非法值不传 ⇒ `runTurn` 用自己的默认值(不在这里再抄一遍数字)。
+      ...(Number.isFinite(turnIdle) && turnIdle > 0 ? { turnIdleMs: turnIdle } : {}),
+      ...(Number.isFinite(turnTool) && turnTool > 0 ? { turnToolMs: turnTool } : {}),
+      ...(Number.isFinite(turnMaxToolCalls) && turnMaxToolCalls > 0
+        ? { turnMaxToolCalls: turnMaxToolCalls }
+        : {}),
       reportBatchSize: Number.isFinite(reportBatch) && reportBatch > 0 ? reportBatch : 3,
       reportMaxDelayMs:
         Number.isFinite(reportDelay) && reportDelay > 0 ? reportDelay : 300_000,

@@ -44,14 +44,30 @@
  *     `prompt()` 已经返回、而收敛事件迟迟不来时,不让这个 `while` 永不退出。
  *     它**不打断**任何东西(此时也没什么可打断的)。
  *
- *   `wallClockTimeoutMs`(缺省 10 分钟)**新墙钟上界** —— 从发出去那一刻起
+ *   `wallClockTimeoutMs`(**缺省不设**)—— 可选的总时长上界:从发出去那一刻起
  *     算真实墙钟时间,到点**调 `AgentSession.abort()` 真的把回合打断**,
  *     并把现场(跑了多久 / 打断瞬间在跑哪个工具 / abort 有没有失败)带回。
- *     这才是「一个回合最多花多久」的上界。
+ *     ⚠️ 2026-11-25 起它不再是默认的那道闸:总时长与「有没有在干活」无关 ——
+ *     一个读进 10 万 token 的合并任务与一个卡在一条命令上的回合受到同样的处置,
+ *     而前者是被误杀的(真机上被砍过的正是这一类:读进 10 万 token 的合并回合)。
+ *     默认改由**看门狗**兜底(见下);
+ *     调用方显式给正值时它才生效(想给成本设硬顶的项目用它)。
  *
- * 登记(`setTimeout` + 它到点时对 `session.abort()` 的调用)必须发生在
- * **第一次 `await` 之前** —— 批次 19 的教训原话:「放在 `await runTurn(...)`
- * 之后等于永远登记不上」。前端中断按钮曾在同一个缝隙里死接线过。
+ *   看门狗(缺省生效:`idleTimeoutMs` / `toolTimeoutMs` / `maxToolCalls`)——
+ *     判的是「**还在不在动**」,不是「跑了多久」。三道闸:
+ *       · 无进展:没有任何事件、也没有工具在跑,持续超过 `idleTimeoutMs`;
+ *       · 单工具过长:一个工具从**开始**起超过 `toolTimeoutMs`(加一点宽限,
+ *         让自带超时的工具先自己收场 —— `bash` 的默认超时与它同一个数);
+ *       · 工具次数:第 `maxToolCalls + 1` 次工具调用**开始**时
+ *         (防「每一步都很快,但永不收敛」;恰好用满次数后正常结束的回合不碰)。
+ *     三种到点与墙钟走**同一条路**(`timedOut` + `TurnTimeoutScene.cause`),
+ *     下游处置一个字不改。multica 的同款推理(config.go:窗口回答的是
+ *     「最长的合法静默步骤需要多久」,不是「多快想发现卡死」;它的值从 5 分钟
+ *     一路调到 2 小时,每次都是因为砍短了真实的活)。
+ *
+ * 登记(墙钟的 `setTimeout`、看门狗的 `setInterval`,以及它们到点时对
+ * `session.abort()` 的调用)必须发生在 **第一次 `await` 之前** —— 批次 19 的教训原话:
+ * 「放在 `await runTurn(...)` 之后等于永远登记不上」。前端中断按钮曾在同一个缝隙里死接线过。
  *
  * ── 用量(usage)为什么必须在**事件时刻**读并深拷贝 ──────────────────
  *
@@ -225,20 +241,21 @@ export interface TurnResult {
    * 有超时收尾(不等于失败,但必须让调用方知道)。
    *
    * **两条路都会置真**:① `timeoutMs` 的收尾等待到点(旧语义);
-   * ② 新的墙钟上界到点、真的打断并 abort 了会话。哪一条看 `timeout` 有没有值:
-   * 有 = 墙钟上界打断的,那一份现场在 `timeout` 里。
+   * ② 平台主动打断了回合并 abort 了会话 —— 总时长上界(墙钟)**或**看门狗三道闸
+   * (无进展 / 单工具过长 / 工具次数到顶)。哪一条看 `timeout` 有没有值:
+   * 有 = 平台打断的,那一份现场(含 `cause`)在 `timeout` 里。
    */
   readonly timedOut: boolean;
   /**
-   * **墙钟上界的现场**(7-N:「见不到的现场等于没有现场」)。
+   * **平台打断回合的现场**(7-N:「见不到的现场等于没有现场」)。
    *
-   * 只有 `wallClockTimeoutMs` 到点、`abort()` 真的发出去过时才存在。
-   * `timedOut` 只说「超时了」;这一份才说得出「跑了多久、打断瞬间在跑哪个工具、
-   * abort 有没有失败、SDK 有没有在宽限内收尾」—— 一个卡了 16 分钟的回合,
-   * 事后要能看出它当时在干什么。
+   * 只有平台真的打断过、`abort()` 真的发出去过时才存在(墙钟或看门狗)。
+   * `timedOut` 只说「超时了」;这一份才说得出「为什么被打断(`cause`)、跑了多久、
+   * 打断瞬间在跑哪个工具、abort 有没有失败、SDK 有没有在宽限内收尾」——
+   * 一个卡了 16 分钟的回合,事后要能看出它当时在干什么。
    *
    * **可选**:手工构造 `TurnResult` 的地方不带它;没有它 = 这一回合不是被
-   * 墙钟上界打断的。
+   * 平台打断的。
    */
   readonly timeout?: TurnTimeoutScene;
   /**
@@ -283,9 +300,24 @@ export interface TurnResult {
  * 它存在的唯一理由是 7-N:超时如果没有现场,「模型在原地打转」与「某个工具
  * 真的跑了很久」在事后完全无法区分 —— 而这决定了该改提示词还是该改工具超时。
  */
+/**
+ * 回合被平台**主动打断**的原因(2026-11-25 看门狗)。闭集。
+ *
+ * 四种走同一条处置路(`timedOut` + `TurnTimeoutScene`),区别只在现场里写哪一句 ——
+ * 排查时要能分清「跑得久」与「不动了」,所以原因必须落库。
+ */
+export type TurnTimeoutCause = "wall_clock" | "idle" | "tool" | "tool_count";
+
 export interface TurnTimeoutScene {
-  /** 到点的那个上界(毫秒)—— 现场要能自证判据 */
+  /** 到点的那个上界(毫秒)—— 现场要能自证判据(看门狗是对应那道闸的窗口) */
   readonly limitMs: number;
+  /** **为什么**被打断 —— 总时长 / 无进展 / 单工具过长 / 工具次数到顶 */
+  readonly cause: TurnTimeoutCause;
+  /**
+   * 工具调用次数的上限(**只有** `cause === "tool_count"` 时非空;那时 `limitMs` 是 0 ——
+   * 那道闸没有时间窗口)。
+   */
+  readonly limitCount: number | null;
   /** 从 `prompt()` 发出到打断,实际跑了多久(毫秒) */
   readonly elapsedMs: number;
   /** `session.abort()` 有没有真的被调到。**false 才是异常**(死接线的形态) */
@@ -352,14 +384,36 @@ export interface RunTurnOptions {
     readonly excludeMessageId?: string;
   };
   /**
-   * **一个回合的墙钟上界**(毫秒,默认 {@link DEFAULT_WALL_CLOCK_TIMEOUT_MS}
-   * = 10 分钟)。到点**调 `AgentSession.abort()` 真的打断这个回合**,
-   * 而不是继续等一个不会收敛的 `prompt()`。
+   * **一个回合的总时长上界**(毫秒;**缺省不设**,{@link DEFAULT_WALL_CLOCK_TIMEOUT_MS}
+   * = 0)。给了正值就从发出去那一刻起算墙钟时间,到点**调 `AgentSession.abort()`
+   * 真的打断这个回合**。
    *
-   * 非正数一律退化成默认值(与 CLI 的 `--max-cascade-rounds` 同一条规矩:
-   * 坏值取默认,而不是「0 = 不设上界」—— 那等于把唯一的上界悄悄拆掉)。
+   * ⚠️ 2026-11-25:默认的那道闸换成了看门狗(下面三个选项)—— 总时长与
+   * 「有没有在干活」无关,默认拿它砍回合会误杀真正在做长活的回合。
+   * 非正数 / 非有限值一律退化成默认值(= 不设;与 CLI 的 `--max-cascade-rounds`
+   * 同一条规矩:坏值取默认,不悄悄变成另一个数)。
    */
   readonly wallClockTimeoutMs?: number;
+  /**
+   * **无进展窗口**(毫秒,默认 {@link DEFAULT_IDLE_TIMEOUT_MS} = 10 分钟):
+   * 没有任何事件、也没有工具在跑,持续这么久 ⇒ 判卡死并打断。
+   * 非正数 / 非有限值取默认。
+   */
+  readonly idleTimeoutMs?: number;
+  /**
+   * **单工具窗口**(毫秒,默认 {@link DEFAULT_TOOL_TIMEOUT_MS} = 10 分钟):
+   * 一个工具从开始起跑这么久还没结束 ⇒ 判卡死并打断(整回合停)。
+   * ⚠️ `bash` 工具的默认超时与封顶用的也是它 —— 那条命令会**先于**这里到点
+   * (本判据另加一点宽限),于是超时作为**工具结果**交还模型,回合通常不用停。
+   * 非正数 / 非有限值取默认。
+   */
+  readonly toolTimeoutMs?: number;
+  /**
+   * **每回合工具调用次数上限**(默认 {@link DEFAULT_MAX_TOOL_CALLS} = 200):
+   * 第 N+1 次工具调用**开始**时打断 —— 防「每一步都很快,但永不收敛」。
+   * 恰好用满 N 次之后正常结束的回合不受影响。非正数 / 非有限值取默认。
+   */
+  readonly maxToolCalls?: number;
   /**
    * `abort()` 发出之后,再等 `session.prompt()` 收尾的**宽限**上界(毫秒,
    * 默认 {@link DEFAULT_ABORT_GRACE_MS})。
@@ -419,20 +473,61 @@ export interface RunTurnOptions {
 export const DEFAULT_TIMEOUT_MS = 300_000;
 
 /**
- * **一个回合的墙钟上界**的缺省值(10 分钟)。
+ * **一个回合的总时长上界**的缺省值:**不设**(0)。
  *
- * 为什么是 10 分钟(判据是真机观测,不是拍脑袋):
- *   - 正常回合 **2–3 分钟**(worker 读代码 / 跑命令 / 写工件);
- *     10 分钟 ≈ 它的 3–5 倍,不会误杀正常回合;
- *   - 真机那条卡死的回合跑了 **16 分钟**还在 `bash` curl 文档 ——
- *     10 分钟把它砍掉约 40%,而且**打断**而不是「等它自己结束」;
- *   - 它同时是排空器下 busy 闩的最长持有时间:一个项目不会被一个回合
- *     无限期锁住。
+ * ── 为什么缺省不再是 10 分钟(2026-11-25)──────────────────────────
  *
- * 保守方向是刻意的:上界太紧会杀掉**真正在做长活**的合法回合(跑一次全量
- * 测试、装依赖),那类误杀比多花几分钟贵得多。真需要更长的项目由调用方显式调大。
+ * 旧缺省是 10 分钟,理由是「正常回合 2–3 分钟的 3–5 倍,不会误杀」。真机两次
+ * 证明它就是会误杀:一条 worker 回合读进 109,231 token 后被砍(合并 7 份报告),
+ * 被记成 `failed`,而它并没有卡 —— 只是活大。总时长回答不了「它还在不在动」。
+ *
+ * 现在缺省由看门狗兜底(下面三个常量),总时长只在调用方**显式**给正值时生效 ——
+ * 想给成本设硬顶的项目用它;它与看门狗可以并存。
  */
-export const DEFAULT_WALL_CLOCK_TIMEOUT_MS = 600_000;
+export const DEFAULT_WALL_CLOCK_TIMEOUT_MS = 0;
+
+/**
+ * **无进展窗口**的缺省值(10 分钟):没有任何事件、也没有工具在跑,这么久就算卡死。
+ *
+ * 数值刻意与旧墙钟相同 —— 今天能跑完的回合一个都不会被新规则砍掉;
+ * 区别只在卡死时:旧墙钟是「整轮作废」,现在是「先确认它真的不动了」。
+ * 它必须大于**最长的合法静默步骤**(等第一个 token、provider 排队)。
+ */
+export const DEFAULT_IDLE_TIMEOUT_MS = 600_000;
+
+/**
+ * **单工具窗口**的缺省值(10 分钟):一个工具从开始起跑这么久还没结束就算卡死。
+ * `bash` 的默认超时与封顶也是它(`agentRuntime/pi/bashTimeout.ts`)。
+ */
+export const DEFAULT_TOOL_TIMEOUT_MS = 600_000;
+
+/**
+ * **每回合工具调用次数上限**的缺省值(200)。防的是「每一步都很快,但永不收敛」——
+ * 这种回合三道闸里只有它拦得住(每个工具都按时结束、事件从不断)。
+ * 200 次约等于旧墙钟下一个回合所能完成的上限量级,不比旧上界更严。
+ */
+export const DEFAULT_MAX_TOOL_CALLS = 200;
+
+/**
+ * 看门狗的检查周期:取两道窗口里较小的那个的一半,夹在 [5ms, 5s]。
+ * 夹上限是为了不给长窗口白白加定时器;夹下限是为了极小窗口(测试)仍有意义。
+ */
+export function watchdogTickMs(idleMs: number, toolMs: number): number {
+  return Math.min(5_000, Math.max(5, Math.floor(Math.min(idleMs, toolMs) / 2)));
+}
+
+/**
+ * 单工具看门狗的**宽限**:让自带超时的工具先自己收场(它的超时与窗口同一个数,
+ * 定时器谁先到点没有保证)。取窗口的十分之一、封顶 5 秒。
+ */
+export function toolWatchdogSlackMs(toolMs: number): number {
+  return Math.min(5_000, Math.floor(toolMs / 10));
+}
+
+/** 上限类选项的解析:正的有限数才算数,其余(缺省 / 0 / 负数 / NaN)取缺省值。 */
+function limitOr(value: number | undefined, fallback: number): number {
+  return value !== undefined && Number.isFinite(value) && value > 0 ? value : fallback;
+}
 
 /**
  * `abort()` 之后等 `prompt()` 收尾的宽限(15 秒)。
@@ -797,6 +892,12 @@ export async function runTurn(opts: RunTurnOptions): Promise<TurnResult> {
    */
   let textSinceLastTool = false;
 
+  /**
+   * 看门狗的「**最后活动时刻**」—— 任何事件都算有进展:正文 / 推理增量、工具
+   * 开始与结束、命令的持续输出(`tool_update`)、SDK 的自动重试。无进展判据读它。
+   */
+  let lastEventAt = Date.now();
+
   // ── 轨迹行的写入状态(2026-11-25:逐条写)──────────────────────────
   //
   // `seq` 是**回合内**的递增序号:工具行在各自结束时占号,故障 / 标记 / 收口行
@@ -833,6 +934,8 @@ export async function runTurn(opts: RunTurnOptions): Promise<TurnResult> {
   const turnId = (opts.newId ?? defaultUsageId)("turn");
 
   const unsub = opts.session.subscribe((ev: RuntimeEvent) => {
+    lastEventAt = Date.now();
+
     // ★ **先落库,后广播**:工具行在这次调用结束时同步写库,写在观察者
     // (`onEvent` → WS)之前 —— 前端收到 `tool_end` 回查读面时,那一行已经在。
     // 进行中的回合因此也读得到「他做到了哪一步」,不再等收口。
@@ -932,6 +1035,17 @@ export async function runTurn(opts: RunTurnOptions): Promise<TurnResult> {
         startedAt: Date.now(),
         argsSummary: argsSummary(ev.args),
       });
+      // 看门狗第三道:**次数**。已完成 `maxToolCalls` 次之后又要开始新的一次 ⇒
+      // 「每一步都很快,但永不收敛」。判在**开始**而不是结束:恰好用满次数后
+      // 正常收尾的回合(最后一次工具调用就是它要做的事)不受影响。
+      if (toolCalls.length >= maxToolCalls) {
+        const running = inflight.get(ev.toolCallId);
+        if (running !== undefined) {
+          stopTurn("tool_count", {
+            name: running.name, argsSummary: running.argsSummary, runningMs: 0,
+          });
+        }
+      }
       return;
     }
 
@@ -939,22 +1053,24 @@ export async function runTurn(opts: RunTurnOptions): Promise<TurnResult> {
   });
 
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-  // 非正数 → 默认值(坏值取默认;「0 = 不设上界」等于把唯一的上界悄悄拆掉)
-  const wallClockMs =
-    opts.wallClockTimeoutMs !== undefined && opts.wallClockTimeoutMs > 0
-      ? opts.wallClockTimeoutMs
-      : DEFAULT_WALL_CLOCK_TIMEOUT_MS;
-  const abortGraceMs =
-    opts.abortGraceMs !== undefined && opts.abortGraceMs > 0
-      ? opts.abortGraceMs
-      : DEFAULT_ABORT_GRACE_MS;
+  // ── 上限的解析(坏值一律取默认,见 `limitOr`)──────────────────────
+  /** 总时长上界;`0` = 不设(缺省)。 */
+  const wallClockMs = limitOr(opts.wallClockTimeoutMs, DEFAULT_WALL_CLOCK_TIMEOUT_MS);
+  const idleMs = limitOr(opts.idleTimeoutMs, DEFAULT_IDLE_TIMEOUT_MS);
+  const toolMs = limitOr(opts.toolTimeoutMs, DEFAULT_TOOL_TIMEOUT_MS);
+  const maxToolCalls = Math.floor(limitOr(opts.maxToolCalls, DEFAULT_MAX_TOOL_CALLS));
+  const abortGraceMs = limitOr(opts.abortGraceMs, DEFAULT_ABORT_GRACE_MS);
 
   let timedOut = false;
   const startedAt = Date.now();
+  // 「最后活动」从发出 prompt 那一刻算起(不是从函数入口 —— 建上下文那几毫秒不算它静着)。
+  lastEventAt = startedAt;
 
-  // ── 墙钟超时的现场(7-N)────────────────────────────────────────
+  // ── 平台主动打断的现场(7-N)────────────────────────────────────
   // 到点那一刻抓,而不是返回时抓:「跑了多久」指的是**被打断时**跑了多久。
-  let wallClockExceeded = false;
+  /** 平台有没有主动打断过这一回合(墙钟或看门狗三道闸之一)。 */
+  let stopped = false;
+  let stopCause: TurnTimeoutCause = "wall_clock";
   let abortRequested = false;
   let abortError: string | null = null;
   let interruptedTool: TurnTimeoutScene["interruptedTool"] = null;
@@ -963,9 +1079,84 @@ export async function runTurn(opts: RunTurnOptions): Promise<TurnResult> {
   let promptReturned = false;
   let promptErrorValue: unknown = undefined;
   let promptErrorMessage: string | null = null;
-  let releaseWallClock: () => void = () => {};
-  const wallClockReached = new Promise<void>((resolve) => {
-    releaseWallClock = resolve;
+  let releaseStop: () => void = () => {};
+  const stopReached = new Promise<void>((resolve) => {
+    releaseStop = resolve;
+  });
+
+  /** 打断瞬间**正在跑**的工具里开始得最晚的那个(没有在跑的 ⇒ `null`)。 */
+  const newestInflight = (): TurnTimeoutScene["interruptedTool"] => {
+    let running: { name: string; startedAt: number; argsSummary: string } | null = null;
+    for (const rec of inflight.values()) {
+      if (running === null || rec.startedAt > running.startedAt) running = rec;
+    }
+    return running === null
+      ? null
+      : { name: running.name, argsSummary: running.argsSummary, runningMs: Date.now() - running.startedAt };
+  };
+
+  /**
+   * 平台主动打断这一回合 —— 墙钟与看门狗三道闸的**唯一入口**。
+   *
+   * 只认**第一次**:几道闸先后到点时不重复 `abort()`、不覆盖先到的现场
+   * (先到的原因才是这一回合真正的死因)。
+   */
+  const stopTurn = (
+    cause: TurnTimeoutCause,
+    running: TurnTimeoutScene["interruptedTool"] = null,
+  ): void => {
+    if (stopped) return;
+    stopped = true;
+    stopCause = cause;
+    timedOut = true;
+    elapsedAtInterruptMs = Date.now() - startedAt;
+    completedAtInterrupt = toolCalls.length;
+    // 打断瞬间**正在跑**的那个工具就是现场:只写一句「超时了」,
+    // 事后分不清「模型在原地打转」与「某个工具真的跑了很久」(7-N)。
+    interruptedTool = running ?? newestInflight();
+
+    // **WARN 级日志 + 现场**:到点不许静默(见文件头与 7-N)
+    log.warn(
+      `turn: ${turnStopLabel(cause)} —— 正在打断 ${opts.agentId} 的回合` +
+        `(已跑 ${elapsedAtInterruptMs}ms · 已完成工具 ${completedAtInterrupt} 次 · ` +
+        (interruptedTool === null
+          ? "打断瞬间没有正在跑的工具"
+          : `打断瞬间在跑 ${interruptedTool.name}(${interruptedTool.runningMs}ms)` +
+            (interruptedTool.argsSummary !== "" ? ` 参数:${interruptedTool.argsSummary}` : "")) +
+        ")",
+    );
+
+    // 与宿主 `interrupt` 完全同一套语义:SDK 的取消入口就是 `AgentSession.abort()`。
+    // **不 await**(它是 async 且会等到 agent 真正 idle,定时器回调不该被阻塞),
+    // 但失败要留现场 —— 前端中断曾经因为「没人 set 的 inflight」静默失效过。
+    abortRequested = true;
+    void requestSessionAbort(opts.session).then((err) => {
+      if (err === null) return;
+      abortError = err;
+      log.error(`turn: 打断 ${opts.agentId} 的回合失败(abort 报错):${err}`);
+    });
+
+    // 收尾等待立刻结束:不再等一个已经被我们打断的回合收敛
+    settled = true;
+    releaseStop();
+  };
+
+  /**
+   * 平台打断的**现场**——轨迹的标记行与 `TurnResult.timeout` 共用这一份
+   * (两处各拼一份会漂:轨迹里说一种原因、返回值说另一种)。
+   * `limitMs` 是到点的那道闸的窗口(工具次数那道没有时间窗口 ⇒ 0,上限在 `limitCount`)。
+   */
+  const timeoutScene = (): TurnTimeoutScene => ({
+    limitMs: stopCause === "wall_clock" ? wallClockMs : stopCause === "idle" ? idleMs : stopCause === "tool" ? toolMs : 0,
+    cause: stopCause,
+    limitCount: stopCause === "tool_count" ? maxToolCalls : null,
+    elapsedMs: elapsedAtInterruptMs,
+    abortRequested,
+    abortError,
+    interruptedTool,
+    completedToolCalls: completedAtInterrupt,
+    promptReturned,
+    promptError: promptErrorMessage,
   });
 
   /** 落库那一行的现场(见 `TurnResult.usage`);没写账时为 `undefined`。 */
@@ -1018,18 +1209,8 @@ export async function runTurn(opts: RunTurnOptions): Promise<TurnResult> {
         "provider_error", `${providerError.kind} · ${providerError.message}`, true,
       ));
     }
-    if (wallClockExceeded) {
-      rows.push(tail(
-        "marker",
-        `墙钟上界 ${wallClockMs}ms 到点打断(已跑 ${elapsedAtInterruptMs}ms,` +
-          `已完成工具 ${completedAtInterrupt} 次;打断瞬间` +
-          (interruptedTool === null
-            ? "没有在跑的工具"
-            : `在跑 ${interruptedTool.name}(${interruptedTool.runningMs}ms)` +
-              (interruptedTool.argsSummary !== "" ? ` 参数:${interruptedTool.argsSummary}` : "")) +
-          ")",
-        true,
-      ));
+    if (stopped) {
+      rows.push(tail("marker", turnStopMarker(stopCause, timeoutScene()), true));
     }
     if (providerRetries > 0) {
       rows.push(tail("marker", `SDK 自动重试 ${providerRetries} 次`, false));
@@ -1053,52 +1234,36 @@ export async function runTurn(opts: RunTurnOptions): Promise<TurnResult> {
   // 之后等于永远登记不上:到点时回合早就结束了(或者早就该被打断了)——
   // 批次 19 修前端中断时,死接线正是藏在这个缝隙里(一个从来没人 `set` 的
   // `inflight`,于是 `get()` 恒 undefined、可选链把整条链路吞得一声不响)。
-  const wallClockTimer = setTimeout(() => {
-    wallClockExceeded = true;
-    timedOut = true;
-    elapsedAtInterruptMs = Date.now() - startedAt;
-    completedAtInterrupt = toolCalls.length;
+  //
+  // 总时长上界:缺省不设(0)⇒ 不登记定时器 —— 给 0 也登记等于立刻打断。
+  const wallClockTimer = wallClockMs > 0
+    ? setTimeout(() => stopTurn("wall_clock"), wallClockMs)
+    : undefined;
 
-    // 打断瞬间**正在跑**的那个工具就是现场:只写一句「超时了」,
-    // 事后分不清「模型在原地打转」与「某个工具真的跑了很久」(7-N)。
-    let running: { name: string; startedAt: number; argsSummary: string } | null = null;
+  /**
+   * 看门狗 —— 周期检查「还在不在动」。每次 tick 按从具体到一般的顺序问两件事:
+   *
+   *   ① **单个工具过长**:有工具从开始起跑满了 `toolMs` 加宽限。宽限是留给
+   *      自带超时的工具先自己收场的(`bash` 的默认超时与窗口同一个数,
+   *      两个定时器谁先到点没有保证);它按**开始**算而不是按最后输出算 ——
+   *      一条不停打印的命令(`tail -f`)也在这一格里被兜住。
+   *   ② **无进展**:没有工具在跑、且距上一个事件已满 `idleMs`。
+   *
+   * 判据全部来自本回合已有的表(`inflight` / `lastEventAt`),不引入新状态。
+   */
+  const watchdogTimer = setInterval(() => {
+    if (stopped) return;
+    const now = Date.now();
     for (const rec of inflight.values()) {
-      if (running === null || rec.startedAt > running.startedAt) running = rec;
+      if (now - rec.startedAt >= toolMs + toolWatchdogSlackMs(toolMs)) {
+        stopTurn("tool", {
+          name: rec.name, argsSummary: rec.argsSummary, runningMs: now - rec.startedAt,
+        });
+        return;
+      }
     }
-    interruptedTool =
-      running === null
-        ? null
-        : {
-            name: running.name,
-            argsSummary: running.argsSummary,
-            runningMs: Date.now() - running.startedAt,
-          };
-
-    // **WARN 级日志 + 现场**:超时不许静默(见文件头与 7-N)
-    log.warn(
-      `turn: 墙钟上界 ${wallClockMs}ms 到点 —— 正在打断 ${opts.agentId} 的回合` +
-        `(已跑 ${elapsedAtInterruptMs}ms · 已完成工具 ${completedAtInterrupt} 次 · ` +
-        (interruptedTool === null
-          ? "打断瞬间没有正在跑的工具"
-          : `打断瞬间在跑 ${interruptedTool.name}(${interruptedTool.runningMs}ms)` +
-            (interruptedTool.argsSummary !== "" ? ` 参数:${interruptedTool.argsSummary}` : "")) +
-        ")",
-    );
-
-    // 与宿主 `interrupt` 完全同一套语义:SDK 的取消入口就是 `AgentSession.abort()`。
-    // **不 await**(它是 async 且会等到 agent 真正 idle,定时器回调不该被阻塞),
-    // 但失败要留现场 —— 前端中断曾经因为「没人 set 的 inflight」静默失效过。
-    abortRequested = true;
-    void requestSessionAbort(opts.session).then((err) => {
-      if (err === null) return;
-      abortError = err;
-      log.error(`turn: 打断 ${opts.agentId} 的回合失败(abort 报错):${err}`);
-    });
-
-    // 收尾等待立刻结束:不再等一个已经被我们打断的回合收敛
-    settled = true;
-    releaseWallClock();
-  }, wallClockMs);
+    if (inflight.size === 0 && now - lastEventAt >= idleMs) stopTurn("idle");
+  }, watchdogTickMs(idleMs, toolMs));
 
   // `timeoutMs` 的定时器**保持原样**:它护的是「prompt() 返回之后等收敛事件」
   // 那段等待。它与上面那个墙钟上界是两件事,不合并(见文件头)。
@@ -1199,14 +1364,14 @@ export async function runTurn(opts: RunTurnOptions): Promise<TurnResult> {
       },
     );
 
-    await Promise.race([promptPromise, wallClockReached]);
+    await Promise.race([promptPromise, stopReached]);
 
     // `prompt()` 自己失败(不是我们打断的)→ **立刻**抛给调用方。
     // 不能拖到收尾等待到点:那会把「provider 报错」变成「卡满 timeoutMs 才报错」,
     // 而且会先把 settled 置真、把错误伪装成一次超时收尾。
-    if (promptErrorMessage !== null && !wallClockExceeded) throw promptErrorValue;
+    if (promptErrorMessage !== null && !stopped) throw promptErrorValue;
 
-    if (wallClockExceeded && !promptReturned) {
+    if (stopped && !promptReturned) {
       // abort 已经发出,给 SDK 一个**有界**的收尾宽限。绝不无限等:
       // 一个卡死的回合会把排空器的 busy 闩一直握住(本缺陷的后果之一)。
       await Promise.race([promptPromise, delay(abortGraceMs)]);
@@ -1217,16 +1382,18 @@ export async function runTurn(opts: RunTurnOptions): Promise<TurnResult> {
         );
       }
     }
-    if (wallClockExceeded && promptErrorMessage !== null) {
+    if (stopped && promptErrorMessage !== null) {
       // 中断不是故障(与宿主 `interrupt` 同一条判断),但要留痕:错误文本进现场
       log.muted(
-        `turn: ${opts.agentId} 的回合被墙钟上界打断,prompt() 以错误收尾:${promptErrorMessage}`,
+        `turn: ${opts.agentId} 的回合被平台打断(${turnStopLabel(stopCause)}),` +
+          `prompt() 以错误收尾:${promptErrorMessage}`,
       );
     }
 
     while (!settled) await new Promise((r) => setTimeout(r, 50));
   } finally {
-    clearTimeout(wallClockTimer);
+    if (wallClockTimer !== undefined) clearTimeout(wallClockTimer);
+    clearInterval(watchdogTimer);
     clearTimeout(timer);
     // 先退订再写账:晚到的 `message_end` 不该落进**上一个**回合的账
     // (`message_end` → 求和 → 落库 是一个同步块,中间不会插进新事件)。
@@ -1270,22 +1437,8 @@ export async function runTurn(opts: RunTurnOptions): Promise<TurnResult> {
     recordTurnEvents();
   }
 
-  const timeout: TurnTimeoutScene | undefined = wallClockExceeded
-    ? {
-        limitMs: wallClockMs,
-        elapsedMs: elapsedAtInterruptMs,
-        abortRequested,
-        abortError,
-        interruptedTool,
-        completedToolCalls: completedAtInterrupt,
-        promptReturned,
-        promptError: promptErrorMessage,
-      }
-    : undefined;
-
   // `unanswered` 与 `turnText` 已在 `finally` 里算好(见上),这里只消费 ——
   // 判据若写第二遍,两处漂开的那天就是「轨迹里说无下文、TurnResult 说有」的那天。
-
 
   return {
     text: turnText,
@@ -1297,23 +1450,63 @@ export async function runTurn(opts: RunTurnOptions): Promise<TurnResult> {
     settled: !timedOut,
     unanswered,
     timedOut,
-    ...(timeout !== undefined ? { timeout } : {}),
+    ...(stopped ? { timeout: timeoutScene() } : {}),
     ...(recordedUsage !== undefined ? { usage: recordedUsage } : {}),
     ...(providerError !== undefined ? { providerError } : {}),
     ...(providerError !== undefined || providerRetries > 0 ? { providerRetries } : {}),
   };
 }
 
+/** 平台主动打断回合的原因,一句人话(日志 / 报告 / 轨迹标记共用这一份)。 */
+export function turnStopLabel(cause: TurnTimeoutCause): string {
+  switch (cause) {
+    case "wall_clock": return "墙钟上界到点";
+    case "idle": return "无进展到点";
+    case "tool": return "单个工具过长到点";
+    case "tool_count": return "工具调用次数到顶";
+  }
+}
+
 /**
- * 把墙钟超时的现场渲染成几行(7-N:见不到的现场等于没有现场)。
+ * 轨迹里那一行「平台打断了这一回合」的现场文字(`turn_events` 的 `marker` 行)。
+ * 墙钟那一句的措辞**逐字不变**(旧判据钉着它);其余三种原因各说清是哪一道闸、
+ * 当时的现场是什么 —— 排查时要能分清「跑得久」与「不动了」。
+ */
+export function turnStopMarker(cause: TurnTimeoutCause, s: TurnTimeoutScene): string {
+  const atInterrupt = s.interruptedTool === null
+    ? "打断瞬间没有在跑的工具"
+    : `打断瞬间在跑 ${s.interruptedTool.name}(${s.interruptedTool.runningMs}ms)` +
+      (s.interruptedTool.argsSummary !== "" ? ` 参数:${s.interruptedTool.argsSummary}` : "");
+  const ran = `已跑 ${s.elapsedMs}ms,已完成工具 ${s.completedToolCalls} 次`;
+  switch (cause) {
+    case "wall_clock":
+      return `墙钟上界 ${s.limitMs}ms 到点打断(${ran};${atInterrupt})`;
+    case "idle":
+      return `无进展 ${s.limitMs}ms 到点打断(${ran} —— 这段时间没有任何事件,也没有工具在跑)`;
+    case "tool":
+      return `单个工具超过 ${s.limitMs}ms 到点打断(${ran};${atInterrupt})`;
+    case "tool_count":
+      return `工具调用达到上限 ${String(s.limitCount)} 次,下一次调用开始时打断(${ran};${atInterrupt})`;
+  }
+}
+
+/**
+ * 把平台打断回合的现场渲染成几行(7-N:见不到的现场等于没有现场)。
  *
  * 单独导出,因为两处报告都要它:`renderTurnReport`(一个回合)与
- * `execution.ts` 的 `renderExecutionReport`(一个工作项)。超时的现场
+ * `execution.ts` 的 `renderExecutionReport`(一个工作项)。到点的现场
  * 恰好是「事后最想看到、而最容易只写一句『超时』」的那部分。
+ * 首行先说**是哪一道闸**(墙钟 / 无进展 / 单工具过长 / 工具次数到顶)。
  */
 export function renderTimeoutScene(s: TurnTimeoutScene): string[] {
+  const head =
+    s.cause === "tool_count"
+      ? `${turnStopLabel("tool_count")}(上限 ${String(s.limitCount)} 次)`
+      : s.cause === "wall_clock"
+        ? `墙钟上界 ${s.limitMs}ms 到点`
+        : `${turnStopLabel(s.cause)}(${s.limitMs}ms)`;
   const lines: string[] = [
-    `⏱ 墙钟上界 ${s.limitMs}ms 到点 → 已${s.abortRequested ? "" : "**未**"}调用 session.abort() 打断` +
+    `⏱ ${head} → 已${s.abortRequested ? "" : "**未**"}调用 session.abort() 打断` +
       `(实际跑了 ${s.elapsedMs}ms,已完成工具 ${s.completedToolCalls} 次)`,
   ];
   lines.push(

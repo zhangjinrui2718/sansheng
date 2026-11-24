@@ -25,8 +25,10 @@ import { listTurnUsage } from "../../src/platform/storage/repo/usage.js";
 import { listPendingDispatchEvents } from "../../src/platform/storage/repo/dispatch.js";
 import { collectPendingWork } from "../../src/platform/runtime/pendingWork.js";
 import {
-  runWorkItem, composeWorkPrompt, renderExecutionReport, type ExecutionResult,
+  runWorkItem, composeWorkPrompt, renderExecutionReport,
+  type ExecutionResult, type RunWorkOptions,
 } from "../../src/platform/runtime/execution.js";
+import type { TurnTimeoutCause } from "../../src/platform/runtime/turn.js";
 
 /**
  * 027 起正文住文件:测试里仍从「想写的正文」造出**落点三列** ——
@@ -455,6 +457,90 @@ describe("runWorkItem · 墙钟超时后的处置(不静默、留现场)", () =>
     expect(r.timeoutDisposition).toBeUndefined();
     expect(getWork(db, w.id)!.status).toBe("in_progress");
     expect(listPendingDispatchEvents(db, "p1"), "没超时就不该有下游事件").toEqual([]);
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════
+// 看门狗三道闸到点后的处置(2026-11-25)—— 与墙钟走同一条路
+// ══════════════════════════════════════════════════════════════════
+//
+// 判的是「还在不在动」:无进展 / 单工具过长 / 工具次数到顶。下游处置**一个字不改**
+// (记 failed、写出 work_failed、现场带得回来)—— 所以三道闸用同一份断言逐道过。
+
+/** 跑一个工作项,只留**被测的那一道闸**(其余推到很远;不真等 10 分钟)。 */
+async function runWithWatchdog(
+  workId: string, session: AgentSession, gate: Partial<RunWorkOptions>,
+): Promise<ExecutionResult> {
+  return runWorkItem({
+    session, db, workId, timeoutMs: 10_000, injectPending: false, abortGraceMs: 50,
+    idleTimeoutMs: 60_000, toolTimeoutMs: 60_000, maxToolCalls: 1_000, ...gate,
+  });
+}
+
+const GATES: ReadonlyArray<{
+  cause: TurnTimeoutCause;
+  gate: Partial<RunWorkOptions>;
+  script: (ctx: { emit: (ev: AgentSessionEvent) => void; text: string }) => void;
+}> = [
+  { cause: "idle", gate: { idleTimeoutMs: 40 }, script: () => {} },
+  {
+    cause: "tool",
+    gate: { toolTimeoutMs: 40 },
+    script: ({ emit }) => {
+      emit({ type: "tool_start", toolCallId: "c1", toolName: "bash", args: { command: "curl 文档" } } as RuntimeEvent);
+    },
+  },
+  {
+    cause: "tool_count",
+    gate: { maxToolCalls: 1 },
+    script: ({ emit }) => {
+      emit({ type: "tool_start", toolCallId: "c1", toolName: "board_list", args: {} } as RuntimeEvent);
+      emit({ type: "tool_end", toolCallId: "c1", toolName: "board_list", result: { content: [] }, isError: false } as RuntimeEvent);
+      // 第 2 次开始 ⇒ 到顶(上限 1)。
+      emit({ type: "tool_start", toolCallId: "c2", toolName: "board_read", args: { id: "a1" } } as RuntimeEvent);
+    },
+  },
+];
+
+describe("runWorkItem · 看门狗三道闸到点后的处置(与墙钟同一条路)", () => {
+  for (const g of GATES) {
+    it(`${g.cause} 到点 ⇒ 记 failed(终态)+ 写出 work_failed + 现场写明原因`, async () => {
+      const w = mkWork();
+      const s = hangingSession(g.script);
+      const r = await runWithWatchdog(w.id, s.session, g.gate);
+
+      expect(s.aborts, "abort() 必须真的被调到").toBe(1);
+      expect(r.outcome).toBe("timed_out");
+      expect(r.timeoutDisposition).toBe("marked_failed");
+      expect(r.turn.timeout?.cause, "现场要说得出是哪一道闸").toBe(g.cause);
+      expect(getWork(db, w.id)!.status).toBe("failed");
+      // 下游事件照旧 —— 业务经理据此向甲方交代,与墙钟超时同一个落点。
+      expect(listPendingDispatchEvents(db, "p1").map((e) => e.kind)).toEqual(["work_failed"]);
+    });
+  }
+
+  it("到点前它自己已经到达终态 ⇒ **不覆盖**它的判定(看门狗不是改判的理由)", async () => {
+    const w = mkWork();
+    const s = hangingSession(() => updateWorkStatus(db, w.id, "done", AT + 5));
+    const r = await runWithWatchdog(w.id, s.session, { idleTimeoutMs: 40 });
+    expect(r.timeoutDisposition).toBe("left_terminal");
+    expect(r.outcome).toBe("converged");
+    expect(getWork(db, w.id)!.status).toBe("done");
+  });
+
+  it("报告首行写明是哪一道闸(事后分得清「跑得久」与「不动了」)", async () => {
+    const w = mkWork();
+    const s = hangingSession(GATES[0]!.script);
+    const rep = renderExecutionReport(await runWithWatchdog(w.id, s.session, GATES[0]!.gate));
+    expect(rep).toContain("无进展到点");
+    expect(rep).toContain("记为 failed");
+  });
+
+  it("负样本:三道闸都没到点的回合不留下任何超时处置", async () => {
+    const w = mkWork();
+    const r = await run(w.id, saidDone("我做完了(但没改状态)"));
+    expect(r.outcome).toBe("unconverged");
+    expect(r.timeoutDisposition).toBeUndefined();
   });
 });
 

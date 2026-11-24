@@ -152,13 +152,22 @@ export interface RunWorkOptions {
   /** 收尾等待的上界(透传给 `runTurn.timeoutMs`)。**不是**回合时长上界 */
   readonly timeoutMs?: number;
   /**
-   * **一个工作项回合的墙钟上界**(透传给 `runTurn.wallClockTimeoutMs`)。
-   * 缺省交给 `runTurn` 的 `DEFAULT_WALL_CLOCK_TIMEOUT_MS`(10 分钟)。
+   * **一个工作项回合的总时长上界**(透传给 `runTurn.wallClockTimeoutMs`)。
+   * 缺省交给 `runTurn` 的 `DEFAULT_WALL_CLOCK_TIMEOUT_MS`(**不设**,2026-11-25 起 ——
+   * 默认由看门狗兜底,见下面三个选项)。
    *
    * 宿主/CLI 要调它,只需把这个字段接出去 —— 判定与打断逻辑都在这条调用链上,
    * 不需要另写一份超时。
    */
   readonly wallClockTimeoutMs?: number;
+  /**
+   * 看门狗三道闸(2026-11-25,透传给 `runTurn` 的同名选项;缺省取 `turn.ts` 的默认值):
+   * 无进展窗口 / 单工具窗口 / 每回合工具调用次数上限。
+   * ⚠️ 两条执行路径都要透传(与 `wallClockTimeoutMs` 同一条教训:只接聊天那条等于没接)。
+   */
+  readonly idleTimeoutMs?: number;
+  readonly toolTimeoutMs?: number;
+  readonly maxToolCalls?: number;
   /** `abort()` 之后等 SDK 收尾的宽限(透传;测试 seam) */
   readonly abortGraceMs?: number;
   readonly injectPending?: boolean;
@@ -356,6 +365,9 @@ export async function runWorkItem(opts: RunWorkOptions): Promise<ExecutionResult
     ...(opts.wallClockTimeoutMs !== undefined
       ? { wallClockTimeoutMs: opts.wallClockTimeoutMs }
       : {}),
+    ...(opts.idleTimeoutMs !== undefined ? { idleTimeoutMs: opts.idleTimeoutMs } : {}),
+    ...(opts.toolTimeoutMs !== undefined ? { toolTimeoutMs: opts.toolTimeoutMs } : {}),
+    ...(opts.maxToolCalls !== undefined ? { maxToolCalls: opts.maxToolCalls } : {}),
     ...(opts.abortGraceMs !== undefined ? { abortGraceMs: opts.abortGraceMs } : {}),
     ...(opts.injectPending !== undefined ? { injectPending: opts.injectPending } : {}),
     // 观察者透传 —— 不传的话 worker 干活的这几分钟在前端是全黑的

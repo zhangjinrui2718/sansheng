@@ -9,6 +9,7 @@
  * | `message_end` | `message_end`(message 原样 unknown) | usage/stopReason 的读取容错在平台侧 |
  * | `tool_execution_start` | `tool_start` | |
  * | `tool_execution_end` | `tool_end`(result 是适配器工具协议方言) | |
+ * | `tool_execution_update` | `tool_update`(不带载荷) | 2026-11-25:看门狗的「还在动」信号 |
  * | `auto_retry_start` / `auto_retry_end` | 同名 | |
  * | `agent_settled` / `agent_end` | 同名 | 回合收敛信号 |
  * | 其余(`message_start` / `queue_update` / `compaction_*` / `entry_appended`…) | **丢弃**(返回 null) | 平台不消费;要消费 = 先在这里加翻译 |
@@ -49,6 +50,9 @@ export function normalizeSessionEvent(ev: AgentSessionEvent): RuntimeEvent | nul
         result: ev.result,
         isError: ev.isError,
       };
+    // 持续输出(2026-11-25):只留「还在动」这个事实,不带载荷。
+    case "tool_execution_update":
+      return { type: "tool_update", toolCallId: ev.toolCallId, toolName: ev.toolName };
     case "auto_retry_start":
       return { type: "auto_retry_start" };
     case "auto_retry_end":

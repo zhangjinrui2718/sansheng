@@ -99,5 +99,11 @@ export type RuntimeEvent =
     }
   | { type: "auto_retry_start" }
   | { type: "auto_retry_end" }
+  /**
+   * 工具的**持续输出**(2026-11-25,看门狗):`bash` 一边跑一边打印时 SDK 会发。
+   * 不带载荷 —— 平台只用它判「还在动」(刷新无进展窗口),不消费内容;
+   * 想接内容就在这里加字段,别让调用方去读适配器方言。
+   */
+  | { type: "tool_update"; toolCallId: string; toolName: string }
   | { type: "agent_settled" }
   | { type: "agent_end" };

@@ -17,11 +17,176 @@ ROOT = Path(__file__).resolve().parent.parent
 # 本批全部判据所在的文件(runner 必须覆盖全 —— 只跑一个文件会把「改坏了却绿」
 # 误判成「没改坏」,Wave 2d 的教训)。
 TESTS = [
+    # ③ 轨迹逐条落库
     "tests/platform/turn-events.test.ts",
     "tests/web/turn-log-refresh.test.ts",
+    # ① 看门狗 + bash 默认超时
+    "tests/platform/turn.test.ts",
+    "tests/platform/execution.test.ts",
+    "tests/platform/bash-timeout.test.ts",
+    "tests/platform/agent-runtime-events.test.ts",
+    "tests/platform/turn-watchdog-host.test.ts",
 ]
 
 MUTATIONS = [
+    # ── ① 看门狗:三道闸的判据(turn.ts)──────────────────────────
+    (
+        "W1",
+        "src/platform/runtime/turn.ts",
+        "    if (inflight.size === 0 && now - lastEventAt >= idleMs) stopTurn(\"idle\");",
+        "    if (false) stopTurn(\"idle\"); /* MUT: 无进展判据失效 */",
+        "无进展这一道闸失效 ⇒ 回合静默到天荒地老 ⇒ turn ① / execution / 宿主① 红",
+    ),
+    (
+        "W2",
+        "src/platform/runtime/turn.ts",
+        "    if (inflight.size === 0 && now - lastEventAt >= idleMs) stopTurn(\"idle\");",
+        "    if (now - lastEventAt >= idleMs) stopTurn(\"idle\"); /* MUT: 不看有没有工具在跑 */",
+        "无进展不看「有没有工具在跑」⇒ 一次安静的 npm install 被当成卡死 ⇒ turn ① 负样本红",
+    ),
+    (
+        "W3",
+        "src/platform/runtime/turn.ts",
+        "      if (now - rec.startedAt >= toolMs + toolWatchdogSlackMs(toolMs)) {",
+        "      if (false) { /* MUT: 单工具判据失效 */",
+        "单工具这一道闸失效 ⇒ 卡死在一条命令上的回合永远不停 ⇒ turn ② / 宿主① 红",
+    ),
+    (
+        "W4",
+        "src/platform/runtime/turn.ts",
+        "  const unsub = opts.session.subscribe((ev: RuntimeEvent) => {\n    lastEventAt = Date.now();",
+        "  const unsub = opts.session.subscribe((ev: RuntimeEvent) => {\n    /* MUT: 活动时刻不刷新 */",
+        "事件不再刷新「最后活动时刻」⇒ 一直在出声的回合也被判无进展 ⇒ turn ① 负样本红",
+    ),
+    (
+        "W5",
+        "src/platform/runtime/turn.ts",
+        "      if (toolCalls.length >= maxToolCalls) {",
+        "      if (false) { /* MUT: 次数判据失效 */",
+        "工具次数这一道闸失效(「每步都快但永不收敛」没人拦)⇒ turn ③ / 宿主① 红",
+    ),
+    (
+        "W6",
+        "src/platform/runtime/turn.ts",
+        "export const DEFAULT_WALL_CLOCK_TIMEOUT_MS = 0;",
+        "export const DEFAULT_WALL_CLOCK_TIMEOUT_MS = 600_000; /* MUT: 缺省回到 10 分钟总时长 */",
+        "缺省回到 10 分钟总时长(与「还在不在动」无关的旧闸)⇒ turn 的缺省判据红",
+    ),
+    (
+        "W7",
+        "src/platform/runtime/turn.ts",
+        "      rows.push(tail(\"marker\", turnStopMarker(stopCause, timeoutScene()), true));",
+        "      rows.push(tail(\"marker\", \"超时打断\", true)); /* MUT: 原因不落库 */",
+        "轨迹标记不再写明是哪一道闸 ⇒ 事后分不清「跑得久」与「不动了」⇒ turn-events 红",
+    ),
+    (
+        "W8",
+        "src/platform/runtime/turn.ts",
+        "  return Math.min(5_000, Math.floor(toolMs / 10));",
+        "  return 0; /* MUT: 没有宽限 */",
+        "宽限归零 ⇒ 自带超时的工具来不及自己收场就被整回合打断 ⇒ 纯判据红",
+    ),
+    (
+        "W9",
+        "src/platform/runtime/turn.ts",
+        "      if (now - rec.startedAt >= toolMs + toolWatchdogSlackMs(toolMs)) {",
+        "      if (now - lastEventAt >= toolMs + toolWatchdogSlackMs(toolMs)) { /* MUT: 按最后输出算 */",
+        "单工具窗口按「最后输出」算 ⇒ 一条 tail -f 永不停 ⇒ turn ②(tail -f)红",
+    ),
+    (
+        "W10",
+        "src/platform/runtime/turn.ts",
+        "export const DEFAULT_IDLE_TIMEOUT_MS = 600_000;",
+        "export const DEFAULT_IDLE_TIMEOUT_MS = 60_000; /* MUT */",
+        "缺省无进展窗口被改(与旧墙钟同值的承诺破了)⇒ 纯判据红",
+    ),
+    (
+        "W11",
+        "src/platform/runtime/turn.ts",
+        "export const DEFAULT_MAX_TOOL_CALLS = 200;",
+        "export const DEFAULT_MAX_TOOL_CALLS = 2; /* MUT */",
+        "缺省次数上限被改 ⇒ 纯判据红",
+    ),
+    (
+        "W12",
+        "src/platform/runtime/agentRuntime/pi/events.ts",
+        "      return { type: \"tool_update\", toolCallId: ev.toolCallId, toolName: ev.toolName };",
+        "      return null; /* MUT: 持续输出被丢弃 */",
+        "工具的持续输出不再翻译(看门狗看不到「还在动」)⇒ agent-runtime-events 红",
+    ),
+    # ── ① bash 的默认超时与封顶(bashTimeout.ts)──────────────────
+    (
+        "B1",
+        "src/platform/runtime/agentRuntime/pi/bashTimeout.ts",
+        "  return Math.min(requested, windowSec);",
+        "  return requested; /* MUT: 不封顶 */",
+        "模型给的更长超时不再封顶 ⇒ bash-timeout 的封顶判据红",
+    ),
+    (
+        "B2",
+        "src/platform/runtime/agentRuntime/pi/bashTimeout.ts",
+        "  if (requested === undefined || !Number.isFinite(requested) || requested <= 0) return windowSec;",
+        "  if (requested === undefined || !Number.isFinite(requested) || requested <= 0) return 0; /* MUT: 不补默认 */",
+        "模型没给超时就不再补默认(0 = SDK 当非法)⇒ bash-timeout 红",
+    ),
+    (
+        "B3",
+        "src/platform/runtime/agentRuntime/pi/bashTimeout.ts",
+        "          timeout: resolveBashTimeout(params.timeout, windowMs),",
+        "          timeout: params.timeout, /* MUT: 补好的值没交给底层 */",
+        "包装算了超时却没交给底层 execute(死接线)⇒ bash-timeout 红",
+    ),
+    # ── ① 会话接线(session.ts)──────────────────────────────────
+    (
+        "S1",
+        "src/platform/runtime/agentRuntime/pi/session.ts",
+        "  const sdkCustomTools = bashOverride === null ? customTools : [...customTools, bashOverride];",
+        "  const sdkCustomTools = customTools; /* MUT: 包装没交给 SDK */",
+        "包装好的 bash 没有真的交给 SDK(模型用的还是没有超时的内置那份)⇒ bash-timeout 接线红",
+    ),
+    (
+        "S2",
+        "src/platform/runtime/agentRuntime/pi/session.ts",
+        "    ? withBashTimeout(createBashToolDefinition(opts.cwd), toolTimeoutMs)",
+        "    ? withBashTimeout(createBashToolDefinition(opts.cwd), 600_000) /* MUT: 窗口与闸不同源 */",
+        "bash 的超时写死、不跟单工具窗口(bash 先于闸到点的保证破了)⇒ bash-timeout 的 90s 判据红",
+    ),
+    (
+        "S3",
+        "src/platform/runtime/agentRuntime/pi/session.ts",
+        "    toolTimeoutMs,\n",
+        "    toolTimeoutMs: undefined, /* MUT: 不转交 */\n",
+        "窗口不转交给建会话那一层(「宿主传没传」从此不可断言)⇒ 宿主③ 红",
+    ),
+    # ── ① 宿主接线(serve.ts)—— 只接一条路径等于没接 ─────────────
+    (
+        "H1",
+        "src/platform/host/serve.ts",
+        "        // 真机现场走的正是这里,只接 `runAgentTurn` 等于没接。看门狗同理。\n        ...turnLimits(opts),",
+        "        // 真机现场走的正是这里,只接 `runAgentTurn` 等于没接。看门狗同理。\n        ...(opts.turnWallClockMs !== undefined ? { wallClockTimeoutMs: opts.turnWallClockMs } : {}), /* MUT: 工作路径不接看门狗 */",
+        "工作路径没接看门狗(worker 卡死那 16 分钟的现场走的正是这里)⇒ 宿主① 三条全红",
+    ),
+    (
+        "H2",
+        "src/platform/host/serve.ts",
+        "        // 「文档说 10 分钟、实际是另一个数」。\n        ...turnLimits(opts),",
+        "        // 「文档说 10 分钟、实际是另一个数」。\n        ...(opts.turnWallClockMs !== undefined ? { wallClockTimeoutMs: opts.turnWallClockMs } : {}), /* MUT: 聊天路径不接看门狗 */",
+        "聊天路径没接看门狗 ⇒ 宿主② 红",
+    ),
+    (
+        "H3",
+        "src/platform/host/serve.ts",
+        "        ...(opts.turnToolMs !== undefined ? { toolTimeoutMs: opts.turnToolMs } : {}),",
+        "        /* MUT: 窗口不进会话 */",
+        "宿主没把单工具窗口交给会话工厂 ⇒ 宿主③ 红",
+    ),
+    (
+        "H4",
+        "src/platform/host/serve.ts",
+        "    ...(opts.turnMaxToolCalls !== undefined ? { maxToolCalls: opts.turnMaxToolCalls } : {}),",
+        "    /* MUT: 漏了次数上限 */",
+        "turnLimits 漏掉次数上限(两条路径同时失效)⇒ 宿主① 次数那条红",
+    ),
     # ── ③ 轨迹逐条落库 ─────────────────────────────────────────────
     (
         "L1",

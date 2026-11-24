@@ -20,6 +20,9 @@ import { insertProject, addMember } from "../../src/platform/storage/repo/projec
 import { insertAsk } from "../../src/platform/storage/repo/asks.js";
 import {
   runTurn, composeTurnMessage, renderTurnReport, type TurnResult,
+  DEFAULT_WALL_CLOCK_TIMEOUT_MS, DEFAULT_IDLE_TIMEOUT_MS, DEFAULT_TOOL_TIMEOUT_MS,
+  DEFAULT_MAX_TOOL_CALLS, watchdogTickMs, toolWatchdogSlackMs, turnStopLabel,
+  turnStopMarker, renderTimeoutScene,
 } from "../../src/platform/runtime/turn.js";
 
 let db: Database.Database;
@@ -604,7 +607,7 @@ describe("runTurn · timeoutMs 的旧语义(收尾等待)没有被改坏", () =>
     expect(result.timeout, "没有墙钟现场 = 不是墙钟打断的").toBeUndefined();
   });
 
-  it("非正数的墙钟上界不生效,退回默认(坏值取默认,而不是「0 = 不设上界」)", async () => {
+  it("非正数的墙钟上界取默认值(坏值取默认;2026-11-25 起默认 = 不设,见下面看门狗那组)", async () => {
     const { result, fake } = await turn((emit) => emit(textDelta("正常")), {
       wallClockTimeoutMs: 0,
     });
@@ -624,5 +627,242 @@ describe("runTurn · timeoutMs 的旧语义(收尾等待)没有被改坏", () =>
         message: "做点事", timeoutMs: 10_000, wallClockTimeoutMs: 10_000,
       }),
     ).rejects.toThrow("provider 炸了");
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════
+// 看门狗:按「还在不在动」判断卡死(2026-11-25)
+// ══════════════════════════════════════════════════════════════════
+//
+// 旧墙钟(10 分钟总时长)回答不了「它还在不在动」:真机上读进 109,231 token 的
+// 合并回合与一条卡死的 curl 受到同样的处置,而前者只是活大。
+// 看门狗三道闸判的是进展:无进展 / 单工具过长 / 工具次数到顶。
+// 三种到点与墙钟走同一条处置路(`timedOut` + `timeout.cause`),下游不改。
+//
+// ⚠️ 每一道闸都要有**负样本** —— 一个「到点就停」的检查最容易把正常的回合一起停掉。
+
+/**
+ * 「按节奏出声」的假会话:每隔 `everyMs` 发一条增量,持续 `forMs`,然后正常收尾。
+ * `tool: true` 时是**一条工具调用在跑、一边跑一边出声**(tool_start → tool_update… → tool_end)。
+ */
+function pacedSession(o: { everyMs: number; forMs: number; tool?: boolean }): {
+  session: AgentSession;
+  aborts: () => number;
+} {
+  const listeners: Array<(ev: AgentSessionEvent) => void> = [];
+  let aborts = 0;
+  const session = {
+    subscribe(fn: (ev: AgentSessionEvent) => void) {
+      listeners.push(fn);
+      return () => {
+        const i = listeners.indexOf(fn);
+        if (i >= 0) listeners.splice(i, 1);
+      };
+    },
+    async prompt() {
+      const emit = (ev: AgentSessionEvent) => { for (const l of [...listeners]) l(ev); };
+      if (o.tool === true) {
+        emit({ type: "tool_start", toolCallId: "t1", toolName: "bash", args: { command: "tail -f log" } });
+      }
+      const until = Date.now() + o.forMs;
+      while (Date.now() < until) {
+        await new Promise<void>((r) => setTimeout(r, o.everyMs));
+        emit(o.tool === true
+          ? { type: "tool_update", toolCallId: "t1", toolName: "bash" }
+          : { type: "message_update", deltaKind: "text", delta: "…" });
+      }
+      if (o.tool === true) {
+        emit({ type: "tool_end", toolCallId: "t1", toolName: "bash", result: { content: [] }, isError: false });
+      }
+      emit({ type: "message_update", deltaKind: "text", delta: "做完了。" });
+      emit({ type: "agent_settled" });
+      return { messages: [] };
+    },
+    async abort() {
+      aborts += 1;
+    },
+    dispose() {},
+  };
+  return { session: session as unknown as AgentSession, aborts: () => aborts };
+}
+
+describe("runTurn · 看门狗三道闸(判的是「还在不在动」,不是「跑了多久」)", () => {
+  it("① 无进展:没有事件、也没有工具在跑,超过窗口 ⇒ 打断,cause = idle", async () => {
+    const { result, fake } = await turn(() => "never", {
+      timeoutMs: 60_000, idleTimeoutMs: 40, abortGraceMs: 50,
+    });
+    expect(fake.aborts, "abort() 必须真的被调到").toBe(1);
+    expect(result.timedOut).toBe(true);
+    expect(result.timeout?.cause).toBe("idle");
+    expect(result.timeout?.limitMs).toBe(40);
+    expect(result.timeout?.abortRequested).toBe(true);
+    expect(result.timeout?.interruptedTool).toBeNull();
+  });
+
+  it("① 负样本:事件一直在来 ⇒ 哪怕远超窗口也不判无进展(跑得久 ≠ 卡死)", async () => {
+    // 窗口 60ms,回合持续约 150ms、每 15ms 一条增量。
+    const s = pacedSession({ everyMs: 15, forMs: 150 });
+    const result = await runTurn({
+      session: s.session, db, agentId: "pm", projectId: "p1",
+      message: "做点事", timeoutMs: 5_000, idleTimeoutMs: 60, toolTimeoutMs: 60_000,
+    });
+    expect(result.text.endsWith("做完了。")).toBe(true);
+    // 自检:这一回合**确实**跑过了窗口(每 15ms 一条增量,≥ 5 条 = ≥ 75ms > 60ms 的窗口)
+    // —— 否则「没被判无进展」只是因为它还没跑那么久,断言等于什么都没断。
+    expect(result.text.split("…").length - 1).toBeGreaterThanOrEqual(5);
+    expect(result.timedOut).toBe(false);
+    expect(result.timeout).toBeUndefined();
+    expect(s.aborts()).toBe(0);
+  });
+
+  it("② 单工具过长:一个工具跑满窗口(加宽限)还没结束 ⇒ 打断,cause = tool,现场里是它", async () => {
+    const { result, fake } = await turn((emit) => {
+      emit(toolStart("t1", "bash", { command: "curl https://help.aliyun.com/document_detail/..." }));
+      return "never";
+    }, { timeoutMs: 60_000, toolTimeoutMs: 40, abortGraceMs: 50 });
+    expect(fake.aborts).toBe(1);
+    expect(result.timeout?.cause).toBe("tool");
+    expect(result.timeout?.limitMs).toBe(40);
+    expect(result.timeout?.interruptedTool?.name).toBe("bash");
+    expect(result.timeout?.interruptedTool?.runningMs).toBeGreaterThanOrEqual(40);
+    expect(result.timeout?.interruptedTool?.argsSummary).toContain("curl");
+  });
+
+  it("② 负样本:工具在跑、一边跑一边出声,窗口之内 ⇒ 不打断(出声的工具不是卡死)", async () => {
+    const s = pacedSession({ everyMs: 10, forMs: 80, tool: true });
+    const result = await runTurn({
+      session: s.session, db, agentId: "pm", projectId: "p1",
+      message: "做点事", timeoutMs: 5_000, idleTimeoutMs: 30, toolTimeoutMs: 400,
+    });
+    expect(result.timedOut, "工具在跑时不看无进展(它正在动),也没到单工具窗口").toBe(false);
+    expect(result.timeout).toBeUndefined();
+    expect(s.aborts()).toBe(0);
+    expect(result.toolCalls).toHaveLength(1);
+  });
+
+  it("② 一条不停打印的命令超过窗口 ⇒ 照样打断(`tail -f` 出声不算在干活)", async () => {
+    const s = pacedSession({ everyMs: 10, forMs: 400, tool: true });
+    const result = await runTurn({
+      session: s.session, db, agentId: "pm", projectId: "p1",
+      message: "做点事", timeoutMs: 5_000, idleTimeoutMs: 30, toolTimeoutMs: 60, abortGraceMs: 50,
+    });
+    expect(result.timeout?.cause, "按**开始**算,不按最后输出算").toBe("tool");
+    expect(result.timeout?.interruptedTool?.name).toBe("bash");
+    expect(s.aborts()).toBe(1);
+  });
+
+  it("① 负样本:工具在跑(哪怕一声不出)时**不看**无进展窗口 —— 它归单工具那道闸管", async () => {
+    // 无进展窗口 30ms、单工具窗口 400ms;工具开始之后 150ms 内什么都不发,然后正常收尾。
+    // 合法的情况:一次安静的 `npm install`。若无进展判据不看「有没有工具在跑」,
+    // 它会在 30ms 被当成卡死打断。
+    const listeners: Array<(ev: AgentSessionEvent) => void> = [];
+    let aborts = 0;
+    const session = {
+      subscribe(fn: (ev: AgentSessionEvent) => void) {
+        listeners.push(fn);
+        return () => {
+          const i = listeners.indexOf(fn);
+          if (i >= 0) listeners.splice(i, 1);
+        };
+      },
+      async prompt() {
+        const emit = (ev: AgentSessionEvent) => { for (const l of [...listeners]) l(ev); };
+        emit({ type: "tool_start", toolCallId: "t1", toolName: "bash", args: { command: "npm install" } });
+        await new Promise<void>((r) => setTimeout(r, 150));
+        emit({ type: "tool_end", toolCallId: "t1", toolName: "bash", result: { content: [] }, isError: false });
+        emit({ type: "message_update", deltaKind: "text", delta: "装好了。" });
+        emit({ type: "agent_settled" });
+        return { messages: [] };
+      },
+      async abort() {
+        aborts += 1;
+      },
+      dispose() {},
+    };
+    const result = await runTurn({
+      session: session as unknown as AgentSession, db, agentId: "pm", projectId: "p1",
+      message: "做点事", timeoutMs: 5_000, idleTimeoutMs: 30, toolTimeoutMs: 400,
+    });
+    expect(result.text).toBe("装好了。");
+    expect(result.timeout, "安静的工具调用不是无进展").toBeUndefined();
+    expect(aborts).toBe(0);
+  });
+
+  it("③ 工具次数:用满上限之后又要开始新的一次 ⇒ 打断,cause = tool_count", async () => {
+    const { result, fake } = await turn((emit) => {
+      emit(toolStart("t1", "board_list", {}));
+      emit(toolEnd("t1", "board_list", { content: [] }));
+      emit(toolStart("t2", "board_read", { id: "a1" }));
+      emit(toolEnd("t2", "board_read", { content: [] }));
+      // 第 3 次开始 ⇒ 到顶(防「每一步都很快,但永不收敛」)。
+      emit(toolStart("t3", "memory_search", { query: "x" }));
+      return "never";
+    }, { timeoutMs: 60_000, maxToolCalls: 2, abortGraceMs: 50 });
+    expect(fake.aborts).toBe(1);
+    expect(result.timeout?.cause).toBe("tool_count");
+    expect(result.timeout?.limitCount).toBe(2);
+    expect(result.timeout?.limitMs, "那道闸没有时间窗口").toBe(0);
+    expect(result.timeout?.completedToolCalls).toBe(2);
+    expect(result.timeout?.interruptedTool?.name).toBe("memory_search");
+  });
+
+  it("③ 负样本:恰好用满上限后正常收尾 ⇒ 不打断(最后一次工具调用就是它要做的事)", async () => {
+    const { result, fake } = await turn((emit) => {
+      emit(toolStart("t1", "board_list", {}));
+      emit(toolEnd("t1", "board_list", { content: [] }));
+      emit(toolStart("t2", "board_read", { id: "a1" }));
+      emit(toolEnd("t2", "board_read", { content: [] }));
+      emit(textDelta("做完了。"));
+    }, { maxToolCalls: 2 });
+    expect(result.text).toBe("做完了。");
+    expect(result.timedOut).toBe(false);
+    expect(result.timeout).toBeUndefined();
+    expect(fake.aborts).toBe(0);
+  });
+
+  it("几道闸先后到点**只算第一次**:不重复 abort、不覆盖先到的原因", async () => {
+    // 工具早已超过窗口,无进展窗口也到点 —— 看门狗先问「单工具」,原因记它;之后的 tick 不再动。
+    const { result, fake } = await turn((emit) => {
+      emit(toolStart("t1", "bash", { command: "sleep 9999" }));
+      return "never";
+    }, { timeoutMs: 60_000, toolTimeoutMs: 40, idleTimeoutMs: 30, abortGraceMs: 50 });
+    expect(fake.aborts).toBe(1);
+    expect(result.timeout?.cause).toBe("tool");
+  });
+
+  it("总时长上界:显式给正值才生效;**0 / 缺省 = 不设**(不是「立刻打断」)", async () => {
+    // 0 传进去、回合静默 80ms ⇒ 没有平台打断(没有现场、没有 abort);
+    // `timedOut` 只来自旧的收尾等待(`timeoutMs`)。若有人把 0 当成了「登记一个 0ms 定时器」,
+    // 这里会当场 abort —— 缺省看门狗就形同虚设。
+    const { result, fake } = await turn(() => "never", {
+      timeoutMs: 80, wallClockTimeoutMs: 0, idleTimeoutMs: 10_000,
+    });
+    expect(fake.aborts, "0 = 不设").toBe(0);
+    expect(result.timeout).toBeUndefined();
+    expect(DEFAULT_WALL_CLOCK_TIMEOUT_MS, "缺省不再有总时长上界").toBe(0);
+  });
+
+  it("缺省值与纯判据:窗口 / 周期 / 宽限", () => {
+    // 数值刻意与旧墙钟相同:今天能跑完的回合一个都不会被新规则砍掉。
+    expect(DEFAULT_IDLE_TIMEOUT_MS).toBe(600_000);
+    expect(DEFAULT_TOOL_TIMEOUT_MS).toBe(600_000);
+    expect(DEFAULT_MAX_TOOL_CALLS).toBe(200);
+    expect(watchdogTickMs(600_000, 600_000), "周期 = 较小窗口的一半,封顶 5s").toBe(5_000);
+    expect(watchdogTickMs(40, 600_000)).toBe(20);
+    expect(watchdogTickMs(1, 1), "下限 5ms(极小窗口仍有意义)").toBe(5);
+    expect(toolWatchdogSlackMs(600_000), "宽限封顶 5s").toBe(5_000);
+    expect(toolWatchdogSlackMs(100), "宽限 = 窗口的十分之一").toBe(10);
+  });
+
+  it("原因要落进现场:标记行与报告首行都说得出是哪一道闸", async () => {
+    const { result } = await turn(() => "never", {
+      timeoutMs: 60_000, idleTimeoutMs: 30, abortGraceMs: 50,
+    });
+    const scene = result.timeout!;
+    expect(turnStopMarker(scene.cause, scene)).toContain("无进展 30ms 到点打断");
+    const lines = renderTimeoutScene(scene);
+    expect(lines[0]).toContain("无进展到点(30ms)");
+    expect(lines[0]).toContain("session.abort()");
+    expect(turnStopLabel("tool_count")).toContain("工具调用次数");
   });
 });

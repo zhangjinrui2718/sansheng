@@ -291,8 +291,9 @@ export interface ServeOptions {
    */
   readonly turnTimeoutMs?: number;
   /**
-   * **一个 agent 回合的墙钟上界(毫秒)**。缺省交给 `runTurn` 的
-   * `DEFAULT_WALL_CLOCK_TIMEOUT_MS`(10 分钟)。
+   * **一个 agent 回合的总时长上界(毫秒)**。缺省交给 `runTurn` 的
+   * `DEFAULT_WALL_CLOCK_TIMEOUT_MS`(**不设**,2026-11-25 起 —— 默认由看门狗兜底,
+   * 见下面三个旋钮;显式给正值才生效,想给成本设硬顶的项目用它)。
    *
    * 与 `turnTimeoutMs` **不是同一个东西**,这也是它必须单独有一个旋钮的理由:
    *   - `turnTimeoutMs` 护的是「`prompt()` resolve 之后等 `agent_settled` 那段」,
@@ -303,6 +304,15 @@ export interface ServeOptions {
    * 于是「调了上界」与「它根本没生效」在真机上长得一样。这里补上那条线。
    */
   readonly turnWallClockMs?: number;
+  /**
+   * **看门狗三道闸**(毫秒 / 次,2026-11-25;缺省取 `runtime/turn.ts` 的默认值):
+   * `turnIdleMs` 无进展窗口(默认 10 分钟)、`turnToolMs` 单工具窗口(默认 10 分钟,
+   * 也是内置 `bash` 的默认超时与封顶)、`turnMaxToolCalls` 每回合工具调用次数上限
+   * (默认 200)。判的是「还在不在动」,不是「跑了多久」—— 总时长上界回答不了这个。
+   */
+  readonly turnIdleMs?: number;
+  readonly turnToolMs?: number;
+  readonly turnMaxToolCalls?: number;
   /**
    * **provider 全局刹车**的第一档冷却(毫秒)。默认 30 秒,第二档 2 分钟,
    * 封顶 8 分钟(序列见 `runtime/providerBrake.ts`,常量集中在那一个文件)。
@@ -523,6 +533,28 @@ export function failoverCandidatesOf(
     out.push(p);
   }
   return out;
+}
+
+/**
+ * 宿主的四个回合上限 → `runTurn` / `runWorkItem` 的选项(2026-11-25)。
+ *
+ * **不给默认值**:缺省由 `runTurn` 自己那份常量兜底 —— 两个地方各写一个默认值,
+ * 迟早会漂,而漂的表现是「文档说 10 分钟、实际是另一个数」。
+ * **两条执行路径共用这一份**(聊天 `runAgentTurn` / 工作 `runWorkInSession`):
+ * 只接一条等于没接 —— 这正是 `turnWallClockMs` 当年那个「调了上界但没生效」的形状。
+ */
+function turnLimits(opts: ServeOptions): {
+  wallClockTimeoutMs?: number;
+  idleTimeoutMs?: number;
+  toolTimeoutMs?: number;
+  maxToolCalls?: number;
+} {
+  return {
+    ...(opts.turnWallClockMs !== undefined ? { wallClockTimeoutMs: opts.turnWallClockMs } : {}),
+    ...(opts.turnIdleMs !== undefined ? { idleTimeoutMs: opts.turnIdleMs } : {}),
+    ...(opts.turnToolMs !== undefined ? { toolTimeoutMs: opts.turnToolMs } : {}),
+    ...(opts.turnMaxToolCalls !== undefined ? { maxToolCalls: opts.turnMaxToolCalls } : {}),
+  };
 }
 
 /**
@@ -1864,6 +1896,9 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
         ...(currentProvider !== null && currentProvider.thinkingLevel !== undefined
           ? { thinkingLevel: currentProvider.thinkingLevel }
           : {}),
+        // 单工具窗口也要进会话:内置 bash 的默认超时与封顶用的是它 ——
+        // 它必须与看门狗第二道闸是同一个数(两处都从 `opts.turnToolMs` 来)。
+        ...(opts.turnToolMs !== undefined ? { toolTimeoutMs: opts.turnToolMs } : {}),
         ...(opts.createSession !== undefined ? { createSession: opts.createSession } : {}),
       },
     );
@@ -2094,12 +2129,10 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
               },
             }
           : {}),
-        // 墙钟上界透传。**不给默认值**:缺省由 `runTurn` 自己那份
-        // `DEFAULT_WALL_CLOCK_TIMEOUT_MS` 兜底 —— 两个地方各写一个默认值,
-        // 迟早会漂,而漂的表现是「文档说 10 分钟、实际是另一个数」。
-        ...(opts.turnWallClockMs !== undefined
-          ? { wallClockTimeoutMs: opts.turnWallClockMs }
-          : {}),
+        // 总时长上界与看门狗三道闸透传。**不给默认值**:缺省由 `runTurn` 自己那份
+        // 常量兜底 —— 两个地方各写一个默认值,迟早会漂,而漂的表现是
+        // 「文档说 10 分钟、实际是另一个数」。
+        ...turnLimits(opts),
         onEvent: (ev) => {
           bridge(ev, projectId, sessionId, messageId, agentId, hub, textBuf, thinkBuf);
         },
@@ -2430,9 +2463,9 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
         ...(opts.turnTimeoutMs !== undefined ? { timeoutMs: opts.turnTimeoutMs } : {}),
         // 同一根线也要接在**执行**这条路上:worker 卡在 curl 文档 16 分钟那次
         // 真机现场走的正是这里,只接 `runAgentTurn` 等于没接。
-        ...(opts.turnWallClockMs !== undefined
-          ? { wallClockTimeoutMs: opts.turnWallClockMs }
-          : {}),
+        // 同一根线也要接在**执行**这条路上:worker 卡在 curl 文档 16 分钟那次
+        // 真机现场走的正是这里,只接 `runAgentTurn` 等于没接。看门狗同理。
+        ...turnLimits(opts),
         // 让 worker 这一回合也流式上屏 —— 否则它在界面上是一段没有反应的等待
         onEvent: (ev) => {
           bridge(ev, projectId, sessionId, messageId, agentId, hub, textBuf, thinkBuf);

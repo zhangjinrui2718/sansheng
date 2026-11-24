@@ -27,7 +27,7 @@
  * 这是本项目吃过亏的地方(5 个 E2E blocker 至今只有 fakeLlmCall 验证)。
  */
 import {
-  createAgentSession, DefaultResourceLoader,
+  createAgentSession, createBashToolDefinition, DefaultResourceLoader,
   createMcpExtension, createToolSearchExtension,
   type AgentSession, type AgentSessionEvent, type ExtensionFactory, type LoadedMcpConfig,
   type ResourceLoader,
@@ -36,6 +36,8 @@ import type { Model } from "@earendil-works/pi-ai";
 import type { ThinkingLevel } from "@shared/types/settings.js";
 import type { RuntimeSession, RuntimeSessionEventBase, RuntimeEvent } from "../types.js";
 import { normalizeSessionEvent } from "./events.js";
+import { resolveBashTimeout, withBashTimeout } from "./bashTimeout.js";
+import { DEFAULT_TOOL_TIMEOUT_MS } from "../../turn.js";
 
 /**
  * 平台侧的模型类型别名。**只在这一处定义。**
@@ -128,6 +130,12 @@ export interface CreateSessionFn {
     tools?: string[];
     customTools?: ReturnType<typeof toSdkTools>;
     /**
+     * **单工具窗口**(毫秒,2026-11-25):内置 `bash` 的默认超时与封顶用的就是它
+     * (见 `./bashTimeout.ts`)。它必须与看门狗第二道闸(`runTurn.toolTimeoutMs`)
+     * **是同一个数** —— 由宿主从同一份选项带进来。缺省取 `turn.ts` 的默认值。
+     */
+    toolTimeoutMs?: number;
+    /**
      * 2026-10-16:内置扩展工厂(MCP / tool_search)。
      *
      * ⚠️ **不传就没有 MCP**(坑 1)—— `DefaultResourceLoader` 默认不装内置扩展,
@@ -160,6 +168,11 @@ export interface PlatformSessionOptions {
   /** 测试 seam:替换真实 SDK 调用 */
   readonly createSession?: CreateSessionFn;
   /**
+   * **单工具窗口**(毫秒,2026-11-25):内置 `bash` 的默认超时与封顶。
+   * 宿主从 `turnToolMs` 带进来(见 `CreateSessionFn.toolTimeoutMs`);缺省取默认值。
+   */
+  readonly toolTimeoutMs?: number;
+  /**
    * 数据目录 —— 提示词单元从这里读(`harness/system_prompts/{unitId}.md`)。
    * 缺省不注入提示词,并把「未注入」如实报进 wiring。
    */
@@ -182,6 +195,12 @@ export type PlatformSessionResult =
       readonly wiring: {
         readonly allowlist: readonly string[];
         readonly customToolNames: readonly string[];
+        /**
+         * 内置 `bash` 的默认超时与封顶(秒,2026-11-25)。`null` = 这个角色拿不到
+         * `bash`(没有 `code.exec`)⇒ 没有包装。挂进 wiring 是因为「配了上限但没交给
+         * 会话」必须看得见 —— 那与 7-B 的「落地了但没人读」是同一种静默。
+         */
+        readonly bashTimeoutSeconds: number | null;
         /**
          * 交给 SDK 的思考档位(2026-11-16 接线)。
          * `undefined` = 调用方没给 ⇒ SDK 走自己的默认链(恢复存档 → pi settings
@@ -283,6 +302,17 @@ export async function createPlatformSession(
     return dispatch(tool.name, args, c.ctx);
   });
 
+  // 3.1 内置 `bash` 的默认超时与封顶(2026-11-25)—— 只有拿得到 `bash` 的角色才包。
+  //     ⚠️ 它经 `customTools` 交给 SDK(SDK 里同名自定义工具覆盖内置);但
+  //     `customToolNames` 仍只报**平台工具** —— 那份名单的读者按「平台实现了哪些
+  //     工具」理解它,混进一个内置名字会让人以为平台自己实现了 bash。
+  const toolTimeoutMs = opts.toolTimeoutMs ?? DEFAULT_TOOL_TIMEOUT_MS;
+  const bashOverride = split.builtinTools.includes("bash")
+    ? withBashTimeout(createBashToolDefinition(opts.cwd), toolTimeoutMs)
+    : null;
+  const bashLimitSeconds = bashOverride === null ? null : resolveBashTimeout(undefined, toolTimeoutMs);
+  const sdkCustomTools = bashOverride === null ? customTools : [...customTools, bashOverride];
+
   // 3.5 提示词装配 —— **这一步不能省**。
   //     首跑冒烟时业务经理自称「AI 编码助手」,因为单元算出来了却没送达模型;
   //     那正是 7-B 的「死接线」形态。promptUnits 只有在真的拼进系统提示之后
@@ -360,13 +390,17 @@ export async function createPlatformSession(
     // SDK。`"off"` 原样传(SDK 把它翻成请求里不带 reasoning);缺省不传 =
     // SDK 自己的默认链 —— 见 CreateSessionFn.thinkingLevel 的注释与证据。
     ...(opts.thinkingLevel !== undefined ? { thinkingLevel: opts.thinkingLevel } : {}),
+    // 单工具窗口随会话选项一起交给建会话那一层:包装 bash 用的是它(上面 3.1),
+    // 这里再交一次是为了**可断言** —— 宿主有没有把 `turnToolMs` 传到这一层,
+    // 只能从「建会话时收到了什么」看出来(thinkingLevel 的同一条教训)。
+    toolTimeoutMs,
     // `tools` 是**统一 allowlist**(内置 + 平台 + MCP 模式)。
     // **不能只放内置** —— SDK 的 isAllowedTool 同时对 customTools 过滤,
     // 只放内置等于把平台工具一起关掉(首跑冒烟实测 0 个激活)。
     // ⚠️ 而 `mcp__<server>__*` 模式**必须在这里** —— 它是坑 3 那把开关:
     //    pi 的 allowlist 不含任何 `mcp__` 条目时会**保留全部 MCP 工具注册**。
     tools: [...split.unifiedAllowlist],
-    customTools,
+    customTools: sdkCustomTools,
     // 外部注入的 resourceLoader(测试 seam)里**不会**有我们算的扩展工厂,
     // 所以它们必须同时交给会话本身 —— 否则 seam 一换,MCP 就静默消失。
     extensionFactories,
@@ -397,6 +431,7 @@ export async function createPlatformSession(
     wiring: {
       allowlist: [...split.unifiedAllowlist],
       customToolNames: customTools.map((t) => t.name),
+      bashTimeoutSeconds: bashLimitSeconds,
       thinkingLevel: opts.thinkingLevel,
       loadedPromptUnits,
       missingPromptUnits,

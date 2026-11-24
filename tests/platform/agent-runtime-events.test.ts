@@ -60,6 +60,15 @@ describe("normalizeSessionEvent:pi 方言 → RuntimeEvent", () => {
     expect(end).toEqual({ type: "tool_end", toolCallId: "tc1", toolName: "board_write", result, isError: false });
   });
 
+  it("持续输出 tool_execution_update → tool_update(不带载荷,2026-11-25:看门狗的「还在动」信号)", () => {
+    const r = normalizeSessionEvent(pi({
+      type: "tool_execution_update", toolCallId: "tc1", toolName: "bash",
+      partialResult: { content: [{ type: "text", text: "已构建 3/10…" }] },
+    }));
+    // 只留「还在动」这个事实:不带 partialResult —— 平台不消费内容。
+    expect(r).toEqual({ type: "tool_update", toolCallId: "tc1", toolName: "bash" });
+  });
+
   it("agent_settled / agent_end / auto_retry_* 同名透传", () => {
     for (const type of ["agent_settled", "agent_end", "auto_retry_start", "auto_retry_end"]) {
       expect(normalizeSessionEvent(pi({ type }))).toEqual({ type });
