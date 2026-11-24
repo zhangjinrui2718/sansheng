@@ -2143,7 +2143,9 @@ AgentRuntime
 
    顺带地,「卡住一条待办不拖停整条」不再需要专门的补丁:预算按待办逐条记账,到界只影响它自己。
 
-3. **墙钟上界** `wallClockTimeoutMs`(`runtime/turn.ts` 的 `DEFAULT_WALL_CLOCK_TIMEOUT_MS` = **10 分钟**;`--turn-wall-clock-ms` 可配)。前两层管的是「**还要不要叫醒**」,这一层管的是「**已经叫醒的那一个回合还能跑多久**」—— 一个回合卡在某个工具上时,前两层都拦不住它:它占着该项目的 busy 闩,预算也不会变(目标没动过,账本记的是次数,不是时长)。真机现场是一个 worker 回合跑了 **16 分钟**还在 `curl` 文档。
+3. **回合上界**(`runtime/turn.ts`;2026-11-25 起缺省由**看门狗的三道闸**兜底,判的是「**还在不在动**」而不是「跑了多久」):无进展 `idleTimeoutMs` 默认 **10 分钟**(没有任何事件、也没有工具在跑)/ 单工具 `toolTimeoutMs` 默认 **10 分钟**(一个工具从**开始**起算)/ 每回合工具调用 `maxToolCalls` 默认 **200 次**(第 N+1 次**开始**时;恰好用满后正常收尾的回合不碰);`--turn-idle-ms` / `--turn-tool-ms` / `--turn-max-tool-calls` 可配。**总时长上界 `wallClockTimeoutMs` 改成可选**:`DEFAULT_WALL_CLOCK_TIMEOUT_MS` = 0 即不设,`--turn-wall-clock-ms` 显式给正值才生效(想给成本设硬顶的项目用它)。前两层管的是「**还要不要叫醒**」,这一层管的是「**已经叫醒的那一个回合还能跑多久**」—— 一个回合卡在某个工具上时,前两层都拦不住它:它占着该项目的 busy 闩,预算也不会变(目标没动过,账本记的是次数,不是时长)。真机现场是一个 worker 回合跑了 **16 分钟**还在 `curl` 文档。
+
+   ⚠️ **为什么把缺省的那道闸从总时长换成「还在不在动」**:总时长分不出「活大」与「卡死」—— 另一个真机现场是一个合并 7 份报告、读进 109,231 token 的回合,它与上面那条卡死的 `curl` 受到同样的处置。新规则下 16 分钟的 `curl` 跑不到 16 分钟:内置 `bash` 先被自己的默认超时收场(`agentRuntime/pi/bashTimeout.ts`,与单工具窗口是同一个数)—— 到点由 SDK 杀掉这条命令、把超时当**工具结果**交还模型,回合不用整个作废;换成一个自己不会超时的工具,则由单工具闸在它从**开始**起跑满窗口时打断整回合(按开始算、不按最后一次输出算,一条还在打印的命令也算)。而一个一直在换步骤的长回合不再因为总时长被砍。三种到点(`TurnTimeoutScene.cause`:`wall_clock | idle | tool | tool_count`)走**同一条路**,下面这张处置表一个字没变。
 
    到点由平台调 `AgentSession.abort()` **真的打断**这个回合(`abortGraceMs` 默认 15 秒 —— 宽限到点就不再等一个不会收敛的 `prompt()`),然后**按超时处置**:
 
@@ -2153,7 +2155,7 @@ AgentRuntime
    | 它自己已到终态(done / failed / cancelled) | 不覆盖它(那是它自己更权威的判定) | `left_terminal` |
    | 它自己登记了阻塞(blocked) | 不覆盖它(`blocked` 的语义是「已登记阻塞」,平台这里没有阻塞记录可指) | `left_blocked` |
 
-   **为什么是 `failed` 而不是留在 `in_progress`**:留在 `in_progress` 是**静默死**。它不在任何 outbox 事件里(`updateWorkStatus` 只对 done / failed / blocked 写事件),所以业务经理永远不会向甲方交代「这条活没做完」;而它会作为 `execute_work` 待办被反复叫醒,直到尝试预算用尽 —— 每次叫醒再买一个完整的墙钟上界,然后它**再也不被叫醒**。`failed` 是终态里唯一诚实的落点:它不假装成功、不假装有人登记过阻塞、也不假装还活着;它经 `updateWorkStatus` 这个唯一写口写出 `work_failed` 事件 → 业务经理的汇报待办 → 甲方可见。要人(项目经理)介入才能继续,这是对的失效方向。
+   **为什么是 `failed` 而不是留在 `in_progress`**:留在 `in_progress` 是**静默死**。它不在任何 outbox 事件里(`updateWorkStatus` 只对 done / failed / blocked 写事件),所以业务经理永远不会向甲方交代「这条活没做完」;而它会作为 `execute_work` 待办被反复叫醒,直到尝试预算用尽 —— 每次叫醒再买一套完整的看门狗窗口,然后它**再也不被叫醒**。`failed` 是终态里唯一诚实的落点:它不假装成功、不假装有人登记过阻塞、也不假装还活着;它经 `updateWorkStatus` 这个唯一写口写出 `work_failed` 事件 → 业务经理的汇报待办 → 甲方可见。要人(项目经理)介入才能继续,这是对的失效方向。
 
    ⚠️ **这个上界在 Wave 1 只做完了判定与打断,运行期吃不到它** —— 宿主没有把 `ServeOptions.turnWallClockMs` 接出去,于是「我调了上界」与「它根本没生效」在真机上长得一样。Wave 2 补上了那条线(CLI → `ServeOptions` → `runAgentTurn` / `runWorkInSession` 两条路都要接,**只接聊天那条等于没接**)。
 
