@@ -256,3 +256,113 @@ describe("分类判据的变异自检", () => {
     expect(broken(raw).status, "外层状态码确实没了").toBeUndefined();
   });
 });
+
+// ══════════════════════════════════════════════════════════════════
+// 三处误判的修复(2026-11-25)
+// ══════════════════════════════════════════════════════════════════
+//
+// 对照 multica 的分类器(`taskfailure/classify.go`)逐条核对三生这份时实测出来的:
+// 9 个样本里 6 个落错了类别。每一处都是「看起来正常的错误答案」——
+// 分类器不抛、有返回值、只是答错了,而调用点全靠 `kind` 做决定。
+//
+//   ① 裸状态码的边界只排除了数字 ⇒ 十六进制请求 id 里夹着的 429 / 401 / 503
+//      被当成状态码(multica #9146 同款);
+//   ② 网络词表里没有 OpenAI Node SDK 的裸 `Connection error.` ⇒ 断网被判成
+//      「归不了类」(multica 的 BHD-135 同款:Pi 的 OpenAI 兼容通道就是这句话);
+//   ③ 403 的两种特殊形态(用量上限 / 并发超限)被「状态码即鉴权」吞掉
+//      (multica 的 `isUsageLimit403` / `concurrentRequestLimitWitness` 同款)。
+
+describe("① 裸状态码:十六进制 id 里夹着的数字不是状态码", () => {
+  const HEX_SAMPLES: ReadonlyArray<[string, string]> = [
+    ["429 夹在请求 id 里", "upstream request failed (request id: req_c429f4b8e2d1) — provider returned an unreadable response"],
+    ["401 夹在请求 id 里", "upstream request failed (request id: req_9a401bc77e21) — provider returned an unreadable response"],
+    ["503 夹在追踪 id 里", "trace 0x503abc: provider returned an unreadable response body"],
+  ];
+  for (const [label, text] of HEX_SAMPLES) {
+    it(`${label} ⇒ 归不了类(此前分别被判成限流 / 鉴权失败 / 服务端错误)`, () => {
+      const r = classifyProviderFailure(text);
+      expect(r.kind, "一个与状态码无关的报错不许被数字带跑").toBe("unknown");
+      expect(r.status, "也没有解析出状态码").toBeUndefined();
+    });
+  }
+
+  it("负样本:真正的状态码照样认得(边界加宽不许把合法的写法一起排掉)", () => {
+    expect(classifyProviderFailure("status code: 429").status).toBe(429);
+    expect(classifyProviderFailure("HTTP 429 Too Many Requests").kind).toBe("rate_limit");
+    expect(classifyProviderFailure("upstream rejected 429, retry later").status).toBe(429);
+    expect(classifyProviderFailure("error_code:429").status, "下划线不算字母数字").toBe(429);
+    expect(classifyProviderFailure("服务暂时不可用 503").status, "中文紧挨着也算边界").toBe(503);
+    expect(classifyProviderFailure("403 Forbidden").kind).toBe("auth");
+  });
+
+  it("变异 ⑤:边界退回「只排除数字」⇒ 三个样本当场落错类别", async () => {
+    const broken = await mutatedClassifier([
+      [
+        // ⚠️ 源码里那一行本身是正则字面量(含反斜杠):要匹配「反斜杠 + d」两个字符,
+        // 这里的正则得写 `\\d`;替换串同理要写 `\\d`(否则字符串里的 `\d` 被吃成 `d`)。
+        /\(\?<!\[a-z0-9\]\)\(\[45\]\\d\{2\}\)\(\?!\[a-z0-9\]\)/,
+        "(?<![\\d])([45]\\d{2})(?![\\d])",
+      ],
+    ]);
+    expect(broken(HEX_SAMPLES[0]![1]).kind, "退回去:又被当成限流").toBe("rate_limit");
+    expect(broken(HEX_SAMPLES[1]![1]).kind, "退回去:又被当成鉴权失败").toBe("auth");
+    expect(broken(HEX_SAMPLES[2]![1]).kind, "退回去:又被当成服务端错误").toBe("server");
+  });
+});
+
+describe("② OpenAI Node SDK 的裸 `Connection error.` 是网络故障", () => {
+  // 出处:三生依赖的 `openai/core/error.js`(`APIConnectionError` 的默认文案),
+  // pi-ai 的 OpenAI 兼容通道在连接断开时抛的就是它 —— 一个英文网络词都没有。
+  it("正样本:判成 network、可重试(此前是 unknown ⇒ 不刹车、不降级、直接记 failed)", () => {
+    const r = classifyProviderFailure("Connection error.");
+    expect(r.kind).toBe("network");
+    expect(r.retryable).toBe(true);
+  });
+
+  it("负样本:带别的词的相近原文各归其位(不是「含 connection 就算网络」)", () => {
+    expect(classifyProviderFailure("429 Too Many Requests — connection reused").kind).toBe("rate_limit");
+    expect(classifyProviderFailure("invalid api key").kind).toBe("auth");
+  });
+
+  it("变异 ⑥:词表里去掉 `connection error` ⇒ 退回 unknown(不可重试)", async () => {
+    const broken = await mutatedClassifier([
+      [/^\s*"connection error",\n/m, ""],
+    ]);
+    expect(broken("Connection error.").kind).toBe("unknown");
+    expect(broken("Connection error.").retryable).toBe(false);
+  });
+});
+
+describe("③ 403 的两种特殊形态:是额度 / 限流,不是鉴权", () => {
+  it("403 + usage limit ⇒ 额度(换 provider 治不了,但也不是配置问题)", () => {
+    const r = classifyProviderFailure("HTTP 403: usage limit exceeded for this key, resets at 00:00 UTC");
+    expect(r.kind).toBe("quota");
+    expect(r.status).toBe(403);
+    expect(r.retryable).toBe(false);
+  });
+
+  it("403 + concurrent request limit ⇒ 限流(可重试)", () => {
+    const r = classifyProviderFailure("403 concurrent request limit reached, retry shortly");
+    expect(r.kind).toBe("rate_limit");
+    expect(r.retryable).toBe(true);
+  });
+
+  it("负样本:别的 403 仍然是鉴权;「每分钟的用量上限」是限流不是额度", () => {
+    expect(classifyProviderFailure("403 Forbidden").kind).toBe("auth");
+    expect(classifyProviderFailure("HTTP 403: invalid x-api-key").kind).toBe("auth");
+    expect(classifyProviderFailure("403: usage limit per minute exceeded").kind).toBe("rate_limit");
+  });
+
+  it("变异 ⑦:去掉这两条规则 ⇒ 两种形态都被「状态码即鉴权」吞掉", async () => {
+    const broken = await mutatedClassifier([
+      [
+        /if \(status === 403 && matchesAny\(lower, \["usage limit", "usage_limit"\]\)\) \{[\s\S]*?\n  \}\n/,
+        "",
+      ],
+      [/^\s*if \(matchesAny\(lower, \["concurrent request limit", "concurrency limit"\]\)\) return "rate_limit";\n/m, ""],
+    ]);
+    expect(broken("HTTP 403: usage limit exceeded for this key").kind, "退回去:额度被说成鉴权").toBe("auth");
+    expect(broken("403 concurrent request limit reached, retry shortly").kind, "退回去:限流被说成鉴权").toBe("auth");
+  });
+});
+

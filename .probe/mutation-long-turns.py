@@ -29,9 +29,19 @@ TESTS = [
     # ② 补话
     "tests/platform/steer.test.ts",
     "tests/web/steer-note.test.ts",
+    # 缺陷修复:SDK 重试成功后不再当故障处置
+    "tests/platform/provider-failure.test.ts",
 ]
 
 MUTATIONS = [
+    # ── 顺带修复:SDK 自己重试成功 ⇒ 不是 provider 故障(turn.ts)──────
+    (
+        "R1",
+        "src/platform/runtime/turn.ts",
+        "        providerError = undefined;\n      }\n      return;\n    }",
+        "        /* MUT: 不清掉 —— 一次被救回来的抖动仍被当成故障 */\n      }\n      return;\n    }",
+        "重试成功后故障不清(误报 provider_error / 误降级 / 待办不消费)⇒ provider-failure ① 与 ⑨ 红",
+    ),
     # ── ② 补话:判据(runtime/steer.ts)──────────────────────────────
     (
         "T1",

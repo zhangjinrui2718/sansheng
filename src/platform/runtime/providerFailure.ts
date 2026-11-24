@@ -164,6 +164,11 @@ const SERVER_WORDS: readonly string[] = [
 
 const NETWORK_WORDS: readonly string[] = [
   "fetch failed",
+  // ⚠️ 裸的 `Connection error.`(2026-11-25):三生依赖的 OpenAI Node SDK
+  // (`openai/core/error.js` 的 `APIConnectionError`)在连接断开时的原话,
+  // pi-ai 的 OpenAI 兼容通道用的就是它。不加这一条,断网被判成「归不了类」⇒
+  // 不刹车、不降级、工作项直接记 failed 并烧预算(multica 的 BHD-135 同款)。
+  "connection error",
   "enotfound",
   "eai_again",
   "econnreset",
@@ -313,8 +318,15 @@ function matchesAny(haystack: string, needles: readonly string[]): boolean {
  * 优先认**带上下文**的写法(`status code: 429` / `status=429` / `HTTP 429`),
  * 找不到再认**独立的三位错误码**。
  *
- * ⚠️ 独立码只认 `4xx` / `5xx`,而且两侧都不许挨着别的数字 ——
- * `1500` 里那个 `500` 不是状态码,`1429` 里那个 `429` 也不是。
+ * ⚠️ 独立码只认 `4xx` / `5xx`,而且两侧都不许挨着**数字或字母** ——
+ * `1500` 里那个 `500` 不是状态码,`1429` 里那个 `429` 也不是;
+ * 十六进制的请求 id 里夹着 `429`(`req_c429f4b8e2d1`)同样不是。
+ *
+ * ⚠️ **字母也要排除**(2026-11-25;multica #9146 同款):原先只排除数字,
+ * 于是「与限流无关的报错 + 一个恰好含 429 的请求 id」被判成限流(可重试 ⇒ 去降级、
+ * 去刹车),「含 401 的 id」被判成鉴权失败(不可重试 ⇒ 直接记 failed)——
+ * 实测 3 个样本全部落错类别。请求 id、追踪 id 几乎都是十六进制 / 字母数字混合的,
+ * 这种夹击并不罕见。
  */
 function parseStatus(lower: string): number | undefined {
   const contextual: readonly RegExp[] = [
@@ -329,7 +341,7 @@ function parseStatus(lower: string): number | undefined {
       if (Number.isInteger(n) && n >= 400 && n <= 599) return n;
     }
   }
-  const bare = /(?<![\d])([45]\d{2})(?![\d])/.exec(lower);
+  const bare = /(?<![a-z0-9])([45]\d{2})(?![a-z0-9])/.exec(lower);
   if (bare !== null) {
     const n = Number(bare[1]);
     if (Number.isInteger(n) && n >= 400 && n <= 599) return n;
@@ -354,6 +366,17 @@ function pickKind(
   if (typeKind === "auth") return "auth";
   // ② 词表(先具体后一般)。⚠️ 额度词在状态码之前:`429 + 用量上限` 是额度不是限流。
   if (matchesAny(lower, QUOTA_WORDS)) return "quota";
+  // ②′ **403 的两种特殊形态**(2026-11-25;multica 的 `isUsageLimit403` /
+  //     `concurrentRequestLimitWitness` 同款)—— 必须先于「状态码即鉴权」:
+  //     · 有的 provider 用 403 报「用量上限」:那是额度,不是鉴权;
+  //     · Anthropic 兼容网关用 403 报「并发超限」:那是限流,不是鉴权。
+  //     判成鉴权的后果是「凭据明明有效,却被说成配置问题」:任何轴都不刹车、
+  //     工作项直接记 failed。
+  if (status === 403 && matchesAny(lower, ["usage limit", "usage_limit"])) {
+    // 「每分钟的用量上限」是限流(窗口会滚),不是账户额度。
+    return matchesAny(lower, ["per minute", "rate limit"]) ? "rate_limit" : "quota";
+  }
+  if (matchesAny(lower, ["concurrent request limit", "concurrency limit"])) return "rate_limit";
   if (status !== undefined && AUTH_STATUSES.has(status)) return "auth";
   if (matchesAny(lower, AUTH_WORDS)) return "auth";
   // ⑥ 上下文超长在限流之前:它常以 400 出现,而病在会话不在供应商 ——

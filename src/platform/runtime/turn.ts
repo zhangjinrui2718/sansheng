@@ -1014,13 +1014,37 @@ export async function runTurn(opts: RunTurnOptions): Promise<TurnResult> {
       ) {
         providerError = classifyProviderFailure(m.errorMessage);
         logProviderFailure(`turn: ${opts.agentId} 的回合被 provider 拒绝`, providerError);
+        return;
+      }
+      // ── 出错之后**被 SDK 自己的重试救回来了**(2026-11-25)────────────
+      //
+      // Pi SDK 先为出错的那条回复发结束事件,**等这一轮跑完才开始重试**
+      // (`agent-session.js`:`_handlePostAgentRun` → `_prepareRetry` → 发
+      // `auto_retry_start`),重试成功之后再发一条**正常结束**的。所以后面这条
+      // 正常结束 = 之前那次故障已经过去:这一回合并没有「被 provider 拒掉」。
+      //
+      // 不清掉的话,一次被救回来的抖动会被当成故障处置:聊天路径广播
+      // `provider_error`、启动刹车、有待用 provider 时白切换并销毁全部会话,
+      // 而且这一轮被标成「失败」⇒ 对应待办不销账 ⇒ 下一轮重做一遍。
+      // 重试**次数**照留(`providerRetries`):「重试 2 次才好」与「一次就过」仍然分得开。
+      //
+      // ⚠️ 被中止的(`stopReason: "aborted"` —— 用户按了停止 / 看门狗到点)
+      // 不算「救回来了」:那次故障的现场要留着。
+      if (m.role === "assistant" && m.stopReason !== "error" && m.stopReason !== "aborted") {
+        if (providerError !== undefined) {
+          log.muted(
+            `turn: ${opts.agentId} 的回合此前被 provider 拒过,SDK 自动重试后恢复了 —— ` +
+              `不按故障处置(自动重试 ${providerRetries} 次)`,
+          );
+        }
+        providerError = undefined;
       }
       return;
     }
 
     // SDK 的自动重试:「限流了」与「限流了、重试 N 次还是限流」是**两种处境**。
-    // ⚠️ 一次 `auto_retry_start` = 一次重试开始(重试成功后这一回合不会有
-    // providerError,但次数仍然要报出来 —— 「重试 2 次才好」与「一次就过」不同)。
+    // ⚠️ 一次 `auto_retry_start` = 一次重试开始(重试成功后这一回合没有
+    // providerError —— 见上面「被 SDK 自己的重试救回来了」那段;但次数仍然要报出来)。
     if (ev.type === "auto_retry_start") {
       providerRetries += 1;
       return;

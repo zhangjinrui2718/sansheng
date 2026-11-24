@@ -122,6 +122,16 @@ describe("① runTurn · provider 故障要留下现场", () => {
 
   const textDelta = (delta: string) =>
     ({ type: "message_update", message: {}, assistantMessageEvent: { type: "text_delta", delta } }) as unknown as AgentSessionEvent;
+  // ⚠️ 这个 describe 的假会话**直接**喂给 runTurn(不经过适配器翻译),所以要正文
+  // 得用平台方言的事件(上面那个 `textDelta` 是 pi 方言,这里不会产生正文)。
+  const okText = (delta: string) =>
+    ({ type: "message_update", deltaKind: "text", delta }) as unknown as AgentSessionEvent;
+  /** 一条**正常结束**的 assistant 消息(重试成功之后 SDK 发的那种)。 */
+  const okMessageEnd = (stopReason = "stop") =>
+    ({
+      type: "message_end",
+      message: { role: "assistant", model: "fake-model", stopReason, usage: { input: 5, output: 2, cacheRead: 0 } },
+    }) as unknown as AgentSessionEvent;
 
   async function turn(script: Parameters<typeof fakeSession>[0]): Promise<TurnResult> {
     const fake = fakeSession(script);
@@ -153,11 +163,16 @@ describe("① runTurn · provider 故障要留下现场", () => {
     expect(r.providerError?.retryable).toBe(false);
   });
 
-  it("SDK 自动重试了几次 ⇒ `providerRetries` 记下来(重试了但没人知道 = 白重试)", async () => {
+  it("SDK 自动重试了几次、最后还是被拒 ⇒ `providerRetries` 记下来(重试了但没人知道 = 白重试)", async () => {
     // pi SDK 自己的那层重试(`auto_retry_start`)是**看不见**的 ——
     // 平台原先只看得见「最终失败了」,看不见「已经重试过 2 次」⇒
     // 界面上那句话会让人以为是「一次就挂」。
+    // ⚠️ 事件顺序照 SDK 的真实行为(pi-coding-agent 1.2.0 `agent-session.js`):
+    // 先为出错的回复发 `message_end`、这一轮跑完才重试(`auto_retry_start`)。
+    //    (2026-11-25 之前这里喂的是「先重试后报错」—— 与 SDK 相反,于是下面那条
+    //    「重试成功」的样本根本无从发现:实测一个重试成功的回合仍带着 providerError。)
     const r = await turn((emit) => {
+      emit(providerErrorMessage(RATE_LIMIT_TEXT));
       emit({
         type: "auto_retry_start", attempt: 1, maxAttempts: 3, delayMs: 2000, errorMessage: "429",
       } as unknown as AgentSessionEvent);
@@ -168,6 +183,39 @@ describe("① runTurn · provider 故障要留下现场", () => {
     });
     expect(r.providerRetries, "重试次数要能被看见").toBe(2);
     expect(r.providerError?.kind).toBe("rate_limit");
+  });
+
+  it("SDK 自动重试**成功** ⇒ 这一回合不是 provider 故障(此前仍带着 providerError,被当成故障处置)", async () => {
+    const r = await turn((emit) => {
+      emit(providerErrorMessage(RATE_LIMIT_TEXT)); // 出错的回复先结束
+      emit({
+        type: "auto_retry_start", attempt: 1, maxAttempts: 3, delayMs: 2000, errorMessage: "429",
+      } as unknown as AgentSessionEvent);
+      emit(okText("这是重试之后的正常答复。"));
+      emit(okMessageEnd());
+    });
+    expect(r.text, "答复照常带回").toContain("正常答复");
+    expect(r.providerError, "被救回来的抖动不是故障", undefined).toBeUndefined();
+    expect(r.providerRetries, "但重试过这件事仍要看得见").toBe(1);
+    expect(r.unanswered, "也不是「没下文」").toBeNull();
+  });
+
+  it("负样本:最后一次仍是出错 ⇒ 故障留着(不是「只要重试过就算好」)", async () => {
+    const r = await turn((emit) => {
+      emit(providerErrorMessage(RATE_LIMIT_TEXT));
+      emit({ type: "auto_retry_start", attempt: 1 } as unknown as AgentSessionEvent);
+      emit(providerErrorMessage(RATE_LIMIT_TEXT));
+    });
+    expect(r.providerError?.kind).toBe("rate_limit");
+  });
+
+  it("负样本:被中止的那一条不算「救回来了」—— 故障现场留着", async () => {
+    const r = await turn((emit) => {
+      emit(providerErrorMessage(RATE_LIMIT_TEXT));
+      emit({ type: "auto_retry_start", attempt: 1 } as unknown as AgentSessionEvent);
+      emit(okMessageEnd("aborted"));
+    });
+    expect(r.providerError?.kind, "中止 ≠ 恢复").toBe("rate_limit");
   });
 
   it("负样本:没有重试 ⇒ `providerRetries` 缺席(不是「永远有值」)", async () => {
@@ -289,6 +337,11 @@ interface Harness {
    * 撞上同一条报错也会丢它自己的会话 —— 数次数会把它们混进来。
    */
   disposedRoles: string[];
+  /**
+   * 这一轮「先被拒、SDK 自动重试后恢复」(2026-11-25)—— 事件顺序照 SDK 的真实行为:
+   * 出错的回复先 `message_end`,然后 `auto_retry_start`,再是一条正常结束的回复。
+   */
+  recover: boolean;
   db: import("better-sqlite3").Database | null;
 }
 
@@ -299,7 +352,7 @@ const WORK_ID_RE = /^# 工作项 (\S+)/m;
 function makeHarness(): Harness {
   return {
     turns: [], models: [], errorText: RATE_LIMIT_TEXT, useTool: false,
-    disposedRoles: [], db: null,
+    disposedRoles: [], recover: false, db: null,
   };
 }
 
@@ -344,6 +397,18 @@ function makeCreateSession(h: Harness): CreateSessionFn {
             usage: { input: 3, output: 0, cacheRead: 0 },
           },
         } as unknown as AgentSessionEvent);
+        if (h.recover) {
+          // SDK 自己的重试把它救回来了(pi 的真实顺序:出错的回复先结束、这一轮跑完才重试)。
+          emit({ type: "auto_retry_start", attempt: 1, maxAttempts: 3, delayMs: 2000, errorMessage: h.errorText } as unknown as AgentSessionEvent);
+          emit({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "重试之后恢复了。" } } as unknown as AgentSessionEvent);
+          emit({
+            type: "message_end",
+            message: {
+              role: "assistant", model: "fake-model", stopReason: "stop",
+              usage: { input: 5, output: 2, cacheRead: 0 },
+            },
+          } as unknown as AgentSessionEvent);
+        }
         emit({ type: "agent_settled" } as AgentSessionEvent);
         return { messages: [] };
       },
@@ -969,5 +1034,61 @@ describe("⑦ 复核补钉:四条没有断言的行为", () => {
       cands.map((c) => c.id),
       "没有 env 映射的 provider 切过去拿不到 key(凭据只经 env 通道进 SDK)",
     ).toEqual(["prov_with_env"]);
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════
+// ⑨ SDK 自动重试成功 ⇒ 不按 provider 故障处置(2026-11-25 补钉)
+// ══════════════════════════════════════════════════════════════════
+//
+// 2026-10-22 的接线把「出错的回复结束」直接当成这一回合的 provider 故障;而 Pi SDK
+// 是先为出错的回复发结束事件、这一轮跑完才重试。于是一次被 SDK 自己救回来的限流
+// 也会走故障处置:广播 provider_error、启动刹车、有待用 provider 时白切换并销毁
+// 全部会话,而且这一轮被标成失败 ⇒ 待办不销账 ⇒ 下一轮重做一遍。
+// 修法在 turn.ts(后面正常结束的回复把 providerError 清掉);这里钉它在两条路径上
+// 的**后果**。夹具挑「有备用 provider」—— 那是后果最重的一档,也最容易看出来。
+
+describe("⑨ SDK 自动重试成功 ⇒ 不按 provider 故障处置", () => {
+  it("聊天路径:有备用 provider 也不降级、不报 provider_error、不刹车,答复照常落库", async () => {
+    await startHost({ backup: true });
+    h.recover = true;
+    seedProject(null);
+    ws!.send(JSON.stringify({ type: "send", projectId: "p1", content: "在吗" }));
+    await until(() =>
+      listSessions(h.db!, "p1").some((s) =>
+        listSessionMessages(h.db!, s.id).some((m) => m.kind === "assistant" && m.content.includes("恢复了")),
+      ),
+    );
+    await sleep(30); // 给「晚到一拍」的故障广播留窗口 —— 下面几条断言的是**没有**。
+
+    expect(errorEvents("provider_error"), "被救回来的抖动不是故障").toHaveLength(0);
+    expect(errorEvents("turn_failed")).toHaveLength(0);
+    expect(failoverNotices(), "不降级、不刹车 ⇒ 没有任何供应商通知").toHaveLength(0);
+    // ⚠️ 数的是「有没有用上备用 provider 的模型」,不是会话数:回合一结束排空器会把
+    // 项目经理也叫醒(项目零工作项),它会用**同一家** provider 再建一条会话。
+    expect(
+      h.models.filter((m) => m === backupModelLabel()),
+      "没有任何会话用上备用 provider 的模型(= 没有降级)",
+    ).toHaveLength(0);
+    expect(
+      h.turns.filter((t) => t.role === "business_manager").length,
+      "业务经理的这一轮只跑了一次(没有因为「失败」被重做)",
+    ).toBe(1);
+  });
+
+  it("工作路径:工作项不记 failed、不降级,这一轮算它跑完了", async () => {
+    await startHost({ backup: true, maxCascadeRounds: 1 });
+    h.recover = true;
+    seedProject("w1");
+    await host!.dispatchTimer.runNow();
+    await until(() => h.turns.length === 1);
+    await sleep(30);
+
+    expect(getWork(h.db!, "w1")?.status, "没有被拒到底 ⇒ 不是 failed").not.toBe("failed");
+    expect(failoverNotices()).toHaveLength(0);
+    expect(h.models).toHaveLength(1);
+    expect(
+      h.db!.prepare(`SELECT COUNT(*) AS n FROM dispatch_events WHERE project_id = 'p1' AND kind = 'work_failed'`).get() as { n: number },
+    ).toEqual({ n: 0 });
   });
 });
