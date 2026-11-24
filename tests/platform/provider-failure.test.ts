@@ -281,6 +281,14 @@ interface Harness {
   errorText: string;
   /** 这一轮要不要先跑一次工具(模拟「已经干过活」)。 */
   useTool: boolean;
+  /**
+   * 假会话被 `dispose()` 时,它**上一轮扮演的角色**(2026-11-25)——「哪条会话被
+   * 真的丢弃了」的直接观察面。此前只有 `models` 那个间接面(下一轮有没有新建),
+   * 它分不清「降级丢的」与「上下文超长丢的」。
+   * ⚠️ 按角色记而不是数次数:聊天回合一结束排空器就被叫醒,别的角色的回合
+   * 撞上同一条报错也会丢它自己的会话 —— 数次数会把它们混进来。
+   */
+  disposedRoles: string[];
   db: import("better-sqlite3").Database | null;
 }
 
@@ -289,7 +297,10 @@ const ROLE_RE = /你是:.*?\(`([a-z_]+)`\)/;
 const WORK_ID_RE = /^# 工作项 (\S+)/m;
 
 function makeHarness(): Harness {
-  return { turns: [], models: [], errorText: RATE_LIMIT_TEXT, useTool: false, db: null };
+  return {
+    turns: [], models: [], errorText: RATE_LIMIT_TEXT, useTool: false,
+    disposedRoles: [], db: null,
+  };
 }
 
 function makeCreateSession(h: Harness): CreateSessionFn {
@@ -298,6 +309,7 @@ function makeCreateSession(h: Harness): CreateSessionFn {
       h.models.push(`${opts.model.provider}/${opts.model.id}`);
     }
     const listeners = new Set<(ev: AgentSessionEvent) => void>();
+    let lastRole: string | null = null;
     const emit = (ev: AgentSessionEvent): void => {
       for (const l of [...listeners]) l(ev);
     };
@@ -310,6 +322,7 @@ function makeCreateSession(h: Harness): CreateSessionFn {
         const text = typeof payload === "string" ? payload : "";
         const projectId = text.match(PROJECT_ID_RE)?.[1] ?? null;
         const role = text.match(ROLE_RE)?.[1] ?? null;
+        lastRole = role;
         const workId = text.match(WORK_ID_RE)?.[1] ?? null;
         h.turns.push({ projectId, role, workId });
         if (h.useTool) {
@@ -335,7 +348,9 @@ function makeCreateSession(h: Harness): CreateSessionFn {
         return { messages: [] };
       },
       async abort() {},
-      dispose() {},
+      dispose() {
+        h.disposedRoles.push(lastRole ?? "(没跑过的会话)");
+      },
     } as unknown as AgentSession;
     return { session };
   };
@@ -608,6 +623,58 @@ describe("④ 宿主 · 工作路径:降级 / 终态", () => {
       "降不了级 ⇒ 进刹车并播暂停通知",
     ).toBe(1);
     host!.hub.setBusy("p1", "qc", false);
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════
+// ⑧ 上下文超长(⑥)· 撞上就**真的**丢弃这条会话
+// ══════════════════════════════════════════════════════════════════
+//
+// 2026-11-25 补钉:`context-overflow.test.ts` 只钉了 dispatcher 对
+// `sessionReset` 标志的语义(不消费、不重置预算),**宿主有没有真的把会话丢掉**
+// 此前没有判据 —— 上一批的变异 M13 只改了一句没人读的文案,所以「全红」里
+// 那一条是假的(在干净的 master 上实测:施加 M13,测试照样全过)。
+
+/** 上下文超长的原文(分类成 context_overflow ⇒ 不可重试、病在会话不在供应商)。 */
+const OVERFLOW_TEXT = "prompt is too long: 215000 tokens > 200000 maximum";
+
+describe("⑧ 上下文超长 · 撞上就真的丢弃这条会话", () => {
+  it("正样本:工作路径 ⇒ 执行者那条会话被丢弃,工作项**不**记 failed", async () => {
+    await startHost({ backup: true, maxCascadeRounds: 1 });
+    h.errorText = OVERFLOW_TEXT;
+    seedProject("w1");
+    await host!.dispatchTimer.runNow();
+    expect(h.turns.length, "只跑一轮(上界 1)").toBe(1);
+    expect(
+      h.disposedRoles,
+      "超长的会话必须被丢弃 —— 留着它,下一轮照样撞",
+    ).toEqual(["research_worker"]);
+    expect(host!.sessionCount(), "会话池里不该再留着它").toBe(0);
+    // 换会话不是判失败:活还在,下一次派发从库里重放历史开新会话。
+    expect(getWork(h.db!, "w1")?.status).not.toBe("failed");
+    expect(h.models.length, "超长不降级(换家没用,上下文还超着)").toBe(1);
+  });
+
+  it("正样本:聊天路径 ⇒ 业务经理那条会话同样丢弃(甲方下一次说话自动重放历史)", async () => {
+    await startHost({ backup: true });
+    h.errorText = OVERFLOW_TEXT;
+    seedProject(null);
+    ws!.send(JSON.stringify({ type: "send", projectId: "p1", content: "在吗" }));
+    await until(() => errorEvents("provider_error").length > 0);
+    expect(
+      h.disposedRoles,
+      "聊天路径的超长会话同样要丢",
+    ).toContain("business_manager");
+  });
+
+  it("负样本:别的供应商故障(鉴权)**不**丢会话 —— 丢会话是超长专有的处置", async () => {
+    await startHost({ backup: false, maxCascadeRounds: 1 });
+    h.errorText = AUTH_TEXT;
+    seedProject("w1");
+    await host!.dispatchTimer.runNow();
+    await until(() => getWork(h.db!, "w1")?.status === "failed");
+    expect(h.disposedRoles, "鉴权失败是配置问题,会话本身是好的").toEqual([]);
+    expect(host!.sessionCount()).toBe(1);
   });
 });
 

@@ -22,6 +22,8 @@ TESTS = [
     "tests/platform/work-acceptance.test.ts",
     "tests/platform/wakeups.test.ts",
     "tests/platform/context-overflow.test.ts",
+    # 2026-11-25:M13 / M14(上下文超长真的丢弃会话)的判据落在这里。
+    "tests/platform/provider-failure.test.ts",
     "tests/platform/dispatcher-rules.test.ts",
     "tests/platform/client.test.ts",
     "tests/platform/design-conformance.test.ts",
@@ -124,8 +126,19 @@ MUTATIONS = [
         "M13",
         "src/platform/host/serve.ts",
         "          providerSessionReset = true;\n          disposeOneSession(\n            projectId, sessionId, agentId,\n            \"context overflow(resume-unsafe,下一次派发换新会话)\",\n          );",
-        "          providerSessionReset = true;\n          disposeOneSession(\n            projectId, sessionId, agentId,\n            \"MUT\"\n          ) /*MUT*/;",
-        "工作路径撞超长不再换会话(续跑中毒会话)⇒ context-overflow 的 dispose 判据红",
+        "          providerSessionReset = true; /* MUT: 不丢弃会话 */",
+        "工作路径撞超长不再换会话(续跑中毒会话)⇒ provider-failure ⑧ 工作路径的丢弃判据红",
+    ),
+    # 2026-11-25:上一版 M13 只把 disposeOneSession 的**原因文案**改成 "MUT" —— 会话照样
+    # 被丢,而没有任何测试读那句话,所以它从来没咬合过(干净的 master 上实测:施加后
+    # context-overflow 照样全绿)。判据补在 provider-failure.test.ts ⑧(按角色记丢弃了谁),
+    # M13 改成真的拿掉调用,并补聊天路径那条 M14。
+    (
+        "M14",
+        "src/platform/host/serve.ts",
+        "            disposeOneSession(\n              projectId, sessionId, agentId,\n              \"context overflow(resume-unsafe,下一轮换新会话)\",\n            );",
+        "            /* MUT: 聊天路径不丢弃会话 */",
+        "聊天路径撞超长不再换会话 ⇒ provider-failure ⑧ 聊天路径的丢弃判据红",
     ),
 ]
 
