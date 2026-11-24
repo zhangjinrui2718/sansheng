@@ -4,9 +4,17 @@
  * ── 粒度:一个回合 N 行 ──────────────────────────────────────────
  *
  * 一行 = 一次工具调用(`kind='tool'`)/ 一条 provider 故障(`kind='provider_error'`)
- * / 一个回合级标记(`kind='marker'`:墙钟打断、无下文)。同回合各行共用
- * `turn_id`,`seq` 回合内单调 —— **读面按 `seq` 排,不按 `created_at`**
- * (同一批写入会同毫秒,时间戳排不出写入顺序)。
+ * / 一个回合级标记(`kind='marker'`:到点打断、无下文)/ 回合收口行
+ * (`kind='turn_end'`)。同回合各行共用 `turn_id`,`seq` 回合内单调 ——
+ * **读面按 `seq` 排,不按 `created_at`**(同一毫秒可以写入多行,
+ * 时间戳排不出写入顺序)。
+ *
+ * ── 写入时机:逐条写 + 收口行(2026-11-25)────────────────────────
+ *
+ * 工具行在**那次调用结束时**就落库(回合还在跑也读得到);故障与标记行在
+ * 回合收口时补在后面;最后一行 `turn_end` 是「这一回合已经结束」的**库里凭据**
+ * —— 没有它的回合要么还在跑,要么是进程在它结束前退出过。读面据此给
+ * `finished`,不把半截回合读成「它就干到这」。
  *
  * ── 与另两张表不混装(035 的裁决)────────────────────────────────
  *
@@ -25,8 +33,12 @@ import type Database from "better-sqlite3";
 
 // ── 形状 ────────────────────────────────────────────────────────
 
-/** 轨迹行的类别。闭集(035 不建 CHECK,取值域在这里)。 */
-export const TURN_EVENT_KINDS = ["tool", "provider_error", "marker"] as const;
+/**
+ * 轨迹行的类别。闭集(035 不建 CHECK,取值域在这里)。
+ *
+ * `turn_end`(2026-11-25):回合收口行 —— 只当凭据,读面不把它列进事件。
+ */
+export const TURN_EVENT_KINDS = ["tool", "provider_error", "marker", "turn_end"] as const;
 
 export type TurnEventKind = (typeof TURN_EVENT_KINDS)[number];
 
@@ -108,11 +120,12 @@ function toRow(raw: RawTurnEvent): TurnEventRow {
 // ── 写 ──────────────────────────────────────────────────────────
 
 /**
- * 一批轨迹行落库(一个回合的全部行,一次事务)。
+ * 一批轨迹行落库(这批行,一次事务;全成或全不成)。
  *
- * **单点写入**:`runtime/turn.ts` 在回合收口的 `finally` 里调它一次 ——
- * 与 `insertTurnUsage` 同一条纪律(两条出口各跑一次、失败不毁回合但不静默)。
- * 空数组直接返回(一个什么都没发生的回合不写轨迹,也不假装写过)。
+ * **写入点只有一处**:`runtime/turn.ts` —— 工具行每次调用结束写一批(通常一行),
+ * 故障 / 标记 / 收口行在回合收口的 `finally` 里写最后一批。与 `insertTurnUsage`
+ * 同一条纪律(失败不毁回合但不静默)。空数组直接返回(一个什么都没发生的回合
+ * 不写轨迹,也不假装写过)。
  */
 export function insertTurnEvents(db: Database.Database, rows: readonly TurnEventRow[]): void {
   if (rows.length === 0) return;
@@ -134,12 +147,14 @@ export function insertTurnEvents(db: Database.Database, rows: readonly TurnEvent
 // ── 读 ──────────────────────────────────────────────────────────
 
 /**
- * 一个项目里某个成员最近 `maxTurns` 个回合的**完整**轨迹(成员页
+ * 一个项目里某个成员最近 `maxTurns` 个回合的**全部已落库行**(成员页
  * 「他做了什么」的数据源)。
  *
  * 两步查询,语义可预测:先取最近 `maxTurns` 个 `turn_id`(按回合内最大
- * `created_at` 倒序),再取这些回合的**全部**行 —— **整回合一起出**,
- * 半截回合比没有更坏(读者会把「后面没了」读成「它就干到这」)。
+ * `created_at` 倒序),再取这些回合的全部行 —— **整回合一起出**。
+ * 逐条写入之后,正在跑的回合也会出现在这里(它的行还在增加):有没有
+ * `turn_end` 行由读面 `transport/http.ts` 的 `agentTurnEvents` 翻成
+ * `finished`,半截回合因此**被标出来**,而不是被读成「它就干到这」。
  */
 export function listTurnEventsByAgent(
   db: Database.Database,

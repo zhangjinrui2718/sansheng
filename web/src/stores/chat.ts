@@ -245,6 +245,17 @@ export interface ChatState {
    * `useProjectLive`)。WS 会断,库与宿主不会。
    */
   activityRevision: number;
+  /**
+   * **执行轨迹**(`turn_events` ·「他做了什么」)的 revision —— 成员面板那一块据此回查。
+   *
+   * 为什么再单独一位:`activityRevision` 的读者是运行态(`message_start` /
+   * `tool_start` 一到就要动),而轨迹是**工具调用结束**那一刻才落行的
+   * (服务端先落库、后广播 `tool_end`)。挂在前者身上等于让每个工具调用的**开始**
+   * 也触发一次轨迹重拉 —— 那时行还没写,拉回来的是旧数据。
+   *
+   * 与它们一样只是『去查一下』的敲门砖,不是真相;真相在库里。
+   */
+  turnLogRevision: number;
   /** 项目列表本身的变更(新建 / 状态变化 / 待答问题数变化)。 */
   projectsRevision: number;
 
@@ -786,6 +797,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   projectRevision: 0,
   projectsRevision: 0,
   activityRevision: 0,
+  turnLogRevision: 0,
 
   turns: [],
   inFlight: {},
@@ -1205,7 +1217,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   /**
    * **重连之后对账** —— 断线期间发生的事,本地一条事件都没收到过(WS 没有回放)。
    *
-   * 三件事:
+   * 四件事:
    *   ① 重新问一次服务端那份运行态(灯与中断入口按事实收回);
    *   ② **把本地过期的那几轮收掉** —— 断线期间结束的那一轮,它的 `agent_end`
    *      永远等不到 ⇒ 本地那张轮表永远留着它 ⇒ 输入框**永久死锁**
@@ -1214,8 +1226,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
    *
    * ⚠️ 判据在 `lib/data.ts` 的 `staleTurnIds`(纯函数),粒度与服务端忙闩一致:
    * `(上下文, agent)`。
+   *
+   * ④ **执行轨迹补齐**:断线期间落库的轨迹行,本地一条 `tool_end` 都没收到过
+   * ⇒ 敲一下 `turnLogRevision`,让开着的成员面板重拉。它排在最前面、不看
+   * `/live` 读不读得到 —— 轨迹是库里的行,与运行态无关。
    */
   async resyncAfterReconnect() {
+    set((s) => ({ turnLogRevision: s.turnLogRevision + 1 }));
     // ① 服务端那份 —— **读不到(`null`)⇒ 下面两步都不动**
     // (读不到的时候「清掉」就是在瞎猜)。
     const runningAgentIds = await get().refreshRunning();
@@ -1466,6 +1483,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
         return;
       }
       case "tool_end": {
+        // ① 轨迹回查的敲门砖 —— **先敲**:下面找不到那一轮就 `return` 了,而
+        //    「他做了什么」读的是库里的行(服务端先落库、后广播这一条),
+        //    它不依赖本地轮表里有没有这一轮(刷新之后轮表是空的,轨迹照样在长)。
+        set((s) => ({
+          turnLogRevision:
+            e.projectId === s.projectId ? s.turnLogRevision + 1 : s.turnLogRevision,
+        }));
         // 只更新**它自己那个 messageId** 的那一轮里的那张工具卡。找不到就丢。
         const cur = get().inFlight[e.messageId];
         if (!cur) return;

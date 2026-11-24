@@ -5,7 +5,7 @@
  *
  *   · 那条答「他说了什么」:对话全文(回合的**正文**,`session_messages`);
  *   · 本组件答「他做了什么」:逐次工具调用 / provider 故障 / 回合级标记
- *     (`turn_events`,回合**收口**时整批落库)。
+ *     (`turn_events`,工具行**逐条落库**)。
  *
  * ── 为什么要有这一块(真机痛点)──────────────────────────────────
  *
@@ -13,8 +13,10 @@
  * 空转)此前只能翻 stdout 日志 —— 工具轨迹在回合内存里抓得全,却只被渲染成
  * 一段散文随日志漂走。落库之后这一块就是它的**读面**。
  *
- * ⚠️ **只有已结束的回合**:写入点在回合收口,正在跑的那一轮在这里还没有 ——
- * 进行中的内容看「他说了什么」的实时流那一块。边界在屏上说清。
+ * ⚠️ **进行中的回合也在**(2026-11-25):工具行每次调用结束就落库,所以正在跑的
+ * 那一轮在这里一行一行地长。收没收口由 `finished` 说话 —— `false` 只能读成
+ * 「还没结束」:它可能还在跑,也可能是进程在它结束前退出过,读面分不开这两者,
+ * 界面就不替它断言哪一种。
  *
  * ⚠️ **四态只算一次**(`remoteListOf`):「还没查过」不许长成「0 个回合」,
  * 「读不到」不许长成「没做过事」—— 与全站 `DataState` 同一条纪律。
@@ -65,8 +67,10 @@ export function AgentTurnLogBody({
   const toolTotal = turns.reduce((n, t) => n + t.events.filter((e) => e.kind === "tool").length, 0);
   const failedTotal = turns.reduce(
     (n, t) => n + t.events.filter((e) => e.kind === "tool" && e.isError).length,
-    0,
+    0
   );
+  /** 没收口的回合数 —— 写在**折叠标题**里:这一块默认收起,不展开也要看得出有回合在长。 */
+  const openTotal = turns.filter((t) => !t.finished).length;
 
   return (
     <DataState
@@ -88,7 +92,8 @@ export function AgentTurnLogBody({
                 铺开会把结构淹掉;**计数永远可见**(点开之前就知道有几回合)。 */}
             <summary>
               {`展开看轨迹 · ${rows.length} 个回合 / ${toolTotal} 次工具` +
-                (failedTotal > 0 ? ` / ${failedTotal} 次失败` : "")}
+                (failedTotal > 0 ? ` / ${failedTotal} 次失败` : "") +
+                (openTotal > 0 ? ` / ${openTotal} 个未结束` : "")}
             </summary>
             <div
               className="flex flex-col gap-2"
@@ -119,7 +124,13 @@ function TurnEventCard({ turn }: { turn: AgentTurnView }) {
         <span className="ss-meta">
           {turn.workId !== null ? `工作项 ${turn.workId}` : "不挂工作项"}
         </span>
+        {!turn.finished && <Pill tone="mute">未结束</Pill>}
       </div>
+      {!turn.finished && (
+        <div className="ss-note" style={{ marginTop: 4 }}>
+          还没结束,行会继续增加;一直停在这里说明进程中途退出过。
+        </div>
+      )}
       <div
         className="flex flex-col gap-0.5"
         style={{ marginTop: 6, fontSize: 12, lineHeight: 1.7 }}

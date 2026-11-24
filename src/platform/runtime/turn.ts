@@ -797,13 +797,82 @@ export async function runTurn(opts: RunTurnOptions): Promise<TurnResult> {
    */
   let textSinceLastTool = false;
 
+  // ── 轨迹行的写入状态(2026-11-25:逐条写)──────────────────────────
+  //
+  // `seq` 是**回合内**的递增序号:工具行在各自结束时占号,故障 / 标记 / 收口行
+  // 在 `finally` 里接着占 —— 一回合之内连续,读面按它排序。
+  let eventSeq = 0;
+  /**
+   * 这一回合有没有**哪一次**轨迹写入失败过。失败过就不写收口行 ——
+   * 缺行的回合配上「已结束」的凭据,读的人会把「后面没了」读成「它就干到这」。
+   */
+  let eventWriteFailed = false;
+  const nextEventId = opts.newId ?? defaultUsageId;
+
+  /** 落一批轨迹行。失败**不毁回合**(轨迹是现场,回合是回合),但绝不静默。 */
+  const writeTurnEvents = (rows: readonly TurnEventRow[]): void => {
+    if (rows.length === 0) return;
+    try {
+      insertTurnEvents(opts.db, rows);
+    } catch (err: unknown) {
+      eventWriteFailed = true;
+      log.error(
+        `turn: 轨迹落库失败(${opts.agentId} · 项目 ${pid ?? "(接待会话)"} · ` +
+          `${rows.length} 行)—— 这一段现场记不上了,本回合不写收口行:` +
+          (err instanceof Error ? err.message : String(err)),
+      );
+    }
+  };
+
+  /**
+   * 这个回合的分组键(`turn_events.turn_id`,migration 035)。
+   * 在回合开始时生成**一次**:工具行(逐条写)、收尾的故障 / 标记 / 收口行
+   * 共用同一份 —— 各生成一个会得到几个不同的「回合」。
+   * 它是 `runTurn` 里第一个取号的地方,声明在订阅之前(回调要用它)。
+   */
+  const turnId = (opts.newId ?? defaultUsageId)("turn");
+
   const unsub = opts.session.subscribe((ev: RuntimeEvent) => {
+    // ★ **先落库,后广播**:工具行在这次调用结束时同步写库,写在观察者
+    // (`onEvent` → WS)之前 —— 前端收到 `tool_end` 回查读面时,那一行已经在。
+    // 进行中的回合因此也读得到「他做到了哪一步」,不再等收口。
+    if (ev.type === "tool_end") {
+      const started = inflight.get(ev.toolCallId);
+      const record: ToolCallRecord = {
+        name: ev.toolName,
+        argsSummary: started?.argsSummary ?? "",
+        isError: toolCallFailed(ev),
+        resultSummary: truncate(resultText(ev.result), 300),
+        durationMs: started !== undefined ? Date.now() - started.startedAt : 0,
+      };
+      toolCalls.push(record);
+      // 工具结果落地 = 又一个「该说话」的时点。从这里起若再没有正文,甲方那边
+      // 就是断的(见 `TurnResult.unanswered`)。
+      textSinceLastTool = false;
+      // 立项是**流程状态变更**,必须单独留痕:宿主靠它做「接待会话 → 新项目」
+      // 的切换。失败的结果不会带 data(见 sdkAdapter 的失败分支)。
+      const opened = openedProjectIdOf(ev);
+      if (opened !== null) openedProjectIds.push(opened);
+      inflight.delete(ev.toolCallId);
+      eventSeq += 1;
+      writeTurnEvents([{
+        id: nextEventId("te"), turnId,
+        projectId: pid, sessionId: opts.sessionId ?? null,
+        agentId: opts.agentId, workId: opts.workId ?? null,
+        seq: eventSeq, kind: "tool", tool: record.name,
+        argsSummary: record.argsSummary, resultSummary: record.resultSummary,
+        isError: record.isError, durationMs: record.durationMs, createdAt: Date.now(),
+      }]);
+    }
+
     try {
       opts.onEvent?.(ev);
     } catch {
       // 观察者出错不该毁掉回合一 —— 但也不能静默:记进 thinking 之外的地方
       // 会污染语义,所以只保证不影响主流程。
     }
+    // 工具行在上面已经处理完(先落库后广播)。
+    if (ev.type === "tool_end") return;
 
     if (ev.type === "message_update") {
       // 7-I 的现场:thinking 增量曾被当成正文展示(判据写成了不存在的
@@ -866,26 +935,6 @@ export async function runTurn(opts: RunTurnOptions): Promise<TurnResult> {
       return;
     }
 
-    if (ev.type === "tool_end") {
-      const started = inflight.get(ev.toolCallId);
-      toolCalls.push({
-        name: ev.toolName,
-        argsSummary: started?.argsSummary ?? "",
-        isError: toolCallFailed(ev),
-        resultSummary: truncate(resultText(ev.result), 300),
-        durationMs: started !== undefined ? Date.now() - started.startedAt : 0,
-      });
-      // 工具结果落地 = 又一个「该说话」的时点。从这里起若再没有正文,甲方那边
-      // 就是断的(见 `TurnResult.unanswered`)。
-      textSinceLastTool = false;
-      // 立项是**流程状态变更**,必须单独留痕:宿主靠它做「接待会话 → 新项目」
-      // 的切换。失败的结果不会带 data(见 sdkAdapter 的失败分支)。
-      const opened = openedProjectIdOf(ev);
-      if (opened !== null) openedProjectIds.push(opened);
-      inflight.delete(ev.toolCallId);
-      return;
-    }
-
     if (ev.type === "agent_settled" || ev.type === "agent_end") settled = true;
   });
 
@@ -923,13 +972,6 @@ export async function runTurn(opts: RunTurnOptions): Promise<TurnResult> {
   let recordedUsage: TurnUsageTotal | undefined;
 
   /**
-   * 这个回合的分组键(`turn_events.turn_id`,migration 035)。
-   * 在回合开始时生成**一次**,`finally` 里写轨迹与(成功的)返回共用同一份 ——
-   * 在两处各生成一个会得到两个不同的「回合」。
-   */
-  const turnId = (opts.newId ?? defaultUsageId)("turn");
-
-  /**
    * 「甲方那边没有下文」的判定结果 —— 在 `finally` 里算好(写轨迹的
    * `unanswered` 标记要它),返回值复用同一个变量,不判第二遍
    * (判据写两遍 = 漂的开端)。
@@ -938,98 +980,73 @@ export async function runTurn(opts: RunTurnOptions): Promise<TurnResult> {
   let unanswered: TurnResult["unanswered"] = null;
 
   /**
-   * 把这一回合的轨迹落成 `turn_events` 的若干行(migration 035)。
+   * 回合收口时补写轨迹的**尾部行**(migration 035;2026-11-25 起工具行逐条写)。
    *
-   * 与 `recordTurnUsage` 同一条纪律:**单点写入、两条出口各跑一次、失败不毁
-   * 回合但绝不静默**。事实全部来自本回合已累积的现场(`toolCalls` /
-   * `providerError` / 墙钟超时现场),不在这里再订阅任何东西。
+   * 这里只写三样:provider 故障、回合级标记(到点打断 / SDK 重试 / 无下文)、
+   * 以及最后一行**收口行** `turn_end`。与 `recordTurnUsage` 同一条纪律:
+   * `finally` 里两条出口各跑一次、失败不毁回合但绝不静默。事实全部来自本回合
+   * 已累积的现场,不在这里再订阅任何东西。
    *
-   * 什么都没发生的回合(零工具、零故障、零标记)**一行都不写** ——
-   * 与 `turn_usage` 的「没买到输出不写账」同一条诚实纪律。
+   * 什么都没发生的回合(零工具、零故障、零标记)**一行都不写** —— 收口行也不写
+   * (给一个空回合盖「已结束」的章等于假装它有过轨迹),与 `turn_usage` 的
+   * 「没买到输出不写账」同一条诚实纪律。
+   *
+   * ⚠️ 本回合只要有一次轨迹写入失败过(`eventWriteFailed`),就**不写收口行**:
+   * 缺行的回合配上「已结束」的凭据,读的人会把「后面没了」读成「它就干到这」。
    */
   const recordTurnEvents = (): void => {
-    const rows: TurnEventRow[] = [];
-    let seq = 0;
     const at = Date.now();
-    const nextId = opts.newId ?? defaultUsageId;
-    for (const t of toolCalls) {
-      seq += 1;
-      rows.push({
-        id: nextId("te"), turnId,
+    /** 一行尾部行:接在逐条写过的工具行后面占号(`seq` 回合内连续)。 */
+    const tail = (
+      kind: "provider_error" | "marker" | "turn_end",
+      resultSummary: string,
+      isError: boolean,
+    ): TurnEventRow => {
+      eventSeq += 1;
+      return {
+        id: nextEventId("te"), turnId,
         projectId: pid, sessionId: opts.sessionId ?? null,
         agentId: opts.agentId, workId: opts.workId ?? null,
-        seq, kind: "tool", tool: t.name,
-        argsSummary: t.argsSummary, resultSummary: t.resultSummary,
-        isError: t.isError, durationMs: t.durationMs, createdAt: at,
-      });
-    }
+        seq: eventSeq, kind, tool: null,
+        argsSummary: "", resultSummary,
+        isError, durationMs: null, createdAt: at,
+      };
+    };
+    const rows: TurnEventRow[] = [];
     if (providerError !== undefined) {
-      seq += 1;
-      rows.push({
-        id: nextId("te"), turnId,
-        projectId: pid, sessionId: opts.sessionId ?? null,
-        agentId: opts.agentId, workId: opts.workId ?? null,
-        seq, kind: "provider_error", tool: null,
-        argsSummary: "",
-        resultSummary: `${providerError.kind} · ${providerError.message}`,
-        isError: true, durationMs: null, createdAt: at,
-      });
+      rows.push(tail(
+        "provider_error", `${providerError.kind} · ${providerError.message}`, true,
+      ));
     }
     if (wallClockExceeded) {
-      seq += 1;
-      rows.push({
-        id: nextId("te"), turnId,
-        projectId: pid, sessionId: opts.sessionId ?? null,
-        agentId: opts.agentId, workId: opts.workId ?? null,
-        seq, kind: "marker", tool: null,
-        argsSummary: "",
-        resultSummary:
-          `墙钟上界 ${wallClockMs}ms 到点打断(已跑 ${elapsedAtInterruptMs}ms,` +
+      rows.push(tail(
+        "marker",
+        `墙钟上界 ${wallClockMs}ms 到点打断(已跑 ${elapsedAtInterruptMs}ms,` +
           `已完成工具 ${completedAtInterrupt} 次;打断瞬间` +
           (interruptedTool === null
             ? "没有在跑的工具"
             : `在跑 ${interruptedTool.name}(${interruptedTool.runningMs}ms)` +
               (interruptedTool.argsSummary !== "" ? ` 参数:${interruptedTool.argsSummary}` : "")) +
           ")",
-        isError: true, durationMs: null, createdAt: at,
-      });
+        true,
+      ));
     }
     if (providerRetries > 0) {
-      seq += 1;
-      rows.push({
-        id: nextId("te"), turnId,
-        projectId: pid, sessionId: opts.sessionId ?? null,
-        agentId: opts.agentId, workId: opts.workId ?? null,
-        seq, kind: "marker", tool: null,
-        argsSummary: "",
-        resultSummary: `SDK 自动重试 ${providerRetries} 次`,
-        isError: false, durationMs: null, createdAt: at,
-      });
+      rows.push(tail("marker", `SDK 自动重试 ${providerRetries} 次`, false));
     }
     if (unanswered !== null && unanswered !== undefined) {
-      seq += 1;
-      rows.push({
-        id: nextId("te"), turnId,
-        projectId: pid, sessionId: opts.sessionId ?? null,
-        agentId: opts.agentId, workId: opts.workId ?? null,
-        seq, kind: "marker", tool: null,
-        argsSummary: "",
-        resultSummary:
-          `回合没有给出下文(${unanswered.kind === "no_text" ? "全程无正文" : "最后一次工具结果之后没有正文"};` +
+      rows.push(tail(
+        "marker",
+        `回合没有给出下文(${unanswered.kind === "no_text" ? "全程无正文" : "最后一次工具结果之后没有正文"};` +
           `正文 ${unanswered.textChars} 字 / 推理 ${unanswered.thinkingChars} 字 / 工具 ${unanswered.toolCalls} 次)`,
-        isError: true, durationMs: null, createdAt: at,
-      });
+        true,
+      ));
     }
-    if (rows.length === 0) return;
-    try {
-      insertTurnEvents(opts.db, rows);
-    } catch (err: unknown) {
-      log.error(
-        `turn: 轨迹落库失败(${opts.agentId} · 项目 ${pid ?? "(接待会话)"} · ` +
-          `${rows.length} 行)—— 这一段现场记不上了:` +
-          (err instanceof Error ? err.message : String(err)),
-      );
-    }
+    // 没有尾部行、回合里也没写过工具行 ⇒ 什么都没发生,一行都不写。
+    if (rows.length === 0 && eventSeq === 0) return;
+    // ★ 收口行 —— 「这一回合已经结束」的库里凭据(写入失败过的回合不给)。
+    if (!eventWriteFailed) rows.push(tail("turn_end", "", false));
+    writeTurnEvents(rows);
   };
 
   // ⚠️ **登记必须发生在第一次 `await` 之前。** 放在 `await opts.session.prompt()`
@@ -1248,7 +1265,8 @@ export async function runTurn(opts: RunTurnOptions): Promise<TurnResult> {
                 toolCalls: toolCalls.length,
               }
             : null;
-    // ★ 轨迹单点写入(与用量同一处、同一条纪律)。
+    // ★ 轨迹的**尾部行**(工具行已在各自结束时逐条写;故障 / 标记 / 收口行在这里补,
+    // 两条出口各跑一次,与用量同一处、同一条纪律)。
     recordTurnEvents();
   }
 

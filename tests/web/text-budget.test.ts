@@ -112,7 +112,10 @@ const BASELINE: Record<string, number> = {
   "components/deliverable/HtmlReport.tsx": 113,
   // 2026-11-17(IA v4 走检):256 → 239(描述句「只在实时流里看得见…」退场)
   "components/members/AgentConversations.tsx": 239,
-  "components/members/AgentTurnLog.tsx": 107,
+  // 2026-11-25(轨迹逐条落库):107 → 139(+32:未收口回合的「未结束」标记 + 说明行
+  // 「行会继续增加…」+ 折叠标题里的「N 个未结束」计数 —— 这一块默认收起,
+  // 不展开也要看得出有回合在长;回归 tests/web/turn-log-refresh.test.ts)。
+  "components/members/AgentTurnLog.tsx": 139,
   // 2026-11-14:1051 → 332。编辑器 / 纯判据 / 告警与工具面段落 / 有状态工作台
   // 搬去 `components/harness/`(那边逐文件登记),本文件只剩成员页那张卡的形状
   // 与入口链接 —— 是搬家,不是删文案。
@@ -245,7 +248,9 @@ describe("可见文字预算:屏上的中文只许减不许增", () => {
     // 接线小幅 +30;每一段都有对应回归文件,不是顺手堆的说明字)。
     // 2026-11-22(工件序列「在跑」标记):9,609 → 9,669(+60,全部在
     // ArtifactFlow:「在跑」二字 + 两条悬停判据,措辞与工作项页 DAG 同源)。
-    expect(total).toBeLessThanOrEqual(9669);
+    // 2026-11-25(轨迹逐条落库):9,669 → 9,701(+32,全部在 AgentTurnLog:
+    // 未收口回合的标记与说明行;明细见 BASELINE 那条)。
+    expect(total).toBeLessThanOrEqual(9701);
   });
 
   it("② 基线表覆盖所有文件(不许有文件悄悄逃出仪器)", () => {

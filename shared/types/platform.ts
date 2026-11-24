@@ -1442,12 +1442,21 @@ export interface TurnEventItemView {
   durationMs: number | null;
 }
 
-/** 一个回合的完整轨迹(同一 `turnId` 的全部行,按 `seq` 升序)。 */
+/**
+ * 一个回合的已落库轨迹(同一 `turnId` 的行,按 `seq` 升序)。
+ *
+ * `finished`:**收口行(`turn_end`)在不在**。工具行是逐条写的,所以正在跑的回合
+ * 也会出现(`finished: false`,行还在增加);进程在回合结束前退出过的回合同样没有
+ * 收口行 —— 两者在读面上分不开,所以这里是 `false` 而不是「进行中」:
+ * 界面只能说「还没结束」,不能替它断言「还在跑」。
+ */
 export interface AgentTurnView {
   turnId: string;
   sessionId: string | null;
   workId: string | null;
   createdAt: number;
+  /** 这一回合有没有收口行 —— `false` = 还在跑,或进程在它结束前退出过。 */
+  finished: boolean;
   events: TurnEventItemView[];
 }
 

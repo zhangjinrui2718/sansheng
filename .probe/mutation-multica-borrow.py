@@ -29,19 +29,22 @@ TESTS = [
 
 MUTATIONS = [
     # ── ① 执行日志(035)──────────────────────────────────────────────
+    # 2026-11-25(轨迹逐条落库)重新锚定:工具行改成了每次调用结束就写,
+    # 收口那一笔只剩故障 / 标记 / 收口行 —— M1 关掉它,红的是这几类的判据
+    # (逐条写自己的变异在 .probe/mutation-long-turns.py)。
     (
         "M1",
         "src/platform/runtime/turn.ts",
-        "    // ★ 轨迹单点写入(与用量同一处、同一条纪律)。\n    recordTurnEvents();",
-        "    // ★ 轨迹单点写入(与用量同一处、同一条纪律)。\n    // MUT: recordTurnEvents();",
-        "轨迹不落库(工具调用只在散文报告里)⇒ turn-events 全红",
+        "    // 两条出口各跑一次,与用量同一处、同一条纪律)。\n    recordTurnEvents();",
+        "    // 两条出口各跑一次,与用量同一处、同一条纪律)。\n    // MUT: recordTurnEvents();",
+        "收口的尾部行不写(故障 / 标记 / 收口行全丢)⇒ turn-events 红",
     ),
     (
         "M2",
         "src/platform/runtime/turn.ts",
         "    if (rows.length === 0) return;",
         "    if (rows.length >= 0) return;",
-        "「什么都没发生的回合一行不写」被改成「永远不写」⇒ turn-events 全红",
+        "写入函数被改成「永远不写」(2026-11-25 起锚在 writeTurnEvents —— 逐条写与收口都走它)⇒ turn-events 全红",
     ),
     # ── ② 忙时排队(036)──────────────────────────────────────────────
     (
@@ -136,13 +139,14 @@ def run_vitest() -> tuple[bool, str]:
     out = p.stdout + p.stderr
     if "Transform failed" in out or "Failed Suites" in out:
         return False, "编译/套件级红(不算数 —— 判据根本没被问到)\n" + out[-1500:]
-    m = re.search(r"Tests\s+(\d+) failed(?:\s*\|\s*(\d+) passed)?", out)
-    if m is None:
-        return False, "解析不到测试统计(异常退出)\n" + out[-1500:]
-    failed = int(m.group(1))
-    if failed > 0:
-        return True, f"红(Failed Tests = {failed})"
-    return False, "全绿(变异没被抓住)\n" + out[-1200:]
+    # 2026-11-25:全绿时 dot reporter 没有 failed 字样 —— 先认「红」,再认「全绿」,
+    # 都不是才是异常退出(原来一律报「异常退出」,会把「没抓住」说成崩溃)。
+    m = re.search(r"Tests\s+(\d+) failed", out)
+    if m is not None:
+        return True, f"红(Failed Tests = {m.group(1)})"
+    if re.search(r"Tests\s+\d+ passed", out):
+        return False, "全绿(变异没被抓住)\n" + out[-1200:]
+    return False, "解析不到测试统计(异常退出)\n" + out[-1500:]
 
 
 def main() -> int:

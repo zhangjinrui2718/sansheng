@@ -507,7 +507,7 @@ export function MemberPane({
         <div className="flex flex-col gap-1.5" style={{ borderTop: "1px solid var(--ink-3)", paddingTop: 8 }}>
           <span
             className="ss-meta flex items-center gap-1"
-            title="按回合分组的工具调用轨迹(只有已结束的回合;进行中的看实时流)"
+            title="按回合分组的工具调用轨迹(进行中的回合也在,标「未结束」)"
           >
             他做了什么
             <Help id="member.turn-events" />

@@ -499,12 +499,13 @@ export function useAgentConversations(
  * 「他做了什么」—— 某个成员的**执行轨迹**(migration 035 的 `turn_events`)。
  *
  * 与 `useAgentConversations` 的分工:那条答「他说了什么」(对话全文,回合的
- * **正文**),这条答「他做了什么」(逐次工具调用 / provider 故障 / 回合级
- * 标记,回合**结束**时整批落库)。真机排查「它到底卡在哪一步」要的是这一面。
+ * **正文**),这条答「他做了什么」(逐次工具调用 / provider 故障 / 回合级标记,
+ * 按回合分组)。真机排查「它到底卡在哪一步」要的是这一面。
  *
- * ⚠️ **只有已结束的回合** —— 正在跑的那一轮轨迹还没写(写入点在回合收口),
- * 进行中要看 `AgentConversations` 的实时流那一块。两块的边界在界面上说清,
- * 不把「已结束的轨迹」说成「全部过程」。
+ * ⚠️ **进行中的回合也在**(2026-11-25 起工具行逐条落库):每次工具调用结束,
+ * 服务端先写行、再广播 `tool_end` —— 前端据此敲 `turnLogRevision` 重拉。
+ * 没收口的回合带 `finished: false`,界面标「未结束」,不把半截读成全部。
+ * 正文流(说了什么)仍然只在它正在流的时候看得见。
  *
  * `data === null` 的语义与刷新机制同 `useAgentConversations` 一条纪律。
  */
@@ -513,12 +514,13 @@ export function useAgentTurnEvents(
   agentId: string | null,
 ): Loaded<AgentTurnEventsResponse | null> {
   const revision = useChatStore((s) => s.projectRevision);
+  const turnLogRevision = useChatStore((s) => s.turnLogRevision);
   const r = useLoad(
     () =>
       projectId !== null && agentId !== null
         ? api.listAgentTurnEvents(projectId, agentId)
         : Promise.resolve(null),
-    [projectId, agentId, revision],
+    [projectId, agentId, revision, turnLogRevision],
   );
   return { data: r.data, loading: r.loading, error: r.error };
 }

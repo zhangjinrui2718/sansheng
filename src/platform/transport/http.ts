@@ -2453,10 +2453,13 @@ const AGENT_TURNS_LIMIT_DEFAULT = 50;
 const AGENT_TURNS_LIMIT_MAX = 200;
 
 /**
- * 一个成员最近 N 个回合的完整轨迹。
+ * 一个成员最近 N 个回合的已落库轨迹。
  *
- * ⚠️ **整回合一起出**(`listTurnEventsByAgent` 的纪律):半截回合比没有更坏
- * —— 读者会把「后面没了」读成「它就干到这」。
+ * ⚠️ **整回合一起出**(`listTurnEventsByAgent` 的纪律)。工具行是逐条写的
+ * (2026-11-25),所以正在跑的回合也在结果里 —— 它与「收口之后一条不少」的
+ * 回合靠 `finished` 区分:**有收口行(`turn_end`)才是已结束**;没有的要么还在跑,
+ * 要么是进程在它结束前退出过。不标出来,读的人会把「后面没了」读成「它就干到这」。
+ * 收口行本身只当凭据,不进 `events`。
  */
 export function agentTurnEvents(
   db: Database.Database,
@@ -2473,9 +2476,14 @@ export function agentTurnEvents(
     if (turn === undefined) {
       turn = {
         turnId: r.turnId, sessionId: r.sessionId, workId: r.workId,
-        createdAt: r.createdAt, events: [],
+        createdAt: r.createdAt, finished: false, events: [],
       };
       grouped.set(r.turnId, turn);
+    }
+    // 收口行:只把「已结束」这件事记在回合上,不列进事件。
+    if (r.kind === "turn_end") {
+      turn.finished = true;
+      continue;
     }
     turn.events.push({
       seq: r.seq, kind: r.kind, tool: r.tool,

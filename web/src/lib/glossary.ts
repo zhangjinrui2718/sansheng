@@ -171,7 +171,7 @@ export const GLOSSARY: Record<GlossaryId, GlossaryEntry> = {
   },
   "member.turn-events": {
     line: "他做了什么:逐次工具调用的落库轨迹",
-    basis: "runtime/turn.ts 收口写 turn_events(migration 035),按回合分组",
+    basis: "runtime/turn.ts 每次工具调用结束就写 turn_events(migration 035);有收口行才算已结束",
     source: "GET /api/projects/:id/agents/:agentId/turn-events",
   },
   "agent.busy": {
