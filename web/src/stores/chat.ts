@@ -425,6 +425,14 @@ export interface ChatState {
    * `code:"busy"` 错误同一条「回合收口时过期」的纪律。
    */
   queuedNote: { projectId: string; sessionId: string; messageId: string } | null;
+  /**
+   * 036 排队提示的**姊妹**(补话,2026-11-25):最近一句「这句话已经补进当前这一轮」。
+   *
+   * 与 `queuedNote` 的区别只有一处 —— 那句话**不等下一轮**:当前这批工具调用
+   * 跑完后就会送进模型。两者互斥(服务端一句话只报其中一种),过期点相同
+   * (那条线上一次 `agent_end`)。
+   */
+  steeredNote: { projectId: string; sessionId: string; messageId: string } | null;
   currentUsage: { input: number; output: number };
   totalUsage: { input: number; output: number };
   socket: PlatformSocket | null;
@@ -812,6 +820,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   status: "connecting",
   error: null,
   queuedNote: null,
+  steeredNote: null,
   currentUsage: { input: 0, output: 0 },
   totalUsage: { input: 0, output: 0 },
   socket: null,
@@ -1562,6 +1571,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
             queuedNote: s.queuedNote !== null && s.queuedNote.sessionId === e.sessionId
               ? null
               : s.queuedNote,
+            // 补话提示同一条「回合收口时过期」的纪律:那一轮结束了,
+            // 「现在发的话会补进这一轮」就不再描述现在。
+            steeredNote: s.steeredNote !== null && s.steeredNote.sessionId === e.sessionId
+              ? null
+              : s.steeredNote,
             // 兼容指针只在**它指向的轮真的被收口**时交接:`withTurn` 的语义是
             // 「最近一次被写入的进行中轮」,所以交接给还活着的那一轮(没有才 null)。
             // 直接置 null 会让别的项目收口把本项目的指针打空 —— 与「清空轮表」
@@ -1685,6 +1699,21 @@ export const useChatStore = create<ChatState>((set, get) => ({
         // 不该在这里冒一行);过期点在下面 `agent_end`。
         if (e.projectId !== get().projectId) return;
         set({ queuedNote: { projectId: e.projectId, sessionId: e.sessionId, messageId: e.messageId } });
+        return;
+      }
+
+      case "message_steered": {
+        // 补话(2026-11-25):甲方在收件人正跑**甲方触发**的回合时说了话,服务端把它
+        // 补进了当前这一轮(不是排队)。消息本体同样已照常进流;这一条只说
+        // 「这句话会在这一轮里被听到」。只记**当前项目**的;过期点在 `agent_end`。
+        if (e.projectId !== get().projectId) return;
+        // 两者互斥:补进去了就不是排队。
+        set((s) => ({
+          queuedNote: s.queuedNote !== null && s.queuedNote.messageId === e.messageId
+            ? null
+            : s.queuedNote,
+          steeredNote: { projectId: e.projectId, sessionId: e.sessionId, messageId: e.messageId },
+        }));
         return;
       }
 

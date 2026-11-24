@@ -2092,6 +2092,14 @@ export type ServerEvent =
    */
   | { type: "message_queued"; projectId: string; sessionId: string; messageId: string }
   /**
+   * **甲方在业务经理回答时说的话,已经补进当前这一轮**(2026-11-25,补话)。
+   *
+   * 与 `message_queued` 的区别:那句话不等下一轮 —— 当前这批工具调用跑完后就会
+   * 送进模型。与 `message_queued` 同一条纪律:`sessionId` 必填(哪条线上补的),
+   * 前端只在**那条线**上显示提示。
+   */
+  | { type: "message_steered"; projectId: string; sessionId: string; messageId: string }
+  /**
    * **驱动者循环停在了异常的位置** —— 撞上单次级联上限,或检测到「同一个待办
    * 在项目状态没变的情况下被反复唤醒」。
    *

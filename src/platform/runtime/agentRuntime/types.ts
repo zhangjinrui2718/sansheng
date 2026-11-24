@@ -48,6 +48,21 @@ export interface RuntimeSession<E extends RuntimeSessionEventBase = RuntimeSessi
    * 适配器可不实现 —— 它不是任何链路的一环。
    */
   getActiveToolNames?: () => readonly string[];
+  /**
+   * **往正在跑的回合里补一句话**(2026-11-25,补话;可选)。
+   *
+   * 返回 `"queued"` = SDK 已把它排进队列(当前这批工具调用跑完后、下一次调模型
+   * 之前送进去)—— ⚠️ **这不是送达回执**:它可能和回合结束赛跑而留在队列里,
+   * 真正的回执是随后那条 `user_message_start` 事件(见事件词表)。
+   * `"handled"` = 被某个输入处理器就地消费了,不会有回执。
+   * 适配器可不实现 —— 没有它时忙时的话照旧排队(036)。
+   */
+  steer?(text: string): Promise<"queued" | "handled">;
+  /**
+   * 丢掉会话里**还没送进去**的补话与后续消息(配套 `steer`)。
+   * 回合没把补进去的话消费掉时调用 —— 否则它会在下一次运行开头冒出来,说两遍。
+   */
+  clearQueue?(): void;
 }
 
 /**
@@ -105,5 +120,16 @@ export type RuntimeEvent =
    * 想接内容就在这里加字段,别让调用方去读适配器方言。
    */
   | { type: "tool_update"; toolCallId: string; toolName: string }
+  /**
+   * **一条用户消息开始了**(2026-11-25,补话的送达回执)—— 只翻用户的那一条,
+   * 正文按 SDK 认回执的拼法取(字符串,或内容块里 text 部分的拼接)。
+   * 助手的 `message_start` 仍然丢弃(平台自己另行广播)。
+   */
+  | { type: "user_message_start"; text: string }
+  /**
+   * SDK 的**补话队列快照**(2026-11-25):排队 / 送进模型之后各来一次。
+   * 平台只用它算「这次补进去的到底是哪段文本」(见 `runtime/steer.ts`),不消费内容。
+   */
+  | { type: "queue_update"; steering: readonly string[]; followUp: readonly string[] }
   | { type: "agent_settled" }
   | { type: "agent_end" };

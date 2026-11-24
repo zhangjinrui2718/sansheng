@@ -151,14 +151,20 @@ export function ChatSurface() {
   );
   const surface = surfaceStatusOf(status, activity, remoteRunning);
   /**
-   * **输入框唯一由「有人在跑」推出的禁用理由**:甲方通道在跑 —— 甲方自己那句
-   * (乐观上屏那条不在 `inFlight` 里)、`tell_client` 的播报、或**用户触发**的
-   * 那一轮正文。内部角色在跑**不**进这个判据 —— 那正是 bug A 的现场。
+   * **甲方通道正在跑** —— 甲方自己那句(乐观上屏那条不在 `inFlight` 里)、
+   * `tell_client` 的播报、或**用户触发**的那一轮正文。内部角色在跑**不**进这个
+   * 判据 —— 那正是 bug A 的现场。它决定两件事:顶部那盏灯,与**输入框的措辞**。
    *
    * ⚠️ **W2-④ 起判据的成分跟着 `channelOf` 变了**(同一个判据,不是第二处真相):
    * 「业务经理被工件叫醒的那一轮」以前算甲方通道(它按角色 `clientFacing` 判),
-   * 现在算内部 —— 因为那一轮**在屏幕上也不显示**。显示与禁用必须是同一个答案,
+   * 现在算内部 —— 因为那一轮**在屏幕上也不显示**。显示与这里的判据必须是同一个答案,
    * 否则会出现「页面上一条甲方消息都没有,而输入框说甲方正在说话」。
+   *
+   * ⚠️ **2026-11-25(补话)起它不再禁用输入框** —— 此前 `clientBusy` ⇒ 输入框禁用,
+   * 甲方在业务经理回答期间**发不出话**;忙时排队(036)只有在刷新之后、或从别的
+   * 对话线发话时才够得着。现在回答期间可以继续打字发送:发出去的话由服务端补进
+   * 当前这一轮(补不了就排队,两条路都不会丢)。bug A 的纪律原样保留 ——
+   * **内部角色在跑不许锁死输入框**,这一条没有变。
    */
   const clientBusy = activity.client.length > 0;
   /** 本上下文里有在飞的轮(内部也算)—— 「有没有东西可以停」的**本地**那一半。 */
@@ -205,14 +211,32 @@ export function ChatSurface() {
 
   function send(): boolean {
     const text = input.trim();
-    if (!text || clientBusy || !hasKey || !hasContext) return false;
+    // ⚠️ 2026-11-25 起不再因 `clientBusy` 拦:对方在回答时发的话会补进当前这一轮
+    // (服务端判;补不了就排队)。这里只拦「没上下文 / 没配 Key / 空句子」。
+    if (!text || !hasKey || !hasContext) return false;
     // ⚠️ **返回「有没有发出去」** —— 没发出去时**不清输入框**:
     // 用户的话还在他手里(清掉就是「我说了话,它没了」)。
     return sendMessage(text);
   }
 
-  const reason: "streaming" | "noContext" | "noKey" | undefined =
-    clientBusy ? "streaming" : !hasContext ? "noContext" : !hasKey ? "noKey" : undefined;
+  // `reason` 只剩两档真实的禁用理由(没上下文 / 没配 Key);「甲方通道在跑」
+  // 不再禁用输入框,改由下面的 `steerable` 决定措辞。
+  const reason: "noContext" | "noKey" | undefined =
+    !hasContext ? "noContext" : !hasKey ? "noKey" : undefined;
+  /**
+   * **甲方亲自触发的回合正在这条线上跑** —— 现在发的话会补进它。
+   *
+   * ⚠️ 判据与服务端同源(`runtime/steer.ts` 的 `steerBlocker`):只有**甲方触发**
+   * (`trigger.kind === "user"`)且**就在这条线上**的回合才补得进去。甲方通道里
+   * 另有一类轮是业务经理向甲方**播报**(内部任务叫醒的)—— 往那一轮里补话会被
+   * 服务端拒绝、退回排队;对它说「会补进这一轮」就是一句假话。
+   * 刷新之后本地轮表是空的 ⇒ 这里为 false,状态行退回「有回合在跑」;
+   * 那句话到底走了哪条路,由随后到的 `message_steered` / `message_queued` 如实说。
+   */
+  const steerable = activity.client.some(
+    (t) => t.origin.source === "turn" && t.origin.trigger.kind === "user" && t.sessionId === sessionId,
+  );
+  const steeredNote = useChatStore((s) => s.steeredNote);
 
   // ── D2:「项目此刻」一行(v3,2026-11-17)──────────────────────────
   // 数据两个来源都**不新增请求路径**:live 走 `useProjectLive` 慢轮询(5s),
@@ -523,6 +547,23 @@ export function ChatSurface() {
         </div>
       )}
 
+      {/*
+        补话(2026-11-25):「已补进当前这一轮」那一行 —— 与上面「已排队」互斥
+        (服务端一句话只报其中一种),过期点相同。它说的是这句话**不用等下一轮**。
+      */}
+      {steeredNote !== null && steeredNote.sessionId === sessionId && (
+        <div
+          className="flex-none"
+          style={{
+            padding: "4px 16px", fontSize: 11, lineHeight: "1.6",
+            color: "var(--bone-dim)",
+            borderTop: "1px solid var(--ink-3)",
+          }}
+        >
+          这句话已经补进当前这一轮 —— 他做完手上的事就能看到。
+        </div>
+      )}
+
       <MessageList facts={facts} />
 
       {/* V2 行动区:四个「等你动作」状态点钉在输入区上方 —— 位置恒定,
@@ -535,8 +576,9 @@ export function ChatSurface() {
         onSubmit={send}
         onInterrupt={sendInterrupt}
         interruptible={interruptible}
+        steerable={steerable}
         connection={socketStatus}
-        disabled={clientBusy || !hasKey || !hasContext}
+        disabled={!hasKey || !hasContext}
         reason={reason}
         placeholder={
           socketStatus === "closed"
@@ -547,9 +589,11 @@ export function ChatSurface() {
                 ? "先在左栏选一个项目,或点「+ 新建」开始聊"
                 : !hasKey
                   ? "请先在「设置」配置 API Key"
-                  : intakeActive
-                    ? "说说你想做什么 —— 三生会和你对齐,谈拢后立项"
-                    : "说点什么…"
+                  : steerable
+                    ? "他正在回答 —— 现在发的话会补进这一轮…"
+                    : intakeActive
+                      ? "说说你想做什么 —— 三生会和你对齐,谈拢后立项"
+                      : "说点什么…"
         }
       />
     </section>

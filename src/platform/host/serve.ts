@@ -60,7 +60,11 @@ import { resetPlatformData } from "./reset.js";
 import {
   appendSessionMessage, getSession, type SessionChannel,
 } from "../storage/repo/sessions.js";
-import { insertQueuedClientMessage } from "../storage/repo/queuedClientMessages.js";
+import { consumeQueuedClientMessages, insertQueuedClientMessage } from "../storage/repo/queuedClientMessages.js";
+import {
+  describeSteerBlocked, isSteerReceipt, MAX_STEERS_PER_TURN, steerBlocker, steerTargetOf,
+  type SteerAttempt,
+} from "../runtime/steer.js";
 import { cancelExhaustedWakeups } from "../storage/repo/wakeups.js";
 import { ROLE_SPECS } from "../identity/role.js";
 import { resolveClientQuestion } from "../tools/client.js";
@@ -1433,8 +1437,47 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
    * 记的键看起来够用;忙闩一改成按 `(上下文, agent)`,它就从不可达变成**可达**,
    * 而按项目记会让**后登记的覆盖前一个** ⇒ 用户的中断只到得了最后一个回合
    * (R1 读出来的雷 (b))。键必须与「一个回合」同粒度。
+   *
+   * ── 登记的是一条记录,不只是一个 abort(2026-11-25,补话)──────────
+   *
+   * `trigger`(这一轮是谁发起的)与 `steer`(往这一轮里补话的入口)也挂在这条
+   * 记录上:补话要找的是「**甲方触发**的、正在跑的那一轮」,而这张表是唯一按
+   * `(上下文, 线, agent)` 记着「哪一轮正在跑」的地方。排空器触发的回合
+   * `steer` 为 `null`(不能往内部任务里插话),没有 `steer` 能力的会话也是。
    */
-  const inflight = new Map<string, () => void>();
+  interface InflightTurn {
+    readonly abort: () => void;
+    readonly trigger: TurnTrigger | null;
+    /** `rowId` = 这句话在 `queued_client_messages` 里的账行(看到回执才销它)。 */
+    readonly steer: ((text: string, rowId: string) => Promise<SteerAttempt>) | null;
+    /** 这一轮已经补了几句(入口处粗筛次数上限用)。 */
+    readonly steered: () => number;
+  }
+
+  /**
+   * 一轮里补话的账(2026-11-25;只有甲方触发的回合才有)。
+   * 判据与规则见 `runtime/steer.ts`,这里只是这一轮自己的那一份状态。
+   */
+  interface SteerState {
+    /** 这一轮已经补了几句(上限 `MAX_STEERS_PER_TURN`)。 */
+    steered: number;
+    /** 上一次看到的补话队列快照 —— 算「这次实际排进去的文本」要用。 */
+    lastSteering: readonly string[];
+    /** 已排进 SDK、**还没看到送达回执**的那几句。 */
+    pending: Array<{
+      rowId: string;
+      text: string;
+      /** 实际排进去的文本(可能与原话不同 —— 被展开过);回执按它逐字比。 */
+      target: string;
+      /** 有没有对过一次队列快照(对过之后就不再被后来的快照改写)。 */
+      seenQueue: boolean;
+    }>;
+    /** 已看到**送达回执**的账行 id(这一轮成功收尾时才销账)。 */
+    delivered: string[];
+    /** 串行链:一次只有一句在排队途中。 */
+    chain: Promise<unknown>;
+  }
+  const inflight = new Map<string, InflightTurn>();
 
   const hub = new PlatformHub(
     { db, now, newId },
@@ -1516,7 +1559,7 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
           `platform: 中断${channelLabel(projectId)}${channel === "client" ? "甲方通道" : "正在跑"}的 ${hit.length} 个回合` +
             `(${hit.map(([k]) => k.slice(prefix.length)).join(", ")})`,
         );
-        for (const [, abort] of hit) abort();
+        for (const [, turn] of hit) turn.abort();
       },
     },
   );
@@ -1616,14 +1659,75 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
     hub.emitDelta(projectId, sessionId, userMessageId, content);
     hub.emitMessageEnd(projectId, sessionId, userMessageId);
 
+    // 账先记上(与排队同一条路):补话的回执**可能不来**(回合先结束),那时这句话
+    // 就是一句普通排队消息 —— 账在,下一轮 `answer_client_message` 就会带上它。
+    const rowId = newId("qm");
     insertQueuedClientMessage(db, {
-      id: newId("qm"), projectId, sessionId,
+      id: rowId, projectId, sessionId,
       messageId: userMessageId, createdAt: at, consumedAt: null,
     });
+
+    // ── 补话(2026-11-25):在跑的正是甲方触发的业务经理回合、且就在这条线上
+    //    ⇒ 补进当前这一轮(当前这批工具调用跑完后送进去),不排队。
+    //    判据在 `runtime/steer.ts` 的 `steerBlocker`;补不了(别的线 / 内部任务 /
+    //    补满了 / 会话还没有)⇒ 走下面原来的排队,036 的行为一字不改。
+    if (await trySteer(projectId, content, sessionId, rowId, userMessageId)) return;
+
     hub.broadcast({ type: "message_queued", projectId, sessionId, messageId: userMessageId });
     log.muted(
       `platform: 甲方在忙时说了话,已排队(${sessionId} · ${userMessageId})—— 收件人下一轮带上`,
     );
+  }
+
+  /**
+   * 把甲方这句话补进正在跑的那一轮(2026-11-25,补话)。返回 `true` = 补进去了
+   * (已广播 `message_steered`);`false` = 没补,调用方照旧排队。
+   *
+   * 找「哪一轮」靠 `inflight` 登记表:键是 `(项目, 线, 业务经理)`。甲方触发的回合
+   * 固定跑在**主对话**上(`handleUserMessage` 传的线是 undefined),所以这里拿主对话的 id。
+   */
+  async function trySteer(
+    projectId: string,
+    content: string,
+    /** 这句话发在哪条线上 */
+    line: string,
+    rowId: string,
+    userMessageId: string,
+  ): Promise<boolean> {
+    const bm = clientFacingAgentId(db);
+    if (bm === null) return false;
+    const mainSid = mainSessionOf(projectId, bm);
+    const entry = inflight.get(pooledKey(projectId, mainSid, bm)) ?? null;
+    const blocker = steerBlocker({
+      entry,
+      line,
+      runningLine: mainSid,
+      hasSteer: entry?.steer !== null && entry?.steer !== undefined,
+    });
+    if (blocker !== null || entry === null || entry.steer === null) {
+      // 「那条线上没有在跑的回合」是常态(不记日志);其余几种受阻留一行 ——
+      // 「说好的能补话、结果排到了下一轮」事后要查得出是哪一格挡的。
+      if (blocker !== null && blocker.reason !== "unavailable") {
+        log.muted(
+          `platform:${channelLabel(projectId)}上甲方的话没有补进当前这一轮` +
+            `(${describeSteerBlocked(blocker)})—— 退回排队`,
+        );
+      }
+      return false;
+    }
+    const attempt = await entry.steer(content, rowId);
+    if (!attempt.ok) {
+      log.muted(
+        `platform:${channelLabel(projectId)}上甲方的话没有补进当前这一轮` +
+          `(${describeSteerBlocked(attempt)})—— 退回排队`,
+      );
+      return false;
+    }
+    hub.broadcast({ type: "message_steered", projectId, sessionId: mainSid, messageId: userMessageId });
+    log.muted(
+      `platform:${channelLabel(projectId)}上甲方的话已补进当前这一轮(${mainSid} · ${userMessageId})`,
+    );
+    return true;
   }
 
   async function handleUserMessage(
@@ -2025,13 +2129,130 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
         );
       });
     };
+    // ── 补话(2026-11-25):只有**甲方触发**的回合才挂这个入口 ────────────
+    //
+    // `handleUserMessageWhileBusy` 经 `inflight` 找到这一轮,把甲方的新话交给
+    // 下面的 `steer`;回执由 `steerObserve` 认(挂在 `onEvent` 上),收尾时销账或
+    // 清队列(`settleSteer`)。判据在 `runtime/steer.ts`,这里只有接线。
+    const steerState: SteerState | null =
+      trigger.kind === "user"
+        ? { steered: 0, lastSteering: [], pending: [], delivered: [], chain: Promise.resolve() }
+        : null;
+    /**
+     * 这一轮已经收尾(账已结清)。收尾之后才到的补话一律拒绝 —— SDK 会把它排进
+     * **下一次运行**,而它的账行又留给下一轮 ⇒ 同一句说两遍。
+     */
+    let turnFinished = false;
+    const steer: InflightTurn["steer"] = steerState === null
+      ? null
+      : (text: string, rowId: string): Promise<SteerAttempt> => {
+          // **串行**:一次只有一句在排队途中 —— 这样队列快照到的时候,
+          // 还没对上快照的条目只可能是刚发出去的那一句(见 `steerObserve`)。
+          const run = async (): Promise<SteerAttempt> => {
+            const s = sessionRef;
+            if (turnFinished || s === null || s.steer === undefined) {
+              return { ok: false, reason: "unavailable" };
+            }
+            // ⚠️ 次数在这里**同步**递增(第一个 await 之前):两条消息挨着到时,
+            // 只在入口处粗筛会让第 4、第 5 句都挤进来。
+            if (steerState.steered >= MAX_STEERS_PER_TURN) return { ok: false, reason: "cap" };
+            steerState.steered += 1;
+            // ⚠️ **先登记,再调 SDK**:SDK 的 `steer()` 在内部**同步**广播一次队列
+            // 快照(`_queueSteer` 里先 `_emitQueueUpdate` 再返回),那时这一句必须
+            // 已经在账上,`steerObserve` 才能把「实际排进去的文本」对到它身上。
+            const item = { rowId, text, target: text, seenQueue: false };
+            steerState.pending.push(item);
+            let disposition: "queued" | "handled";
+            try {
+              disposition = await s.steer(text);
+            } catch (err: unknown) {
+              // 没排进去就撤账、不占名额(多半是回合刚好结束 —— 那这句话退回排队)。
+              steerState.pending.splice(steerState.pending.indexOf(item), 1);
+              steerState.steered -= 1;
+              return {
+                ok: false, reason: "error",
+                detail: err instanceof Error ? err.message : String(err),
+              };
+            }
+            if (disposition === "handled") {
+              steerState.pending.splice(steerState.pending.indexOf(item), 1);
+              return { ok: false, reason: "handled" };
+            }
+            return { ok: true };
+          };
+          const next = steerState.chain.then(run, run);
+          steerState.chain = next.then(() => undefined, () => undefined);
+          return next;
+        };
+    /**
+     * 补话的回执与队列快照 —— 这一轮的**每个事件**都过一遍。
+     *
+     * · `queue_update`:队列快照。还没对过快照的条目(串行之下只可能是刚发出去的
+     *   那一句)据此定下「实际排进去的文本」(`steerTargetOf` —— 可能被展开过);
+     * · `user_message_start`:**送达回执** —— 一条用户消息开始了,且正文与目标
+     *   逐字相等。只认最早的那一条(队列先进先出)。
+     */
+    const steerObserve = (ev: RuntimeEvent): void => {
+      if (steerState === null) return;
+      if (ev.type === "queue_update") {
+        for (const p of steerState.pending) {
+          if (p.seenQueue) continue;
+          p.target = steerTargetOf(steerState.lastSteering, ev.steering, p.text);
+          p.seenQueue = true;
+        }
+        steerState.lastSteering = ev.steering;
+        return;
+      }
+      if (ev.type === "user_message_start") {
+        const at = steerState.pending.findIndex((p) => isSteerReceipt(ev.text, p.target));
+        if (at >= 0) {
+          const [p] = steerState.pending.splice(at, 1);
+          steerState.delivered.push(p!.rowId);
+        }
+      }
+    };
+    /**
+     * 回合收尾时把补话的账结清。
+     *
+     * @param turnOk 这一轮是否**成功收尾**(没被中断、没超时、没有 provider 故障、有答复)
+     */
+    const settleSteer = (turnOk: boolean): void => {
+      turnFinished = true;
+      if (steerState === null || steerState.steered === 0) return;
+      // 看到**回执**并且这一轮**成功** ⇒ 才销账(at-least-once,与 `answer_client_message`
+      // 的消费同一条纪律:回合成功才写 consumed_at)。
+      const consumed = turnOk
+        ? consumeQueuedClientMessages(db, steerState.delivered, now())
+        : 0;
+      if (turnOk && consumed < steerState.delivered.length) {
+        log.warn(
+          `platform:${channelLabel(projectId)}上 ${agentId} 的回合:补话销账 ${consumed}/${steerState.delivered.length} 条` +
+            "(其余已消费过或已不存在)",
+        );
+      }
+      // 没看到回执的、或这一轮没收尾成功的:账行**留着**(下一轮 `answer_client_message`
+      // 带上),同时丢掉 SDK 里残留的那半句 —— 否则下一次运行开头它会再冒出来,同一句说两遍。
+      if (steerState.pending.length > 0 || !turnOk) sessionRef?.clearQueue?.();
+      if (steerState.pending.length > 0) {
+        log.muted(
+          `platform:${channelLabel(projectId)}上 ${agentId} 的回合先结束了,` +
+            `${steerState.pending.length} 句补话没送达 —— 留到下一轮带上`,
+        );
+      }
+    };
     // **登记必须发生在第一次 await 之前。** 放在 `await runTurn(...)` 之后等于
     // 永远登记不上:WS 的每一条消息是各自 fire-and-forget 处理的,中断消息会在
     // 这个回合还卡在 await 里的时候就被处理掉。这正是「死接线」得以藏身的缝隙。
-    inflight.set(inflightKey, abortThisTurn);
+    inflight.set(inflightKey, {
+      abort: abortThisTurn,
+      trigger,
+      steer,
+      steered: () => steerState?.steered ?? 0,
+    });
 
     const got = await getOrCreateSession({ projectId, agentId, sessionId });
     if (!got.ok) {
+      turnFinished = true;
       inflight.delete(inflightKey);
       hub.broadcast({
         type: "error", projectId,
@@ -2068,6 +2289,7 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
         `platform: ${channelLabel(projectId)}上 ${agentId} 的回合在会话建好之前就被用户中断 —— 这一轮没有跑`,
       );
       hub.emitAgentEnd(projectId, sessionId);
+      turnFinished = true;
       inflight.delete(inflightKey);
       return {
         aborted: true, timedOut: false, text: "", toolCalls: [],
@@ -2135,6 +2357,8 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
         ...turnLimits(opts),
         onEvent: (ev) => {
           bridge(ev, projectId, sessionId, messageId, agentId, hub, textBuf, thinkBuf);
+          // 补话的送达回执与队列快照 —— 与广播同一个事件流,不多订一份。
+          steerObserve(ev);
         },
       });
       // 助手消息落库(项目活过会话)。落的是**真正说话的那个 agent**,不是写死 bm。
@@ -2341,6 +2565,10 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
       if (!aborted) {
         reportUnannouncedTurn(projectId, agentId, messageId, trigger, text, turn.toolCalls);
       }
+      // 补话的账在**成功收尾**这一支结清(「成功」与 `clearProviderBrake` 同一条判据)。
+      settleSteer(
+        !aborted && turn.providerError == null && !turn.timedOut && turn.unanswered == null,
+      );
       return {
         aborted, timedOut: turn.timedOut, text, toolCalls: turn.toolCalls,
         openedProjectIds: turn.openedProjectIds,
@@ -2351,6 +2579,9 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
         ...(providerDegraded ? { failoverApplied: true } : {}),
       };
     } catch (e) {
+      // 这一轮没有成功收尾 ⇒ 补进去的话不算「回应过」:账行留着给下一轮,
+      // SDK 里残留的半句丢掉(说两遍比晚一轮更坏)。
+      settleSteer(false);
       // **中断不是故障。** 把一次「停止」报成 `turn_failed` 会让用户以为出了错,
       // 而他要的只是停下来。两条路径呈现不同,但都要收尾(前端还挂着流式气泡)。
       if (aborted) {
@@ -2376,6 +2607,8 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
         failureReason: e instanceof Error ? e.message : String(e),
       };
     } finally {
+      // 任何出口都算收尾:之后才到的补话一律不再往这条(已经结束的)回合里排。
+      turnFinished = true;
       inflight.delete(inflightKey);
       // ── **回合边界的 housekeeping 提交**(设计 §3.1 / §3.4)────────────
       //
@@ -2439,14 +2672,21 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
     let aborted = false;
     /** 回合怎么结束的 —— 见 `runAgentTurn` 同一处(只喂 housekeeping 提交说明)。 */
     let outcomeLabel = "结束";
-    inflight.set(pooledKey(projectId, sessionId, agentId), () => {
-      aborted = true;
-      void session.abort().catch((err: unknown) => {
-        log.error(
-          `platform: 中断${channelLabel(projectId)}上 ${agentId} 的执行失败:` +
-            `${err instanceof Error ? err.message : String(err)}`,
-        );
-      });
+    // 登记里 `steer` 为 null:执行工作项的回合是内部任务,不往里面补甲方的活
+    // (忙时的话照旧排队,由 `answer_client_message` 带回)。
+    inflight.set(pooledKey(projectId, sessionId, agentId), {
+      trigger: { kind: "todo", todoKind: "execute_work" },
+      steer: null,
+      steered: () => 0,
+      abort: () => {
+        aborted = true;
+        void session.abort().catch((err: unknown) => {
+          log.error(
+            `platform: 中断${channelLabel(projectId)}上 ${agentId} 的执行失败:` +
+              `${err instanceof Error ? err.message : String(err)}`,
+          );
+        });
+      },
     });
     try {
       const execution = await runWorkItem({

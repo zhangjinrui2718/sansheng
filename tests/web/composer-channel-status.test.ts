@@ -16,8 +16,14 @@
  *
  * ── 修法(判据)─────────────────────────────────────────────────
  *
- *     输入框禁用 ⟺ **甲方通道**在**本上下文**里有在飞的轮
+ *     「甲方通道在本上下文里有在飞的轮」⟺ 对方正在回答
  *     内部角色在跑 ⟹ 显示「内部推进中」+ 保留中断按钮,**输入框可用**
+ *
+ * ⚠️ **2026-11-25(补话)起「对方正在回答」不再禁用输入框**:回答期间可以继续
+ * 打字,发出去的话由服务端补进当前这一轮(补不了就排队,两条路都不会丢)。
+ * 这条判据原样保留,只是读者从「输入框禁用」换成了「顶部状态灯 + 输入框措辞」
+ * (「正在回答 · 现在发的话会补进这一轮」)。bug A 的纪律 —— **内部角色在跑不许
+ * 锁输入框** —— 一个字没变,下面每条断言也没变;只是标题里的「禁用」改说「在回答」。
  *
  * 判据落在 `lib/data.ts` 的 `channelActivityOf` / `surfaceStatusOf`,复用 A3 已有的
  * `channelOf`。**W2-④(2026-10-06)把 `channelOf` 的主判据从「角色是不是
@@ -29,14 +35,14 @@
  * ── 正负样本(本项目纪律:必须命中的 + 必须不命中的,两个都对上才算判据没坏)──
  *
  *   正样本:只有 wk 在飞 → 不是 streaming(输入框可用)
- *   正样本:bm 在飞 → 是 streaming(输入框禁用)
- *   负样本:一个内部轮 + 一个 client 轮同时在飞 → **仍然禁用**
+ *   正样本:bm 在飞 → 是 streaming(对方正在回答)
+ *   负样本:一个内部轮 + 一个 client 轮同时在飞 → **仍然算对方在回答**
  *          (证明它不是「只要有内部轮就放行」)
- *   负样本:平台通知(kind=system)在飞 → 不算任何一侧的活动,不禁用
+ *   负样本:平台通知(kind=system)在飞 → 不算任何一侧的活动,不算对方在回答
  *
  * ⚠️ 一条**刻意钉住成因**的断言:wk 在飞时,`ChatState.status`(传输级那一位)
  * **仍然是** `"streaming"`。这一位没有消失 —— 它是「有人在跑」的真话,
- * 而输入框的判据不再读它。谁要是把判据改回「读 status」,下面第一条就红。
+ * 而「对方在回答」的判据不再读它。谁要是把判据改回「读 status」,下面第一条就红。
  */
 import { beforeEach, describe, expect, it } from "vitest";
 import { createElement } from "react";
@@ -109,7 +115,7 @@ function surface(contextKey: string | null, context: ChannelContext = ctx()) {
   return surfaceStatusOf(useChatStore.getState().status, channelActivityOf(live(), context, contextKey));
 }
 
-/** 输入框的「有人在跑」那一半判据。 */
+/** 「甲方通道正在回答」那一半判据(2026-11-25 起不再禁用输入框,只决定措辞)。 */
 function clientBusy(contextKey: string | null, context: ChannelContext = ctx()): boolean {
   return channelActivityOf(live(), context, contextKey).client.length > 0;
 }
@@ -151,7 +157,7 @@ describe("bug A · 只有内部角色在跑 ⇒ 输入框可用", () => {
     expect(clientBusy(PA)).toBe(false);
   });
 
-  it("**正样本**:bm 的轮在飞 → `status === \"streaming\"`(输入框禁用)", () => {
+  it("**正样本**:bm 的轮在飞 → `status === \"streaming\"`(对方正在回答)", () => {
     const s = useChatStore.getState();
     s.applyEvent({ type: "message_start", projectId: PA, messageId: "m-bm", role: "assistant", agentId: "bm" , source: "turn", trigger: { kind: "user" }});
     expect(surface(PA)).toBe("streaming");
@@ -163,17 +169,17 @@ describe("bug A · 只有内部角色在跑 ⇒ 输入框可用", () => {
     expect(clientBusy(PA)).toBe(false);
   });
 
-  it("**负样本**:一个内部轮 + 一个 client 轮同时在飞 → **仍然禁用**", () => {
+  it("**负样本**:一个内部轮 + 一个 client 轮同时在飞 → **仍然算对方在回答**", () => {
     const s = useChatStore.getState();
     s.applyEvent({ type: "message_start", projectId: PA, messageId: "m-wk", role: "assistant", agentId: "wk" , source: "turn", trigger: { kind: "todo", todoKind: "execute_work" }});
     s.applyEvent({ type: "message_start", projectId: PA, messageId: "m-bm", role: "assistant", agentId: "bm" , source: "turn", trigger: { kind: "user" }});
 
     // 「只要有内部轮就放行」的实现会在这里返回 false —— 那是错的:业务经理正在回你。
-    expect(clientBusy(PA), "client 在飞就是禁用,内部轮不改变这一条").toBe(true);
+    expect(clientBusy(PA), "client 在飞就是对方在回答,内部轮不改变这一条").toBe(true);
     expect(surface(PA)).toBe("streaming");
   });
 
-  it("**负样本**:平台通知(`role: \"system\"`)不算任何一侧的活动,不禁用输入框", () => {
+  it("**负样本**:平台通知(`role: \"system\"`)不算任何一侧的活动,不算对方在回答", () => {
     const sys = turn("s1", "system", null, PA);
     const act = channelActivityOf([sys], ctx(), PA);
     expect(act.client).toEqual([]);
@@ -182,7 +188,7 @@ describe("bug A · 只有内部角色在跑 ⇒ 输入框可用", () => {
     expect(surfaceStatusOf("streaming", act)).toBe("idle");
   });
 
-  it("**负样本**:封套没到的轮(origin=unknown)里,成员表之外的 agent → fail-closed,不禁用", () => {
+  it("**负样本**:封套没到的轮(origin=unknown)里,成员表之外的 agent → fail-closed,不算对方在回答", () => {
     const s = useChatStore.getState();
     // ⚠️ **W2-④ 起这条 fail-closed 只对 `origin === unknown` 的轮生效**
     // (`channelOf` 的第五支)—— 封套带着 `trigger` 的轮按 trigger 判,与成员表无关。
@@ -198,7 +204,7 @@ describe("bug A · 只有内部角色在跑 ⇒ 输入框可用", () => {
 });
 
 describe("bug A · 接待会话与跨上下文(projectId === null 不是通配)", () => {
-  it("**接待会话**:没有成员表也不影响判据(那一轮是用户触发的)⇒ 仍然禁用", () => {
+  it("**接待会话**:没有成员表也不影响判据(那一轮是用户触发的)⇒ 仍然算对方在回答", () => {
     useChatStore.setState({ projectId: null, intakeActive: true, inFlight: {}, inFlightOrder: [], status: "idle" });
     const s = useChatStore.getState();
     s.applyEvent({ type: "message_start", projectId: null, messageId: "m-i", role: "assistant", agentId: "bm" , source: "turn", trigger: { kind: "user" }});
@@ -210,7 +216,7 @@ describe("bug A · 接待会话与跨上下文(projectId === null 不是通配)"
     expect(clientBusy(null, ctx({ members: [], intake: true }))).toBe(true);
   });
 
-  it("**负样本**:别的项目里在飞的轮不许锁住这里的输入框(服务端的忙闩也是按项目的)", () => {
+  it("**负样本**:别的项目里在飞的轮不算这里的「对方在回答」(服务端的忙闩也是按项目的)", () => {
     const s = useChatStore.getState();
     // 用户坐在 PA;排空器在 PB 里叫醒了业务经理(汇报待办)
     s.applyEvent({ type: "message_start", projectId: PB, messageId: "b-bm", role: "assistant", agentId: "bm" , source: "turn", trigger: { kind: "user" }});
@@ -222,7 +228,7 @@ describe("bug A · 接待会话与跨上下文(projectId === null 不是通配)"
     expect(surface(PB)).toBe("streaming");
   });
 
-  it("**负样本**:`tool_start` 建出来的内部轮同样不锁输入框(第二个建轮点)", () => {
+  it("**负样本**:`tool_start` 建出来的内部轮同样不算对方在回答(第二个建轮点)", () => {
     const s = useChatStore.getState();
     s.applyEvent({
       type: "tool_start", projectId: PA, messageId: "m-tool", agentId: "wk",

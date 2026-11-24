@@ -103,7 +103,22 @@ export function wrapPiSession(pi: AgentSession): RuntimeSession<RuntimeEvent> {
     abort: () => pi.abort(),
     dispose: () => pi.dispose(),
     getActiveToolNames: () => pi.getActiveToolNames(),
+    // 补话(2026-11-25):**有才暴露** —— 测试注入的假会话多半没有 `steer`,
+    // 端口上没有它时宿主自动退回排队(036),不需要每个假会话都补一个空实现。
+    ...(isSteerableSession(pi)
+      ? {
+          steer: (text: string) => pi.steer(text),
+          clearQueue: () => {
+            pi.clearQueue();
+          },
+        }
+      : {}),
   };
+}
+
+/** 假会话多半没有补话接口 —— 有 `steer` 才算能补(module-level guard,不用断言)。 */
+function isSteerableSession(s: unknown): s is AgentSession & { steer: AgentSession["steer"] } {
+  return typeof s === "object" && s !== null && typeof (s as { steer?: unknown }).steer === "function";
 }
 
 export interface CreateSessionFn {

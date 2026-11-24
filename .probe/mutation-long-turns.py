@@ -26,9 +26,142 @@ TESTS = [
     "tests/platform/bash-timeout.test.ts",
     "tests/platform/agent-runtime-events.test.ts",
     "tests/platform/turn-watchdog-host.test.ts",
+    # ② 补话
+    "tests/platform/steer.test.ts",
+    "tests/web/steer-note.test.ts",
 ]
 
 MUTATIONS = [
+    # ── ② 补话:判据(runtime/steer.ts)──────────────────────────────
+    (
+        "T1",
+        "src/platform/runtime/steer.ts",
+        "  if (input.entry.trigger?.kind !== \"user\") {",
+        "  if (false) { /* MUT: 不管这一轮是谁触发的 */",
+        "往内部任务里也补话(对方在跑汇报 / 整合时插进去会混进一件无关的活)⇒ steer 端到端「内部任务」红",
+    ),
+    (
+        "T2",
+        "src/platform/runtime/steer.ts",
+        "  if ((input.line ?? input.runningLine) !== input.runningLine) {",
+        "  if (false) { /* MUT: 不管发在哪条线上 */",
+        "别的线上的话也被补进主对话这一轮(答非所问)⇒ steer 端到端「另一条线」红",
+    ),
+    (
+        "T3",
+        "src/platform/runtime/steer.ts",
+        "  if (input.entry.steered() >= MAX_STEERS_PER_TURN) return { ok: false, reason: \"cap\" };\n",
+        "  /* MUT: 不设上限 */\n",
+        "一轮可以无限补话(回合被拖成没完没了)⇒ steer「第 4 句」红",
+    ),
+    (
+        "T4",
+        "src/platform/runtime/steer.ts",
+        "  if (added.includes(steeredText)) return steeredText;\n  return added.length > 0 ? added[added.length - 1]! : steeredText;",
+        "  return steeredText; /* MUT: 目标文本永远按原话 */",
+        "回执目标不认 SDK 展开后的文本(原话被展开过就永远认不出回执)⇒ steer「展开过」红",
+    ),
+    (
+        "T5",
+        "src/platform/runtime/steer.ts",
+        "  return deliveredText === target;",
+        "  return deliveredText.length > 0; /* MUT: 正文对不上也算 */",
+        "回执不逐字比(任何用户消息都算送达)⇒ 纯判据红",
+    ),
+    # ── ② 补话:宿主接线(serve.ts)───────────────────────────────
+    (
+        "T6",
+        "src/platform/host/serve.ts",
+        "          p.target = steerTargetOf(steerState.lastSteering, ev.steering, p.text);",
+        "          p.target = p.text; /* MUT: 不认队列快照 */",
+        "队列快照不再用来定目标文本(第一版真实缺陷:登记晚于快照)⇒ steer「展开过」红",
+    ),
+    (
+        "T7",
+        "src/platform/host/serve.ts",
+        "        ? consumeQueuedClientMessages(db, steerState.delivered, now())\n        : 0;",
+        "        ? consumeQueuedClientMessages(db, steerState.delivered, now())\n        : consumeQueuedClientMessages(db, steerState.delivered, now()); /* MUT: 没成功收尾也销账 */",
+        "回没收尾成功也把补话销账(话送到了、可这一轮随后被打断 —— 那句话其实没得到回应)⇒ steer「送到了但被中断」红",
+    ),
+    (
+        "T8",
+        "src/platform/host/serve.ts",
+        "      if (steerState.pending.length > 0 || !turnOk) sessionRef?.clearQueue?.();",
+        "      if (false) sessionRef?.clearQueue?.(); /* MUT: 不清 SDK 队列 */",
+        "没送达的补话留在 SDK 队列里(下一轮说两遍)⇒ steer「没赶上」「不相关的消息」红",
+    ),
+    (
+        "T9",
+        "src/platform/host/serve.ts",
+        "        const at = steerState.pending.findIndex((p) => isSteerReceipt(ev.text, p.target));",
+        "        const at = steerState.pending.length > 0 ? 0 : -1; /* MUT: 任何用户消息都算回执 */",
+        "一条不相关的用户消息被当成送达回执(那半句被丢掉、账被销掉)⇒ steer「不相关的消息」红",
+    ),
+    (
+        "T10",
+        "src/platform/host/serve.ts",
+        "    if (await trySteer(projectId, content, sessionId, rowId, userMessageId)) return;",
+        "    if (false && await trySteer(projectId, content, sessionId, rowId, userMessageId)) return; /* MUT: 永远排队 */",
+        "补话入口死接线(忙时的话永远排队)⇒ steer 端到端正样本红",
+    ),
+    (
+        "T11",
+        "src/platform/host/serve.ts",
+        "      hasSteer: entry?.steer !== null && entry?.steer !== undefined,",
+        "      hasSteer: false, /* MUT: 永远报「会话不能补」 */",
+        "判据被喂了假的「不能补」⇒ steer 端到端正样本红",
+    ),
+    (
+        "T12",
+        "src/platform/runtime/agentRuntime/pi/events.ts",
+        "      return { type: \"user_message_start\", text: userTextOf(ev.message.content) };",
+        "      return null; /* MUT: 送达回执被丢弃 */",
+        "用户的 message_start 不翻译(回执永远认不到)⇒ steer 正样本 + agent-runtime-events 红",
+    ),
+    (
+        "T13",
+        "src/platform/runtime/agentRuntime/pi/session.ts",
+        "    ...(isSteerableSession(pi)\n      ? {",
+        "    ...(false && isSteerableSession(pi)\n      ? {",
+        "端口不暴露 steer / clearQueue(适配器把能力吞了)⇒ steer 端到端全红",
+    ),
+    # ── ② 补话:前端 ────────────────────────────────────────────
+    (
+        "T14",
+        "web/src/stores/chat.ts",
+        "          steeredNote: { projectId: e.projectId, sessionId: e.sessionId, messageId: e.messageId },",
+        "          steeredNote: null, /* MUT: 不记提示 */",
+        "message_steered 被忽略(用户不知道这句话补进去了)⇒ steer-note 红",
+    ),
+    (
+        "T15",
+        "web/src/stores/chat.ts",
+        "            steeredNote: s.steeredNote !== null && s.steeredNote.sessionId === e.sessionId\n              ? null\n              : s.steeredNote,",
+        "            steeredNote: s.steeredNote, /* MUT: 不过期 */",
+        "补话提示永远挂着(那一轮早就结束了)⇒ steer-note 红",
+    ),
+    (
+        "T16",
+        "web/src/features/chat/ChatSurface.tsx",
+        "    if (!text || !hasKey || !hasContext) return false;",
+        "    if (!text || clientBusy || !hasKey || !hasContext) return false; /* MUT: 回答期间又发不出去了 */",
+        "回答期间输入框又被拦(补话够不着)⇒ steer-note 接线哨兵红",
+    ),
+    (
+        "T17",
+        "web/src/features/chat/ChatSurface.tsx",
+        "    (t) => t.origin.source === \"turn\" && t.origin.trigger.kind === \"user\" && t.sessionId === sessionId,",
+        "    (t) => t.sessionId === sessionId, /* MUT: 播报轮也算补得进去 */",
+        "状态行对播报轮也说「会补进这一轮」(一句假话)⇒ steer-note 同源哨兵红",
+    ),
+    (
+        "T18",
+        "web/src/features/chat/ChatComposer.tsx",
+        "                    \"正在回答 · 现在发的话会补进这一轮 · Esc 中断\"",
+        "                    \"就绪\" /* MUT: 什么都不说 */",
+        "回答期间状态行说「就绪」(用户不知道发的话走哪一条)⇒ steer-note 红",
+    ),
+    # ── ③ 轨迹逐条落库 ─────────────────────────────────────────────
     # ── ① 看门狗:三道闸的判据(turn.ts)──────────────────────────
     (
         "W1",
@@ -282,9 +415,13 @@ def run_vitest() -> tuple[bool, str]:
 
 
 def main() -> int:
+    # 可选参数 = 只跑指定编号的变异(重跑单条时用:`python3 脚本 T7`)。
+    only = set(sys.argv[1:])
     originals: dict[str, str] = {}
     results: list[tuple[str, str, bool, str]] = []
     for mid, path, old, new, note in MUTATIONS:
+        if only and mid not in only:
+            continue
         full = ROOT / path
         src = full.read_text()
         if path not in originals:

@@ -62,9 +62,17 @@ const cjkCount = (s: string): number => (s.match(/[\u4e00-\u9fff]/g) ?? []).leng
 const BASELINE: Record<string, number> = {
   "App.tsx": 18,
   "components/brand/Seal.tsx": 2,
-  "features/chat/ChatComposer.tsx": 136,
+  // 2026-11-25(补话):136 → 149(+13,状态行「正在回答 · 现在发的话会补进这一轮 ·
+  // Esc 中断」—— 对方正在回答而输入框可用时,这句话必须在屏上,否则用户不知道
+  // 现在发的话走哪一条;回归 tests/web/steer-note.test.ts)。
+  "features/chat/ChatComposer.tsx": 149,
   // 2026-11-17(IA v4 走检):317 → 329(+12,头部「详情」入口;placeholder 键位段删除)
-  "features/chat/ChatSurface.tsx": 316,
+  // 2026-11-20(v5):329 → 316 —— 右栏与流尾提示退场,行动区上移(见 git log)。
+  // 2026-11-25(补话):316 → 355(+39,全是新 UI 的功能文字:输入框占位
+  // 「他正在回答 —— 现在发的话会补进这一轮…」+ 提示行「这句话已经补进当前这一轮 ——
+  // 他做完手上的事就能看到。」—— 回答期间输入框从禁用变成可发,这两句是用户判断
+  // 「现在发的话走哪一条」的唯一依据;回归 tests/web/steer-note.test.ts)。
+  "features/chat/ChatSurface.tsx": 355,
   "features/chat/Markdown.tsx": 0,
   // 2026-11-17(D3):「计划」卡 —— 新 UI(目标/判据摘要 + 拆解清单 + 确认开工)。
   // 2026-11-20(v5):117 → 57 —— band 形态退场,卡身随表态卡进流(判据在
@@ -250,7 +258,9 @@ describe("可见文字预算:屏上的中文只许减不许增", () => {
     // ArtifactFlow:「在跑」二字 + 两条悬停判据,措辞与工作项页 DAG 同源)。
     // 2026-11-25(轨迹逐条落库):9,669 → 9,701(+32,全部在 AgentTurnLog:
     // 未收口回合的标记与说明行;明细见 BASELINE 那条)。
-    expect(total).toBeLessThanOrEqual(9701);
+    // 2026-11-25(补话):9,701 → 9,753(+52:ChatComposer +13、ChatSurface +39 ——
+    // 回答期间输入框可发之后,状态行 / 占位 / 提示行三处新文字;明细见 BASELINE 那两条)。
+    expect(total).toBeLessThanOrEqual(9753);
   });
 
   it("② 基线表覆盖所有文件(不许有文件悄悄逃出仪器)", () => {

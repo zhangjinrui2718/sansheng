@@ -146,6 +146,15 @@ describe("③ 契约:事件必填 sessionId,send 可省", () => {
     }
   });
 
+  it("排队 / 补话两条通知也带 `sessionId`(前端只在**那条线**上显示提示,漏传就会答非所问)", () => {
+    // 2026-11-22 `message_queued`(036)与 2026-11-25 `message_steered`(补话)。
+    for (const t of ["message_queued", "message_steered"]) {
+      expect(TYPES, `${t} 上必须有 sessionId`).toMatch(
+        new RegExp(`type: "${t}"; projectId: string; sessionId: string; messageId: string`),
+      );
+    }
+  });
+
   it("两个建轮封套都带 `sessionId`", () => {
     expect(TYPES).toMatch(/interface TurnMessageStart[\s\S]*?sessionId: string/);
     expect(TYPES).toMatch(/interface BroadcastMessageStart[\s\S]*?sessionId: string/);

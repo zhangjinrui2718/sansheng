@@ -75,9 +75,18 @@ describe("normalizeSessionEvent:pi 方言 → RuntimeEvent", () => {
     }
   });
 
-  it("未知方言事件(message_start / queue_update / compaction_*)⇒ 丢弃(null)", () => {
-    for (const type of ["message_start", "queue_update", "compaction_start", "entry_appended"]) {
+  it("未知方言事件(compaction_* / entry_appended / turn_start)⇒ 丢弃(null)", () => {
+    for (const type of ["compaction_start", "compaction_end", "entry_appended", "turn_start"]) {
       expect(normalizeSessionEvent(pi({ type }))).toBeNull();
     }
+  });
+
+  it("形状不认识不抛:没有 message 的 message_start / 裸 queue_update ⇒ null 或空快照", () => {
+    // 2026-11-25 起 message_start(仅用户)与 queue_update 有了翻译(补话);
+    // 但翻译器不许因为形状不认识而炸 —— 炸掉整条回合是最大的事故面。
+    expect(normalizeSessionEvent(pi({ type: "message_start" }))).toBeNull();
+    expect(normalizeSessionEvent(pi({ type: "queue_update" }))).toEqual({
+      type: "queue_update", steering: [], followUp: [],
+    });
   });
 });

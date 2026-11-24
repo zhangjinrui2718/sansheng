@@ -47,6 +47,12 @@ interface Props {
    * 回合。两个判据各管各的,不许互相顶替。
    */
   interruptible?: boolean;
+  /**
+   * **对方正在回答,而输入框可用**(补话,2026-11-25):现在发的话会补进
+   * 当前这一轮,而不是排到下一轮。只影响状态行 —— 发不发的判据在调用方
+   * (`onSubmit` 返回 `false` 就不清输入框,与断线时同一条规矩)。
+   */
+  steerable?: boolean;
   disabled?: boolean;
   reason?: "streaming" | "noContext" | "noKey";
   placeholder?: string;
@@ -59,6 +65,7 @@ export function ChatComposer({
   onInterrupt,
   connection = "open",
   interruptible,
+  steerable,
   disabled,
   reason,
   placeholder,
@@ -201,6 +208,10 @@ export function ChatComposer({
                   : reason === "noKey"
                     ? "请先在「设置」配置 API Key"
                     : "推演中 · Esc 中断"
+                : steerable
+                  ? // ⚠️ **对方正在回答、而输入框可用**(补话,2026-11-25):这句话必须在屏上 ——
+                    // 否则用户不知道现在发的话走哪一条(补进这一轮,还是排到下一轮)。
+                    "正在回答 · 现在发的话会补进这一轮 · Esc 中断"
                 : interruptible
                   ? // ⚠️ **输入框可用、但确实有回合在跑** —— 这是刷新 / 切走再切回之后
                     // 的那一档:本地轮表是空的,服务端那一轮还在跑。

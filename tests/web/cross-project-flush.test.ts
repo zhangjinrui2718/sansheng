@@ -97,7 +97,7 @@ describe("bug② · 交错的两个项目:同一条 WS 上的 agent_end 不许�
     expect(textsOf("a1")).toEqual(["前半后半"]);
   });
 
-  it("**正样本**:B 的 agent_end 不许把「A 还在推演」的状态改成 idle(那会让发送键提前解锁)", () => {
+  it("**正样本**:B 的 agent_end 不许把「A 还在推演」的状态改成 idle(那会让顶部状态与输入框措辞提前变回就绪)", () => {
     const s = () => useChatStore.getState();
     s().applyEvent({ type: "message_start", projectId: PA, messageId: "a1", role: "assistant", agentId: BM , source: "turn", trigger: { kind: "user" }});
     expect(s().status).toBe("streaming");
@@ -105,8 +105,9 @@ describe("bug② · 交错的两个项目:同一条 WS 上的 agent_end 不许�
     s().applyEvent({ type: "message_start", projectId: PB, messageId: "b1", role: "assistant", agentId: PM , source: "turn", trigger: { kind: "todo", todoKind: "decompose_project" }});
     s().applyEvent({ type: "agent_end", projectId: PB, ts: 1 });
 
-    // 修复前:idle —— 而 `ChatSurface.tsx` 的发送按钮正是 `status === "streaming"`
-    // 才禁用,顶部「推演中」也吃同一个值 ⇒ 用户在 A 还在流的时候被允许再发一句
+    // 修复前:idle —— 顶部「推演中」那盏灯与输入框的状态行(「正在回答 · 现在发的话
+    // 会补进这一轮」)都吃这同一个值 ⇒ 灯提前熄、措辞提前变回「就绪」,而 A 还在流。
+    // (2026-11-25 起回答期间本来就可以再发一句 —— 那句话会补进 A,不是「提前解锁」。)
     expect(s().status).toBe("streaming");
 
     // 收口自己那一轮之后才回 idle
