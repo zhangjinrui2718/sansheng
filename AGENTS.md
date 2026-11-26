@@ -138,7 +138,7 @@
   判据的一部分:同一对节点上两类边**方向一致**时不是环(真机那份数据就是这样),方向相反
   才是环(`mutualPairs` 会点名是哪两条边)。写反会让「交付」跑到最左、并且把一个不存在的
   环报出来(`web/src/lib/workGraph.ts` 的 `collectEdges`)。
-- 基线:**2852 passed / 3 failed(model-catalog,工作区里 pi-ai 版本漂移,先于 2026-11-22 批次存在)/ 163 test files**(2026-11-25「让回合可以跑得久」批次之后,在分支 `feat/long-running-turns` 上实测;**该批尚未并入 master、未推送**)· 两条 typecheck 0 error · `check:design` E1–E14 全绿(5 角色)。
+- 基线:**2852 passed / 3 failed(model-catalog,工作区里 pi-ai 版本漂移,先于 2026-11-22 批次存在)/ 163 test files**(2026-11-25「让回合可以跑得久」批次之后实测;该批 2026-11-26 并入 master)· 两条 typecheck 0 error · `check:design` E1–E14 全绿(5 角色)。
 - **角色中文名只有一处**:`src/platform/runtime/org.ts` 的 `ORG`(播种 / `roleDisplayName()` /
   `RoleHarnessView.displayName` / **系统提示里的「# 你的角色:X」**全走它);
   前端兜底表 `web/src/lib/vocab.ts` 的 `ROLE_LABEL` 必须逐项相同,由
@@ -753,7 +753,8 @@ web 侧 `text-budget` 基线 9,425 → **9,609**(全部是本轮带回归的新 
 (判定读库里的结构化事实、判据只有一处、读不到不渲染成「没有」),只挑对着三生**已记录的真机痛点**的机制。
 落地三件,顺带修掉两个缺陷(记在上面「provider 故障」一节)。组织编排的核心(排空器 / 三道门 / 验收门)没有动。
 
-> ⚠️ **这一批在分支 `feat/long-running-turns` 上,尚未并入 master、未推送**(提交以 `git log` 为准)。
+> ⚠️ **这一批在分支 `feat/long-running-turns` 上做的,2026-11-26 并入 master**(提交以 `git log` 为准)。
+> **并入时下面两件事还没有做**:没有与真 SDK / 真模型实测(见本节末);看门狗的三个数没有经甲方逐项确认。
 > ⚠️ **看门狗的三个数(10 分钟 / 10 分钟 / 200 次)是实现时按推荐值落地的,没有经甲方逐项确认,也没有真机样本校准。**
 > 取值的理由只有一条:前两个与旧墙钟的数值相同,于是**今天能跑完的回合一个都不会被新规则砍掉**。调整走命令行,不用改代码。
 > ⚠️ **三件都只验证到「真宿主 + 真适配层 + 假会话」这一层,没有与真 SDK / 真模型实测**(见本节末)。
