@@ -101,9 +101,16 @@ async function turn(
 
 // ── ① 工具轨迹 ──────────────────────────────────────────────────
 
-/** 只看工具行(收口行 `turn_end` 不是工具调用)。 */
+/**
+ * 只看工具行(收口行 `turn_end` 不是工具调用),**按 seq 排**。
+ *
+ * ⚠️ 必须排:仓储层 `listTurnEventsByAgent` 回的是「最新的行在前」(回合之间如此,
+ * 回合之内也是如此 —— 只有落在同一毫秒的行才碰巧按 seq 升序)。2026-11-25 把工具行改成
+ * 每次调用结束就写之后,两次调用通常不在同一毫秒 ⇒ 不排的话这里的顺序随时翻。
+ * 「回合之内按 seq」是读面 `transport/http.ts` 的 `agentTurnEvents` 做的事(下面有判据钉着)。
+ */
 const toolRows = (): ReturnType<typeof listTurnEventsByAgent> =>
-  listTurnEventsByAgent(db, "p1", "bm").filter((r) => r.kind === "tool");
+  listTurnEventsByAgent(db, "p1", "bm").filter((r) => r.kind === "tool").sort((a, b) => a.seq - b.seq);
 
 describe("turn_events · 工具调用逐条落库", () => {
   it("两次调用 = 两行工具行 + 一行收口行,seq 单调,名字/成败/时长都在", async () => {
@@ -264,6 +271,31 @@ describe("turn_events · 读面(agentTurnEvents / 单回合回放)", () => {
   it("没有轨迹的成员是空 turns,不是读不到(空与读不到不是一回事)", () => {
     const view = agentTurnEvents(db, "p1", "bm", 50);
     expect(view.turns).toEqual([]);
+  });
+
+  it("⚠️ 回合之内按 seq 不靠时间戳:逐条写之后两次调用不在同一毫秒,读面照样按 seq 升序", () => {
+    // 时间戳刻意**打乱**且与 seq 无关(seq 1 / 2 / 3 的 created_at = 20 / 30 / 10)。
+    // 一条「同一毫秒碰巧按 seq」的实现过不了这一条 —— 全量跑时它有时绿有时红,
+    // 单跑恒绿,正是最难归因的那种抖动(2026-11-25 逐条写之后留下、2026-11-28 抓到)。
+    const row = (id: string, seq: number, kind: "tool" | "turn_end", tool: string | null, createdAt: number) => ({
+      id, turnId: "turn_o", projectId: "p1", sessionId: null, agentId: "bm", workId: null,
+      seq, kind, tool, argsSummary: "", resultSummary: "夹具", isError: false, durationMs: 1, createdAt,
+    });
+    insertTurnEvents(db, [
+      row("te_o1", 1, "tool", "memory_search", 20),
+      row("te_o2", 2, "tool", "board_list", 30),
+      row("te_o3", 3, "turn_end", null, 10),
+    ]);
+    const view = agentTurnEvents(db, "p1", "bm", 50);
+    expect(view.turns).toHaveLength(1);
+    expect(view.turns[0]!.events.map((e) => [e.seq, e.tool])).toEqual([
+      [1, "memory_search"],
+      [2, "board_list"],
+    ]);
+    expect(view.turns[0]!.finished).toBe(true);
+    // 仓储层自己**不承诺**回合之内的顺序(它是「最新的行在前」)—— 如实录下:
+    // 拿它当 seq 序用的测试,全量跑时会随机翻。
+    expect(listTurnEventsByAgent(db, "p1", "bm").map((r) => r.seq)).toEqual([2, 1, 3]);
   });
 });
 
