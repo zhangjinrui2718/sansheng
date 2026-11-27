@@ -12,6 +12,7 @@
 import type Database from "better-sqlite3";
 import { getWork } from "./works.js";
 import { getArtifact } from "./artifacts.js";
+import { getProjectRow, updateProject } from "./projects.js";
 
 // ── 闭集(不建 CHECK,将来加取值不动 schema)──────────────────────
 
@@ -21,7 +22,12 @@ export type DutyCadenceKind = (typeof DUTY_CADENCE_KINDS)[number];
 export const DUTY_STATUSES = ["active", "paused"] as const;
 export type DutyStatus = (typeof DUTY_STATUSES)[number];
 
-export const DUTY_RUN_STATUSES = ["open", "done"] as const;
+/**
+ * 一轮的状态。`abandoned` = **平台收掉的**:业务经理连续三次没能收工,宿主的熔断扫描
+ * 替它把这一轮收掉 —— 没有自省。与 `done`(模型自己写的自省)分开记,读的人才分得清
+ * 「它反省过了」与「这一轮根本没收」。
+ */
+export const DUTY_RUN_STATUSES = ["open", "done", "abandoned"] as const;
 export type DutyRunStatus = (typeof DUTY_RUN_STATUSES)[number];
 
 export function isDutyCadenceKind(v: unknown): v is DutyCadenceKind {
@@ -425,4 +431,58 @@ export function failuresSince(db: Database.Database, projectId: string, since: n
     out.push({ kind: "rejected", id: r.artifact_id, title: getArtifact(db, r.artifact_id)?.title ?? "" });
   }
   return out;
+}
+
+// ── 熔断(宿主排空前的扫描用)────────────────────────────────────
+
+/** 熔断的一种结果:要么暂停整条职责,要么由平台收掉一轮。调用方负责播报。 */
+export type DutySettle =
+  | { readonly kind: "paused"; readonly duty: DutyRow }
+  | { readonly kind: "abandoned"; readonly duty: DutyRow; readonly run: DutyRunRow };
+
+/**
+ * **熔断**:尝试预算烧穿的职责不许变僵尸。
+ *
+ * 判据读既有账本(`dispatch_attempts`):**当前**排定点的那本开工账
+ * (`duty_due:<id>:open@<next_due_at>`)或**当前**这一轮的那本收工账
+ * (`duty_due:<id>:close@<run id>`)到顶并播报过(`notified_at` 非空)。
+ * ⚠️ 必须是**精确**的那一本:按前缀找的话,甲方恢复职责后的新一趟会被之前烧穿的老账
+ * 拖累 —— 恢复之后下一趟又被暂停,而它其实一次都还没被叫过。两种形态各有各的处置:
+ *   · **没开工**(`:open` 到顶)⇒ 暂停职责 —— 工作间项目一起停,与甲方在设置页点暂停
+ *     是同一个状态(恢复 = 再点启用)。不暂停的话,它每个 tick 都在「到点了」,
+ *     而平台已经不再叫它 —— 日志里一切正常,职责却永远不动(「零待办」与「做完了」
+ *     在库里长得一模一样,真机踩过)。
+ *   · **没收工**(`:close` 到顶)⇒ 由平台把这一轮收掉,记成 `abandoned`(没有自省)。
+ *     职责**不**因此停下:下一轮到点照常开工(有恒)。
+ *
+ * ⚠️ 放在宿主排空前的扫描里(`serve.ts`),不在规则的 `if` 里 —— 规则是纯查询,
+ * 写库的活归宿主(§11.3 的结构保证)。幂等:两种处置都让对应的那条待办不再产出。
+ */
+export function settleExhaustedDuty(db: Database.Database, projectId: string, now: number): DutySettle[] {
+  const duty = dutyOfProject(db, projectId);
+  if (duty === null || duty.status !== "active") return [];
+  const open = openDutyRunOf(db, duty.id);
+  // 账本的 key 与规则产出的待办 key 逐字相同(规则那边是唯一的产出方)。
+  const key = open === null
+    ? `duty_due:${duty.id}:open@${duty.nextDueAt ?? "unscheduled"}`
+    : `duty_due:${duty.id}:close@${open.id}`;
+  const ledger = db
+    .prepare(`SELECT notified_at FROM dispatch_attempts WHERE project_id = ? AND todo_key = ?`)
+    .get(projectId, key) as { notified_at: number | null } | undefined;
+  if (ledger === undefined || ledger.notified_at === null) return [];
+  if (open === null) {
+    updateDuty(db, duty.id, { status: "paused", nextDueAt: null }, now);
+    const project = getProjectRow(db, duty.projectId);
+    if (project !== null && project.status === "active") {
+      updateProject(db, duty.projectId, { status: "paused" });
+    }
+    return [{ kind: "paused", duty: { ...duty, status: "paused", nextDueAt: null, updatedAt: now } }];
+  }
+  updateDutyRun(db, open.id, {
+    status: "abandoned", finishedAt: now,
+    // 平台**不替模型写自省**:功课的交代一格不动(没交代就是没交代),只在「缺口」里
+    // 记下这一轮是怎么收的 —— 那是事实,不是反思。
+    gaps: "这一轮没能收工:平台连续三次叫业务经理来收工都没成,这一轮由平台收掉,没有自省。",
+  });
+  return [{ kind: "abandoned", duty, run: { ...open, status: "abandoned", finishedAt: now } }];
 }

@@ -201,7 +201,9 @@ const BASELINE: Record<string, number> = {
   // components/members/activity.ts(板与面板共用;下面三条新账)。
   "routes/Members.tsx": 611,
   // 活动判据(欠什么/为什么在跑/年龄)—— MemberCard 与 MemberPane 共用。
-  "components/members/activity.ts": 190,
+  // 2026-11-27(职责,039):190 → 204(+14,新待办名「职责到点:开工列功课 / 收工写自省」
+  // —— 成员页是内部视图,待办名必须逐条有中文读法,否则显示英文)。
+  "components/members/activity.ts": 204,
   // 「此刻状态」三态行(读不到 ≠ 空闲;没拿到 ≠ 读不到)—— 板与面板共用一份。
   "components/members/TurnStatus.tsx": 53,
   // 全员并发板的卡面(谁在跑/手上活/欠什么/实时行;悬停只有角标口径)。
@@ -260,7 +262,9 @@ describe("可见文字预算:屏上的中文只许减不许增", () => {
     // 未收口回合的标记与说明行;明细见 BASELINE 那条)。
     // 2026-11-25(补话):9,701 → 9,753(+52:ChatComposer +13、ChatSurface +39 ——
     // 回答期间输入框可发之后,状态行 / 占位 / 提示行三处新文字;明细见 BASELINE 那两条)。
-    expect(total).toBeLessThanOrEqual(9753);
+    // 2026-11-27(职责,039):9,753 → 9,767(+14:成员页的待办名「职责到点:开工列功课 /
+    // 收工写自省」)。职责的界面(设置页职责段 / 左栏标记)在后面几笔里再加账。
+    expect(total).toBeLessThanOrEqual(9767);
   });
 
   it("② 基线表覆盖所有文件(不许有文件悄悄逃出仪器)", () => {

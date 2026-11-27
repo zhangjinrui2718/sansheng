@@ -139,6 +139,12 @@ import {
 import {
   dueWakeups, getWakeup, markWakeupFired, type WakeupRow,
 } from "../storage/repo/wakeups.js";
+import {
+  dutyOfProject, openDutyRunOf, type DutyRow, type DutyRunRow,
+} from "../storage/repo/duties.js";
+import { dutyStartCapReached, dueDutyPhase, type DutyPhase } from "./duty.js";
+import { renderDutyTask } from "./dutyTask.js";
+import { listAsks } from "../storage/repo/asks.js";
 import { ROLE_SPECS, isProjectRole, isExecutorRole, EXECUTOR_ROLES, type ProjectRole } from "../identity/role.js";
 import { getSessionMessage, openDeliverableSession } from "../storage/repo/sessions.js";
 import type { Capability } from "../harness/capability.js";
@@ -293,6 +299,26 @@ export const TODO_KINDS = [
    */
   "wakeup_due",
   /**
+   * **职责到点了 —— 业务经理开工 / 收工**(039,2026-11-27)。
+   *
+   * 一条职责 = 一个长期项目(工作间)+ 一条职责记录。本待办是它唯一的读者:
+   *   · **开工**:职责启用、工作间进行中、`next_due_at` 到了、没有未收工的一轮、
+   *     没有等甲方答的问题、今天没开满 ⇒ 叫醒业务经理,任务正文里摆好职责、边界、
+   *     上一轮的自省与现状,它先 `duty_run_open` 列功课再去派活;
+   *   · **收工**:有未收工的一轮,并且工作间**安静了**(没有未完成的工作项、没有
+   *     待审、没有未答的提问),或者已经拖到了下一个排定点 ⇒ 叫醒它
+   *     `duty_run_close` 逐步交代、写自省。
+   *
+   * ⚠️ **同一条待办、同一个 key**(`duty_due:<职责 id>`):两种形态互斥 —— 开了工
+   * 就有待收工的一轮,收了工才可能再开工。所以尝试预算按「这一轮」记:开工连续
+   * 三次没调成 `duty_run_open`,或收工连续三次没调成 `duty_run_close`,宿主的
+   * 熔断扫描会处置(暂停职责 / 由平台收掉这一轮)并播报 —— 不留僵尸。
+   *
+   * 时间不在这里猜:`next_due_at` 是算出来存进库的(`runtime/duty.ts`),本规则
+   * 只拿它和 `now` 比大小 —— 与批次 21「判定读库里的结构化事实」同一条纪律。
+   */
+  "duty_due",
+  /**
    * **平台已经不再叫醒某条待办了 —— 换个人来处置**(2026-10-07 补)。
    *
    * 用户原话:「如果项目没有交付,且一段时间内没有任何角色在干活,系统去问问 PM 现在进度」。
@@ -402,6 +428,10 @@ const PRIORITY: Readonly<Record<TodoKind, number>> = {
   report_downstream: 12,
   // 定时唤醒与汇报同档:都是业务经理**自己的节奏**类活,排在执行/审查之后。
   wakeup_due: 12,
+  // 职责到点(039):排在汇报之后 —— 收工那一步要**把这一轮的下游结果一并交代进日报**,
+  // 而「活落定了没有」恰恰要看前面那些规则还成不成立(执行 / 审查 / 整合 / 交付)。
+  // 开工与收工是同一条待办,所以同一个档位。
+  duty_due: 13,
   // 收口排**最后**:它成立的前提是「上面每一条都不成立」,所以它排在最后不是
   // 优先级偏好,是**顺序依赖** —— 有任何一件没做完的事,这条就压根不成立。
   close_project: 13,
@@ -895,6 +925,19 @@ export interface RuleFacts {
    * 都会惊动一次业务经理 —— **对着一条正在推进的流水线喊**。
    */
   readonly integratableRootCount: number;
+  // ── 职责(039,2026-11-27)────────────────────────────────────────
+  /**
+   * 这个项目是不是某条职责的工作间;不是就 `null`。**规则侧认「职责项目」只走这一格**
+   * (`integrate` / `handover` / 收口 / 「为什么没交付物」四条规则在职责项目里改口径,
+   * 都读它)—— 判据本身在 `repo/duties.ts` 的 `dutyOfProject`,这里只搬结果。
+   */
+  readonly duty: DutyRow | null;
+  /** 这条职责未收工的那一轮(没有 / 这里不是职责项目 ⇒ `null`)。 */
+  readonly openDutyRun: DutyRunRow | null;
+  /** 今天全系统开的工到上限了吗(`dutyStartCapReached`)。查库的活在这里做完。 */
+  readonly dutyStartCapReached: boolean;
+  /** 项目里还没答的提问数(任何角色之间的)—— 「工作间安静了」的三件事之一。 */
+  readonly openAskCount: number;
 }
 
 /** 平台已经放弃叫醒的待办(账本到顶)。只搬结构化列,**不读任何正文**。 */
@@ -1459,6 +1502,10 @@ export const RULES: readonly Rule[] = [
     if: (q) => {
       const pm = q.members.find((m) => m.role === "project_manager");
       if (pm === undefined) return [];
+      // 职责项目(039)· **例行产出**:不做整合 —— 成果就是日报,不走交付物与验收。
+      // (整合会写出 `deliverable`,接着就是交付交接与「待你验收」,那正是例行职责
+      // 不该给甲方添的点击。正式交付物的职责照旧走这条流水线。)
+      if (q.duty !== null && !q.duty.formal) return [];
       const children = childrenByParent(q.works);
       /** 这一轮准备好整合的根(每个 = 一条要写交付物的交付) */
       const ready: WorkRow[] = [];
@@ -1529,6 +1576,8 @@ export const RULES: readonly Rule[] = [
     if: (q) => {
       const bm = q.members.find((m) => m.role === "business_manager");
       if (bm === undefined) return [];
+      // 职责项目(039)· **例行产出**:不交付 —— 成果在日报里,没有要甲方验收的东西。
+      if (q.duty !== null && !q.duty.formal) return [];
       // ⚠️ **球在甲方那边时不追加第二次交代**(2026-10-06 真机现场补)。
       //
       // 真机:`09:03:42` 与 `09:03:59` —— 相隔 **17 秒** —— 业务经理连着问了两件,
@@ -1688,6 +1737,66 @@ export const RULES: readonly Rule[] = [
       "下一个版本由业务经理重排)。回合失败烧完预算的,由熔断扫描收尸并播报。",
   },
   {
+    id: "duty_due",
+    // 职责行只由人写(HTTP `/api/duties`),开工 / 收工只由两个工具写 —— 没有
+    // 「状态迁移之后的门铃」可蹭,而时间本身不在闭合触发集里 ⇒ 唯一的触发是 `tick`。
+    on: ["tick"],
+    if: (q) => {
+      const phase = dueDutyPhase({
+        duty: q.duty,
+        openRunStartedAt: q.openDutyRun?.startedAt ?? null,
+        now: q.now,
+        projectStatus: q.projectStatus,
+        awaitingClient: q.awaitingClient,
+        acceptancePending: q.acceptancePending.length > 0,
+        nonTerminalWorkCount: q.nonTerminalWorkCount,
+        pendingReviewCount: q.pendingReview.length,
+        openAskCount: q.openAskCount,
+        startCapReached: q.dutyStartCapReached,
+      });
+      if (phase === null || q.duty === null) return [];
+      const bm = q.members.find((m) => m.role === "business_manager");
+      if (bm === undefined) return [];
+      const duty = q.duty;
+      return [{
+        agentId: bm.agentId, role: "business_manager", kind: "duty_due",
+        // key = 职责 id + 这一面 + **这一轮的身份**:开工那一面按**排定点**记,收工那一面按
+        // **那一轮**记。「待办消失即预算作废」只认 key,所以账本必须跟看真正的轮次走:
+        //   · 只按职责记 ⇒ 上一轮收工烧穿的账被下一轮收工直接继承(第二轮根本没人来叫,
+        //     就被兜底判成「收不了工」);职责被自动暂停后甲方去恢复,它还带着那本烧穿的
+        //     老账,下一趟又被暂停。
+        //   · 按职责 + 面(不加轮次)⇒ 同样的事在「收工」那一面照样发生。
+        key: phase === "open"
+          ? `duty_due:${duty.id}:open@${duty.nextDueAt ?? "unscheduled"}`
+          : `duty_due:${duty.id}:close@${q.openDutyRun?.id ?? "none"}`,
+        target: duty.id, refs: [duty.id],
+        // 预算按「这一轮」记:开工那一格在 `duty_run_open` 写入 `last_run_at` 时变
+        // (⇒ 新一轮拿到新预算);收工那一格在这一轮开着期间**不变**(⇒ 连续三次
+        // 收不了工就到顶,交给宿主的熔断扫描处置,不留僵尸)。
+        targetState: phase === "open"
+          ? (duty.lastRunAt ?? duty.createdAt)
+          : (q.openDutyRun?.startedAt ?? q.now),
+        label: phase === "open"
+          ? `职责「${duty.name}」到点:开工`
+          : `职责「${duty.name}」这一轮该收工了:写自省`,
+      }];
+    },
+    then: { kind: "duty_due", targetRole: "business_manager" },
+    why:
+      "三生此前的每一步都由甲方开口触发:立项要他谈、计划要他点「确认开工」、进展要他问。" +
+      "系统里没有任何一行能表达「这是一摊常设的事,到点你该去做」—— `wakeups`(038)" +
+      "只能排一次性或按间隔的唤醒,绑在某个项目上,也没有「每天几点」。" +
+      "039 把职责落成 `duties` / `duty_runs`,本规则是它的读者:到点 ⇒ 叫醒业务经理开工" +
+      "(先列功课再派活);活落定了 ⇒ 再叫醒它收工写自省。" +
+      "⚠️ 判据本体是纯函数(`runtime/duty.ts` 的 `dueDutyPhase`),时间不在这里猜 ——" +
+      "`next_due_at` 是算出来存进库的,本规则只拿它和 `now` 比大小(与批次 21 同一条纪律)。" +
+      "⚠️ 预先授权出自甲方本人:设一条职责 = 授权这个范围内的活自动开工,所以职责项目里" +
+      "建出来的工作项**已确认**(`work_create`)—— 而 D3 那道「确认之前一个 token 都不花」" +
+      "的硬档在普通项目里一个字没动。" +
+      "保险丝三条:每天最多开 N 轮(`dutyStartCapReached`,规则与工具同一个判据)、" +
+      "尝试预算按「这一轮」记、预算烧穿由宿主的熔断扫描处置并播报(不留僵尸)。",
+  },
+  {
     id: "close_finished_project",
     // 判据的每一半都只可能因为「新落了一件事」或「一件东西不再是那样」而变:
     // 工作项状态迁移、交付物落库、答复被消费。而 `tick` 是**重启后补跑**的唯一载体
@@ -1696,6 +1805,9 @@ export const RULES: readonly Rule[] = [
     if: (q) => {
       const bm = q.members.find((m) => m.role === "business_manager");
       if (bm === undefined) return [];
+      // 职责项目(039)· **例行产出**:不判断收口 —— 职责的工作间是常设的,
+      // 它的终点是甲方在设置页暂停 / 归档它,不是「做完了」。
+      if (q.duty !== null && !q.duty.formal) return [];
       // ── 终止判据:项目已经不是 active 了 ────────────────────────────
       // 落在一列上(`projects.status`),所以项目一收口这条规则立刻不成立,
       // **不需要任何额外状态**。这也是「收口不可逆」在机制上的体现:它不会被
@@ -1803,6 +1915,9 @@ export const RULES: readonly Rule[] = [
     if: (q) => {
       const bm = q.members.find((m) => m.role === "business_manager");
       if (bm === undefined) return [];
+      // 职责项目(039)· **例行产出**:「为什么一份交付物都没有」对它不是问题 ——
+      // 例行职责本来就不产出交付物;每一轮做没做成,由 `duty_due` 的收工自省交代。
+      if (q.duty !== null && !q.duty.formal) return [];
       // 终止判据:项目已经不是 active(收口不可逆,别叫第二次)
       if (q.projectStatus !== "active") return [];
       // 空项目不归它 —— 那是 `decompose_empty_project` 的活(拆解由 PM 起头)
@@ -2101,6 +2216,8 @@ function collectRuleFacts(
   // 甲方收货(029):**一次算完**,两个字段与读面读的是同一条判据
   // (`deliveryAcceptance`)。分开算两次会让「收口门」与「待收货清单」有机会漂。
   const acceptance = acceptanceFacts(db, projectId, deliverables);
+  // 这个项目是不是某条职责的工作间(039)—— 规则侧认「职责项目」只走这一格。
+  const duty = dutyOfProject(db, projectId);
   return {
     projectId,
     now,
@@ -2151,6 +2268,14 @@ function collectRuleFacts(
     reworkPending: collectReworkPending(db, projectId, works, latestVerdictsByWork(db, projectId)),
     abandonedTodos: abandonedTodos(db, projectId),
     integratableRootCount: countIntegratableRoots(works, deliverables),
+    // ── 职责(039)──────────────────────────────────────────────────
+    // 一条索引查询一条:绝大多数项目不是职责的工作间(⇒ `duty: null`,后三格恒为
+    // 空 / 零),所以「今天开满了没有」只在职责项目里才去数 —— 普通项目一个 tick
+    // 不该为职责多付一次全表计数。
+    duty,
+    openDutyRun: duty === null ? null : openDutyRunOf(db, duty.id),
+    dutyStartCapReached: duty !== null && dutyStartCapReached(db, now),
+    openAskCount: duty === null ? 0 : listAsks(db, projectId, { status: "open" }).length,
   };
 }
 
@@ -2243,6 +2368,10 @@ function abandonedTodos(db: Database.Database, projectId: string): AbandonedTodo
     const kind = todoKindOfKey(row.todoKey);
     if (kind === null) continue;
     if (ownerByKind.get(kind) === "project_manager") continue;
+    // 职责到顶(039)**不换手给项目经理**:他手里没有职责的工具,叫醒他只是一轮空转
+    // (三次之后自己也到顶)。职责的到顶由宿主的熔断扫描处置(暂停职责 / 收掉这一轮)
+    // 并播报 —— 与「升级待办自己不再触发升级」同一条纪律:兜底不许自噬。
+    if (kind === "duty_due") continue;
     out.push({ key: row.todoKey, kind, attempts: row.attempts });
   }
   return out.sort((a, b) => a.key.localeCompare(b.key));
@@ -2712,6 +2841,11 @@ export function renderTask(db: Database.Database, todo: DriverTodo): string {
         "周期性的这条点完这一轮会自动续期;不再需要就 `wakeup_cancel`。"
       );
     }
+    case "duty_due":
+      // 职责到点(039):开工还是收工,由库里有没有未收工的一轮决定;职责、边界、
+      // 上一轮的自省与现状由 `runtime/dutyTask.ts` **查出来摆好** —— 「先看现状再动手」
+      // 的落点在那里,不靠模型自己去查。
+      return renderDutyTask(db, todo);
     case "close_project":
       // 与 `resume_client` 同纪律:**摆事实、说你来判断**。
       // ⚠️ 平台**不自动关闭项目**:收口不可逆(`closeProject` 直接 `throw`),

@@ -158,8 +158,10 @@ describe("B1 · 规则表:每个 `TodoKind` 恰好一条规则(C3 之后 10 条,
     // 020 那次事故的形状(账在库里,排空器每 10 秒读到「无事可做」)。
     // 2026-11-22(038)补上第 20 条 `wakeup_due`:「过两小时再查 / 每天早报」
     // 此前没有载体 —— 时间表达不出来,说过就忘。
-    expect(RULES).toHaveLength(20);
-    expect(TODO_KINDS).toHaveLength(20);
+    // 2026-11-27(039)补上第 21 条 `duty_due`:职责到点 —— 开工列功课 / 收工写自省,
+    // 同一条待办的两种形态(此前「一摊常设的事,到点你该去做」在库里没有行)。
+    expect(RULES).toHaveLength(21);
+    expect(TODO_KINDS).toHaveLength(21);
     // 集合相等 ⇒ 「表产出的 kind」与「闭集」是同一个集合
     expect([...kinds].sort()).toEqual([...TODO_KINDS].sort());
     // 且没有两条规则争同一个 kind(否则「谁负责这一条」没有答案)

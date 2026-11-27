@@ -31,6 +31,7 @@ import {
   listWorks, depsSatisfied, depState, workIdsWithChildren, type WorkRow,
 } from "../storage/repo/works.js";
 import { getProjectRow } from "../storage/repo/projects.js";
+import { dutyOfProject, getDuty, openDutyRunOf, type DutyRunRow } from "../storage/repo/duties.js";
 import { ROLE_SPECS, isProjectRole, isExecutorRole, type ProjectRole } from "../identity/role.js";
 
 export interface PendingWork {
@@ -117,6 +118,13 @@ export interface PendingWork {
    * 「拆完了」和「没拆过」是两件事,后者的判据必须能区分它们。
    */
   needsDecomposition: boolean;
+  /**
+   * 这个项目是一条职责的工作间、而它有一轮**没收工**(039)。只对对甲方说话的那个角色算
+   * (`duty.run` 只在它的 ceiling 里);不是职责项目 / 没有未收工的一轮 ⇒ `null`。
+   * ⚠️ 它**不是唤醒理由**(叫不叫醒由规则 `duty_due` 判)—— 只是让别的回合
+   * (比如下游事件把业务经理叫醒的那一轮)知道「这里有一轮开着,结果并进日报」。
+   */
+  openDutyRun: DutyRunRow | null;
   /** 我这个 agent 的当前角色(从库里现读)。找不到时 `null`。 */
   readonly role: ProjectRole | null;
 }
@@ -163,8 +171,18 @@ export function collectPendingWork(
   // 项目还没拆过:只有项目经理该管这件事,且只在 active 项目上。
   const project = getProjectRow(db, projectId);
   const noWorksYet = listWorks(db, projectId).length === 0;
+  // ⚠️ **职责的工作间除外**(039):那里的活由业务经理每一轮列完功课再请项目经理拆 ——
+  // 项目刚建出来时自己先拆一轮,就绕过了「先列功课」。
+  const duty = dutyOfProject(db, projectId);
   const needsDecomposition =
-    role === "project_manager" && project !== null && project.status === "active" && noWorksYet;
+    role === "project_manager" && project !== null && project.status === "active" && noWorksYet &&
+    duty === null;
+  // 职责的功课只有对甲方说话的那个角色管(`duty.run` 只在它的 ceiling 里)——
+  // 判据读 `ROLE_SPECS.clientFacing`,不写死一个角色名。
+  const openDutyRun =
+    duty !== null && role !== null && ROLE_SPECS[role].clientFacing
+      ? openDutyRunOf(db, duty.id)
+      : null;
 
   return {
     asksToAnswer: listAsks(db, projectId, { toAgentId: agentId, actionableOnly: true }),
@@ -179,6 +197,7 @@ export function collectPendingWork(
     myWaitingWorks,
     myWorksWithCancelledDeps,
     needsDecomposition,
+    openDutyRun,
     role,
   };
 }
@@ -222,6 +241,7 @@ export function summarizePendingWork(w: PendingWork): string {
   if (w.pendingChanges.length > 0) parts.push(`${w.pendingChanges.length} 条变更待推进`);
   if (w.myOpenWorks.length > 0) parts.push(`${w.myOpenWorks.length} 个工作项可开工`);
   if (w.needsDecomposition) parts.push("项目还没拆解");
+  if (w.openDutyRun !== null) parts.push("职责有一轮没收工");
   if (w.myBlockedAsks.length > 0) parts.push(`你自己卡着 ${w.myBlockedAsks.length} 条`);
   if (w.overdueAsks.length > 0) parts.push(`${w.overdueAsks.length} 条已超时`);
   if (w.openBlockers.length > 0) parts.push(`${w.openBlockers.length} 个未解决阻塞`);
@@ -263,7 +283,8 @@ export function renderPendingWork(db: Database.Database, w: PendingWork): string
     // 下面那段「前置被取消」的警告会**静默消失**,没人会发现。
     // (并行 subagent 复核时指出:这段可见性一直搭在别人的非空上。)
     w.myWorksWithCancelledDeps.length > 0 ||
-    w.needsDecomposition;
+    w.needsDecomposition ||
+    w.openDutyRun !== null;
   if (!hasAnything) return "";
   const lines: string[] = ["## 当前待办"];
 
@@ -289,6 +310,16 @@ export function renderPendingWork(db: Database.Database, w: PendingWork): string
       "先 `board_list` 看黑板上有没有人已经做过什么,再用 `work_create` 拆出",
       "**能各自独立开工**的工作项,每个都给负责人与可验证的判据。",
       "拆完之后**不要**自己动手做 —— 你不持 `code.*`。",
+    );
+  }
+
+  if (w.openDutyRun !== null) {
+    const duty = getDuty(db, w.openDutyRun.dutyId);
+    lines.push(
+      "",
+      `### 职责「${duty?.name ?? w.openDutyRun.dutyId}」有一轮没收工(${w.openDutyRun.id})`,
+      "这个项目是一条职责的工作间。活落定之后平台会叫你 `duty_run_close` 收工;",
+      "这一轮的下游结果**并进日报**,不单独播 —— 这一轮用 `[未播报]` 留在内部。",
     );
   }
 

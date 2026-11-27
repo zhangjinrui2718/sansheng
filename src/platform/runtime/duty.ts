@@ -196,6 +196,62 @@ export function formatClock(t: number): string {
   return `${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
 }
 
+// ── 该不该叫醒业务经理(规则 `duty_due` 的判据本体)────────────────
+
+/** 「开工」还是「收工」—— 同一条待办的两种形态,互斥。 */
+export type DutyPhase = "open" | "close";
+
+/** `dueDutyPhase` 读的全部事实。规则侧由 `collectRuleFacts` 物化好递进来(规则拿不到 db)。 */
+export interface DutyDueInput {
+  /** 这个项目是不是某条职责的工作间;不是就 `null`。 */
+  readonly duty: { readonly status: string; readonly formal: boolean; readonly nextDueAt: number | null } | null;
+  /** 这条职责未收工的那一轮;没有就 `null`。 */
+  readonly openRunStartedAt: number | null;
+  readonly now: number;
+  /** 工作间项目在库里的状态(只有 `active` 才开工 / 收工)。 */
+  readonly projectStatus: string;
+  /** 有问题在等甲方答(球在甲方那边)。 */
+  readonly awaitingClient: boolean;
+  /** 有货交出去了、甲方还没表态(只对「正式交付物」的职责有意义)。 */
+  readonly acceptancePending: boolean;
+  /** 工作间安静不安静的三件事:没做完的活、等着审的产出、还没答的提问。 */
+  readonly nonTerminalWorkCount: number;
+  readonly pendingReviewCount: number;
+  readonly openAskCount: number;
+  /** 今天全系统开的工到上限了吗。 */
+  readonly startCapReached: boolean;
+}
+
+/**
+ * 这条职责此刻该产出哪一种待办;都不该就 `null`。**纯函数**,只读上面那组事实。
+ *
+ *   · 开工 —— 职责启用、工作间进行中、到点了、没有未收工的一轮、没有等甲方答的问题、
+ *             今天没开满;正式交付的职责在「货交了等你验收」时也不开新工。
+ *   · 收工 —— 有未收工的一轮,并且工作间**安静了**(活都落定了),或者已经拖到了
+ *             下一个排定点(「既过不恋」:不把旧的拖进新一轮)。
+ *
+ * ⚠️ **有问题在等甲方答时,两种都不做**:开工不叠轮次;收工要等他的答复落进这一轮。
+ *    答复到了另有 `resume_client` 叫醒业务经理,之后这里自然会再产出收工。
+ */
+export function dueDutyPhase(q: DutyDueInput): DutyPhase | null {
+  const duty = q.duty;
+  if (duty === null) return null;
+  if (duty.status !== "active" || q.projectStatus !== "active") return null;
+
+  if (q.openRunStartedAt === null) {
+    if (duty.nextDueAt === null || duty.nextDueAt > q.now) return null;
+    if (q.awaitingClient) return null;
+    if (duty.formal && q.acceptancePending) return null;
+    if (q.startCapReached) return null;
+    return "open";
+  }
+
+  if (q.awaitingClient) return null;
+  const quiet = q.nonTerminalWorkCount === 0 && q.pendingReviewCount === 0 && q.openAskCount === 0;
+  const overdue = duty.nextDueAt !== null && duty.nextDueAt <= q.now;
+  return quiet || overdue ? "close" : null;
+}
+
 /** 时长的一行说法:「不到 1 分钟」「35 分钟」「2 小时 10 分钟」「3 天 4 小时」。向下取整(30 秒不是「1 分钟」)。 */
 export function formatDuration(ms: number): string {
   const minutes = Math.floor(Math.max(0, ms) / 60_000);

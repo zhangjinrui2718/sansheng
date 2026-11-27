@@ -20,6 +20,12 @@ ROOT = Path(__file__).resolve().parent.parent
 TESTS = [
     "tests/platform/duties.test.ts",
     "tests/platform/duty-runs.test.ts",
+    # 时钟与开工:规则判据、职责项目里别的规则的口径、熔断、任务正文
+    "tests/platform/duty-rule.test.ts",
+    "tests/platform/duty-host.test.ts",
+    "tests/platform/dispatcher-rules.test.ts",
+    "tests/platform/project-close-rule.test.ts",
+    "tests/web/text-budget.test.ts",
     "tests/platform/reset.test.ts",
     "tests/platform/execution.test.ts",
     # 能力 / 工具 / 提示词单元的登记处:计数哨兵与设计文档一致性
@@ -41,6 +47,11 @@ REPO = "src/platform/storage/repo/duties.ts"
 HTTP = "src/platform/transport/http.ts"
 VIEWS = "src/platform/transport/views.ts"
 TOOL = "src/platform/tools/duty.ts"
+DISP = "src/platform/runtime/dispatcher.ts"
+DTASK = "src/platform/runtime/dutyTask.ts"
+PROJ = "src/platform/tools/project.ts"
+PEND = "src/platform/runtime/pendingWork.ts"
+SERVE = "src/platform/host/serve.ts"
 
 MUTATIONS = [
     # ── 时间(纯函数)──────────────────────────────────────────────────
@@ -427,6 +438,288 @@ MUTATIONS = [
           "  \"duty.\","),
         J("  // 已收口)就不许再开工、收工。"),
         "职责的功课不是项目内能力(工作间不在进行中也拿得到工具)",
+    ),
+    (
+        "G1", DUTY,
+'    if (duty.nextDueAt === null || duty.nextDueAt > q.now) return null;',
+'    if (duty.nextDueAt === null || duty.nextDueAt >= q.now) return null;',
+        '到点判成「严格早于现在」:排定点正好是现在的那一轮永远不开工',
+    ),
+    (
+        "G2", DUTY,
+'  if (duty.status !== "active" || q.projectStatus !== "active") return null;',
+'    if (q.projectStatus !== "active") return null;',
+        '已暂停的职责照样开工 / 收工',
+    ),
+    (
+        "G3", DUTY,
+'  if (duty.status !== "active" || q.projectStatus !== "active") return null;',
+'    if (duty.status !== "active") return null;',
+        '工作间项目不在进行中也照样开工 / 收工',
+    ),
+    (
+        "G4", DUTY,
+J('    if (q.awaitingClient) return null;',
+          '    if (duty.formal && q.acceptancePending) return null;'),
+'    if (duty.formal && q.acceptancePending) return null;',
+        '有问题在等甲方答时照样开新一轮(轮次叠起来)',
+    ),
+    (
+        "G5", DUTY,
+'    if (duty.formal && q.acceptancePending) return null;',
+'    if (false && duty.formal && q.acceptancePending) return null;',
+        '正式交付的职责:货交了等甲方验收时还开新工',
+    ),
+    (
+        "G6", DUTY,
+'    if (q.startCapReached) return null;',
+'    if (false && q.startCapReached) return null;',
+        '今天开满了照样开工(规则那一层不拦)',
+    ),
+    (
+        "G7", DUTY,
+J('  if (q.awaitingClient) return null;',
+          '  const quiet = q.nonTerminalWorkCount === 0 && q.pendingReviewCount === 0 && q.openAskCount === 0;'),
+'  const quiet = q.nonTerminalWorkCount === 0 && q.pendingReviewCount === 0 && q.openAskCount === 0;',
+        '有问题在等甲方答时照样收工(他的答复被关在门外)',
+    ),
+    (
+        "G8", DUTY,
+'  const quiet = q.nonTerminalWorkCount === 0 && q.pendingReviewCount === 0 && q.openAskCount === 0;',
+'  const quiet = q.pendingReviewCount === 0 && q.openAskCount === 0;',
+        '「安静」不看还有没有没做完的活(活还在跑就收工)',
+    ),
+    (
+        "G9", DUTY,
+'  const quiet = q.nonTerminalWorkCount === 0 && q.pendingReviewCount === 0 && q.openAskCount === 0;',
+'  const quiet = q.nonTerminalWorkCount === 0 && q.openAskCount === 0;',
+        '「安静」不看还有没有等着审的产出',
+    ),
+    (
+        "G10", DUTY,
+'  const quiet = q.nonTerminalWorkCount === 0 && q.pendingReviewCount === 0 && q.openAskCount === 0;',
+'  const quiet = q.nonTerminalWorkCount === 0 && q.pendingReviewCount === 0;',
+        '「安静」不看还有没有没答的提问',
+    ),
+    (
+        "G11", DUTY,
+'  const overdue = duty.nextDueAt !== null && duty.nextDueAt <= q.now;',
+'  const overdue = duty.nextDueAt !== null && duty.nextDueAt < q.now;',
+        '拖到下一个排定点(正好那一刻)也不收',
+    ),
+    (
+        "G12", DUTY,
+'  return quiet || overdue ? "close" : null;',
+'  return quiet ? "close" : null;',
+        '上一轮永远可以拖着不收(既过不恋没了)',
+    ),
+    (
+        "G13", DISP,
+'          ? `duty_due:${duty.id}:open@${duty.nextDueAt ?? "unscheduled"}`',
+'          ? `duty_due:${duty.id}:open`',
+        '开工的账按职责记(不按排定点):恢复职责时带着烧穿的老账又被暂停',
+    ),
+    (
+        "G14", DISP,
+'          : `duty_due:${duty.id}:close@${q.openDutyRun?.id ?? "none"}`,',
+'          : `duty_due:${duty.id}:close`,',
+        '收工的账按职责记(不按那一轮):上一轮烧穿的预算被下一轮继承',
+    ),
+    (
+        "G15", DISP,
+'        startCapReached: q.dutyStartCapReached,',
+'        startCapReached: false,',
+        '规则读不到「今天开满了」',
+    ),
+    (
+        "G16", DISP,
+'        acceptancePending: q.acceptancePending.length > 0,',
+'        acceptancePending: false,',
+        '规则读不到「货交了等甲方验收」',
+    ),
+    (
+        "G17", DISP,
+'        openRunStartedAt: q.openDutyRun?.startedAt ?? null,',
+'        openRunStartedAt: null,',
+        '规则永远以为没有未收工的一轮(永远不收工)',
+    ),
+    (
+        "G18", DISP,
+'    dutyStartCapReached: duty !== null && dutyStartCapReached(db, now),',
+'    dutyStartCapReached: false,',
+        '事实装配不数「今天开过几轮」',
+    ),
+    (
+        "G19", DISP,
+'    if (kind === "duty_due") continue;',
+'    if (false && kind === "duty_due") continue;',
+        '职责到顶后换手给项目经理(他手里没有职责的工具,白叫三轮)',
+    ),
+    (
+        "G20", DISP,
+'  const duty = dutyOfProject(db, projectId);',
+'  const duty = null;',
+        '事实装配不认职责项目(规则永远不产出,四条规则的口径也不改)',
+    ),
+    (
+        "G21", DISP,
+'      return renderDutyTask(db, todo);',
+'      return "现在轮到你了";',
+        '职责到点的任务正文不摆现状(先看现状再动手没了)',
+    ),
+    (
+        "G22", DISP,
+J('      // 不该给甲方添的点击。正式交付物的职责照旧走这条流水线。)',
+          '      if (q.duty !== null && !q.duty.formal) return [];'),
+J('      // 不该给甲方添的点击。正式交付物的职责照旧走这条流水线。)',
+          '      if (false && q.duty !== null && !q.duty.formal) return [];'),
+        '例行产出的职责也去整合(写出交付物,接着就是待你验收)',
+    ),
+    (
+        "G23", DISP,
+J('      // 职责项目(039)· **例行产出**:不交付 —— 成果在日报里,没有要甲方验收的东西。',
+          '      if (q.duty !== null && !q.duty.formal) return [];'),
+J('      // 职责项目(039)· **例行产出**:不交付 —— 成果在日报里,没有要甲方验收的东西。',
+          '      if (false && q.duty !== null && !q.duty.formal) return [];'),
+        '例行产出的职责也去交付(给甲方添验收)',
+    ),
+    (
+        "G24", DISP,
+J('      // 它的终点是甲方在设置页暂停 / 归档它,不是「做完了」。',
+          '      if (q.duty !== null && !q.duty.formal) return [];'),
+J('      // 它的终点是甲方在设置页暂停 / 归档它,不是「做完了」。',
+          '      if (false && q.duty !== null && !q.duty.formal) return [];'),
+        '例行产出的职责也判收口',
+    ),
+    (
+        "G25", DISP,
+J('      // 例行职责本来就不产出交付物;每一轮做没做成,由 `duty_due` 的收工自省交代。',
+          '      if (q.duty !== null && !q.duty.formal) return [];'),
+J('      // 例行职责本来就不产出交付物;每一轮做没做成,由 `duty_due` 的收工自省交代。',
+          '      if (false && q.duty !== null && !q.duty.formal) return [];'),
+        '例行产出的职责也被问「为什么没交付物」',
+    ),
+    (
+        "Z1", REPO,
+'    updateDuty(db, duty.id, { status: "paused", nextDueAt: null }, now);',
+'    void duty;',
+        '开工到顶不暂停职责(每个 tick 都「到点了」,却永远没人来 —— 静默死)',
+    ),
+    (
+        "Z2", REPO,
+'    if (project !== null && project.status === "active") {',
+'    if (false && project !== null && project.status === "active") {',
+        '自动暂停职责时工作间项目照常跑',
+    ),
+    (
+        "Z3", REPO,
+'    status: "abandoned", finishedAt: now,',
+'    status: "done", finishedAt: now,',
+        '平台收掉的一轮被记成「模型自己收的」(没有自省却像反省过)',
+    ),
+    (
+        "Z4", REPO,
+'    ? `duty_due:${duty.id}:open@${duty.nextDueAt ?? "unscheduled"}`',
+'    ? `duty_due:${duty.id}:open`',
+        '熔断找错了账本(找不到 ⇒ 永远不暂停)',
+    ),
+    (
+        "Z5", REPO,
+'    : `duty_due:${duty.id}:close@${open.id}`;',
+'    : `duty_due:${duty.id}:close`;',
+        '熔断找错了收工的账本(没收工的一轮永远挂着)',
+    ),
+    (
+        "Z6", REPO,
+'  if (ledger === undefined || ledger.notified_at === null) return [];',
+'  if (ledger === undefined) return [];',
+        '熔断不等播报过:刚记了一次账就暂停职责',
+    ),
+    (
+        "Z7", REPO,
+'    gaps: "这一轮没能收工:平台连续三次叫业务经理来收工都没成,这一轮由平台收掉,没有自省。",',
+'    gaps: "无",',
+        '平台收掉的一轮写成「缺口:无」(把没收工说成没问题)',
+    ),
+    (
+        "C1", PROJ,
+'    const preApproved = dutyOfProject(ctx.db, pid) !== null;',
+'    const preApproved = false;',
+        '职责项目里的工作项也要等甲方点「确认开工」(预先授权没了)',
+    ),
+    (
+        "C2", PROJ,
+'        ...(preApproved ? { confirmedAt: at } : {}),',
+'',
+        '同上:算了预先授权却没写进 confirmed_at',
+    ),
+    (
+        "N1", PEND,
+'    duty === null;',
+'    true;',
+        '空的项目经理自己起头拆解,职责的工作间也不例外(绕过「先列功课」)',
+    ),
+    (
+        "N2", PEND,
+'    duty !== null && role !== null && ROLE_SPECS[role].clientFacing',
+'    duty !== null && role !== null',
+        '未收工的那一轮摆给了所有角色(不只对甲方说话的那个)',
+    ),
+    (
+        "X1", DTASK,
+'  const duty = todo.target !== null ? getDuty(db, todo.target) : null;',
+'  const duty = todo.target !== null ? dutyOfProject(db, todo.target) : null;',
+        '拿职责 id 当项目 id 去查(第一版的 bug:每一轮都说「记录已经不在了」)',
+    ),
+    (
+        "X2", DTASK,
+'  ← 这一条这一轮要兑现',
+'',
+        '任务正文不提醒「上一轮说要改的」这一轮要兑现',
+    ),
+    (
+        "X3", DTASK,
+J('    ...(failures.length > 0',
+          '      ? [`- ⚠️ 这一轮有 ${failures.length} 件事没成:'),
+J('    ...(false && failures.length > 0',
+          '      ? [`- ⚠️ 这一轮有 ${failures.length} 件事没成:'),
+        '收工正文不提「有失败必须写自己的原因」',
+    ),
+    (
+        "X4", DTASK,
+'  const stillOpen = works.filter((w) => !isTerminalWorkStatus(w.status));',
+'  const stillOpen = touched.filter((w) => !isTerminalWorkStatus(w.status));',
+        '收工正文只列这一轮动过的活(开工前就卡住、没碰过的不算「没做成」)',
+    ),
+    (
+        "X5", DTASK,
+'  const why = isQuiet(db, duty.projectId, works)',
+'  const why = false',
+        '收工正文永远说「拖到了下一个排定点」(明明是活落定了)',
+    ),
+    (
+        "X6", DTASK,
+'    `- 必须先问甲方的事:${duty.boundaries.trim() !== "" ? duty.boundaries : "(甲方没写 —— 按你平时的判断)"}`,',
+'    `- 必须先问甲方的事:${duty.boundaries}`,',
+        '甲方没写边界时留一个空的「必须先问甲方的事:」(看着像漏了)',
+    ),
+    (
+        "U1", SERVE,
+'    for (const s of settleExhaustedDuty(db, projectId, now())) {',
+'    for (const s of [] as never[]) {',
+        '宿主不扫职责的熔断(到顶之后既不暂停也不播报)',
+    ),
+    (
+        "U2", SERVE,
+'        notifyDesktop(`duty-paused:${s.duty.id}`, "三生 · 一条职责已自动暂停",',
+'        notifyDesktop(`duty-paused:${s.duty.id}`, "三生",',
+        '职责被自动暂停时桌面通知不说是什么事',
+    ),
+    (
+        "U3", SERVE,
+'            `⚠️ 职责:「${s.duty.name}」已自动暂停 —— 连续三次到点,业务经理都没能开工` +',
+'            `职责:「${s.duty.name}」已自动暂停 —— 连续三次到点,业务经理都没能开工` +',
+        '系统消息没有「⚠️ 职责:」首行前缀(界面上分不出这一类)',
     ),
 ]
 

@@ -35,6 +35,8 @@ const TODO_KIND_LABEL: Record<TriggerTodoKind, string> = {
   answer_client_message: "带上甲方在忙时排的话",
   // 038:自己排的时间锚到点了。
   wakeup_due: "处理到点的定时唤醒",
+  // 039:职责到点 —— 开工(列功课)或收工(写自省),同一条待办的两种形态。
+  duty_due: "职责到点:开工列功课 / 收工写自省",
   close_project: "判断项目是否收口",
   escalate_stalled_work: "处置平台已经不再叫醒的待办",
   review_undelivered_project: "判断项目为什么没有交付物",

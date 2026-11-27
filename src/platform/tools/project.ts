@@ -17,6 +17,7 @@ import {
   WORK_STATUSES, type WorkStatus, type WorkStatusChange,
 } from "../storage/repo/works.js";
 import { getAgent } from "../storage/repo/agents.js";
+import { dutyOfProject } from "../storage/repo/duties.js";
 import { insertArtifact, listArtifacts } from "../storage/repo/artifacts.js";
 import { deliveryAcceptance } from "../storage/repo/deliveryVerdicts.js";
 import { ensureProjectOrg } from "../runtime/org.js";
@@ -795,12 +796,17 @@ const workCreate: PlatformTool = {
 
     const id = ctx.newId("wk");
     const at = ctx.now();
+    // 职责的工作间(039):甲方在设置页设下这条职责,就是**预先授权**了这个范围内的活
+    // 自动开工 ⇒ 这里建出来的工作项直接是「已确认」。普通项目里 D3 那道「确认之前
+    // 一个 token 都不花」的硬档一个字没动(`confirmed_at` 仍然只有 HTTP 端点能写)。
+    const preApproved = dutyOfProject(ctx.db, pid) !== null;
     try {
       insertWork(ctx.db, {
         id, projectId: pid, parentWorkId: parentWorkId ?? null,
         title: title.value, goal: goal.value, status: "open",
         ...(priorityArg.value !== undefined ? { priority: priorityArg.value } : {}),
         ...(criteriaArg.value !== undefined ? { acceptanceCriteria: criteriaArg.value } : {}),
+        ...(preApproved ? { confirmedAt: at } : {}),
         assigneeAgentId: resolved.agentId, createdAt: at, updatedAt: at,
       });
     } catch (err) {
@@ -819,7 +825,8 @@ const workCreate: PlatformTool = {
     return ok(
       `已创建 ${id}「${title.value}」→ 负责 ${resolved.agentId}` +
         (priorityArg.value !== undefined ? `\n优先级:${priorityArg.value}` : "") +
-        (depResult.added.length > 0 ? `\n前置:${depResult.added.join(", ")}` : ""),
+        (depResult.added.length > 0 ? `\n前置:${depResult.added.join(", ")}` : "") +
+        (preApproved ? "\n(这里是职责的工作间:甲方设职责时已预先授权,这一条不用再等他确认开工)" : ""),
     );
   },
 };

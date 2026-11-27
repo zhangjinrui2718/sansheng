@@ -1721,6 +1721,12 @@ export type TriggerTodoKind =
    */
   | "wakeup_due"
   /**
+   * **职责到点了**(039 + `duty_due` 规则):业务经理开工(先列功课再派活)或收工
+   * (逐步交代、写自省)。两种形态同一条待办,由库里有没有未收工的一轮决定。
+   * **正文直接进甲方通道** —— 开工那轮写这一轮打算做哪几步,收工那轮就是日报。
+   */
+  | "duty_due"
+  /**
    * 质检判了「不通过」,这份产出回到**写它的人**手上返工(2026-10-07 真机事故补)。
    *
    * ⚠️ 它不是「退回」这个动作的别名:fail 只是写下**一行结构化结论**
@@ -1818,6 +1824,9 @@ export const CLIENT_FACING_TODO_KINDS: ReadonlySet<TriggerTodoKind> = new Set<Tr
   // 2026-11-22(036):这一轮的存在原因就是「甲方说了话等回应」——
   // 正文按定义就是冲着甲方去的(与 resume_client 同一条推理)。
   "answer_client_message",
+  // 2026-11-27(039):职责到点的那一轮 —— 开工那轮是「这一轮打算做哪几步」,
+  // 收工那轮就是日报。甲方设了职责就是为了看这些,不进他眼前等于白做。
+  "duty_due",
 ]);
 
 /**
@@ -2565,8 +2574,11 @@ export interface DutyRunView {
   readonly scheduledFor: number;
   readonly startedAt: number;
   readonly finishedAt: number | null;
-  /** `open` = 还没收工;`done` 是终态 */
-  readonly status: "open" | "done";
+  /**
+   * `open` = 还没收工;`done` = 模型自己收的(有自省);`abandoned` = **平台收掉的**
+   * (连续三次没能收工,没有自省)。后两种都是终态 —— 界面要把它们分开说。
+   */
+  readonly status: "open" | "done" | "abandoned";
   readonly steps: readonly DutyRunStepView[];
   readonly doneSummary: string | null;
   readonly notDone: string | null;

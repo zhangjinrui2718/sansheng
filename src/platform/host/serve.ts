@@ -66,6 +66,7 @@ import {
   type SteerAttempt,
 } from "../runtime/steer.js";
 import { cancelExhaustedWakeups } from "../storage/repo/wakeups.js";
+import { settleExhaustedDuty } from "../storage/repo/duties.js";
 import { ROLE_SPECS } from "../identity/role.js";
 import { resolveClientQuestion } from "../tools/client.js";
 import { listProjectSummaries, type LiveCollectOptions } from "../transport/views.js";
@@ -3261,6 +3262,52 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
         // 平台通知不属于任何封套(与 `announceProviderFailover` 同)。
         originSource: null, triggerKind: null,
       });
+    }
+    // ── 熔断扫描(职责,039,2026-11-27)──────────────────────────────
+    //
+    // 职责是**没人盯着也会自己跑**的东西:预算烧穿之后如果只是「不再叫醒」,甲方
+    // 不会知道它停了 —— 他设了它,就是为了不必盯着。所以两种处置都**主动播报**,
+    // 其中「暂停」再弹一张桌面通知(它需要甲方去设置页恢复;「收掉一轮」不需要
+    // 他做什么,下一轮照常开工,所以只落系统消息)。
+    for (const s of settleExhaustedDuty(db, projectId, now())) {
+      const dutySession = ensureSession(db, projectId, now(), newId, "internal");
+      if (s.kind === "paused") {
+        log.warn(
+          `platform:${channelLabel(projectId)}的职责「${s.duty.name}」连续到点没能开工` +
+            "(尝试预算到顶)—— 已自动暂停",
+        );
+        appendSessionMessage(db, {
+          id: newId("m"),
+          sessionId: dutySession,
+          agentId: null,
+          kind: "system",
+          content:
+            `⚠️ 职责:「${s.duty.name}」已自动暂停 —— 连续三次到点,业务经理都没能开工` +
+            `(多半是供应商、上下文或提示词的问题,不是职责本身)。平台不再重复叫它;` +
+            `到设置页启用可以恢复,下一次开工会重新排定。`,
+          createdAt: now(),
+          originSource: null, triggerKind: null,
+        });
+        notifyDesktop(`duty-paused:${s.duty.id}`, "三生 · 一条职责已自动暂停",
+          `「${s.duty.name}」连续三次到点没能开工,平台不再重复叫它;到设置页启用可以恢复`,
+          (l) => log.muted(l));
+      } else {
+        log.warn(
+          `platform:${channelLabel(projectId)}的职责「${s.duty.name}」这一轮(${s.run.id})` +
+            "连续没能收工(尝试预算到顶)—— 已由平台收掉",
+        );
+        appendSessionMessage(db, {
+          id: newId("m"),
+          sessionId: dutySession,
+          agentId: null,
+          kind: "system",
+          content:
+            `⚠️ 职责:「${s.duty.name}」的这一轮(${s.run.id})没能收工 —— 平台连续三次叫业务经理` +
+            `来收工都没成,这一轮由平台收掉,没有自省。职责没有停:下一轮到点照常开工。`,
+          createdAt: now(),
+          originSource: null, triggerKind: null,
+        });
+      }
     }
     /** 这一轮排空被用户中断过 —— 传进 dispatcher 让它立刻停 */
     let cancelled = false;
