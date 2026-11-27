@@ -45,6 +45,9 @@ import type {
   ClientQuestionList,
   ClientQuestionView,
   DeliveryVerdict,
+  // 职责(039)的读面;写面的入参类型在本文件末尾自己声明(它们不是服务端的读面)。
+  DutyCadenceView,
+  DutyView,
   HarnessView,
   HealthResponse,
   IntakeMessagesResponse,
@@ -862,4 +865,64 @@ export function closeConsent(
     `/projects/${encodeURIComponent(projectId)}/close/consent`,
     { method: "POST", body: JSON.stringify({ choice }) },
   );
+}
+
+// ── 职责(039,2026-11-27)────────────────────────────────────────
+//
+// **职责只有人能建、能改** —— 这四个函数是它在前端的全部写面。模型那一侧只写
+// 「每一轮怎么做、做得怎么样」(两个工具),碰不到这里。
+
+/** 建一条职责时给的节奏:三选一,其余两格不给(服务端 `validateCadence` 说了算)。 */
+export interface DutyCadenceInput {
+  kind: "daily" | "weekly" | "hourly";
+  /** 每天 / 每周的本地时刻 "HH:MM" */
+  at?: string;
+  /** 每周:星期几(0 = 周日 … 6 = 周六) */
+  weekday?: number;
+  /** 每隔几小时 */
+  hours?: number;
+}
+
+export interface DutyCreateInput {
+  name: string;
+  goal: string;
+  boundaries: string;
+  cadence: DutyCadenceInput;
+  formal: boolean;
+  /** 先建着、暂不启用 */
+  startPaused?: boolean;
+}
+
+export interface DutyUpdateInput {
+  name?: string;
+  goal?: string;
+  boundaries?: string;
+  cadence?: DutyCadenceInput;
+  formal?: boolean;
+  status?: "active" | "paused";
+}
+
+export function listDuties(): Promise<{ duties: DutyView[] }> {
+  return request("/duties");
+}
+
+/** 建一条职责 —— 服务端会连带建好它的工作间项目(目录 + 仓库)。 */
+export function createDuty(
+  body: DutyCreateInput,
+): Promise<{ duty: DutyView; workspaceBootstrapped: boolean; workspaceProblem?: string }> {
+  return request("/duties", { method: "POST", body: JSON.stringify(body) });
+}
+
+export function updateDuty(id: string, body: DutyUpdateInput): Promise<{ duty: DutyView }> {
+  return request(`/duties/${encodeURIComponent(id)}`, { method: "PUT", body: JSON.stringify(body) });
+}
+
+/**
+ * 「现在做一次」:把下一次排定改成此刻。已暂停 / 工作间不在进行中 / 上一轮没收工 ⇒
+ * 服务端回 409 `conflict`,`message` 里说了是哪一种(原样给用户看,不在这里改写)。
+ */
+export function runDutyNow(id: string): Promise<{ duty: DutyView }> {
+  return request(`/duties/${encodeURIComponent(id)}/run-now`, {
+    method: "POST", body: JSON.stringify({}),
+  });
 }

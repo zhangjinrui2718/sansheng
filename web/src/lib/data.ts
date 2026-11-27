@@ -37,6 +37,7 @@ import type {
   BlockerView,
   ChangeView,
   ClientQuestionView,
+  DutyView,
   HarnessView,
   MemberConversationView,
   MemberView,
@@ -185,6 +186,19 @@ export function useBlockers(projectId?: string | null): Loaded<BlockerView[]> {
     [projectId, revision],
   );
   return { data: r.data?.blockers ?? [], loading: r.loading, error: r.error };
+}
+
+/**
+ * 全部职责(设置页那一段,039)。
+ *
+ * 什么时候重拉:① 每一轮开工 / 收工都是一次回合 ⇒ `agent_end` ⇒ `projectRevision` 变;
+ * ② 你自己刚建 / 改 / 让它现在做一次之后 —— 调用方把 `extra` 加一,立刻重拉(不等下一个回合)。
+ * 「下次几点开工」那一行不靠轮询:它印的是绝对时刻,到没到点每半分钟就地重算一次。
+ */
+export function useDuties(extra = 0): Loaded<DutyView[]> {
+  const revision = useChatStore((s) => s.projectRevision);
+  const r = useLoad(() => api.listDuties(), [revision, extra]);
+  return { data: r.data?.duties ?? [], loading: r.loading, error: r.error };
 }
 
 /** 本项目成员(四个固定职能)。 */

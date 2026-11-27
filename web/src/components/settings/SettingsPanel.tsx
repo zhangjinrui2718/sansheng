@@ -4,6 +4,7 @@ import { Disclosure } from "@/components/ui/primitives";
 import { DataState, remoteListOf } from "@/components/ui/DataState";
 import { useSettingsStore } from "@/stores/settings";
 import { errorMessage, listProviderFailovers, resetData } from "@/lib/api";
+import { DutySection } from "@/components/settings/DutySection";
 import { invalidateHarnessCache } from "@/lib/data";
 import { fmtTime } from "@/lib/vocab";
 import type { ProviderConfig, ThinkingLevel } from "@shared/types/settings";
@@ -280,6 +281,9 @@ export function SettingsPanel() {
       </div>
 
       <ProviderFailoverHistory />
+
+      {/* 职责(039):它自己取数、自己保存 —— 与上面 provider 的「一个保存按钮」不是一张表单 */}
+      <DutySection />
 
       <section className="sansheng-card-elevated p-4">
         <h2 className="font-serif mb-3" style={{ color: "var(--bone)", fontSize: 14, letterSpacing: ".04em" }}>

@@ -60,7 +60,9 @@ export type GlossaryId =
   | "settings.workdir"
   | "code-service.ignored"
   // ── Wave 3(2026-10-26):工件详情搬进抽屉后,「正文是按 id 现读的」有了落点 ──
-  | "artifact.detail";
+  | "artifact.detail"
+  // 2026-11-27(职责,039):设置页「职责」那一段。
+  | "settings.duties";
 
 export interface GlossaryEntry {
   /** 一句话(≤ 24 字)—— 页面上唯一可见的那部分。 */
@@ -213,6 +215,11 @@ export const GLOSSARY: Record<GlossaryId, GlossaryEntry> = {
     line: "已收口项目的提问,不再等",
     basis: "storage/repo/clientQuestions.ts 的 listAllClientQuestions(终态项目被排除)",
     source: "GET /api/client-questions 的 fromClosedProjects",
+  },
+  "settings.duties": {
+    line: "你设的常设的事,到点他自己开工",
+    basis: "runtime/duty.ts 的 dueDutyPhase(到点开工、活落定了收工)",
+    source: "GET /api/duties 读 duties / duty_runs 两张表",
   },
   "settings.workdir": {
     line: "命令与文件都从这里出发",

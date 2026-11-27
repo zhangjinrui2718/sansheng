@@ -26,6 +26,8 @@ TESTS = [
     "tests/platform/dispatcher-rules.test.ts",
     "tests/platform/project-close-rule.test.ts",
     "tests/web/text-budget.test.ts",
+    # 界面:设置页职责段的状态说法 / 请求体 / 真渲染 / 接线哨兵
+    "tests/web/duty-settings.test.ts",
     "tests/platform/reset.test.ts",
     "tests/platform/execution.test.ts",
     # 能力 / 工具 / 提示词单元的登记处:计数哨兵与设计文档一致性
@@ -52,6 +54,9 @@ DTASK = "src/platform/runtime/dutyTask.ts"
 PROJ = "src/platform/tools/project.ts"
 PEND = "src/platform/runtime/pendingWork.ts"
 SERVE = "src/platform/host/serve.ts"
+DSTAT = "web/src/components/settings/dutyStatus.ts"
+DSEC = "web/src/components/settings/DutySection.tsx"
+RAIL = "web/src/components/shell/HistoryRail.tsx"
 
 MUTATIONS = [
     # ── 时间(纯函数)──────────────────────────────────────────────────
@@ -721,6 +726,103 @@ J('    ...(false && failures.length > 0',
 '            `职责:「${s.duty.name}」已自动暂停 —— 连续三次到点,业务经理都没能开工` +',
         '系统消息没有「⚠️ 职责:」首行前缀(界面上分不出这一类)',
     ),
+    (
+        "Q1", DSTAT,
+J('  if (d.projectStatus !== "active") {',
+          '    return `工作间${projectStatusLabel(d.projectStatus)},不会开工`;'),
+J('  if (false && d.projectStatus !== "active") {',
+          '    return `工作间${projectStatusLabel(d.projectStatus)},不会开工`;'),
+        '界面把「职责启用、工作间却不在进行中」说成「下次开工 …」(它其实不会开工)',
+    ),
+    (
+        "Q2", DSTAT,
+'  if (d.nextDueAt <= now) return "到点了,马上开工";',
+'  if (d.nextDueAt < now) return "到点了,马上开工";',
+        '到点的那一刻不显示「马上开工」(边界)',
+    ),
+    (
+        "Q3", DSTAT,
+J('  if (d.projectStatus !== "active") {',
+          '    return { tone: "amber", label: `工作间${projectStatusLabel(d.projectStatus)}` };'),
+J('  if (false && d.projectStatus !== "active") {',
+          '    return { tone: "amber", label: `工作间${projectStatusLabel(d.projectStatus)}` };'),
+        '状态标签在工作间不在进行中时仍写「启用中」',
+    ),
+    (
+        "Q4", DSTAT,
+'  if (r.status === "abandoned") {',
+'  if (false && r.status === "abandoned") {',
+        '平台收掉的一轮被写成「0/N 步做成」(像模型反省过一样)',
+    ),
+    (
+        "Q5", DSTAT,
+'r.gaps.trim() !== "" && r.gaps.trim() !== "无"',
+'r.gaps.trim() !== ""',
+        '缺口写「无」也摆一行「缺口:无」',
+    ),
+    (
+        "Q6", DSTAT,
+'  if (f.kind === "hourly" && (!Number.isInteger(Number(f.hours)) || Number(f.hours) < 1)) {',
+'  if (f.kind === "hourly" && !Number.isInteger(Number(f.hours)) || Number(f.hours) < 1) {',
+        '每天 / 每周的表单也去看「间隔」那一格(第一版就这么写错:每天的职责存不了)',
+    ),
+    (
+        "Q7", DSTAT,
+J('  if (f.kind === "hourly" && (!Number.isInteger(Number(f.hours)) || Number(f.hours) < 1)) {',
+          '    return "间隔要是 1 小时以上的整数";',
+          '  }'),
+'',
+        '间隔不是正整数也能提交',
+    ),
+    (
+        "Q8", DSTAT,
+'  if (f.kind === "weekly") return { kind: "weekly", at: f.at, weekday: f.weekday };',
+'  if (f.kind === "weekly") return { kind: "weekly", at: f.at, weekday: 1 };',
+        '每周的职责永远排在周一(用户选的星期丢了)',
+    ),
+    (
+        "Q9", DSTAT,
+J('    name: f.name.trim(), goal: f.goal.trim(), boundaries: f.boundaries.trim(),',
+          '    cadence: formCadence(f), formal: f.formal, startPaused: f.startPaused,'),
+J('    name: f.name, goal: f.goal, boundaries: f.boundaries,',
+          '    cadence: formCadence(f), formal: f.formal, startPaused: f.startPaused,'),
+        '新建的职责带着前后空白存进库',
+    ),
+    (
+        "Q10", DSTAT,
+J('    cadence: formCadence(f), formal: f.formal,',
+          '  };',
+          '}'),
+J('    cadence: formCadence(f), formal: f.formal, status: "active" as const,',
+          '  };',
+          '}'),
+        '改一条已暂停的职责会顺手把它启用',
+    ),
+    (
+        "Q11", DSTAT,
+'  const made = r.steps.filter((s) => s.done === true).length;',
+'  const made = r.steps.length;',
+        '「做成几步」数的是全部功课(没做成的也算做成)',
+    ),
+    (
+        "Q12", DSEC,
+'                disabled={busy || d.status !== "active"} onClick={() => props.onRunNow(d)}',
+'                disabled={busy} onClick={() => props.onRunNow(d)}',
+        '已暂停的职责也能点「现在做一次」',
+    ),
+    (
+        "Q13", DSEC,
+'                {d.status === "active" ? "暂停" : "启用"}',
+'                {d.status === "active" ? "启用" : "暂停"}',
+        '启停按钮的文字反了',
+    ),
+    (
+        "Q14", RAIL,
+J('              {p.duty !== undefined && <Pill tone="mute">职责</Pill>}',
+          ''),
+'',
+        '左栏里职责的工作间项目没有「职责」标记(和普通项目长得一样)',
+    ),
 ]
 
 
@@ -777,6 +879,14 @@ def main() -> int:
         if now != src:
             print(f"⚠️  {path} 复原不完整")
             bad += 1
+    # ⚠️ **一条都没跑不算通过**:2026-11-28 实测踩过 —— 补丁没打上、编号一条都没匹配,
+    # 脚本却报「0/0 条变异实测变红 —— 判据有牙 ✅」(第三类静默失败:坏掉的检查
+    # 返回了一个看起来正常的答案)。
+    if len(results) == 0:
+        unknown = sorted(only - {m[0] for m in MUTATIONS}) if only else []
+        reason = f"这些编号不存在:{', '.join(unknown)}" if unknown else "变异表是空的"
+        print(f"\n⚠️  一条变异都没跑 —— {reason}")
+        return 1
     print(f"\n结论:{len(results) - bad}/{len(results)} 条变异实测变红"
           + (" —— 判据有牙 ✅" if bad == 0 else f" —— 有 {bad} 条没咬合 ❌"))
     return 0 if bad == 0 else 1

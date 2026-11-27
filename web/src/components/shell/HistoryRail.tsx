@@ -323,6 +323,8 @@ function ProjectNode(props: {
               {p.name}
             </span>
             <span className="flex-none flex items-center gap-1.5">
+              {/* 职责的工作间(039):一个身份标记 —— 不然它在左栏里和一个普通项目长得一样。 */}
+              {p.duty !== undefined && <Pill tone="mute">职责</Pill>}
               {/* S-G:状态 pill → 一个状态点(悬停项目名可读全文)。非零徽标保留。 */}
               <span
                 aria-hidden

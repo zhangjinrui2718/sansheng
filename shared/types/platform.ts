@@ -2600,6 +2600,11 @@ export interface DutyView {
   /** 必须先问甲方的事(原样带给每一轮的任务正文) */
   readonly boundaries: string;
   readonly cadence: DutyCadenceView;
+  /**
+   * 节奏的一行说法(「每天 09:00」)—— **服务端算的**(`runtime/duty.ts` 的 `cadenceText`,
+   * 与项目摘要 `duty.cadence` 同一个函数)。界面不自己拼:两处各拼一份,迟早说法不一样。
+   */
+  readonly cadenceLabel: string;
   /** `false` = 例行产出(日报,不走交付物);`true` = 正式交付物(要走验收) */
   readonly formal: boolean;
   readonly status: "active" | "paused";

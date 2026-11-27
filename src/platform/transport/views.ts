@@ -829,6 +829,8 @@ export function toDutyView(db: Database.Database, duty: DutyRow): DutyView | nul
     goal: duty.goal,
     boundaries: duty.boundaries,
     cadence: { ...duty.cadence },
+    // 与项目摘要 `duty.cadence` 同一个函数:界面不自己拼节奏的说法。
+    cadenceLabel: cadenceText(duty.cadence),
     formal: duty.formal,
     status: duty.status,
     projectStatus: project.status,
