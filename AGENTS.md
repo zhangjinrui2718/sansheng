@@ -19,8 +19,11 @@
   (`hub.runningTurns()`,重启即清零)/ 库里的工作项与 `collectTodos` 的待办 / 落库痕迹。
   `runtime: "unavailable"` 是**读不到**,不是「空闲」—— 前端不许把它渲染成后者。
   工件页的产出图靠 `ArtifactView.workId`(migration 014 的产出边)把工件挂回环节。
-- **导航现在只有 6 个 tab**:对话 / 项目 / 工作项 / 成员 / 记忆 / 设置
-  (判据是 `web/src/components/shell/TopBar.tsx` 的 `TABS`)。三次收编:
+- **导航现在是左栏 4 项**:对话 / 项目 / 工件 / 记忆(2026-11-21 前端 V2 重做定的;
+  判据是 `web/src/app/Sidebar.tsx` 的 `TABS`,`tests/web/about-page.test.ts` 钉住「恒 4 项」)。
+  设置退为顶栏图标,关于在顶栏的 `?`;工作项 / 成员 / harness 的路由保留作深链过程视图,
+  不占一级导航。⚠️ 下面这句「6 个 tab」是 2026-10 的旧形态,`TopBar.tsx` 里已经没有 `TABS`
+  (2026-11-28 核对时改准)。此前的收编史:
   **「工件」并入「工作项」**(`web/src/routes/Works.tsx`,2026-10-06)与
   **「Harness」并入「成员」**(`web/src/components/members/RoleHarness.tsx`,同日)。
   **「待办」页签也已删除**(2026-10-06):它是**唯一需要甲方动手**的数据,而甲方 90% 的时间在
@@ -61,6 +64,9 @@
   token 都不花**;甲方在对话页「计划」卡点「确认开工」→
   `POST /api/projects/:id/works/confirm` → 排空器下一次兜底轮询接手。
   开关判据 = 服务端计数 `counts.unconfirmedWorks`。
+  ⚠️ **职责的工作间是唯一的例外**(039,2026-11-27):职责项目里建出来的工作项**直接是
+  已确认**(`work_create` 写 `confirmed_at`)—— 甲方在设置页设下一条职责,就是预先授权
+  这个范围内的活自动开工。普通项目里这道硬档一个字没动;见下面「职责」一节。
   **(v5 起「计划」卡长在对话流里**,头部 band 挂载点退场;锚 = 最新一条未确认
   工作项的 createdAt,确认后塌缩成「已确认开工 · N 条」—— 按 `confirmedAt`
   批次锚定,见 `streamCards.ts`)。
@@ -138,7 +144,7 @@
   判据的一部分:同一对节点上两类边**方向一致**时不是环(真机那份数据就是这样),方向相反
   才是环(`mutualPairs` 会点名是哪两条边)。写反会让「交付」跑到最左、并且把一个不存在的
   环报出来(`web/src/lib/workGraph.ts` 的 `collectEdges`)。
-- 基线:**2852 passed / 3 failed(model-catalog,工作区里 pi-ai 版本漂移,先于 2026-11-22 批次存在)/ 163 test files**(2026-11-25「让回合可以跑得久」批次之后实测;该批 2026-11-26 并入 master)· 两条 typecheck 0 error · `check:design` E1–E14 全绿(5 角色)。
+- 基线:**2972 passed / 3 failed(model-catalog,工作区里 pi-ai 版本漂移,先于 2026-11-22 批次存在)/ 168 test files**(2026-11-28「职责」批次之后,在分支 `feat/duties` 上实测;**该批尚未并入 master、未推送**)· 两条 typecheck 0 error · `check:design` E1–E14 全绿(5 角色)。
 - **角色中文名只有一处**:`src/platform/runtime/org.ts` 的 `ORG`(播种 / `roleDisplayName()` /
   `RoleHarnessView.displayName` / **系统提示里的「# 你的角色:X」**全走它);
   前端兜底表 `web/src/lib/vocab.ts` 的 `ROLE_LABEL` 必须逐项相同,由
@@ -152,7 +158,7 @@
   (把旧写法喂回去,它当场变红)。这是本项目第 3 类静默失败(坏掉的检查返回了看起来正常的答案)的一次复发。
 - 日志只走 stdout:`~/.sansheng/logs/sansheng.log` 恒为 0 字节,别去 tail 它。
 
-## 源码地图(`find src -name '*.ts' | wc -l` = 83)
+## 源码地图(`find src -name '*.ts' | wc -l` = 100)
 
 ```
 src/cli/                 CLI 入口(index.ts + paths.ts)
@@ -162,17 +168,18 @@ src/platform/transport/  传输:http(API)/ hub(WS 广播)/ views
 src/platform/runtime/    boot session turn execution assembly promptAssembly pendingWork
                          projectContext dispatcher org sdkAdapter rework
                          (rework.ts = 「退回给谁」的判据,质检返工与甲方拒收共用)
+                         duty(职责的时间与判据,纯函数)/ dutyTask(职责到点的任务正文)
 src/platform/runtime/agentRuntime/  AgentRuntime 端口(types.ts:RuntimeSession /
                          RuntimeEvent / RuntimeSessionFactory)+ `pi/` 适配器
                          (session 工厂 / events 翻译 / toolsAdapter / mcpConfig /
                          providers)—— 换运行时 = 在这里加一个适配器目录(见下
                          「AgentRuntime 端口」一节)
-src/platform/tools/      工具层:14 个文件、41 个平台工具定义 + registry.ts 的 dispatch()
+src/platform/tools/      工具层:`ls *.ts` 16 个文件、**46** 个平台工具定义 + registry.ts 的 dispatch()
 src/platform/mcp/        MCP:server 目录 / secret 存储 / 角色授权 / 求解 / pi 配置转换(见下「MCP」一节)
 src/platform/codeservice/ 代码服务:port.ts(端口)+ git.ts(真实现,盘上核对仓库)
 src/platform/harness/    授权:capability(能力↔工具表)/ authorize(三道门)/ toolSet(L2 集合文件读盘)/ write(提示词写盘)
 src/platform/identity/   角色:role.ts 的 ROLE_SPECS
-src/platform/storage/    db.ts + repo/ 下 15 个仓储(含 knowledge.ts / deliveryVerdicts.ts)
+src/platform/storage/    db.ts + repo/(`ls *.ts` 19 个文件,含 index.ts;knowledge.ts / deliveryVerdicts.ts / duties.ts)
 src/platform/infra/      keyring / settings / settingsApply / providers / migrations
 src/platform/memory/     MemoryPort 端口 + sqlite 实现(**关于用户**,会淡忘)
 src/platform/knowledge/  知识语料:切块 / 索引器 / 现读(**关于项目**,只读;见下)
@@ -181,7 +188,7 @@ src/platform/client/     ClientChannel 端口
 shared/types/            跨端协议类型(platform.ts / settings.ts)
 ```
 
-工具表合计 **51 个工具 = 44 平台 + 7 SDK 内置**,能力 **38** 条 —— 这几个数字由 `check:design`
+工具表合计 **53 个工具 = 46 平台 + 7 SDK 内置**,能力 **39** 条 —— 这几个数字由 `check:design`
 (能力/工具)与 `tests/platform/client.test.ts` 的哨兵(已实现工具数)每次核对。
 
 > **不要按「单向分层」的假设推理依赖方向。** 实测 `identity ↔ harness` 之间有**值级 import 环**(`src/platform/identity/role.ts` 从 `src/platform/harness/capability.ts` 取能力表,`src/platform/harness/authorize.ts` 从 `src/platform/identity/role.ts` 取 `ROLE_SPECS`),`transport` 也会向上引 `host`。这是现状,不代表可以随手加新的反向依赖。
@@ -285,6 +292,7 @@ shared/types/            跨端协议类型(platform.ts / settings.ts)
 | `research_worker` / `coding_worker` | **分派给它、前置已满足、还没终态**的工作项 | `pendingWork.ts` 的 `myOpenWorks` |
 | **产出的作者**(执行角色或 PM) | **质检判了不通过**(`rework`)/ **甲方拒收了一份交付物**(`rework_rejected`,029)—— 目的地都是**产出的作者**,没有作者退 PM,第 3 轮起换人 | `review_verdicts` / `delivery_verdicts` |
 | `quality_reviewer` | 有人问它 / 有变更待评 / **有做完但没审的产出** | `works.status='done' AND review_state='pending'` |
+| `business_manager`(**职责到点**,039) | **到点开工**(先列功课再派活)/ **活落定了收工写自省**(同一职责同时只有一轮) | `duties.status` + `next_due_at`、`duty_runs` 里有没有未收工的一轮;判据本体是 `runtime/duty.ts` 的 `dueDutyPhase`。⚠️ 到顶**不换手给项目经理**(他手里没有职责的工具),由宿主的熔断扫描处置 —— 见「职责」一节 |
 
 > ✅ **「等待审查」现在是库里的真状态**(`works.review_state = none | pending | done`,migration 013)。迁入 `done` → `pending`,质检回合**成功结束后**由平台置 `done`;维护点是 `works.status` 的唯一写口 `repo/works.ts` 的 `updateWorkStatus`。所以质检的待办就是**一条查询**,重启后补跑。批次 20 那句「不要把它写成一条 SQL 查询」随这次重构作废 —— 当时它是对的(语义为假),现在是假的(状态真的存在了)。
 
@@ -412,7 +420,9 @@ dev/prod + CI/CD」,09:54 业务经理只回了一句「我先看下你之前留
 
 > ⚠️ **下文按 `RULES` 的 `id` 说话,不按「第 N 条」** —— 序数会随增删漂
 > (2026-10-08 加了 `rework_rejected_delivery` 之后,原来的「第 13/14/15 条」
-> 全部平移了一格,而**没有任何检查会红**)。当前 `RULES` 与 `TODO_KINDS` 都是 **18** 条。
+> 全部平移了一格,而**没有任何检查会红**)。当前 `RULES` 与 `TODO_KINDS` 都是 **21** 条
+> (2026-11-22 补到 20,2026-11-27 补第 21 条 `duty_due`;计数由 `tests/platform/dispatcher-rules.test.ts` 钉住 ——
+> 这句原先停在「18 条」,两次加规则都没人回来改,是 2026-11-28 核对时改准的)。
 
 真机驱动:根工作项被质检**连续三轮 fail**,而 `turn_usage` 显示**三次审查之间一个执行回合都
 没有** —— 两个缺陷叠加:`fail` 对**容器**是空操作(判 fail 走 `updateWorkStatus(in_progress)`,
@@ -875,8 +885,133 @@ H1–H4 / T1–T18 / R1);`mutation-multica-borrow.py` 14/14(见上节更正)。w
   门铃会把它叫起来。临时探针实测:收口项目上 `collectTodos` 照样产出 `wakeup_due`,直接排空真跑 1 个回合、
   唤醒置 `done`。`authorize.ts` 里「项目收口后不该再点火」那句注释说的意图与此相反);
   人没有取消入口(HTTP 无端点、界面不可见);`tools/schedule.ts` 校验的是 1 分钟、报错文案却写「10 分钟」。
-  执行者的任务正文(`execution.ts` 的 `composeWorkPrompt`)只有标题与目标,**不带工作项级验收判据**(037)——
-  判据只摆给质检看,执行者要到返工那一轮才第一次见到。
+  ~~执行者的任务正文(`execution.ts` 的 `composeWorkPrompt`)只有标题与目标,**不带工作项级验收判据**(037)——
+  判据只摆给质检看,执行者要到返工那一轮才第一次见到。~~ **已修**(2026-11-27,随「职责」一批):
+  `composeWorkPrompt` 逐条带上工作项的验收判据(判据在动手前就到做事的人手上)。
+  ⚠️ 上面唤醒(038)的几条**仍然没动** —— 职责(039)是另一套机制(有自己的表与规则),没有顺手修唤醒。
+
+## 职责:三生自己找活干(2026-11-27 · 数字员工 + 曾国藩性情机制,039)
+
+**背景**:用户要三生成为一个**数字员工** —— 给他设一些**职责**,他自己到点找活干、用现有的组织把活做完,
+不必逐件驱动;并把曾国藩的性情做成**系统机制**,不是提示词里的口号。落地前问过四件事
+(员工是谁 / 哪些事不用他亲手点 / 落成哪几组机制 / 头几件职责是什么),**用户没有逐项作答**;
+看过列着这些默认值的方案后说「可以的,我觉得可以开发了」⇒ 方案被**整体放行**,但**没有逐项表态**
+(见下面「默认值」)。组织编排的核心(排空器 / 三道门 / 验收门)没有动。
+
+> ⚠️ **这一批在分支 `feat/duties` 上,尚未并入 master、未推送**(提交以 `git log` 为准)。
+> ⚠️ **没有与真 SDK / 真模型实测** —— 端到端用的是真宿主 + 真的适配层 + 假会话,模型那一侧的动作
+> 由测试直接调工具来扮演(证明的是接线,不是「模型会不会照做」)。
+
+### 一条职责 = 一个长期项目 + 一条职责记录
+
+不另造一套东西:职责的项目(「工作间」)长期保持进行中,工作项 / 工件 / 知识 / 对话全部复用。
+
+| 表 | 存什么 |
+|---|---|
+| `duties` | 名称、目标、边界(「必须先问我的事」,原样带给模型)、节奏、产出形态、状态、`next_due_at`(算出来存进库的) |
+| `duty_runs` | 每一轮功课:服务的排定点、开工 / 收工时刻、功课步骤、自省六项(「原因」在有失败时必填,其余五项恒必填)、这一轮里平台查到的失败;`open` / `done` / `abandoned` |
+
+- **产出形态**两种:**例行产出**(缺省)不整合、不生成交付物、不用甲方验收,成果就是日报;
+  **正式交付物**走完整流程(交付物要甲方验收,收口要甲方同意)。
+- **节奏**三种:每天 HH:MM / 每周星期几 HH:MM / 每隔 N 小时。下一次的时刻按**排定点**累加
+  (`runtime/duty.ts` 的 `nextDueAt`,纯函数),不按实际收工时间 —— 后者会让「每天 9:00」一天天往后漂。
+  按小时的节奏落在 22:00–08:00 的排定点顺延;每天 / 每周不套这条(那个时刻是甲方亲手填的)。
+  进程当时不在(电脑睡了)⇒ 醒来后补做一轮,错过的轮数如实可数(`missedSlots`)。
+
+### 一轮怎么跑
+
+```
+到点(库里的 next_due_at ≤ 现在)
+ → 规则 duty_due 产出「开工」待办,叫醒业务经理
+ → 任务正文 = 职责 + 边界 + 上一轮的自省 + 现状(平台查好摆进去的)+ 这一轮怎么做
+ → duty_run_open 列功课(1–3 步,每步一条可检验的标准);ask_role 请项目经理拆
+   (职责项目里建出来的工作项已确认,不用甲方再点)
+ → 执行者做 → 质检审 →(正式交付:整合 → 交接 → 等甲方验收)
+ → 工作间安静了(没有未完成的活 / 待审的产出 / 未答的提问)或拖到了下一个排定点
+ → 规则产出「收工」待办 → duty_run_close:每一步交代 + 自省五项;正文就是日报
+```
+
+### 性情 → 机制(每一条都是平台保证的,不靠模型自觉)
+
+| 性情 | 机制 | 落点 |
+|---|---|---|
+| **有恒 · 日课** | 到点自动开工;开工必须先列功课(写不出就还没想清这一轮做什么);连续三次没能开工 ⇒ 暂停职责并通知,不静默停;补做时错过的轮数如实写 | 规则 `duty_due`、`duty_run_open`、宿主熔断 |
+| **日省**(写日记检视自己) | 不写完自省不算收工:每一步功课都交代,做成 / 没做成 / 下一轮怎么改 / 缺口 / 新知都要填(没有就写「无」) | `duty_run_close` 的校验 |
+| **尚拙 · 结硬寨打呆仗** | ① 动手前平台把现状摆给他(上一轮的自省、没做完的活、出过的失败、等甲方答的);② 同一职责同时只有一轮,一轮最多三步;拖到下一个排定点就强制收工、如实写没做完;③ 职责项目里质检照常审;执行者的任务正文带验收判据 | `runtime/dutyTask.ts`、规则、`execution.ts` |
+| **屡败屡战 · 反求诸己** | 这一轮有失败(工作项失败 / 质检不通过 / 甲方拒收)时「原因在自己哪一步」不许为空,失败清单由**平台查**;下一轮开工时把「上次说要改的」摆回给他;职责不因一次失败停下 | `duty_run_close`、`failuresSince`、任务正文 |
+| **求缺** | 日报必列缺口(空着不许收工);界面只显示「做成 N 步 / 共 M 步」,不显示百分比 | `duty_run_close`、`dutyStatus.ts` |
+| **夜不出门 · 保身** | 按小时的职责 22:00–08:00 不开新工;每天全系统最多 12 轮开工 | `runtime/duty.ts` 的常量 |
+| **当时不杂,未来不迎,既过不恋** | 同一职责同时只有一轮;已收工的记录改不动(仓储层就是写口);拖过排定点就收掉。⚠️ 「这一轮不去掺和别的职责」是提示词层面的,没有硬拦 | 规则 + 仓储(`done` / `abandoned` 是终态) |
+| **成大事以多得替手为第一要义**(流传的话) | 他自己不执行:要动手的交给项目经理拆、研究员 / 工程师做、质检把关;甲方设了职责 = 预先授权,职责项目里的工作项建出来就已确认 | `work_create` |
+
+引语取的是流传的说法,不是逐字校勘的原文;提示词(`business_manager.duty`)里只写道理、写明来历,
+并明说「不必模仿谁的口吻」—— 对话里仍然只有「三生」一个声音。
+
+### 默认值(按推荐值落地;方案被整体放行,**没有逐项表态**)
+
+| 事项 | 取的值 | 另一种 |
+|---|---|---|
+| 员工是谁 | 就是三生:业务经理升级成这个员工,另外四个角色照旧是班底(不新增角色) | 另起第六个角色(要重建 `agents` 表并改十几处「五个角色」的检查) |
+| 自主范围 | 职责内拆出的活自动开工;例行产出以日报交付、不用验收;**正式交付物仍要甲方验收,收口同意不变** | 完全放手 / 只自动开工 |
+| 说话口吻 | 不变 | 说话也学他 |
+| 一轮最多几步 / 每天最多几轮 / 静默时段 | 3 步 / 12 轮 / 22:00–08:00(都只是常量) | — |
+
+### 判据与落点
+
+| 东西 | 落点 |
+|---|---|
+| 该不该开工 / 收工 | `runtime/duty.ts` 的 `dueDutyPhase`(**纯函数**);规则 `duty_due` 只读 `collectRuleFacts` 物化好的事实 |
+| 任务正文(先看现状) | `runtime/dutyTask.ts` 的 `renderDutyTask` |
+| 开工 / 收工的写入与校验 | `tools/duty.ts`(能力 `duty.run`,只给业务经理;`duty.` 在 `PROJECT_SCOPED_PREFIXES` 里) |
+| 职责的建与改(**只有人能做**) | HTTP:`GET/POST /api/duties`、`PUT /api/duties/:id`、`POST /api/duties/:id/run-now` |
+| 熔断 | `repo/duties.ts` 的 `settleExhaustedDuty`;宿主在每趟排空前扫(`serve.ts`),暂停时弹桌面通知 + 落 `⚠️ 职责:` 系统消息 |
+| 界面 | 设置页 `components/settings/DutySection.tsx` + `dutyStatus.ts`;左栏职责项目带「职责」标记;词汇表 `settings.duties` |
+
+### 这一批写测试时抓到的真 bug(读代码都看不出来,记下来免得重犯)
+
+1. **账本必须按轮次记**。尝试预算(`dispatch_attempts`)按待办 key 记账,「待办消失即预算作废」只认 key。
+   职责待办的 key 原先只按职责记 ⇒ 上一轮收工烧穿的预算被下一轮收工**直接继承**(第二轮根本没人来叫,
+   就被熔断判成「收不了工」);甲方恢复职责后还带着那本老账,下一趟又被暂停。
+   ⇒ 开工按**排定点**记(`duty_due:<id>:open@<next_due_at>`),收工按**那一轮**记(`…:close@<run id>`)。
+2. **熔断要查精确的那一本账**。按前缀找的话,恢复职责后的新一趟会被之前烧穿的老账拖累。
+3. **任务正文拿职责 id 当项目 id 去查**(`getDuty` 写成了 `dutyOfProject`)⇒ 每一轮都说「记录已经不在了」。
+4. **调用期的授权门不重判「项目在进行中」** —— 那是建会话时算工具面的事;旧会话里的工具在项目被暂停后
+   仍然调得动 ⇒ 职责的两个工具自己看一眼项目状态。
+5. 界面:`A && B || C` 少一对括号,让**每天**的表单也去看「间隔」那一格 —— 每天的职责存不了。
+6. 上一批留下的:轨迹测试的辅助函数拿仓储层的原始顺序当 seq 序用(逐条写之后两行通常不在同一毫秒)——
+   全量跑时随机红、单跑恒绿,已改成按 seq 排并补了一条与钟表无关的判据。
+7. 变异脚本自己:指定的编号一条都没匹配上时,它报「0/0 条变异实测变红 —— 判据有牙」并以 0 退出
+   (第三类静默失败)—— 现在明说并以失败退出。
+
+### 回归与变异
+
+`tests/platform/duties.test.ts`(28:时间 / 仓储(含「已收口的轮次改不动」)/ 四个接口)· `duty-runs.test.ts`(19:两个工具的写入与拒收、
+失败清单、授权)· `duty-rule.test.ts`(39:判据本体 + 接线 + 职责项目里别的规则的口径 + 任务正文 + 熔断)·
+`duty-host.test.ts`(2:真宿主走完一整轮;连续三次没开工 ⇒ 自动暂停 + 系统消息 + 桌面通知)·
+`tests/web/duty-settings.test.ts`(29:屏上说法的判据 + 真渲染 + 接线哨兵;表单翻出来的节奏跨边界对服务端的
+`validateCadence`)。另:`execution.test.ts` +2(执行者正文带判据)、`turn-events.test.ts` +1、
+规则计数哨兵 20 → 21、工具计数 44 → 46、提示词单元 15 → 16、web `text-budget` 9,767 → 10,017。
+**变异**:`.probe/mutation-duties.py` **118 条全部实测变红**(D / R / H / V:数据、仓储、接口、视图;
+K:工具;G / Z / C / N / X / U:规则、熔断、预先确认、注入面、任务正文、宿主;Q:界面)。
+真正漏过网的两条都是**判据弱**:G25(测试造的场景被另一条规则压着,拆掉防线也绿)与
+Q8(断言「星期几原样带过去」的样本正好是周一,而变异恰好把它写死成周一);另有三条是脚本锚点没对上
+(D4 的实现在重构后并入了 K18;G2 / G3 缩进写错),不是漏网。
+
+### 没做的 / 没验证的(如实记)
+
+- **没有与真 SDK / 真模型实测。**真机上第一次跑的时候盯:业务经理到点是否先列功课再派活;
+  日报是否如实列缺口;**「开完功课立刻收工」只有提示词约束、没有硬拦**(硬拦得靠墙钟,本项目拒绝)。
+- **下游事件仍会照旧叫醒业务经理**(工作项失败绕过合并窗口立刻叫)—— 待办块里有一行提示
+  「结果并进日报,用 `[未播报]` 留内部」,但这是提示词层面的,没在真模型上验过。
+- **巡检类职责只能看和报**,不能直接去推别的项目(跨项目派活今天不存在);**维护类职责**的工作区是
+  新建的空仓,不能指向已有的代码仓;职责**只能暂停、不能删**;每月节奏、外部事件触发不做;
+  不能在对话里直接跟他说「你负责 X」就登记。
+- **「边界」是写给他看的规矩,不是硬拦截**;金额上限没有,只有「每天 12 轮」这一道。
+- ⚠️ **一条早就存在、这一批只是撞见的通用现象**:`tools/registry.ts` 的 `dispatch()` 在调用期重判的是
+  ceiling、接待范围、kind / target —— **不重判「项目在进行中」**(那是建会话时 `solveToolset` 算工具面的事)。
+  于是项目被暂停 / 收口之后,**之前建好的会话仍带着收口前的项目内工具**。职责的两个工具自己补了一道
+  「工作间不在进行中就拒收」;别的工具没补 —— 要不要在 `dispatch()` 里统一补,是一次显式评审。
+- 唤醒(038)的几条缺口照旧(见上一节末)。
 
 ## 跨项目地址带项目坐标(2026-10-26 · Wave 2e)
 
@@ -995,8 +1130,9 @@ H1–H4 / T1–T18 / R1);`mutation-multica-borrow.py` 14/14(见上节更正)。w
   (四态含义 / `GLOSSARY` 全表 / **已知不实之处**)。
   ⚠️ **它不是第七个页签** —— 导航恒 6 项,入口是顶栏末尾那个 `?`(`TopBar` 的 `NavTab label="?"`)。
   「已知不实之处」的数据在 `lib/glossary.ts` 的 `KNOWN_GAPS`(**每条必须带 `where` 落点**),
-  现在 7 条(语料 tainted 标记不存在 · 成本无上界 · 进行中依赖 WS · 降级是平台级 · 降级无结构化表 ·
-  MCP 无界面且连接状态读不到 · 已收口项目的提问不再排队)。回归 `tests/web/about-page.test.ts`(12 条)。
+  现在 8 条(语料 tainted 标记不存在 · 成本无上界 · 进行中依赖 WS · 降级是平台级 · 降级无结构化表 ·
+  MCP 无界面且连接状态读不到 · 已收口项目的提问不再排队 · 职责「到点了」不等于马上开工)。回归
+  `tests/web/about-page.test.ts`(12 条)。
 - 变异自检脚本:`.probe/mutation-wave0b.py`(6 条,全部实测变红)。
   ⚠️ **它不用 `git checkout --` 复原** —— 新增文件还没入库时会报 `pathspec … did not match`,
   于是**变异留在盘上**、脚本自己崩。改成按内存里的原文写回 + 断言「复原后与原文逐字相同」。
@@ -1388,6 +1524,8 @@ M8 工作项列表复活 · M9 页面自己判档位 · M10 卡片不是链接)�
 **037 工作项级验收判据**(`works.acceptance_criteria`,与 031 同形;质检逐条对照),
 **038 结构化唤醒**(`wakeups`:`at`/`every` 两种,闭集在 TS;**取 multica issue_wakeup 的时间轴子集**,
 cron 与条件唤醒如实不做)。
+**039 职责**(`duties` + `duty_runs`:一摊常设的事 + 每一轮功课的记录;一条职责 = 一个长期项目
+(工作间)+ 一条职责记录;节奏 / 状态 / 一轮的状态三个闭集都在 TS;详见「职责」一节)。
 - ⚠️ **`artifacts.work_id` 一条边承载两个语义**(「产出」∪「关于」,migration 014):执行角色写 `evidence` 是产出,质检把 `review_finding` 挂到**被审的那条**上是「关于」。取「这条工作项交付了什么」必须自己区分(`runtime/execution.ts` 用 `work_id` + 作者 + `kind ∉ ABOUT_ONLY_ARTIFACT_KINDS` 三条判据);**不要删那些边** —— 它是 `review_finding` 唯一能表达「审的是哪一条」的地方。
 - `artifacts` 直接挂项目 —— **没有 blackboard 容器层**。记忆在 `memory_fragments` / `memory_profile`,不是 `fragments`:`fragments` 是旧名字,001 已占用。
 - 平台表**不得复用旧表名**:`CREATE TABLE IF NOT EXISTS` 撞名时静默无操作,新表根本建不出来(见下 §三类静默失败)。加表前先 `ls migrations/` 查名。
