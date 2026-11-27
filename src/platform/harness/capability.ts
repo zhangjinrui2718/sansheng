@@ -80,7 +80,11 @@ export type Capability =
   // ── 038(2026-11-22):结构化唤醒 —— 「到点再叫醒我」落成库里的行。
   // 只给业务经理:排的是**他对甲方/项目的自查节奏**(早报、稍后再查),
   // 不是给执行角色加第二套排空器。
-  | "schedule.manage";
+  | "schedule.manage"
+  // ── 039(2026-11-27):职责的功课 —— 开工列功课、收工写自省(`duty_run_open` /
+  // `duty_run_close`)。只给业务经理:职责本身只有人能建能改(HTTP),模型只写
+  // 「每一轮怎么做、做得怎么样」。
+  | "duty.run";
 
 /** 闭合集数组形式 —— 遍历/校验用。顺序与设计文档一致。 */
 export const CAPABILITIES = [
@@ -122,6 +126,7 @@ export const CAPABILITIES = [
   "work.report",
   "work.review_verdict",
   "schedule.manage",
+  "duty.run",
 ] as const satisfies readonly Capability[];
 
 /**
@@ -188,6 +193,7 @@ export const CAPABILITY_GROUP: Readonly<Record<Capability, string>> = {
   "work.report": "汇报",
   "work.review_verdict": "审查",
   "schedule.manage": "定时",
+  "duty.run": "职责",
 };
 
 /** 一个能力的中文分组(界面用)。键是闭合联合,所以这里不会漏项。 */
@@ -220,7 +226,8 @@ export type PlatformToolName =
   | "ask_client" | "tell_client"
   | "report"
   | "review_verdict"
-  | "wakeup_create" | "wakeup_list" | "wakeup_cancel";
+  | "wakeup_create" | "wakeup_list" | "wakeup_cancel"
+  | "duty_run_open" | "duty_run_close";
 
 export type ToolName = SdkToolName | PlatformToolName;
 
@@ -292,6 +299,7 @@ export const CAPABILITY_TOOLS: Readonly<Record<Capability, readonly ToolName[]>>
   "work.report": ["report"],
   "work.review_verdict": ["review_verdict"],
   "schedule.manage": ["wakeup_create", "wakeup_list", "wakeup_cancel"],
+  "duty.run": ["duty_run_open", "duty_run_close"],
 };
 
 /** SDK 内置工具名集合。**必须先于 PLATFORM_TOOLS 初始化** —— 后者在模块加载期

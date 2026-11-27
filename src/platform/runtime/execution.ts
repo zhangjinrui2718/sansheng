@@ -272,6 +272,16 @@ export function composeWorkPrompt(
     "",
     "目标:",
     work.goal,
+    // 工作项级验收判据(037)。它们此前只摆给质检看(`renderPendingReviews`)与
+    // 项目经理(拆解提示)—— **执行者自己从没见过**,要到返工那一轮才第一次拿到,
+    // 而那时已经是「你没做到」的事后通知。判据在动手前就得到做事的人手上。
+    ...(work.acceptanceCriteria.length > 0
+      ? [
+          "",
+          "验收判据(质检将逐条对照 —— 做到哪条,就要说得出它的证据):",
+          ...work.acceptanceCriteria.map((c, i) => `  ${i + 1}. ${c}`),
+        ]
+      : []),
     "",
     "---",
     "完成后**直接调 `work.update` 把状态改成 done**(或 failed);",

@@ -152,6 +152,8 @@ describe("能力面已完整(BC5 接线前置)", () => {
     // (设计 `docs/DESIGN-KNOWLEDGE.md`;**没有**写侧工具 —— 索引由平台做)。
     // 41 → **44**:定时唤醒(2026-11-22,038)的 `wakeup_create` / `wakeup_list` /
     // `wakeup_cancel`(能力 `schedule.manage`,只给业务经理 —— 见 tools/schedule.ts)。
+    // 44 → **46**:职责的功课(2026-11-27,039)的 `duty_run_open` / `duty_run_close`
+    // (能力 `duty.run`,只给业务经理 —— 见 tools/duty.ts)。
     // 38 → **41**:MCP(2026-10-16)的 `mcp_list` / `mcp_grant` / `mcp_revoke`
     // (设计 1 §3.2 的 `mcp.read` / `mcp.grant`;**没有**「新增 server 定义」的工具 ——
     //  定义 = 任意命令执行 / 任意出网,那是人的资产,见 tools/mcp.ts 文件头)。
@@ -159,7 +161,7 @@ describe("能力面已完整(BC5 接线前置)", () => {
     // 写成 40 会让这条哨兵当场变红 —— 而它红的方式恰好说明它是有用的。
     // 这个数**必须手工跟着改** —— 若从代码自动推导,它就永远等于自己,
     // 那一刻它就不再是「有没有人偷偷加了工具」的哨兵了。
-    expect(registrySnapshot().implemented).toBe(44);
+    expect(registrySnapshot().implemented).toBe(46);
   });
 
   it("client 工具已注册", () => {

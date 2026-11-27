@@ -178,6 +178,8 @@ export type PromptUnitId =
   | "business_manager.core"
   | "business_manager.protocol"
   | "business_manager.align"
+  /** 039(2026-11-27):职责到点的那一轮 —— 开工列功课、派活、收工写自省。 */
+  | "business_manager.duty"
   | "project_manager.core"
   | "project_manager.protocol"
   | "research_worker.core"
@@ -237,11 +239,16 @@ export const ROLE_SPECS: Readonly<Record<ProjectRole, RoleSpec>> = {
       // 038(2026-11-22):结构化唤醒 —— 排「到点再叫醒我」(早报/稍后再查)。
       // 只给业务经理:排的是他对甲方与项目的自查节奏,不是执行角色的第二套排空器。
       "schedule.manage",
+      // 039(2026-11-27):职责的功课 —— 到点开工时列功课、收工时写自省。
+      // ⚠️ 职责的**建与改**不在这里:那是甲方在设置页做的事(HTTP `/api/duties`),
+      // 做成工具就等于让模型替甲方预先授权。
+      "duty.run",
     ],
     writeKinds: ["project_brief", "decision", "note"],
     promptUnits: [
       "business_manager.core", "business_manager.protocol",
       "business_manager.align", "collaboration.convene",
+      "business_manager.duty",
     ],
     // 业务经理不持有 work.* 与 code.* —— 它收敛诉求,不拆解、不干活
     boundaryDeny: [

@@ -1,5 +1,6 @@
 /**
- * 职责的时间与判据(migration 039,2026-11-27)—— **纯函数**
+ * 职责的时间与判据(migration 039,2026-11-27)—— **纯函数**(只有 `dutyStartCapReached`
+ * 是一条只读查询,读 `duty_runs` 数今天开了几轮)
  *
  * ── 它回答什么 ──────────────────────────────────────────────────
  *
@@ -19,6 +20,8 @@
  * 这条:那个时刻是甲方亲手填的,他填 23:30 就是 23:30。
  */
 import type { DutyCadence } from "../storage/repo/duties.js";
+import { countDutyRunsStartedSince } from "../storage/repo/duties.js";
+import type Database from "better-sqlite3";
 
 const HOUR_MS = 3_600_000;
 
@@ -122,25 +125,53 @@ export function nextDueAt(cadence: DutyCadence, after: number): number {
 }
 
 /**
- * 排定点 `dueAt` 到 `now` 之间**错过了几轮**(不含正在补做的这一轮)。
- * 进程当时不在(电脑睡了)时会大于 0;日报如实写它。上限 10,000 是防御(坏数据不该让这里转不完)。
+ * 以排定点 `slot` 为起点往后数,到 `now` 为止的结果:
+ *   · `missed`   —— `slot` 之后、`now` 之前(含)又过去了几个排定点(**不含**正在补做的这一轮);
+ *   · `nextDueAt` —— `now` 之后的第一个排定点(下一次该开工的时刻)。
+ *
+ * 一轮开工时两件事同时要:日报如实写「错过了几轮」,而职责的 `next_due_at` 要推进到
+ * 一个**还在未来**的排定点 —— 只往后推一格的话,补做一轮时它可能已经又过去了。
+ * 上限 10,000 是防御(坏数据不该让这里转不完)。
  */
-export function missedSlots(cadence: DutyCadence, dueAt: number, now: number): number {
-  let t = dueAt;
-  let n = 0;
-  while (n < 10_000) {
+export function slotsAfter(
+  cadence: DutyCadence,
+  slot: number,
+  now: number,
+): { readonly missed: number; readonly nextDueAt: number } {
+  let t = slot;
+  let missed = 0;
+  while (missed < 10_000) {
     const next = nextDueAt(cadence, t);
-    if (next > now) break;
+    if (next > now) return { missed, nextDueAt: next };
     t = next;
-    n += 1;
+    missed += 1;
   }
-  return n;
+  return { missed, nextDueAt: t };
+}
+
+/** 排定点 `dueAt` 到 `now` 之间**错过了几轮**(进程当时不在时会大于 0;日报如实写它)。 */
+export function missedSlots(cadence: DutyCadence, dueAt: number, now: number): number {
+  return slotsAfter(cadence, dueAt, now).missed;
+}
+
+/** 这一轮服务完 `slot` 之后,下一次该开工的时刻:`now` 之后的第一个排定点。 */
+export function advanceDueAt(cadence: DutyCadence, slot: number, now: number): number {
+  return slotsAfter(cadence, slot, now).nextDueAt;
 }
 
 /** `t` 所在那个本地日的零点(「今天开过几轮」的起点)。 */
 export function localDayStart(t: number): number {
   const d = new Date(t);
   return new Date(d.getFullYear(), d.getMonth(), d.getDate(), 0, 0, 0, 0).getTime();
+}
+
+/**
+ * 今天全系统开的工到上限了吗。**规则(`duty_due`)与开课工具读的是同一个判据** ——
+ * 规则拦在「叫不叫醒」,工具拦在「写不写得进」,两处一个答案。
+ * 本文件其余都是纯函数;这一条是只读查询(它读 `duty_runs`,不写任何东西)。
+ */
+export function dutyStartCapReached(db: Database.Database, now: number): boolean {
+  return countDutyRunsStartedSince(db, localDayStart(now)) >= DUTY_DAILY_START_CAP;
 }
 
 function pad2(n: number): string {

@@ -127,6 +127,7 @@ const CAPABILITY_LABEL: Readonly<Partial<Record<Capability, string>>> = {
   "code.write": "改代码",
   "code.exec": "执行命令",
   "work.report": "汇报进度",
+  "duty.run": "职责的功课:开工列功课、收工写自省",
 };
 
 /*

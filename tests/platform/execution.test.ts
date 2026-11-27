@@ -306,6 +306,7 @@ describe("composeWorkPrompt · 告诉它怎么算完成", () => {
     const p = composeWorkPrompt({
       id: "w1", projectId: "p1", parentWorkId: null, title: "写接口", goal: "加分页",
       status: "open", confirmedAt: 1, assigneeAgentId: "wk", createdAt: AT, updatedAt: AT,
+      acceptanceCriteria: [],
     });
     expect(p).toContain("w1");
     expect(p).toContain("写接口");
@@ -316,11 +317,42 @@ describe("composeWorkPrompt · 告诉它怎么算完成", () => {
     const p = composeWorkPrompt({
       id: "w1", projectId: "p1", parentWorkId: null, title: "t", goal: "g",
       status: "open", confirmedAt: 1, assigneeAgentId: "wk", createdAt: AT, updatedAt: AT,
+      acceptanceCriteria: [],
     });
     expect(p).toContain("board_write");
     expect(p).toContain("工件就是你的交付物");
     expect(p).toContain("work.update");
     expect(p).toContain("blocker_open");
+  });
+
+  it("带上工作项级验收判据 —— 执行者在动手前就要看到「做成什么样算做成」(2026-11-27;此前只摆给质检看)", () => {
+    const withCriteria = composeWorkPrompt({
+      id: "w1", projectId: "p1", parentWorkId: null, title: "写接口", goal: "加分页",
+      status: "open", confirmedAt: 1, assigneeAgentId: "wk", createdAt: AT, updatedAt: AT,
+      acceptanceCriteria: ["翻页响应 < 200ms", "空页返回空数组而不是报错"],
+    });
+    expect(withCriteria).toContain("验收判据");
+    expect(withCriteria).toContain("  1. 翻页响应 < 200ms");
+    expect(withCriteria).toContain("  2. 空页返回空数组而不是报错");
+    // 负样本:没给判据的工作项不摆一个空的「验收判据」标题(空标题比没有更糟)
+    const none = composeWorkPrompt({
+      id: "w1", projectId: "p1", parentWorkId: null, title: "写接口", goal: "加分页",
+      status: "open", confirmedAt: 1, assigneeAgentId: "wk", createdAt: AT, updatedAt: AT,
+      acceptanceCriteria: [],
+    });
+    expect(none).not.toContain("验收判据");
+  });
+
+  it("真跑一个带验收判据的工作项:任务正文里带着它(从库里读出来,不是测试塞进去的)", async () => {
+    const w = mkWork({ acceptanceCriteria: ["响应里有 total 字段"] });
+    let seen = "";
+    const r = await run(w.id, fakeSession(({ emit, text }) => {
+      seen = text;
+      emit({ type: "message_update", message: {}, deltaKind: "text", delta: "好" } as RuntimeEvent);
+    }));
+    expect(r.outcome).not.toBe("refused");
+    expect(seen).toContain("验收判据");
+    expect(seen).toContain("  1. 响应里有 total 字段");
   });
 });
 
@@ -634,6 +666,7 @@ describe("任务 1 · 产出采集走 014 的产出边", () => {
     const p = composeWorkPrompt({
       id: "w1", projectId: "p1", parentWorkId: null, title: "t", goal: "g",
       status: "open", confirmedAt: 1, assigneeAgentId: "wk", createdAt: AT, updatedAt: AT,
+      acceptanceCriteria: [],
     });
     expect(p).toContain("workId");
     expect(p).toContain('"w1"');

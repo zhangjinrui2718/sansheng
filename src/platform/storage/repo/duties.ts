@@ -10,6 +10,8 @@
  * ⚠️ **repos 不造 id、不读时钟**:id 与时刻都由调用方传进来(与其余仓储同一条规矩)。
  */
 import type Database from "better-sqlite3";
+import { getWork } from "./works.js";
+import { getArtifact } from "./artifacts.js";
 
 // ── 闭集(不建 CHECK,将来加取值不动 schema)──────────────────────
 
@@ -384,4 +386,43 @@ export function countDutyRunsStartedSince(db: Database.Database, since: number):
     .prepare(`SELECT COUNT(*) AS n FROM duty_runs WHERE started_at >= ?`)
     .get(since) as { n: number };
   return row.n;
+}
+
+/**
+ * 某个时刻之后,这个项目里**平台查得到**的失败。收工时写进 `duty_runs.failures`,
+ * 「这一轮有失败就必须写自己的原因」那条校验读它。
+ *
+ *   · `work_failed` / `work_blocked` —— 读 outbox(`dispatch_events`):它是「出过什么事」
+ *     的流水,行在消费之后仍然留着;而 `works.status` 只看得到**此刻**停在 `failed`
+ *     的那些(被复活 / 退役之后就查不到了 —— 那正是最该反省的一类)。
+ *   · `review_fail` —— 质检判了不通过(`review_verdicts`)。
+ *   · `rejected`    —— 甲方拒收了交付物(`delivery_verdicts`)。
+ *
+ * 标题取工作项 / 工件的标题(取不到给空串,不编)。只读结构化列。
+ */
+export function failuresSince(db: Database.Database, projectId: string, since: number): DutyFailure[] {
+  const out: DutyFailure[] = [];
+  const events = db
+    .prepare(
+      `SELECT kind, subject_id FROM dispatch_events
+       WHERE project_id = ? AND kind IN ('work_failed', 'work_blocked') AND created_at >= ?
+       ORDER BY created_at, seq`,
+    )
+    .all(projectId, since) as Array<{ kind: string; subject_id: string }>;
+  for (const e of events) {
+    out.push({ kind: e.kind, id: e.subject_id, title: getWork(db, e.subject_id)?.title ?? "" });
+  }
+  const reviews = db
+    .prepare(`SELECT work_id FROM review_verdicts WHERE project_id = ? AND verdict = 'fail' AND created_at >= ? ORDER BY created_at, seq`)
+    .all(projectId, since) as Array<{ work_id: string }>;
+  for (const r of reviews) {
+    out.push({ kind: "review_fail", id: r.work_id, title: getWork(db, r.work_id)?.title ?? "" });
+  }
+  const rejects = db
+    .prepare(`SELECT artifact_id FROM delivery_verdicts WHERE project_id = ? AND verdict = 'reject' AND created_at >= ? ORDER BY created_at, seq`)
+    .all(projectId, since) as Array<{ artifact_id: string }>;
+  for (const r of rejects) {
+    out.push({ kind: "rejected", id: r.artifact_id, title: getArtifact(db, r.artifact_id)?.title ?? "" });
+  }
+  return out;
 }

@@ -39,6 +39,7 @@ import { CLIENT_TOOLS } from "./client.js";
 import { REVIEW_TOOLS } from "./review.js";
 import { NUDGE_CAPABILITIES } from "../runtime/dispatcher.js";
 import { SCHEDULE_TOOLS } from "./schedule.js";
+import { DUTY_TOOLS } from "./duty.js";
 import { fail, type PlatformTool, type ToolResult, type ToolRunContext } from "./types.js";
 
 /** 已实现的全部平台工具。BC2 / BC7 的工具在各自批次落地后并入这里。 */
@@ -56,6 +57,8 @@ export const ALL_PLATFORM_TOOLS: readonly PlatformTool[] = [
   ...REVIEW_TOOLS,
   // 038:结构化唤醒(schedule.manage,只给业务经理)。
   ...SCHEDULE_TOOLS,
+  // 039:职责的功课(duty.run,只给业务经理)。
+  ...DUTY_TOOLS,
 ];
 
 /** 工具名 → 工具定义 */

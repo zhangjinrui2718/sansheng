@@ -19,7 +19,15 @@ ROOT = Path(__file__).resolve().parent.parent
 # 误判成「没改坏」,Wave 2d 的教训)。
 TESTS = [
     "tests/platform/duties.test.ts",
+    "tests/platform/duty-runs.test.ts",
     "tests/platform/reset.test.ts",
+    "tests/platform/execution.test.ts",
+    # 能力 / 工具 / 提示词单元的登记处:计数哨兵与设计文档一致性
+    "tests/platform/client.test.ts",
+    "tests/platform/tool-briefs.test.ts",
+    "tests/platform/design-conformance.test.ts",
+    "tests/platform/harness-write.test.ts",
+    "tests/platform/prompt-assembly.test.ts",
 ]
 
 
@@ -32,6 +40,7 @@ DUTY = "src/platform/runtime/duty.ts"
 REPO = "src/platform/storage/repo/duties.ts"
 HTTP = "src/platform/transport/http.ts"
 VIEWS = "src/platform/transport/views.ts"
+TOOL = "src/platform/tools/duty.ts"
 
 MUTATIONS = [
     # ── 时间(纯函数)──────────────────────────────────────────────────
@@ -56,14 +65,6 @@ MUTATIONS = [
         "  return hour >= DUTY_QUIET_FROM_HOUR || hour < DUTY_QUIET_TO_HOUR;",
         "  return hour > DUTY_QUIET_FROM_HOUR || hour < DUTY_QUIET_TO_HOUR;",
         "静默时段漏掉 22 点整",
-    ),
-    (
-        "D4", DUTY,
-        J("    const next = nextDueAt(cadence, t);",
-          "    if (next > now) break;"),
-        J("    const next = nextDueAt(cadence, t);",
-          "    if (next >= now) break;"),
-        "错过的轮次数:正好落在现在的那个排定点被漏数",
     ),
     (
         "D5", DUTY,
@@ -291,6 +292,141 @@ MUTATIONS = [
         "    projectStatus: project.status,",
         "    projectStatus: \"active\",",
         "职责读面把工作间项目永远说成进行中",
+    ),
+    # ── 日课与日省:两个工具 ──────────────────────────────────────────
+    (
+        "K1", TOOL,
+        J("    const open = openDutyRunOf(ctx.db, duty.id);",
+          "    if (open !== null) {"),
+        J("    const open = openDutyRunOf(ctx.db, duty.id);",
+          "    if (false && open !== null) {"),
+        "开工:上一轮没收工也开新的一轮(同一职责同时不止一轮)",
+    ),
+    (
+        "K2", TOOL,
+        "    if (duty.status !== \"active\") {",
+        "    if (false && duty.status !== \"active\") {",
+        "开工:已暂停的职责照开",
+    ),
+    (
+        "K3", TOOL,
+        "    if (proj.project.status !== \"active\") {",
+        "    if (false && proj.project.status !== \"active\") {",
+        "工作间项目不在进行中也照开 / 照收(工具自己那一眼被拿掉)",
+    ),
+    (
+        "K4", TOOL,
+        "  if (raw.length < 1) {",
+        "  if (raw.length < 0) {",
+        "开工:一步功课都不写也能开",
+    ),
+    (
+        "K5", TOOL,
+        "  if (raw.length > DUTY_MAX_STEPS) {",
+        "  if (raw.length > DUTY_MAX_STEPS + 10) {",
+        "开工:功课步数没有上限",
+    ),
+    (
+        "K6", TOOL,
+        "    if (title === \"\" || criterion === \"\") {",
+        "    if (title === \"\" && criterion === \"\") {",
+        "开工:功课没有可检验的标准也能开",
+    ),
+    (
+        "K7", TOOL,
+        "    if (dutyStartCapReached(ctx.db, now)) {",
+        "    if (false && dutyStartCapReached(ctx.db, now)) {",
+        "开工:每天的上限不拦(工具那第二道)",
+    ),
+    (
+        "K8", TOOL,
+        "    const { missed, nextDueAt } = slotsAfter(duty.cadence, slot, now);",
+        "    const { missed, nextDueAt } = { missed: 0, nextDueAt: slot + 86_400_000 };",
+        "开工:下一次按「排定点 + 24 小时」推(补做时那一格已经过去 ⇒ 刚开工就又到点)",
+    ),
+    (
+        "K9", TOOL,
+        "    if (failures.length > 0 && cause === null) {",
+        "    if (false && failures.length > 0 && cause === null) {",
+        "收工:出了失败也不要求写自己的原因",
+    ),
+    (
+        "K10", TOOL,
+        "  if (raw.length !== plan.length) {",
+        "  if (raw.length > plan.length) {",
+        "收工:功课可以少交代几步",
+    ),
+    (
+        "K11", TOOL,
+        J("  if (s === \"\") {",
+          "    return { ok: false, result: fail(\"invalid_args\", `${key} 不许为空:${hint}`) };"),
+        J("  if (false && s === \"\") {",
+          "    return { ok: false, result: fail(\"invalid_args\", `${key} 不许为空:${hint}`) };"),
+        "收工:自省五项可以空着",
+    ),
+    (
+        "K12", TOOL,
+        "    const failures = failuresSince(ctx.db, proj.project.id, run.startedAt);",
+        "    const failures = failuresSince(ctx.db, proj.project.id, 0);",
+        "收工:这一轮开工之前的失败也算在它头上",
+    ),
+    (
+        "K13", TOOL,
+        "    if (run === null) {",
+        "    if (false && run === null) {",
+        "收工:没有未收工的一轮也不拦",
+    ),
+    (
+        "K14", REPO,
+        J("       WHERE project_id = ? AND kind IN ('work_failed', 'work_blocked') AND created_at >= ?",
+          "       ORDER BY created_at, seq`,"),
+        J("       WHERE project_id = ? AND kind IN ('work_failed', 'work_blocked') AND created_at >= ? - 3",
+          "       ORDER BY created_at, seq`,"),
+        "失败清单的时间窗往前多开 3 毫秒(开工之前的失败被算进来)",
+    ),
+    (
+        "K15", REPO,
+        "`SELECT work_id FROM review_verdicts WHERE project_id = ? AND verdict = 'fail' AND created_at >= ? ORDER BY created_at, seq`",
+        "`SELECT work_id FROM review_verdicts WHERE project_id = ? AND created_at >= ? ORDER BY created_at, seq`",
+        "失败清单:质检「通过」也算失败",
+    ),
+    (
+        "K16", REPO,
+        "`SELECT artifact_id FROM delivery_verdicts WHERE project_id = ? AND verdict = 'reject' AND created_at >= ? ORDER BY created_at, seq`",
+        "`SELECT artifact_id FROM delivery_verdicts WHERE project_id = ? AND created_at >= ? ORDER BY created_at, seq`",
+        "失败清单:甲方「接受」也算失败",
+    ),
+    (
+        "K17", DUTY,
+        "  return countDutyRunsStartedSince(db, localDayStart(now)) >= DUTY_DAILY_START_CAP;",
+        "  return countDutyRunsStartedSince(db, localDayStart(now)) > DUTY_DAILY_START_CAP;",
+        "每天的上限差一(开满 12 轮还能再开一轮)",
+    ),
+    (
+        "K18", DUTY,
+        "    if (next > now) return { missed, nextDueAt: next };",
+        "    if (next >= now) return { missed, nextDueAt: next };",
+        "排定点正好是「现在」时被排到下一次(刚开工就又到点)",
+    ),
+    (
+        "K19", "src/platform/runtime/execution.ts",
+        "    ...(work.acceptanceCriteria.length > 0",
+        "    ...(work.acceptanceCriteria.length < 0",
+        "执行者的任务正文不带验收判据",
+    ),
+    (
+        "K20", "src/platform/identity/role.ts",
+        J("      // 做成工具就等于让模型替甲方预先授权。",
+          "      \"duty.run\","),
+        J("      // 做成工具就等于让模型替甲方预先授权。"),
+        "业务经理的工具面里没有职责的功课(它根本调不了)",
+    ),
+    (
+        "K21", "src/platform/harness/authorize.ts",
+        J("  // 已收口)就不许再开工、收工。",
+          "  \"duty.\","),
+        J("  // 已收口)就不许再开工、收工。"),
+        "职责的功课不是项目内能力(工作间不在进行中也拿得到工具)",
     ),
 ]
 

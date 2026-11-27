@@ -37,10 +37,13 @@ afterEach(() => {
 });
 
 describe("规矩① · id 必须来自闭合注册表", () => {
-  it("注册表由 ROLE_SPECS 推导,含全部 15 个单元(2026-11-15 +methodology.core)", () => {
+  it("注册表由 ROLE_SPECS 推导,含全部 16 个单元(2026-11-27 +business_manager.duty)", () => {
     // 12 → 14(2026-10-08):`worker.core/.protocol` 拆成两套;
-    // 14 → 15(2026-11-15):+`methodology.core`(三干活角色共享的五步作业系统)。
-    expect(promptUnitIds()).toHaveLength(15);
+    // 14 → 15(2026-11-15):+`methodology.core`(三干活角色共享的五步作业系统);
+    // 15 → 16(2026-11-27):+`business_manager.duty`(职责到点的那一轮:开工列功课、
+    // 收工写自省 —— 039)。
+    expect(promptUnitIds()).toHaveLength(16);
+    expect(promptUnitIds()).toContain("business_manager.duty");
     expect(promptUnitIds()).toContain("methodology.core");
     expect(promptUnitIds()).toContain(ANY_UNIT);
     expect(promptUnitIds()).toContain("quality_reviewer.protocol");

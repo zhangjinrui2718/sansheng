@@ -97,6 +97,7 @@
 | `knowledge.read` | 检索项目语料(对话 / 工件正文;索引由平台做,只读) |
 | `mcp.read` | 列外部工具(MCP)server 目录与各角色授权 ← **只有「读」,没有「授权」**:它是甲方接口,不该替甲方扩权 |
 | `schedule.manage` | 排**定时唤醒**(038:到点由排空器叫醒,note 原样带回)← 仅本角色持有:排的是它对甲方与项目的自查节奏,不是执行角色的第二套排空器 |
+| `duty.run` | 职责的功课(039:到点开工时列功课、收工时写自省)← 仅本角色持有。**职责本身(目标 / 节奏 / 边界)只有人能建能改**(HTTP `/api/duties`):设职责 = 预先授权,必须出自甲方 |
 | **`client.ask`** | **向甲方提问** ← 仅本角色持有 |
 | **`client.message`** | **向甲方播报** ← 仅本角色持有 |
 
@@ -118,6 +119,7 @@
     "memory_search", "memory_remember", "knowledge_search", "knowledge_read",
     "mcp_list",
     "wakeup_create", "wakeup_list", "wakeup_cancel",
+    "duty_run_open", "duty_run_close",
     "ask_client", "tell_client"
   ],
   "deny": ["work_create", "work_update", "work_assign", "work_list", "work_read",
@@ -125,7 +127,7 @@
 }
 ```
 
-**33 个工具。**(2026-11-13 更正:首版写「26 个」—— 上面 `allow` 数组就是 30 项,与 `factoryToolset("business_manager")` 实测一致,是首版数错了。)注意 `clientFacing: true` 是它能拿到最后两个的唯一原因 —— `ScopeGate` 规则 1。
+**35 个工具。**(2026-11-27:33 → 35,加职责的功课两条;2026-11-13 更正:首版写「26 个」—— 上面 `allow` 数组就是 30 项,与 `factoryToolset("business_manager")` 实测一致,是首版数错了。)注意 `clientFacing: true` 是它能拿到最后两个的唯一原因 —— `ScopeGate` 规则 1。
 
 `deny` 列出它的两条边界:**不拆解工作**(`work.*` 全族)与**不碰代码**(SDK 七件)。业务经理收敛诉求,不排期也不干活。
 
@@ -138,6 +140,7 @@
 | `business_manager.core` | 角色定义:唯一客户接口;职责是收敛诉求而非执行 |
 | `business_manager.protocol` | 何时 `ask_client` / 何时 `project_open`;结论必须落 `board_write` |
 | `business_manager.align` | 对齐规约:一次只问一个问题、必须给候选项与倾向、禁止把问题原样抛回甲方 |
+| `business_manager.duty` | 职责到点的那一轮:先看现状 → 列功课(1–3 步,每步可检验)→ 派活不自己干 → 收工逐步交代、写自省(有失败必写自己的原因)→ 日报必列缺口;正文就是给甲方的日报 |
 | `collaboration.convene` | 会议主持规约:明确议题、参会人、要谁表态、结束要出纪要 |
 
 ### 2.6 失败模式(来自 7-B / 7-L 的真实现场)
@@ -510,13 +513,14 @@
 | `work.report` | — | ✅ | ✅ | ✅ | — |
 | `work.review_verdict` | — | — | — | — | ✅ |
 | `schedule.manage` | ✅ | — | — | — | — |
+| `duty.run` | ✅ | — | — | — | — |
 | `code.read` | — | — | ✅ | ✅ | — |
 | `code.write` | — | — | — | ✅ | — |
 | `code.exec` | — | — | ✅ | ✅ | — |
 | **`client.ask`** | **✅** | — | — | — | — |
 | **`client.message`** | **✅** | — | — | — | — |
 
-**共 38 条 capability。** 读这张表最该看的是**最后两行** —— 整个组织里只有一个角色能跟甲方说话,这不是提示词里的约定,是这张表的形状决定的。
+**共 39 条 capability。** 读这张表最该看的是**最后两行** —— 整个组织里只有一个角色能跟甲方说话,这不是提示词里的约定,是这张表的形状决定的。
 
 三处值得单独注意:
 
