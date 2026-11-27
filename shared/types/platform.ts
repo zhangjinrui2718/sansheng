@@ -190,6 +190,11 @@ export interface ProjectSummary {
    * 这个字段不出现,而**不是**写成 0(读不到 ≠ 没人跑)。左栏「在跑」组的判据。
    */
   runningTurns?: number;
+  /**
+   * 这个项目是**某条职责的工作间**(039,2026-11-27)。普通项目**不带**这个字段
+   * (不是写成 `null`)—— 左栏据此打「职责」标记;字段不在 = 普通项目。
+   */
+  duty?: DutySummary;
   createdAt: number;
   /** 该项目的规模概览 —— 列表页直接用,不必再拉详情 */
   counts: {
@@ -2204,6 +2209,15 @@ export function eventProjectId(ev: ServerEvent): string | null {
 //   GET    /api/settings                      → SettingsPublic       (shared/types/settings.ts)
 //   PUT    /api/settings                      → { ok, settings }
 //   GET    /api/providers                     → { providers: ProviderInfo[] } (shared/types/settings.ts)
+//   ── 职责(039,2026-11-27):一条职责 = 一个长期项目 + 一条职责记录 ──
+//   GET    /api/duties                        → { duties: DutyView[] }
+//   POST   /api/duties                        → { duty: DutyView } [201]
+//                                                (+ workspaceBootstrapped / workspaceProblem,
+//                                                 与 `POST /api/projects` 同一组字段、同一个理由)
+//   PUT    /api/duties/:id                    → { duty: DutyView }
+//   POST   /api/duties/:id/run-now            → { duty: DutyView }
+//                                                ⚠️ **唯一由人写**的「现在就开工」:把下一次
+//                                                排定改成此刻。已暂停 / 有一轮没收工 ⇒ 409 conflict。
 //   ── 项目 ──
 //   GET    /api/projects                      → { projects: ProjectSummary[] }
 //   POST   /api/projects                      → { project: ProjectSummary } [201]
@@ -2345,7 +2359,8 @@ export function eventProjectId(ev: ServerEvent): string | null {
 // 错误形状(所有非 2xx):`{ error: { code, message } }`
 //   code: invalid_body | invalid_args | not_found | already_resolved |
 //         not_a_question | settings_write_failed | internal |
-//         unknown_unit | confirmation_required | write_failed | no_factory_copy
+//         unknown_unit | confirmation_required | write_failed | no_factory_copy |
+//         conflict(409:职责「现在做一次」时已暂停或有一轮没收工;恢复一条工作间已收口的职责)
 //
 // `unknown_unit` 的响应里**额外带 `validIds`**(在 `error` 对象**里面**,
 // 不是 body 顶层)—— 让调用方知道合法 id 有哪些,而不是去猜。
@@ -2500,6 +2515,94 @@ export interface ProviderFailoverEntryView {
 /** `GET /api/diagnostics/provider-failover` 的响应。新的在前;至多 20 条。 */
 export interface ProviderFailoverResponse {
   entries: ProviderFailoverEntryView[];
+}
+
+// ── 职责(migration 039,2026-11-27)───────────────────────────────
+//
+// 一条职责 = 一个长期项目(工作间)+ 一条职责记录。读写两侧的闭集在
+// `src/platform/storage/repo/duties.ts`;这里只是给界面看的形状。
+
+/** 职责在项目列表里的那一眼(左栏标记用;详情见 `DutyView`)。 */
+export interface DutySummary {
+  /** 节奏的一行说法(「每天 09:00」) */
+  readonly cadence: string;
+  readonly status: "active" | "paused";
+  /** 下一次该开工的时刻;`null` = 没排(已暂停) */
+  readonly nextDueAt: number | null;
+}
+
+/** 节奏。三选一,其余两格为 `null`。 */
+export interface DutyCadenceView {
+  /** `daily`=每天 `at`;`weekly`=每周 `weekday` 的 `at`(0 = 周日 … 6 = 周六);`hourly`=每隔 `hours` 小时 */
+  readonly kind: "daily" | "weekly" | "hourly";
+  /** 本地时刻 "HH:MM";`hourly` 时为 `null` */
+  readonly at: string | null;
+  readonly weekday: number | null;
+  readonly hours: number | null;
+}
+
+/** 功课里的一步。`done` 为 `null` = 还没交代。 */
+export interface DutyRunStepView {
+  readonly title: string;
+  /** 可检验的标准:做到什么算这一步成了 */
+  readonly criterion: string;
+  readonly done: boolean | null;
+  readonly note: string | null;
+}
+
+/** 这一轮窗口内平台查到的一条失败(`kind`:work_failed / review_fail / rejected)。 */
+export interface DutyFailureView {
+  readonly kind: string;
+  readonly id: string;
+  readonly title: string;
+}
+
+/** 一轮功课的记录:开工时列的功课 + 收工时写的自省。 */
+export interface DutyRunView {
+  readonly id: string;
+  readonly dutyId: string;
+  /** 这一轮服务的是哪个排定点(晚开工时与 `startedAt` 不同) */
+  readonly scheduledFor: number;
+  readonly startedAt: number;
+  readonly finishedAt: number | null;
+  /** `open` = 还没收工;`done` 是终态 */
+  readonly status: "open" | "done";
+  readonly steps: readonly DutyRunStepView[];
+  readonly doneSummary: string | null;
+  readonly notDone: string | null;
+  /** 原因在自己哪一步(这一轮有失败时必填) */
+  readonly cause: string | null;
+  readonly nextChange: string | null;
+  /** 没做到 / 缺口 / 存疑(收工必填;没有也要写「无」) */
+  readonly gaps: string | null;
+  readonly learned: string | null;
+  readonly failures: readonly DutyFailureView[];
+}
+
+export interface DutyView {
+  readonly id: string;
+  /** 工作间项目(长期保持 active;与职责一对一) */
+  readonly projectId: string;
+  readonly name: string;
+  readonly goal: string;
+  /** 必须先问甲方的事(原样带给每一轮的任务正文) */
+  readonly boundaries: string;
+  readonly cadence: DutyCadenceView;
+  /** `false` = 例行产出(日报,不走交付物);`true` = 正式交付物(要走验收) */
+  readonly formal: boolean;
+  readonly status: "active" | "paused";
+  /**
+   * 工作间项目在库里的状态。项目不是 `active`(被暂停 / 已收口)时职责**不会开工**
+   * —— 哪怕 `status` 还是 `active`。界面要照这两个数的组合说话,不替它圆。
+   */
+  readonly projectStatus: ProjectStatus;
+  /** 下一次该开工的时刻;`null` = 没排(已暂停) */
+  readonly nextDueAt: number | null;
+  readonly lastRunAt: number | null;
+  readonly createdAt: number;
+  readonly updatedAt: number;
+  /** 最近的一轮(不论收没收工);从没开过工为 `null` */
+  readonly lastRun: DutyRunView | null;
 }
 
 // 注意:`SettingsPublic` / `ProviderInfo` **不在这里重定义** —— 它们在

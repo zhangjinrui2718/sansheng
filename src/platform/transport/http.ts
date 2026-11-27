@@ -26,8 +26,12 @@ import type Database from "better-sqlite3";
 import { join } from "node:path";
 import { readFileSync, existsSync } from "node:fs";
 import {
-  listProjects, getProjectRow, insertProject, markCloseConsent,
+  listProjects, getProjectRow, insertProject, markCloseConsent, updateProject,
 } from "../storage/repo/projects.js";
+import {
+  listDuties, getDuty, insertDuty, updateDuty, openDutyRunOf, type DutyUpdate,
+} from "../storage/repo/duties.js";
+import { nextDueAt, validateCadence } from "../runtime/duty.js";
 import { confirmWorks, getWork } from "../storage/repo/works.js";
 import {
   getArtifact,
@@ -62,7 +66,7 @@ import {
   toMessageView, toProjectUsageView,
   toWorkView,
   toKnowledgeOverview, listKnowledgeChunkViews,
-  listProviderFailoverEntries,
+  listProviderFailoverEntries, toDutyView,
   type LiveCollectOptions, type LiveRuntimeSnapshot,
 } from "./views.js";
 import { buildMatchQuery } from "../knowledge/query.js";
@@ -86,6 +90,7 @@ import type {
   AgentConversationLineView, AgentConversationsResponse,
   AgentTurnEventsResponse, AgentTurnView,
   CodeServiceFileView, CodeServiceFilesView,
+  DutyView,
   HarnessView, MemberConversationView, MemberConversationsResponse,
   KnowledgeChunkView,
   PromptUnitView, RepoCommitsView, RoleHarnessView, SessionIndexEntry,
@@ -205,6 +210,9 @@ const err = (code: string, message: string, status: 400 | 404 | 409 | 500 = 400)
   body: { error: { code, message } },
   status,
 });
+
+/** 职责工作间项目的 `client` 字段:职责不是某次委托的一次性活,这一栏如实写「职责」。 */
+const DUTY_PROJECT_CLIENT = "职责";
 
 /**
  * 同上,但带一个**补充清单**(合法 server 名 / 合法角色 / 仍然授权着的角色)。
@@ -404,34 +412,35 @@ export function createPlatformApp(deps: HttpDeps): Hono {
     return c.json({ projects: listProjectSummaries(db, filter, running) });
   });
 
-  app.post("/api/projects", async (c) => {
-    const body = (await c.req.json().catch(() => null)) as {
-      name?: unknown; client?: unknown; goal?: unknown; criteria?: unknown;
-    } | null;
-    if (body === null) return c.json(err("invalid_body", "请求体不是合法 JSON").body, 400);
-    const name = typeof body.name === "string" ? body.name.trim() : "";
-    const goal = typeof body.goal === "string" ? body.goal.trim() : "";
-    // 验收判据(2026-11-15,结构化):HTTP 立项不强制(网页表的演进另批),
-    // 缺省把 goal 整体作为单条判据 —— 空判据比没有判据更糟(伪结构)。
-    const criteria: string[] = Array.isArray(body.criteria)
-      ? body.criteria.filter((x: unknown): x is string => typeof x === "string" && x.trim() !== "").map((x: string) => x.trim())
-      : goal !== "" ? [goal] : [];
-    if (goal === "") {
-      // 立项而不写目标 = 下游所有人都会做出一堆自感觉良好但甲方不要的东西。
-      // 这不是格式校验,是设计 1 §1「收敛诉求」那条规矩的接口面落点。
-      return c.json(err("invalid_args", "goal 不能为空 —— 立项必须说清做成什么样算成").body, 400);
-    }
-
+  /**
+   * 建一个项目:项目行 + 整个组织进项目 + 工作区(目录 + 仓库)。
+   *
+   * **两个入口共用这一份**:`POST /api/projects` 与 `POST /api/duties`(职责的工作间)。
+   * 「两个入口造出两种项目」是这个项目要消灭的分叉 —— 下面那两段注释记的正是
+   * 上一次分叉的事故。
+   */
+  function createProjectRecord(input: {
+    readonly name: string;
+    readonly client: string;
+    readonly goal: string;
+    readonly criteria: readonly string[];
+  }): {
+    readonly id: string;
+    readonly row: ReturnType<typeof getProjectRow>;
+    readonly createdOrg: string[];
+    readonly workspaceBootstrapped: boolean;
+    readonly workspaceProblem: string | null;
+  } {
     const at = deps.now();
     // 组织不在就建 —— 用户第一次打开界面时不该先去命令行跑一遍
     const createdOrg = ensureOrg(db, at);
     const id = deps.newId("pj");
     insertProject(db, {
       id,
-      name,
-      client: typeof body.client === "string" && body.client.trim() !== "" ? body.client.trim() : "(未指定)",
-      goal,
-      acceptanceCriteria: criteria,
+      name: input.name,
+      client: input.client,
+      goal: input.goal,
+      acceptanceCriteria: [...input.criteria],
       status: "active",
       createdAt: at,
     });
@@ -470,21 +479,223 @@ export function createPlatformApp(deps: HttpDeps): Hono {
         : bootstrapError !== null
           ? `建工作区时抛出异常,工作区根目录 ${workspaceRoot} 仍不存在:${bootstrapError}`
           : `ensureWorkspace 跑完了,但工作区根目录 ${workspaceRoot} 仍然不存在 —— 目录没建出来。`;
+    return { id, row: getProjectRow(db, id), createdOrg, workspaceBootstrapped, workspaceProblem };
+  }
 
-    const row = getProjectRow(db, id);
-    if (row === null) return c.json(err("internal", "项目刚建好却读不到", 500).body, 500);
+  app.post("/api/projects", async (c) => {
+    const body = (await c.req.json().catch(() => null)) as {
+      name?: unknown; client?: unknown; goal?: unknown; criteria?: unknown;
+    } | null;
+    if (body === null) return c.json(err("invalid_body", "请求体不是合法 JSON").body, 400);
+    const name = typeof body.name === "string" ? body.name.trim() : "";
+    const goal = typeof body.goal === "string" ? body.goal.trim() : "";
+    // 验收判据(2026-11-15,结构化):HTTP 立项不强制(网页表的演进另批),
+    // 缺省把 goal 整体作为单条判据 —— 空判据比没有判据更糟(伪结构)。
+    const criteria: string[] = Array.isArray(body.criteria)
+      ? body.criteria.filter((x: unknown): x is string => typeof x === "string" && x.trim() !== "").map((x: string) => x.trim())
+      : goal !== "" ? [goal] : [];
+    if (goal === "") {
+      // 立项而不写目标 = 下游所有人都会做出一堆自感觉良好但甲方不要的东西。
+      // 这不是格式校验,是设计 1 §1「收敛诉求」那条规矩的接口面落点。
+      return c.json(err("invalid_args", "goal 不能为空 —— 立项必须说清做成什么样算成").body, 400);
+    }
+
+    const r = createProjectRecord({
+      name,
+      client: typeof body.client === "string" && body.client.trim() !== "" ? body.client.trim() : "(未指定)",
+      goal,
+      criteria,
+    });
+    if (r.row === null) return c.json(err("internal", "项目刚建好却读不到", 500).body, 500);
     return c.json(
       {
-        project: toProjectSummary(db, row),
-        createdOrg,
+        project: toProjectSummary(db, r.row),
+        createdOrg: r.createdOrg,
         // ⚠️ `true` = 工作区根目录**真的在盘上**(不是「调用过了」)。
         // `false` 的项目**永远跑不起来**,所以它必须能从响应里看出来,而不是等到
         // 某次 `session_failed` 才发现 —— 同时 `workspaceProblem` 说明为什么。
-        workspaceBootstrapped,
-        ...(workspaceProblem !== null ? { workspaceProblem } : {}),
+        workspaceBootstrapped: r.workspaceBootstrapped,
+        ...(r.workspaceProblem !== null ? { workspaceProblem: r.workspaceProblem } : {}),
       },
       201,
     );
+  });
+
+  // ── 职责(039,2026-11-27)────────────────────────────────────────
+  //
+  // 一条职责 = 一个长期项目(工作间)+ 一条职责记录。**职责只有人能建、能改**
+  // (这一组端点就是它的全部写面):设一条职责 = 预先授权这个职责范围内的活
+  // 自动开工,而预先授权必须出自甲方本人,不能由某个模型替他做。
+  // 模型那一侧只写「每一轮的功课与自省」(工具 `duty_run_open` / `duty_run_close`)。
+
+  app.get("/api/duties", (c) => {
+    const duties: DutyView[] = [];
+    for (const d of listDuties(db)) {
+      const view = toDutyView(db, d);
+      // 工作间项目那一行不在的职责读不出来(`toDutyView` 不编状态)—— 跳过,
+      // 不让一行坏数据把整张列表变成 500。
+      if (view !== null) duties.push(view);
+    }
+    return c.json({ duties });
+  });
+
+  app.post("/api/duties", async (c) => {
+    const body = (await c.req.json().catch(() => null)) as {
+      name?: unknown; goal?: unknown; boundaries?: unknown;
+      cadence?: unknown; formal?: unknown; startPaused?: unknown;
+    } | null;
+    if (body === null) return c.json(err("invalid_body", "请求体不是合法 JSON").body, 400);
+    // **先校验,后落库**:任何一项不合法时一个字节都不写(建到一半的职责项目
+    // 是一个永远没人开工的空项目)。
+    const name = typeof body.name === "string" ? body.name.trim() : "";
+    if (name === "") return c.json(err("invalid_args", "名称不能为空").body, 400);
+    const goal = typeof body.goal === "string" ? body.goal.trim() : "";
+    if (goal === "") {
+      return c.json(err("invalid_args", "目标不能为空 —— 说清什么算做好了").body, 400);
+    }
+    const cadence = validateCadence(body.cadence);
+    if (!cadence.ok) return c.json(err("invalid_args", cadence.message).body, 400);
+    const boundaries = typeof body.boundaries === "string" ? body.boundaries.trim() : "";
+    const startPaused = body.startPaused === true;
+
+    const at = deps.now();
+    const r = createProjectRecord({
+      name, client: DUTY_PROJECT_CLIENT, goal,
+      // 职责项目没有另写判据的入口:目标整体作为单条判据(与 HTTP 立项同一个缺省)。
+      criteria: [goal],
+    });
+    const id = deps.newId("du");
+    insertDuty(db, {
+      id, projectId: r.id, name, goal, boundaries,
+      cadence: cadence.cadence, formal: body.formal === true,
+      status: startPaused ? "paused" : "active",
+      // 第一轮排在 `at` 之后最近的那个排定点:今天的点已经过了就是明天 ——
+      // **不**因为「建的时候已经过了今天的点」而立刻开工(那是「现在做一次」按钮的事)。
+      nextDueAt: startPaused ? null : nextDueAt(cadence.cadence, at),
+      lastRunAt: null, createdAt: at, updatedAt: at,
+    });
+    // 「先建着、暂不启用」:职责与工作间项目一起停在 paused(与 PUT 的暂停同一个语义)。
+    if (startPaused) updateProject(db, r.id, { status: "paused" });
+    const duty = getDuty(db, id);
+    const view = duty === null ? null : toDutyView(db, duty);
+    if (view === null) return c.json(err("internal", "职责刚建好却读不到它的工作间", 500).body, 500);
+    return c.json(
+      {
+        duty: view,
+        // 与 `POST /api/projects` 同一组字段、同一个理由:工作区没建出来的项目永远跑不起来。
+        workspaceBootstrapped: r.workspaceBootstrapped,
+        ...(r.workspaceProblem !== null ? { workspaceProblem: r.workspaceProblem } : {}),
+      },
+      201,
+    );
+  });
+
+  app.put("/api/duties/:id", async (c) => {
+    const duty = getDuty(db, c.req.param("id"));
+    if (duty === null) return c.json(err("not_found", "职责不存在", 404).body, 404);
+    const body = (await c.req.json().catch(() => null)) as {
+      name?: unknown; goal?: unknown; boundaries?: unknown;
+      cadence?: unknown; formal?: unknown; status?: unknown;
+    } | null;
+    if (body === null) return c.json(err("invalid_body", "请求体不是合法 JSON").body, 400);
+
+    // ── 先校验 ──
+    const fields: DutyUpdate = {};
+    if (body.name !== undefined) {
+      const name = typeof body.name === "string" ? body.name.trim() : "";
+      if (name === "") return c.json(err("invalid_args", "名称不能为空").body, 400);
+      fields.name = name;
+    }
+    if (body.goal !== undefined) {
+      const goal = typeof body.goal === "string" ? body.goal.trim() : "";
+      if (goal === "") return c.json(err("invalid_args", "目标不能为空 —— 说清什么算做好了").body, 400);
+      fields.goal = goal;
+    }
+    if (body.boundaries !== undefined) {
+      fields.boundaries = typeof body.boundaries === "string" ? body.boundaries.trim() : "";
+    }
+    let cadence: DutyUpdate["cadence"];
+    if (body.cadence !== undefined) {
+      const checked = validateCadence(body.cadence);
+      if (!checked.ok) return c.json(err("invalid_args", checked.message).body, 400);
+      cadence = checked.cadence;
+      fields.cadence = checked.cadence;
+    }
+    if (body.formal !== undefined) {
+      if (typeof body.formal !== "boolean") {
+        return c.json(err("invalid_args", "产出形态(formal)只能是 true / false").body, 400);
+      }
+      fields.formal = body.formal;
+    }
+    let projectStatus: "active" | "paused" | undefined;
+    if (body.status !== undefined) {
+      if (body.status !== "active" && body.status !== "paused") {
+        return c.json(err("invalid_args", "状态只能是 active 或 paused").body, 400);
+      }
+      if (body.status !== duty.status) {
+        const project = getProjectRow(db, duty.projectId);
+        if (project === null) return c.json(err("not_found", "职责的工作间项目不存在", 404).body, 404);
+        if (isTerminalProjectStatus(project.status)) {
+          return c.json(err(
+            "conflict",
+            `这个职责的工作间项目已经收口(${project.status}),不能再启用;需要的话另建一条职责`,
+            409,
+          ).body, 409);
+        }
+        fields.status = body.status;
+        // **启用 / 暂停职责 ⇔ 工作间项目 active / paused**:一个开关管两边。
+        // 项目一 paused,项目内的工具面与排空一起停 —— 「暂停职责」就是字面意思。
+        projectStatus = body.status === "active" ? "active" : "paused";
+      }
+    }
+
+    // ── 后落库(一个事务:职责行与项目行要么都改、要么都不改)──
+    const at = deps.now();
+    db.transaction(() => {
+      if (projectStatus !== undefined) updateProject(db, duty.projectId, { status: projectStatus });
+      // 节奏改了、或者刚从暂停恢复 ⇒ 从此刻重新排下一次;暂停 ⇒ 清空排定。
+      const willBeActive = (fields.status ?? duty.status) === "active";
+      if (!willBeActive) fields.nextDueAt = null;
+      else if (cadence !== undefined || fields.status === "active") fields.nextDueAt = nextDueAt(cadence ?? duty.cadence, at);
+      updateDuty(db, duty.id, fields, at);
+    })();
+    const after = getDuty(db, duty.id);
+    const view = after === null ? null : toDutyView(db, after);
+    return view === null
+      ? c.json(err("internal", "职责刚改好却读不到", 500).body, 500)
+      : c.json({ duty: view });
+  });
+
+  /**
+   * 「现在做一次」:把下一次排定改成此刻,排空器下一趟(≤10s)就开工。
+   *
+   * 三种拒收都是**状态冲突**(409),不是参数错:已暂停(先启用)、工作间项目不在进行中
+   * (被暂停 / 已收口)、上一轮还没收工(同一职责同时只有一轮)。
+   */
+  app.post("/api/duties/:id/run-now", (c) => {
+    const duty = getDuty(db, c.req.param("id"));
+    if (duty === null) return c.json(err("not_found", "职责不存在", 404).body, 404);
+    if (duty.status !== "active") {
+      return c.json(err("conflict", "这条职责已暂停 —— 先启用,再让它现在做一次", 409).body, 409);
+    }
+    const project = getProjectRow(db, duty.projectId);
+    if (project === null || project.status !== "active") {
+      return c.json(err(
+        "conflict",
+        `这个职责的工作间项目此刻不在进行中(${project?.status ?? "不存在"}),开了工也没有人能动手`,
+        409,
+      ).body, 409);
+    }
+    if (openDutyRunOf(db, duty.id) !== null) {
+      return c.json(err("conflict", "上一轮还没收工 —— 等它收工再排下一轮(同一职责同时只有一轮)", 409).body, 409);
+    }
+    const at = deps.now();
+    updateDuty(db, duty.id, { nextDueAt: at }, at);
+    const after = getDuty(db, duty.id);
+    const view = after === null ? null : toDutyView(db, after);
+    return view === null
+      ? c.json(err("internal", "职责刚改好却读不到", 500).body, 500)
+      : c.json({ duty: view });
   });
 
   app.get("/api/projects/:id", (c) => {

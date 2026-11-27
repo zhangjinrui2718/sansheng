@@ -38,6 +38,11 @@ import {
 } from "../storage/repo/sessions.js";
 import { getAgent } from "../storage/repo/agents.js";
 import {
+  dutyOfProject, lastDutyRunOf,
+  type DutyRow, type DutyRunRow,
+} from "../storage/repo/duties.js";
+import { cadenceText } from "../runtime/duty.js";
+import {
   deliveryAcceptance, deliveredDeliverables, latestDeliveryVerdict, latestVerdictsByArtifact,
   type DeliveryAcceptance,
 } from "../storage/repo/deliveryVerdicts.js";
@@ -70,6 +75,7 @@ import type {
   SessionMessageView, TurnTrigger, TurnUsageView,
   UsageByAgentView, WorkView,
   ProviderFailoverEntryView, ProviderFailoverKind,
+  DutyRunView, DutySummary, DutyView,
 } from "@shared/types/platform.js";
 
 // ── 小工具 ──────────────────────────────────────────────────────
@@ -719,6 +725,8 @@ export function toProjectSummary(
   // ⚠️ **判据只算一次**:派生状态与计数来自**同一次** `deliveryAcceptance` 调用 ——
   // 算两次会让「状态显示待收货、计数写 0」这种自相矛盾的读面有机会出现。
   const acceptance = deliveryAcceptance(db, row.id);
+  // 这个项目是不是某条职责的工作间(039):普通项目**不带**这个字段。
+  const duty = dutyOfProject(db, row.id);
   return {
     id: row.id,
     name: row.name,
@@ -729,6 +737,15 @@ export function toProjectSummary(
     // D1 升级:「在跑」组的判据。只在宿主装配给了 live 快照时才有 ——
     // 没有它(纯 HTTP 装配 / 测试)这个字段**不出现**,而不是写成 0(读不到 ≠ 没人跑)。
     ...(activity !== undefined ? { runningTurns: activity.runningTurns } : {}),
+    ...(duty !== null
+      ? {
+          duty: <DutySummary>{
+            cadence: cadenceText(duty.cadence),
+            status: duty.status,
+            nextDueAt: duty.nextDueAt,
+          },
+        }
+      : {}),
     createdAt: row.createdAt,
     counts: {
       ...countsOf(db, row.id),
@@ -769,6 +786,58 @@ export function listProjectMembers(db: Database.Database, projectId: string): Me
     });
   }
   return out;
+}
+
+// ── 职责(039)───────────────────────────────────────────────────
+
+export function toDutyRunView(run: DutyRunRow): DutyRunView {
+  return {
+    id: run.id,
+    dutyId: run.dutyId,
+    scheduledFor: run.scheduledFor,
+    startedAt: run.startedAt,
+    finishedAt: run.finishedAt,
+    status: run.status,
+    steps: run.steps.map((s) => ({
+      title: s.title, criterion: s.criterion, done: s.done, note: s.note,
+    })),
+    doneSummary: run.doneSummary,
+    notDone: run.notDone,
+    cause: run.cause,
+    nextChange: run.nextChange,
+    gaps: run.gaps,
+    learned: run.learned,
+    failures: run.failures.map((f) => ({ kind: f.kind, id: f.id, title: f.title })),
+  };
+}
+
+/**
+ * 职责的读面。**工作间项目的状态如实带出来**(`projectStatus`):职责自己是 `active`
+ * 而项目不是,它也不会开工 —— 界面要照这两个数的组合说话,不替它圆成「在跑」。
+ *
+ * 返回 `null` = 工作间项目那一行不在(外键是 CASCADE,理论上不该发生;真发生了
+ * **不编一个状态出来**,由调用方决定是跳过还是报错)。
+ */
+export function toDutyView(db: Database.Database, duty: DutyRow): DutyView | null {
+  const project = getProjectRow(db, duty.projectId);
+  if (project === null) return null;
+  const lastRun = lastDutyRunOf(db, duty.id);
+  return {
+    id: duty.id,
+    projectId: duty.projectId,
+    name: duty.name,
+    goal: duty.goal,
+    boundaries: duty.boundaries,
+    cadence: { ...duty.cadence },
+    formal: duty.formal,
+    status: duty.status,
+    projectStatus: project.status,
+    nextDueAt: duty.nextDueAt,
+    lastRunAt: duty.lastRunAt,
+    createdAt: duty.createdAt,
+    updatedAt: duty.updatedAt,
+    lastRun: lastRun === null ? null : toDutyRunView(lastRun),
+  };
 }
 
 export function toProjectDetail(db: Database.Database, row: ProjectRow): ProjectDetail | null {

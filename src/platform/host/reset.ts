@@ -65,6 +65,9 @@ export const PLATFORM_DATA_TABLES: readonly string[] = [
   "turn_events",
   "queued_client_messages",
   "wakeups",
+  // 2026-11-27(职责,039):`duty_runs` 引 `duties`,`duties` 引 `projects` ⇒ 子先于父。
+  "duty_runs",
+  "duties",
   // BC-020 甲方提问台账
   //
   // ⚠️ 它同时引 `artifacts` 与 `projects` ⇒ 必须排在**两者之前**(外键安全顺序:

@@ -49,6 +49,7 @@ import { insertTurnUsage } from "../../src/platform/storage/repo/usage.js";
 import { insertTurnEvents } from "../../src/platform/storage/repo/turnEvents.js";
 import { insertQueuedClientMessage } from "../../src/platform/storage/repo/queuedClientMessages.js";
 import { insertWakeup } from "../../src/platform/storage/repo/wakeups.js";
+import { insertDuty, insertDutyRun } from "../../src/platform/storage/repo/duties.js";
 import { insertBlocker } from "../../src/platform/storage/repo/blockers.js";
 import { insertChange } from "../../src/platform/storage/repo/changes.js";
 import { insertAsk } from "../../src/platform/storage/repo/asks.js";
@@ -281,6 +282,17 @@ async function seedEverything(): Promise<{ project: string; work: string; agent:
     id: "wu_test", projectId: project, createdByAgentId: agent, note: "夹具自查",
     kind: "every", at: null, intervalMs: 600_000, status: "pending",
     lastFiredAt: null, firedCount: 0, createdAt: NOW,
+  });
+  // 2026-11-27(职责,039)两张新表:职责本身与每一轮功课的记录。
+  insertDuty(db, {
+    id: "du_test", projectId: project, name: "夹具职责", goal: "夹具", boundaries: "",
+    cadence: { kind: "daily", at: "09:00", weekday: null, hours: null }, formal: false,
+    status: "active", nextDueAt: NOW, lastRunAt: null, createdAt: NOW, updatedAt: NOW,
+  });
+  insertDutyRun(db, {
+    id: "dr_test", dutyId: "du_test", scheduledFor: NOW, startedAt: NOW, finishedAt: null,
+    status: "open", steps: [], doneSummary: null, notDone: null, cause: null, nextChange: null,
+    gaps: null, learned: null, failures: [],
   });
   // memory_fragments:走端口实现(唯一写口)
   await new SqliteMemory(db, { newId: (p) => `${p}_test`, now: () => NOW }).remember({
