@@ -727,6 +727,12 @@ J('    ...(false && failures.length > 0',
         '系统消息没有「⚠️ 职责:」首行前缀(界面上分不出这一类)',
     ),
     (
+        "Z8", REPO,
+        "  if (current.status !== \"open\") return false; // 终态:已收口的记录不可改\n",
+        "",
+        "已收口的轮次又能改了(收工之后改口 —— 「既过不恋」在仓储层没了守卫)",
+    ),
+    (
         "Q1", DSTAT,
 J('  if (d.projectStatus !== "active") {',
           '    return `工作间${projectStatusLabel(d.projectStatus)},不会开工`;'),

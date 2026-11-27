@@ -249,12 +249,12 @@ describe("职责 · 仓储", () => {
     mkDuty();
     mkRun({ id: "dr_1", startedAt: at(2026, 11, 27, 9, 1) });
     expect(openDutyRunOf(db, "du_1")?.id).toBe("dr_1");
-    updateDutyRun(db, "dr_1", {
+    expect(updateDutyRun(db, "dr_1", {
       status: "done", finishedAt: at(2026, 11, 27, 9, 40),
       steps: [{ title: "读三份来源", criterion: "每份有一句结论和链接", done: true, note: "三份都读到了" }],
       doneSummary: "三份来源都读到了", notDone: "无", cause: null, nextChange: "提前十分钟缓存",
       gaps: "只覆盖了三家公司", learned: "某站要带 referer",
-    });
+    }), "开着的一轮:写成").toBe(true);
     expect(openDutyRunOf(db, "du_1")).toBeNull();
     const run = getDutyRun(db, "dr_1")!;
     expect(run.status).toBe("done");
@@ -268,6 +268,24 @@ describe("职责 · 仓储", () => {
     // 起点正好落在开工那一刻的那一轮也算(「>=」不是「>」)
     expect(countDutyRunsStartedSince(db, at(2026, 11, 28, 9, 2))).toBe(1);
     expect(countDutyRunsStartedSince(db, at(2026, 11, 28, 9, 3))).toBe(0);
+  });
+
+  it("⚠️ 已收口的轮次改不动(done / abandoned 都是终态)—— 仓储层就是它唯一的写口", () => {
+    mkDuty();
+    mkRun({ id: "dr_done" });
+    expect(updateDutyRun(db, "dr_done", { status: "done", finishedAt: 1 })).toBe(true);
+    // 收工之后改口:「其实都做成了」
+    expect(updateDutyRun(db, "dr_done", { doneSummary: "改口", steps: [] }), "已收口的一轮").toBe(false);
+    expect(getDutyRun(db, "dr_done")!.doneSummary).toBeNull();
+    expect(getDutyRun(db, "dr_done")!.steps).toHaveLength(1);
+    // 平台收掉的同样改不动
+    mkRun({ id: "dr_ab", status: "abandoned", finishedAt: 2 });
+    expect(updateDutyRun(db, "dr_ab", { status: "done", finishedAt: 3 })).toBe(false);
+    expect(getDutyRun(db, "dr_ab")!.status).toBe("abandoned");
+    // 行不存在、或没什么可改:也没写成(不抛)
+    expect(updateDutyRun(db, "dr_nope", { status: "done" })).toBe(false);
+    mkRun({ id: "dr_empty" });
+    expect(updateDutyRun(db, "dr_empty", {})).toBe(false);
   });
 
   it("⚠️ `steps` 的 JSON 坏了要抛,不退成空数组(空数组会让收工校验空转通过)", () => {

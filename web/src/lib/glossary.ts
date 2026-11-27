@@ -288,4 +288,9 @@ export const KNOWN_GAPS: readonly KnownGap[] = [
     why: "排空器只跑 active 项目 ⇒ 那里没有人会被叫醒来处理;事实仍在项目页",
     where: "src/platform/storage/repo/clientQuestions.ts 的 listAllClientQuestions",
   },
+  {
+    what: "职责「到点了」不等于马上开工",
+    why: "设置页那一行只看排定;供应商刹车期间、当天开满了、或连续叫不醒被暂停之前,排空器并不会动。有没有真的在跑、花了多少,看那条职责自己的项目页",
+    where: "components/settings/dutyStatus.ts 的 scheduleLine · runtime/providerBrake.ts",
+  },
 ];

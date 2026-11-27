@@ -337,9 +337,18 @@ export interface DutyRunUpdate {
   failures?: readonly DutyFailure[];
 }
 
-export function updateDutyRun(db: Database.Database, id: string, fields: DutyRunUpdate): void {
+/**
+ * 局部更新一轮功课。返回 `false` = **没写成**。
+ *
+ * ⚠️ **已收口的轮次改不动**:`done`(模型自己收的)与 `abandoned`(平台收掉的)都是终态。
+ * 收工之后再改口(「其实都做成了」)正是「既过不恋」要防的;而这里是它唯一的写口 ——
+ * 只在工具那一层拦的话,任何一处新加的写入都会绕过它。熔断把一轮收成 `abandoned` 时
+ * 它还是 `open`,不受影响。
+ */
+export function updateDutyRun(db: Database.Database, id: string, fields: DutyRunUpdate): boolean {
   const current = getDutyRun(db, id);
-  if (current === null) return; // 行没了(项目被删)就无事可记 —— 幂等
+  if (current === null) return false; // 行没了(项目被删)就无事可记 —— 幂等
+  if (current.status !== "open") return false; // 终态:已收口的记录不可改
   const sets: string[] = [];
   const vals: unknown[] = [];
   const push = (column: string, value: unknown): void => {
@@ -356,8 +365,9 @@ export function updateDutyRun(db: Database.Database, id: string, fields: DutyRun
   if (fields.gaps !== undefined) push("gaps", fields.gaps);
   if (fields.learned !== undefined) push("learned", fields.learned);
   if (fields.failures !== undefined) push("failures", JSON.stringify(fields.failures));
-  if (sets.length === 0) return;
+  if (sets.length === 0) return false;
   db.prepare(`UPDATE duty_runs SET ${sets.join(", ")} WHERE id = ?`).run(...vals, id);
+  return true;
 }
 
 // ── duty_runs:读 ───────────────────────────────────────────────
@@ -478,11 +488,13 @@ export function settleExhaustedDuty(db: Database.Database, projectId: string, no
     }
     return [{ kind: "paused", duty: { ...duty, status: "paused", nextDueAt: null, updatedAt: now } }];
   }
-  updateDutyRun(db, open.id, {
+  // 返回值不许丢:没写成就不能向调用方报「已收掉」(那会是一条自信的假话)。
+  const settled = updateDutyRun(db, open.id, {
     status: "abandoned", finishedAt: now,
     // 平台**不替模型写自省**:功课的交代一格不动(没交代就是没交代),只在「缺口」里
     // 记下这一轮是怎么收的 —— 那是事实,不是反思。
     gaps: "这一轮没能收工:平台连续三次叫业务经理来收工都没成,这一轮由平台收掉,没有自省。",
   });
+  if (!settled) return [];
   return [{ kind: "abandoned", duty, run: { ...open, status: "abandoned", finishedAt: now } }];
 }

@@ -271,11 +271,15 @@ const dutyRunClose: PlatformTool = {
       );
     }
 
-    updateDutyRun(ctx.db, run.id, {
+    // ⚠️ 返回值不许丢:仓储层对「已经不是 open 的一轮」不写 —— 这里读到的是 open 的,
+    // 但在它之前的那一刻被熔断收掉是可能的(同一进程内不会交错,纵深防御而已)。
+    if (!updateDutyRun(ctx.db, run.id, {
       status: "done", finishedAt: now, steps: accounting.steps,
       doneSummary: done.value, notDone: notDone.value, cause,
       nextChange: nextChange.value, gaps: gaps.value, learned: learned.value, failures,
-    });
+    })) {
+      return fail("conflict", `这一轮(${run.id})已经不是「开着」的状态了 —— 收不了工`, ["duty_run_open"]);
+    }
     const made = accounting.steps.filter((s) => s.done).length;
     return ok(
       `已收工:${made}/${accounting.steps.length} 步做成` +
