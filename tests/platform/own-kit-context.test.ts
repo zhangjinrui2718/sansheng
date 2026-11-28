@@ -23,6 +23,8 @@ import { renderProjectContext } from "../../src/platform/runtime/projectContext.
 import { runTurn } from "../../src/platform/runtime/turn.js";
 import { insertAgentNote } from "../../src/platform/storage/repo/agentNotes.js";
 import { setOwnToolDisabled } from "../../src/platform/storage/repo/agentTools.js";
+import { toOwnKitView, toOwnToolView } from "../../src/platform/transport/ownKitView.js";
+import type { OwnToolScan } from "../../src/platform/harness/ownTools.js";
 
 const T0 = 1_700_000_000_000;
 const SKILL = "---\ndescription: 把一份网页正文抽成干净的文本\n---\n正文";
@@ -211,5 +213,31 @@ describe("runTurn · 「你自己的东西」拼在项目上下文之后、任�
     expect(a.prompts[0]).toBe(expected);
     expect(b.prompts[0]).toBe(expected);
     expect(a.prompts[0]).not.toContain("你自己的东西");
+  });
+});
+
+// ── 人读面的视图(transport/ownKitView.ts)──────────────────────
+
+describe("toOwnToolView / toOwnKitView · 三态与「读不到」", () => {
+  const scan = (over: Partial<OwnToolScan>): OwnToolScan => ({
+    name: "rag", kind: "mcp", description: "d", dir: "/x", problem: null, fileCount: 1, ...over,
+  });
+
+  it("工具状态 = 扫描结果 × 停用记录:格式不对优先于已停用,都没有才是在用", () => {
+    expect(toOwnToolView(scan({}), null).state).toBe("usable");
+    expect(toOwnToolView(scan({}), 123)).toMatchObject({ state: "disabled", disabledAt: 123 });
+    expect(toOwnToolView(scan({ problem: "缺 description" }), 123)).toMatchObject({ state: "invalid", problem: "缺 description" });
+    expect(toOwnToolView(scan({ problem: "缺 description" }), null).state).toBe("invalid");
+  });
+
+  it("② 没有装配工作区 ⇒ 仓库那半边 unavailable(带原因),经验库那半边照常;经验库读不到 ⇒ notes 为 null,不是 0", () => {
+    const bare = toOwnKitView(db, { agentId: "wk", role: "research_worker", workspaceRoot: undefined });
+    expect(bare).toMatchObject({ repoDir: "", repoState: "unavailable", tools: [], notes: { lesson: 0, research: 0 } });
+    expect(bare.problem).toContain("没有装配工作区");
+    db.exec("DROP TABLE agent_notes");
+    const broken = toOwnKitView(db, { agentId: "wk", role: "research_worker", workspaceRoot: workRoot });
+    expect(broken.notes).toBeNull();
+    // 仓库目录在这个夹具里没建 ⇒ 如实是 missing(不是 unavailable:那半边读得到,只是目录不在)
+    expect(broken.repoState).toBe("missing");
   });
 });

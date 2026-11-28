@@ -144,6 +144,10 @@
   判据的一部分:同一对节点上两类边**方向一致**时不是环(真机那份数据就是这样),方向相反
   才是环(`mutualPairs` 会点名是哪两条边)。写反会让「交付」跑到最左、并且把一个不存在的
   环报出来(`web/src/lib/workGraph.ts` 的 `collectEdges`)。
+- **三个执行角色有自己的仓库与经验库(2026-11-28,040)**:`<工作根>/roles/<角色>/` 里一个工具一个目录
+  (`SKILL.md` + 可选脚本 / `mcp.json`),角色自己写、**不经放行**下一轮生效(用户裁决),人只有「停用」这一个刹车
+  (成员页角色 harness 卡);经验库按角色隔离、跨项目,每轮开工前把最相关的三条旧经验摆在任务前面。
+  同批关掉了 SDK 对项目目录的自动装载(`.pi/`、`AGENTS.md`):**会话里进什么只由平台决定**。
 - 基线:**2972 passed / 3 failed(model-catalog,工作区里 pi-ai 版本漂移,先于 2026-11-22 批次存在)/ 168 test files**(2026-11-28「职责」批次之后,在分支 `feat/duties` 上实测;**该批尚未并入 master、未推送**)· 两条 typecheck 0 error · `check:design` E1–E14 全绿(5 角色)。
 - **角色中文名只有一处**:`src/platform/runtime/org.ts` 的 `ORG`(播种 / `roleDisplayName()` /
   `RoleHarnessView.displayName` / **系统提示里的「# 你的角色:X」**全走它);
@@ -158,37 +162,41 @@
   (把旧写法喂回去,它当场变红)。这是本项目第 3 类静默失败(坏掉的检查返回了看起来正常的答案)的一次复发。
 - 日志只走 stdout:`~/.sansheng/logs/sansheng.log` 恒为 0 字节,别去 tail 它。
 
-## 源码地图(`find src -name '*.ts' | wc -l` = 100)
+## 源码地图(`find src -name '*.ts' | wc -l` = 107)
 
 ```
 src/cli/                 CLI 入口(index.ts + paths.ts)
 src/platform/cli/        smoke / run 两个子命令的实现
 src/platform/host/       常驻宿主:serve / scheduler / reset / notify(桌面通知,见下「桌面通知」一节)
-src/platform/transport/  传输:http(API)/ hub(WS 广播)/ views
+src/platform/transport/  传输:http(API)/ hub(WS 广播)/ views / ownKitView(自己的仓库与经验库的人读面)
 src/platform/runtime/    boot session turn execution assembly promptAssembly pendingWork
                          projectContext dispatcher org sdkAdapter rework
                          (rework.ts = 「退回给谁」的判据,质检返工与甲方拒收共用)
                          duty(职责的时间与判据,纯函数)/ dutyTask(职责到点的任务正文)
+                         ownKitContext(每轮拼进任务的「你自己的东西」:相关经验 + 自己的仓库)
 src/platform/runtime/agentRuntime/  AgentRuntime 端口(types.ts:RuntimeSession /
                          RuntimeEvent / RuntimeSessionFactory)+ `pi/` 适配器
                          (session 工厂 / events 翻译 / toolsAdapter / mcpConfig /
                          providers)—— 换运行时 = 在这里加一个适配器目录(见下
                          「AgentRuntime 端口」一节)
-src/platform/tools/      工具层:`ls *.ts` 16 个文件、**46** 个平台工具定义 + registry.ts 的 dispatch()
+src/platform/tools/      工具层:`ls *.ts` 18 个文件、**52** 个平台工具定义 + registry.ts 的 dispatch()
 src/platform/mcp/        MCP:server 目录 / secret 存储 / 角色授权 / 求解 / pi 配置转换(见下「MCP」一节)
 src/platform/codeservice/ 代码服务:port.ts(端口)+ git.ts(真实现,盘上核对仓库)
 src/platform/harness/    授权:capability(能力↔工具表)/ authorize(三道门)/ toolSet(L2 集合文件读盘)/ write(提示词写盘)
+                         ownTools(自己的仓库:扫描与校验,「仓库就是真相」)
+
 src/platform/identity/   角色:role.ts 的 ROLE_SPECS
-src/platform/storage/    db.ts + repo/(`ls *.ts` 19 个文件,含 index.ts;knowledge.ts / deliveryVerdicts.ts / duties.ts)
+src/platform/storage/    db.ts + repo/(`ls *.ts` 21 个文件,含 index.ts;knowledge.ts / deliveryVerdicts.ts / duties.ts /
+                         agentNotes.ts 经验库 / agentTools.ts 自己的工具的停用记录)
 src/platform/infra/      keyring / settings / settingsApply / providers / migrations
 src/platform/memory/     MemoryPort 端口 + sqlite 实现(**关于用户**,会淡忘)
 src/platform/knowledge/  知识语料:切块 / 索引器 / 现读(**关于项目**,只读;见下)
-src/platform/workspace/  工作区:root(项目根)/ git(提交·读·show)/ scan(目录观测面)/ port
+src/platform/workspace/  工作区:root(项目根 + 角色自己的仓库根)/ git(提交·读·show)/ scan(目录观测面)/ port
 src/platform/client/     ClientChannel 端口
 shared/types/            跨端协议类型(platform.ts / settings.ts)
 ```
 
-工具表合计 **53 个工具 = 46 平台 + 7 SDK 内置**,能力 **39** 条 —— 这几个数字由 `check:design`
+工具表合计 **59 个工具 = 52 平台 + 7 SDK 内置**,能力 **43** 条 —— 这几个数字由 `check:design`
 (能力/工具)与 `tests/platform/client.test.ts` 的哨兵(已实现工具数)每次核对。
 
 > **不要按「单向分层」的假设推理依赖方向。** 实测 `identity ↔ harness` 之间有**值级 import 环**(`src/platform/identity/role.ts` 从 `src/platform/harness/capability.ts` 取能力表,`src/platform/harness/authorize.ts` 从 `src/platform/identity/role.ts` 取 `ROLE_SPECS`),`transport` 也会向上引 `host`。这是现状,不代表可以随手加新的反向依赖。
@@ -1013,6 +1021,134 @@ Q8(断言「星期几原样带过去」的样本正好是周一,而变异恰好�
   「工作间不在进行中就拒收」;别的工具没补 —— 要不要在 `dispatch()` 里统一补,是一次显式评审。
 - 唤醒(038)的几条缺口照旧(见上一节末)。
 
+## 自己的仓库与经验库(2026-11-28 · 三个执行角色各自的长线家底,040)
+
+**用户原话**:「我想给现在的工程师、质检员、研究员,两类专属的 harness 内容,比如说他可以有一个独立的
+代码仓库,这个代码仓库他可以自己开发 tools 或者 mcp 放进去,他能够根据要经常解决的问题或者职责,
+去拓宽自己的能力。比如说研究员构建一个有自己的 rag 服务,他平时经验、外部调研等等这些内容都可以放进去。」
+**用户裁决**(放行方式那一问):「自己的 rag 和代码仓库不需要我放行。」
+
+### 它补的是什么:角色级的第三、四类 harness 内容
+
+三生里每一样东西都按**项目**分(工作区、知识语料、工件);角色级此前只有提示词单元、工具集合文件、
+MCP 授权三类配置 —— **没有任何属于「这一个角色、跨项目留着」的存储或目录**。040 加两样:
+
+| | 是什么 | 落点 | 谁写 |
+|---|---|---|---|
+| **经验库** | 这个角色自己的条目(经验 `lesson` / 调研 `research`),全文检索 | 表 `agent_notes` + FTS5 `agent_notes_fts`(`storage/repo/agentNotes.ts`) | 角色自己(`experience_*` 四个工具) |
+| **自己的仓库** | 一个独立 git 仓库,里面一个工具一个目录 | `<工作根>/roles/<角色>/` | 角色自己(`own_read` / `own_write`)+ 平台(每轮收尾提交) |
+
+⚠️ **三套东西别并**(与 010 / 028 文件头同一条判据):**记忆**关于用户、业务经理写、会淡忘;
+**知识语料**关于项目、平台索引、角色只读、**只存偏移**;**经验库**关于这个角色自己的手艺、角色自己写、
+跨项目、**直接存正文**(条目本身就是内容,别处没有一份原文可指 —— 照搬语料那套会得到一个指向空气的偏移)。
+`design/DESIGN-KNOWLEDGE.md` §1 的边界表与 `DESIGN-AGENTS.md` §11.1「记忆不是任何 agent 自己的记忆」
+都按此补了一句:经验库是另一个落点,不是记忆的延伸。
+
+### 自己的仓库:位置与格式
+
+- **位置 = `<工作根>/roles/<角色>/`**,算式只有一处(`workspace/root.ts` 的 `agentWorkspaceRoot`),与
+  `projects/` 平级 —— 它是 `docs/DESIGN-WORKSPACE.md`「按项目分,不按角色分」那条裁决的**唯一例外**
+  (那条说的是项目的文件;这里放的是角色自己的工具箱)。不放别处的理由:嵌在项目仓里会被 `git add -A`
+  记成 gitlink;放在数据目录的 `harness/` 下会被 harness 仓库的 `commitAll` 整体吞进去、且
+  `/api/harness/restore` 能改写里面任意路径(等于绕过「看得见、停得了」)。
+- **谁有仓库 / 谁能提交 MCP 都从 ceiling 推出来,不另写角色表**:`harness/ownTools.ts` 的
+  `ownsRepo(role)` = ceiling 里有 `own.write`;`canRunOwnMcp(role)` = 有 `code.exec`。
+  判据:`grep -n "ownsRepo\|canRunOwnMcp" src/platform/harness/ownTools.ts`。
+- **一个工具一个目录**:`tools/<名字>/SKILL.md`(说明书,frontmatter 里必须有 `description`)+ 可选脚本与数据;
+  多一个 `mcp.json`(写 `command` 与 `args` 的本地进程)它就是一个 MCP 服务。
+  **目录名就是工具的名字**(停用记录、pi 侧 server 名都按它记;frontmatter 里写不写 `name` 都不改名字 ——
+  两处都能定名字就一定会漂)。
+- **`own_read` / `own_write` 只够得着自己仓库**:路径经 `WorkspacePort.resolveInside` 限定在那个根之内
+  (`..`、仓库外的绝对路径、软链逃逸、`.git/` 都拒;仓库内的绝对路径认 —— 上下文里给的就是绝对路径)。
+  于是三条既有边界只开一个口子:研究员仍然没有 `code.write`(「不产出产品代码」成立,它只是不必再靠
+  shell 重定向往自己仓库写文件);质检能写自己的仓库而**读不到、更改不了被审的产出**,它仍然没有 `code.*`;
+  业务经理与项目经理没有这组能力。
+  ⚠️ **这不是沙箱**:`code.exec` 里的 `bash` 本来就够得着盘上任何文件(`identity/role.ts` 写明那条边界是
+  「表达意图的」)。这两个工具的意思是「有一对够用且被限定范围的读写口,轨迹里看得见」。
+
+### 不放行:判据与刹车
+
+- **仓库就是真相**:「有哪些工具、合不合法」全部由扫仓库得出(`scanOwnTools`),没有任何一张「工具登记表」
+  会与仓库漂开。格式不对(缺说明书、`mcp.json` 不合法、目录名不合法)**如实报原因**(`problem`)——
+  既给他下一轮的上下文,也给人读面;悄悄跳过 = 一个静默失效的工具。
+- **唯一落库的人工动作是踩刹车**:停用(`agent_tool_disables`,`PUT /api/harness/own/:role/tools/:name`
+  `{ disabled }`)。停用只过滤、不改写扫描结果,且**不因文件挪动而失效**(目录删了又回来,它仍是停用的)。
+  重复停用不改行(`changed: false`),服务端据此决定要不要换会话。**没有待审 / 通过 / 退回那套状态机。**
+- **自己的 MCP 服务只能是人放不进目录里的那种**:校验复用 `parseMcpCatalog`(`!cmd` 硬拒绝),另加三条 ——
+  只许 stdio(不许 `url`)、不许 `headers`、`env` 的值不许引用 `${变量}`(自己的服务不带凭据)。
+  没有跑命令能力的角色(质检)写了 `mcp.json` 记为格式不对 —— 平台不替它启动一个它从没跑通过的进程。
+
+### 进会话
+
+- **说明类工具**:不靠 SDK 的技能装载,由平台每轮把已启用的列在他面前(`runtime/ownKitContext.ts`),
+  他要用时 `own_read` 读说明书。三个角色一套做法(质检也看得到)。
+- **MCP 服务**:`mcp/solve.ts` 的 `solveOwnMcp` 是 `solveMcpFor` 的第四个来源 —— 合法且未被停用的
+  `mcp.json`,pi 侧 server 名 `own-<角色>-<名字>`(与人登记的目录不撞名;撞了人的一份赢并报出原因),
+  `cwd` 钉在工具目录(`agentRuntime/pi/mcpConfig.ts` 的 `toPiConfig` 透传)。`wiring.ownMcpServers` 可见。
+- **换会话的判据只有一条**:MCP 的配置是**建会话那一刻**定下的(平台完全接管 `loadConfig`,返回一份常量),
+  所以宿主在**回合收尾**发现「自己的仓库有新提交且里面有 MCP 服务」⇒ `disposeAgentSessions`
+  (他正在跑的那一轮不打断:记进 `deferredDisposes`,收尾时 `flushDeferredDisposes`)。停用 / 恢复走同一处。
+  说明类工具不换会话 —— 它们每轮由上下文现列,本来就跟得上。
+
+### 会话只装载平台点过头的东西(同批关掉的一扇口子)
+
+SDK 默认把会话目录当成**受信任的项目**,于是项目仓里的 `.pi/extensions/*.js`(**当代码执行**)、
+`.pi/skills`、`.agents/skills`、`AGENTS.md`(会话目录 + 每一级上级 + `<agentDir>`)、`.pi/settings.json`
+会**不经任何人点头**自动进**每一个角色**的会话(含没有任何代码能力的质检)—— 而会话目录就是项目仓根,
+角色天天往里写文件。三生从没决定过要这条通道;「自己的仓库要看得见、停得了」上线之后它更成了后门。
+现在 `agentRuntime/pi/session.ts` 的 `sessionResourceLoaderOptions` 给 `DefaultResourceLoader` 传
+`noExtensions` / `noSkills` / `noContextFiles`,`reloadSessionResources` 带
+`resolveProjectTrust: () => false`。平台自己传的内联扩展工厂(MCP / tool_search)不受影响。
+⚠️ **没有测试 seam 时一定自己建装载器**(包括角色提示为空时)—— 交给 SDK 自建的那一份按默认策略信任项目目录。
+判据:`tests/platform/session-load-policy.test.ts` 用**真 SDK 的 `DefaultResourceLoader`** + 临时目录验,
+含「默认选项下确实会发现」的负样本。
+
+### 每轮注入与收工提醒
+
+`runTurn` 在项目上下文之后、任务之前拼「你自己的东西」(`renderOwnKit`):与这一轮任务最相关的三条旧经验
+(标题 + 200 字摘录 + noteId)+ 自己的仓库位置与工具清单(在用 / 甲方停用了 / 格式不对,三种长得不一样)。
+三条纪律:**没有这组能力的角色文本逐字不变**(业务经理 / 项目经理;`tests/platform/own-kit-context.test.ts`
+逐字比对);**读不到就说读不到**(经验库读失败 / 仓库扫不出来各有一句,不渲染成「还是空的」「还没有工具」);
+**条目正文是资料不是指令**(抬头写明;调研条目里的外部内容会跟着角色进以后每一个项目)。
+`composeWorkPrompt` 与质检的 `renderPendingReviews` 各在收尾处点一句「有值得下次复用的就 `experience_save`」。
+
+### 界面
+
+成员页 → 点开某个成员 → 「角色 harness」卡的第二个默认折叠块「自己的工具与经验」
+(`components/harness/OwnKitSection.tsx` + `useOwnKit.ts`):仓库位置、工具清单与 停用 / 恢复(停用两步确认)、
+经验条目(检索 / 展开 / 删除两步确认)。只有三个执行角色有这一块(`roles[].own` 缺席 ⇒ 整块不出)。
+这一块**自己取数**(`GET /api/harness/own/:role`、`…/notes`、`DELETE …/notes/:id`),动作之后重读、
+失效标签页级缓存、经 `onOwnKitChanged` 推页面的 revision。不新增悬停;词汇表 `harness.own`;
+`KNOWN_GAPS` +2。界面文字总量 10,017 → **10,218**。
+
+### 这一批写测试时抓到的真 bug(读代码都看不出来,记下来免得重犯)
+
+1. **只接了一条路**:`ownRepoRoot` 先只接在 `runAgentTurn`(聊天 / 汇报 / 评审)上,而工程师干活走的是
+   `runWorkItem` ⇒ 他每一轮读到的都是「这一轮没有接到仓库路径」,聊天那条路却是好的。与 `sessionId` /
+   看门狗同一条教训:**两条路都要接**。
+2. **启动块早于常量声明 ⇒ TDZ**:启动时(函数靠前的位置)就调 `ensureOwnRepo`,而 `.gitignore` 是声明在
+   后面的常量 ⇒ 一启动就抛 `Cannot access before initialization`。改成函数。
+3. **每轮收尾都调 `initRepo`**:`initRepo` 结尾**无条件 commit**(作者「三生平台」),于是角色刚写的文件
+   被平台先提交掉,以角色为作者的那次提交永远没有东西可提、会话也不换 —— 「归属由 git 承载」静默失效。
+   现在 `.git` 在就只花一次 `existsSync`(与 `ensureProjectRepo` 同形)。
+4. **工具名两处都能定**:frontmatter 的 `name` 与目录名都能定名字 ⇒ 取消前者。
+5. **夹具一次派三条活**:排空器一趟会把能做的活全做掉,分不清「停用前 / 后」⇒ 一条一条派。
+
+### 默认值与没做的(如实记)
+
+放行方式那一问用户答了(不放行);另两问(质检的范围、要不要关自动装载口)**没有逐项作答**,按推荐值落地:
+**质检只写说明类工具 + 用经验库**(不跑命令,`mcp.json` 对它不生效);**关掉会话的自动装载口**。
+
+没做:任何形式的人工审批;工具跨角色共用(工程师做好了给质检用);给质检跑命令的能力;新增排空器规则
+(记经验、做工具由收工提醒与职责那一批的功课驱动);仓库目录的界面浏览(路径显示在卡上,文件在盘上看)。
+**没有与真 SDK / 真模型实测**:端到端是真宿主 + 假会话(工具面断言的是交给 `createSession` 的 allowlist),
+自己的 MCP 服务在一个真 SDK 会话里实际连通过没有,没有验过。
+
+摸底时发现、**这批不动**的既有问题(各记一笔,免得下次又从头找):`bash` 无沙箱且子进程继承 provider 密钥
+(`dist/core/tools/bash.js` 的 env 是 `{...process.env, PATH}`);`board_read` 不校验项目(读得到任意工件 id);
+`CAPABILITY_LABEL` 是 `Partial`,`mcp.read` / `mcp.grant` / `work.review_verdict` / `schedule.manage` 四条
+在角色简报里没有说明文字、也没有哨兵。
+
 ## 跨项目地址带项目坐标(2026-10-26 · Wave 2e)
 
 **症状**:同一个工件在五个地方被说到…（见上节）—— 修完实体脊之后,
@@ -1130,8 +1266,9 @@ Q8(断言「星期几原样带过去」的样本正好是周一,而变异恰好�
   (四态含义 / `GLOSSARY` 全表 / **已知不实之处**)。
   ⚠️ **它不是第七个页签** —— 导航恒 6 项,入口是顶栏末尾那个 `?`(`TopBar` 的 `NavTab label="?"`)。
   「已知不实之处」的数据在 `lib/glossary.ts` 的 `KNOWN_GAPS`(**每条必须带 `where` 落点**),
-  现在 8 条(语料 tainted 标记不存在 · 成本无上界 · 进行中依赖 WS · 降级是平台级 · 降级无结构化表 ·
-  MCP 无界面且连接状态读不到 · 已收口项目的提问不再排队 · 职责「到点了」不等于马上开工)。回归
+  现在 10 条(语料 tainted 标记不存在 · 成本无上界 · 进行中依赖 WS · 降级是平台级 · 降级无结构化表 ·
+  MCP 无界面且连接状态读不到 · 已收口项目的提问不再排队 · 职责「到点了」不等于马上开工 ·
+  自己的 MCP 服务不是沙箱 · 经验库里的外部内容没有来源可信度标记)。回归
   `tests/web/about-page.test.ts`(12 条)。
 - 变异自检脚本:`.probe/mutation-wave0b.py`(6 条,全部实测变红)。
   ⚠️ **它不用 `git checkout --` 复原** —— 新增文件还没入库时会报 `pathspec … did not match`,
@@ -1525,7 +1662,11 @@ M8 工作项列表复活 · M9 页面自己判档位 · M10 卡片不是链接)�
 **038 结构化唤醒**(`wakeups`:`at`/`every` 两种,闭集在 TS;**取 multica issue_wakeup 的时间轴子集**,
 cron 与条件唤醒如实不做)。
 **039 职责**(`duties` + `duty_runs`:一摊常设的事 + 每一轮功课的记录;一条职责 = 一个长期项目
-(工作间)+ 一条职责记录;节奏 / 状态 / 一轮的状态三个闭集都在 TS;详见「职责」一节)。
+(工作间)+ 一条职责记录;节奏 / 状态 / 一轮的状态三个闭集都在 TS;详见「职责」一节),
+**040 自己的仓库与经验库**(`agent_notes` + FTS5 `agent_notes_fts` + 三个同步触发器:一个角色自己的条目,
+**直接存正文**(条目本身就是内容,别处没有一份原文可指 —— 与 028 的「只存偏移」相反);
+`agent_tool_disables`:人踩的刹车。两张都引 `agents`(CASCADE),`agent_notes` 另引 `projects`(SET NULL);
+取值域闭集在 TS、不建 CHECK;详见「自己的仓库与经验库」一节)。
 - ⚠️ **`artifacts.work_id` 一条边承载两个语义**(「产出」∪「关于」,migration 014):执行角色写 `evidence` 是产出,质检把 `review_finding` 挂到**被审的那条**上是「关于」。取「这条工作项交付了什么」必须自己区分(`runtime/execution.ts` 用 `work_id` + 作者 + `kind ∉ ABOUT_ONLY_ARTIFACT_KINDS` 三条判据);**不要删那些边** —— 它是 `review_finding` 唯一能表达「审的是哪一条」的地方。
 - `artifacts` 直接挂项目 —— **没有 blackboard 容器层**。记忆在 `memory_fragments` / `memory_profile`,不是 `fragments`:`fragments` 是旧名字,001 已占用。
 - 平台表**不得复用旧表名**:`CREATE TABLE IF NOT EXISTS` 撞名时静默无操作,新表根本建不出来(见下 §三类静默失败)。加表前先 `ls migrations/` 查名。
@@ -1919,6 +2060,14 @@ turn_usage / client_questions / review_verdicts / artifacts / knowledge_chunks)�
 MCP server 定义 = 在这台机器上执行任意命令 / 向任意地址出网,同款处置。
 工具只有三个:`mcp_list`(读)/ `mcp_grant` / `mcp_revoke`。
 
+> ⚠️ **2026-11-28(040)修订:上面两条各多了一个例外,而且是用户点的头。**
+> 用户裁决「自己的 rag 和代码仓库不需要我放行」。角色**自己仓库**里
+> (`<工作根>/roles/<角色>/tools/<名字>/mcp.json`)的 MCP 服务**不经授权文件**、直接进**他自己的**会话
+> (`mcp/solve.ts` 的 `solveOwnMcp`:只能是本地进程、`env` 里不许引用凭据、被甲方停用的不连、
+> 撞了人的目录人的一份赢)。三个执行角色与质检**仍然没有** `mcp.read` / `mcp.grant`,人的目录一个字节动不了。
+> 下面「两个执行角色与质检**零 MCP**」那句从此读作「零**授权**」。
+> 全文见「自己的仓库与经验库」一节。
+
 ### 落点是文件,不是表
 
 ```
@@ -1936,7 +2085,9 @@ HTTP 面:`GET|POST /api/mcp/servers` · `PUT /api/mcp/servers/:name/secrets` ·
 - **secret 明文不进 DB、不进任何 API 响应、不进日志、不回写文件**;解不开的只报**键名**。
 - `env`/`headers` 里**硬拒 `!` 开头的值**(pi 的 `!command` 是任意命令执行后门),只允许 `${VAR}`。
 - **角色分配**:`mcp.read` 给 business_manager 与 project_manager;`mcp.grant` **只给 project_manager**;
-  两个执行角色与质检**零 MCP**(他们已有 `code.exec`,再叠外部工具是纯扩权)。
+  两个执行角色与质检**零 MCP 授权**(他们已有 `code.exec`,再叠外部工具是纯扩权;
+  2026-11-28 起唯一的例外是角色**自己仓库**里的 MCP 服务 —— 不经授权文件、只进他自己的会话,
+  见「自己的仓库与经验库」一节)。
 - **收口项目停用 MCP**:`authorize.ts` 的 `PROJECT_SCOPED_PREFIXES` 加了 `"mcp."`,
   且**没有**加进 `DIALOGUE_SURVIVES_CLOSURE`(豁免的是「说话」,不是「用外部工具」)。
 - ⚠️ **授权只影响新建的会话** —— 会话池键是 `(项目, 会话, agent)`。改完授权要对已存在的会话
@@ -2004,9 +2155,9 @@ allowlist 拦不住它);**刻意不给 `projectConfig`**(pi 默认还会读 `<cw
 
 ## 提示词(harness)
 
-- 单元内容在 `harness/system_prompts/`,**15 个唯一单元**(2026-11-15 +`methodology.core`:三个干活角色共享的方法论);构建时由 `scripts/copy-harness.mjs` 拷进 `dist/harness/`(出厂副本)。
+- 单元内容在 `harness/system_prompts/`,**17 个唯一单元**(2026-11-15 +`methodology.core`:三个干活角色共享的方法论;2026-11-27 +`business_manager.duty`;2026-11-28 +`own_kit.core`:三个干活角色共享的经验库与自己的仓库);构建时由 `scripts/copy-harness.mjs` 拷进 `dist/harness/`(出厂副本)。
 - 运行时从**数据目录**读:`<dataDir>/harness/system_prompts/{unitId}.md`(`src/platform/runtime/promptAssembly.ts`)。
-- 角色→单元的声明在 `ROLE_SPECS[].promptUnits`:5 个角色共 **22 处声明**、15 个唯一单元。跨角色共享的有**四个** —— `collaboration.ask`(4 个角色)、`collaboration.convene`(2 个角色)、`change.propose`(2 个角色)、`methodology.core`(3 个干活角色,2026-11-15 起)。
+- 角色→单元的声明在 `ROLE_SPECS[].promptUnits`:5 个角色共 **26 处声明**、17 个唯一单元。跨角色共享的有**五个** —— `collaboration.ask`(4 个角色)、`collaboration.convene`(2 个角色)、`change.propose`(2 个角色)、`methodology.core`(3 个干活角色,2026-11-15 起)、`own_kit.core`(3 个干活角色,2026-11-28 起)。
 - **角色中文名的第三处写法已彻底删掉**(2026-10-08):`runtime/promptAssembly.ts` 曾有一张
   `ROLE_NAME`,先写着 `Worker(执行者)`、后写着「质检审查员」(而 `ORG` 是「质检」)——
   现在**没有那张表了**,系统提示里的「# 你的角色:X」直接调 `roleDisplayName()`。

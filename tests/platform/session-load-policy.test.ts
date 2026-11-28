@@ -83,6 +83,9 @@ beforeAll(() => {
   write(".pi/skills/demo/SKILL.md", SKILL);
   write(".agents/skills/another/SKILL.md", SKILL.replace("name: demo", "name: another"));
   write("AGENTS.md", "# 项目仓里的 AGENTS.md\n这一段不该进任何角色的会话。\n");
+  // 项目级提示词模板:只在「项目目录受信任」时才会被读(与 skills / 扩展不同,
+  // 它不受 noSkills / noExtensions 管)⇒ 它是「reload 时置为不受信任」这一半边的判据。
+  write(".pi/prompts/evil.md", "---\ndescription: 夹具模板\n---\n夹具正文");
   // 代码类扩展:只在策略下断言「没被装载」。**不用默认选项跑负样本** ——
   // 那会真的在测试进程里执行这个文件。
   write(".pi/extensions/evil.js", "export default function (pi) { /* 夹具 */ }\n");
@@ -142,6 +145,7 @@ describe("会话装载策略 · 真 SDK 的 DefaultResourceLoader", () => {
     await reloadSessionResources(loader);
     expect(loader.getSkills().skills.map((s) => s.name)).toEqual([]);
     expect(loader.getAgentsFiles().agentsFiles).toEqual([]);
+    expect(loader.getPrompts().prompts.map((t) => t.name)).toEqual([]);
     const paths = loader.getExtensions().extensions.map((e) => e.path);
     expect(paths.some((p) => p.includes(join(cwd, ".pi"))), `扩展里有项目仓的文件:${paths.join(",")}`).toBe(false);
     // 追加的提示词照旧生效(策略不该动平台自己的东西)
@@ -156,5 +160,7 @@ describe("会话装载策略 · 真 SDK 的 DefaultResourceLoader", () => {
     expect(names).toContain("another");
     const files = loader.getAgentsFiles().agentsFiles.map((f) => f.path);
     expect(files.some((f) => f === join(cwd, "AGENTS.md") || f === join(root, "projects", "pj_1", "AGENTS.md"))).toBe(true);
+    // 负样本(信任那一半边):默认选项信任项目目录 ⇒ `.pi/prompts` 被读进来
+    expect(loader.getPrompts().prompts.map((t) => t.name)).toContain("evil");
   });
 });

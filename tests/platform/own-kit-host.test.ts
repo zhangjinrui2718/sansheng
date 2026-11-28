@@ -341,9 +341,12 @@ describe("自己的工具 · 停用端点与换会话", () => {
     const offBody = await json<{ tool: { state: string; disabledAt: number | null }; changed: boolean }>(off);
     expect(offBody.tool.state).toBe("disabled");
     expect(offBody.changed).toBe(true);
-    // 幂等:再停一次不算改动
+    // 幂等:再停一次不算改动,也**不换会话**(没改动却丢会话 = 把一个空操作说成了生效)
+    const disposedBefore = cwSessions(h).filter((x) => x.disposed).length;
     const again = await toggle(h, "coding_worker", "rag", { disabled: true });
     expect((await json<{ changed: boolean }>(again)).changed).toBe(false);
+    await new Promise((r) => setTimeout(r, 60));
+    expect(cwSessions(h).filter((x) => x.disposed).length).toBe(disposedBefore);
 
     // 第 2 轮:新会话的工具面里没有它,任务里写着停用
     workIds.push(assignWork(h, "停用之后的一轮"));
