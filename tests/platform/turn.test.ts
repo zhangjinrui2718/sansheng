@@ -885,3 +885,335 @@ describe("runTurn · 看门狗三道闸(判的是「还在不在动」,不是「
     expect(turnStopLabel("tool_count")).toContain("工具调用次数");
   });
 });
+
+// ══════════════════════════════════════════════════════════════════
+// 活干完即停:stopAfterTool(2026-11-28 真模型实验之后)
+// ══════════════════════════════════════════════════════════════════
+//
+// 判据由调用方给(`runWorkItem` 读库判「本回合那条工作项到终态了没有」);
+// 这里只测 `runTurn` 这一侧的机制:判说要停 ⇒ abort 一次、不是超时也不是中断、
+// 轨迹里「办完的那次调用」之后紧跟一行「平台在此结束这一轮」。
+
+describe("runTurn · stopAfterTool · 活干完即停", () => {
+  const oneTool = (emit: (ev: AgentSessionEvent) => void): void => {
+    emit(toolStart("t1", "work_update", { workId: "w_1", status: "done" }));
+    emit(toolEnd("t1", "work_update", { ok: true }));
+  };
+
+  it("判说要停 ⇒ abort 一次、`finishedBy` 带回;不是超时(`timedOut` 假、没有 `timeout` 现场)", async () => {
+    const { result, fake } = await turn((emit) => {
+      oneTool(emit);
+      emit(toolStart("t2", "bash", { command: "ls" }));
+      emit(toolEnd("t2", "bash", { ok: true }));
+    }, { timeoutMs: 5_000, idleTimeoutMs: 10_000 });
+    // 上面那次没传 stopAfterTool:先证「不传就不停」(负样本)
+    expect(fake.aborts).toBe(0);
+    expect(result.finishedBy).toBeUndefined();
+
+    const stopped = await turn((emit) => {
+      oneTool(emit);
+      emit(toolStart("t2", "bash", { command: "ls" }));
+      emit(toolEnd("t2", "bash", { ok: true }));
+    }, {
+      timeoutMs: 5_000, idleTimeoutMs: 10_000,
+      stopAfterTool: (call) => (call.name === "work_update" && !call.isError ? "工作项 w_1 已到终态(done)" : null),
+    });
+    expect(stopped.fake.aborts, "判说要停的那一次就该 abort").toBe(1);
+    expect(stopped.result.finishedBy).toBe("工作项 w_1 已到终态(done)");
+    expect(stopped.result.timedOut).toBe(false);
+    expect(stopped.result.timeout).toBeUndefined();
+    expect(stopped.result.unanswered, "即停不是「模型没说话」").toBeNull();
+  });
+
+  it("判据拿得到原样的参数;返回 null ⇒ 照常继续,一次都不 abort", async () => {
+    const seen: Array<{ name: string; args: Readonly<Record<string, unknown>>; isError: boolean }> = [];
+    const { result, fake } = await turn((emit) => {
+      emit(toolStart("t1", "bash", { command: "ls -la", nested: { a: 1 } }));
+      emit(toolEnd("t1", "bash", { ok: true }));
+      emit(toolStart("t2", "board_write", { kind: "note" }));
+      emit(toolEnd("t2", "board_write", { ok: false }, { isError: true }));
+    }, {
+      timeoutMs: 5_000, idleTimeoutMs: 10_000,
+      stopAfterTool: (call) => { seen.push(call); return null; },
+    });
+    expect(fake.aborts).toBe(0);
+    expect(result.finishedBy).toBeUndefined();
+    expect(seen.map((c) => [c.name, c.isError])).toEqual([["bash", false], ["board_write", true]]);
+    expect(seen[0]!.args).toEqual({ command: "ls -la", nested: { a: 1 } });
+  });
+
+  it("判据自己抛错 ⇒ 这一轮照常继续(不毁回合),留一条 ERROR", async () => {
+    const lines: string[] = [];
+    const spy = vi.spyOn(console, "log").mockImplementation((...args: unknown[]) => {
+      lines.push(args.map((a) => String(a)).join(" "));
+    });
+    try {
+      const { result, fake } = await turn((emit) => {
+        oneTool(emit);
+        emit(textDelta("继续干活"));
+      }, {
+        timeoutMs: 5_000, idleTimeoutMs: 10_000,
+        stopAfterTool: () => { throw new Error("判据炸了"); },
+      });
+      expect(fake.aborts).toBe(0);
+      expect(result.finishedBy).toBeUndefined();
+      expect(result.text).toBe("继续干活");
+      expect(lines.some((l) => l.includes("stopAfterTool 抛错") && l.includes("判据炸了"))).toBe(true);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("轨迹:工具行之后紧跟一行「平台在此结束这一轮」,再是收口行", async () => {
+    await turn((emit) => { oneTool(emit); }, {
+      timeoutMs: 5_000, idleTimeoutMs: 10_000, sessionId: "s_1",
+      stopAfterTool: () => "工作项 w_1 已到终态(done)",
+    });
+    const rows = db.prepare(
+      "SELECT seq, kind, tool, result_summary FROM turn_events WHERE agent_id = 'pm' ORDER BY seq",
+    ).all() as Array<{ seq: number; kind: string; tool: string | null; result_summary: string }>;
+    expect(rows.map((r) => [r.kind, r.tool])).toEqual([["tool", "work_update"], ["marker", null], ["turn_end", null]]);
+    expect(rows.map((r) => r.seq)).toEqual([1, 2, 3]);
+    expect(rows[1]!.result_summary).toContain("工作项 w_1 已到终态(done)");
+    expect(rows[1]!.result_summary).toContain("平台在此结束这一轮");
+  });
+
+  it("即停让 prompt() 以错误收尾 ⇒ **不是回合故障**(与打断同一条判断),不抛给调用方", async () => {
+    // 这里不用 fakeSession 的 holdPromptUntilAbort:那个剧本在 emit 之前还没挂上 release,
+    // 而 emit 是同步的 —— abort 会在 release 挂上之前就发出去(测试夹具的时序,不是被测行为)。
+    // 自己写一个:先挂上 release,下一拍才发工具事件。
+    const listeners: Array<(ev: AgentSessionEvent) => void> = [];
+    let release: (() => void) | null = null;
+    let aborts = 0;
+    const session = {
+      subscribe(fn: (ev: AgentSessionEvent) => void) { listeners.push(fn); return () => {}; },
+      async prompt() {
+        const emit = (ev: AgentSessionEvent) => { for (const l of [...listeners]) l(ev); };
+        await new Promise<void>((r) => setTimeout(r, 5));
+        oneTool(emit);
+        await new Promise<void>((r) => { release = r; });
+        throw new Error("aborted by platform");
+      },
+      async abort() { aborts += 1; release?.(); },
+      dispose() {},
+      getActiveToolNames() { return []; },
+    } as unknown as AgentSession;
+    const result = await runTurn({
+      session, db, agentId: "pm", projectId: "p1", message: "做点事", timeoutMs: 5_000,
+      idleTimeoutMs: 10_000, abortGraceMs: 500, stopAfterTool: () => "工作项 w_1 已到终态(done)",
+    });
+    expect(aborts).toBe(1);
+    expect(result.finishedBy).toBe("工作项 w_1 已到终态(done)");
+    expect(result.timedOut).toBe(false);
+  });
+
+  it("即停时 prompt() **当场**以错误收尾(在 abort() 里同步拒掉,早于收尾等待放行)⇒ 同样不是回合故障", async () => {
+    // 上一条的假会话是在 abort 之后的下一拍才抛 —— 那个时序下「prompt 的错误先到、收尾等待后放行」
+    // 这一格根本没被问到(变异实测漏网:把 `finishedBy === null` 拿掉,上一条照样绿)。
+    let rejectPrompt: ((err: Error) => void) | null = null;
+    let aborts = 0;
+    const listeners: Array<(ev: AgentSessionEvent) => void> = [];
+    const emit = (ev: AgentSessionEvent): void => { for (const l of [...listeners]) l(ev); };
+    const session = {
+      subscribe(fn: (ev: AgentSessionEvent) => void) { listeners.push(fn); return () => {}; },
+      prompt() {
+        setTimeout(() => { oneTool(emit); }, 5);
+        return new Promise<never>((_resolve, reject) => { rejectPrompt = reject; });
+      },
+      async abort() { aborts += 1; rejectPrompt?.(new Error("aborted by platform")); },
+      dispose() {},
+      getActiveToolNames() { return []; },
+    } as unknown as AgentSession;
+    const result = await runTurn({
+      session, db, agentId: "pm", projectId: "p1", message: "做点事", timeoutMs: 5_000,
+      idleTimeoutMs: 10_000, abortGraceMs: 500, stopAfterTool: () => "工作项 w_1 已到终态(done)",
+    });
+    expect(aborts).toBe(1);
+    expect(result.finishedBy).toBe("工作项 w_1 已到终态(done)");
+    expect(result.timedOut).toBe(false);
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════
+// 平台自己掐掉的回合,不算模型的错、也不算 provider 的错(2026-11-28 真机现场)
+// ══════════════════════════════════════════════════════════════════
+//
+// 真 SDK 被掐掉之后**不是**发一条 `stopReason:"aborted"` 就完事:活干完即停那一轮,
+// 它为被掐掉的这次请求补了一条 `stopReason:"error"` 的助手消息(原文
+// `This operation was aborted`,用量全 0、没有正文)。此前三处判据都把这件事算到了别人头上:
+//   ① 当成 provider 故障 —— 一行「被 provider 拒绝」WARN + 轨迹里的 `provider_error`,
+//      写在一个**办成了**的回合上;
+//   ② 甲方在模型开口前按「停止」⇒ 报成「这一回合没有回答甲方」(宿主直接掐的会话,
+//      `runTurn` 此前不知道有人掐过);
+//   ③ 被掐掉的回合用量是 0 ⇒ 一条「SDK 字段名是不是变了」的 WARN(每按一次停止一条)。
+
+/** 真 SDK 被掐掉之后补的那条消息(pi 1.2.0 实测形状:没有正文,用量全 0)。 */
+const abortedCallEnd = (errorMessage = "This operation was aborted") =>
+  ({
+    type: "message_end",
+    message: {
+      role: "assistant", model: "fake-model", stopReason: "error", errorMessage,
+      usage: { input: 0, output: 0, cacheRead: 0 },
+    },
+  }) as RuntimeEvent;
+const abortedMessageEnd = () =>
+  ({
+    type: "message_end",
+    message: { role: "assistant", model: "fake-model", stopReason: "aborted", usage: { input: 0, output: 0, cacheRead: 0 } },
+  }) as RuntimeEvent;
+
+/**
+ * 「先发一截、等掐、掐掉之后 SDK 再补一条消息」的假会话(真 SDK 的顺序就是先掐、后补)。
+ * `release` 在发事件**之前**就挂好:`stopAfterTool` 触发的 abort 是在事件处理器里同步到达的。
+ */
+function abortableSession(
+  beforeAbort: (emit: (ev: AgentSessionEvent) => void) => void,
+  onAbort: (emit: (ev: AgentSessionEvent) => void) => void,
+): { session: AgentSession; aborts: () => number } {
+  const listeners: Array<(ev: AgentSessionEvent) => void> = [];
+  const emit = (ev: AgentSessionEvent): void => { for (const l of [...listeners]) l(ev); };
+  let release: (() => void) | null = null;
+  let aborts = 0;
+  const session = {
+    subscribe(fn: (ev: AgentSessionEvent) => void) { listeners.push(fn); return () => {}; },
+    async prompt() {
+      const held = new Promise<void>((r) => { release = r; });
+      await new Promise<void>((r) => setTimeout(r, 5));
+      beforeAbort(emit);
+      await held;
+      return { messages: [] };
+    },
+    async abort() {
+      aborts += 1;
+      // 掐掉请求与补那条消息不在同一个同步段里
+      await new Promise<void>((r) => setTimeout(r, 0));
+      onAbort(emit);
+      release?.();
+    },
+    dispose() {},
+    getActiveToolNames() { return []; },
+  } as unknown as AgentSession;
+  return { session, aborts: () => aborts };
+}
+
+const captureLogs = (): { lines: string[]; restore: () => void } => {
+  const lines: string[] = [];
+  const spy = vi.spyOn(console, "log").mockImplementation((...args: unknown[]) => {
+    lines.push(args.map((a) => String(a)).join(" "));
+  });
+  return { lines, restore: () => spy.mockRestore() };
+};
+
+describe("runTurn · 平台自己掐掉的回合,不算模型 / provider 的错", () => {
+  it("活干完即停之后 SDK 为被掐掉的调用补一条 error ⇒ **不是 provider 故障**:没有 providerError,轨迹里没有 provider_error 行", async () => {
+    const logs = captureLogs();
+    try {
+      const fake = abortableSession(
+        (emit) => {
+          emit(toolStart("t1", "work_update", { workId: "w_1", status: "done" }));
+          emit(toolEnd("t1", "work_update", { ok: true }));
+        },
+        (emit) => { emit(abortedCallEnd()); emit({ type: "agent_settled" } as RuntimeEvent); },
+      );
+      const result = await runTurn({
+        session: fake.session, db, agentId: "pm", projectId: "p1", message: "做点事", timeoutMs: 5_000,
+        idleTimeoutMs: 10_000, abortGraceMs: 500, sessionId: "s_1",
+        stopAfterTool: () => "工作项 w_1 已到终态(done)",
+      });
+      expect(fake.aborts()).toBe(1);
+      expect(result.finishedBy).toBe("工作项 w_1 已到终态(done)");
+      expect(result.providerError, "平台掐的,不是 provider 拒的").toBeUndefined();
+      expect(logs.lines.some((l) => l.includes("被 provider 拒绝"))).toBe(false);
+      const kinds = (db.prepare("SELECT kind FROM turn_events WHERE agent_id = 'pm' ORDER BY seq").all() as Array<{ kind: string }>)
+        .map((r) => r.kind);
+      expect(kinds).toEqual(["tool", "marker", "turn_end"]);
+    } finally {
+      logs.restore();
+    }
+  });
+
+  it("甲方在模型开口前按「停止」(宿主直接掐的)⇒ 不算「没有下文」,也不报「用量全 0」", async () => {
+    const logs = captureLogs();
+    try {
+      let hostAborted = false;
+      const fake = abortableSession(
+        (emit) => { emit(thinkDelta("想了 450 字")); },
+        (emit) => { emit(abortedMessageEnd()); emit({ type: "agent_settled" } as RuntimeEvent); },
+      );
+      const running = runTurn({
+        session: fake.session, db, agentId: "bm", projectId: "p1", message: "问一句", timeoutMs: 5_000,
+        idleTimeoutMs: 10_000, aborted: () => hostAborted,
+      });
+      await new Promise<void>((r) => setTimeout(r, 20));
+      hostAborted = true; // 宿主 `abortThisTurn` 的顺序:先记意图,再掐会话
+      await fake.session.abort();
+      const result = await running;
+      expect(fake.aborts()).toBe(1);
+      expect(result.unanswered, "被甲方停掉的回合不是「模型没说话」").toBeNull();
+      expect(logs.lines.some((l) => l.includes("token 全为 0"))).toBe(false);
+    } finally {
+      logs.restore();
+    }
+  });
+
+  it("自检:同一场戏**不告诉** `runTurn` 有人掐过(旧接线)⇒ 就会被报成「没有下文」+「用量全 0」—— 上面那条绿的确实是那个探针换来的", async () => {
+    const logs = captureLogs();
+    try {
+      const fake = abortableSession(
+        (emit) => { emit(thinkDelta("想了 450 字")); },
+        (emit) => { emit(abortedMessageEnd()); emit({ type: "agent_settled" } as RuntimeEvent); },
+      );
+      const running = runTurn({
+        session: fake.session, db, agentId: "bm", projectId: "p1", message: "问一句", timeoutMs: 5_000,
+        idleTimeoutMs: 10_000,
+      });
+      await new Promise<void>((r) => setTimeout(r, 20));
+      await fake.session.abort();
+      const result = await running;
+      expect(result.unanswered?.kind).toBe("no_text");
+      expect(logs.lines.some((l) => l.includes("token 全为 0"))).toBe(true);
+    } finally {
+      logs.restore();
+    }
+  });
+
+  it("宿主掐掉之后 SDK 报的是 error(不是 aborted)⇒ 同样不按 provider 故障处置", async () => {
+    let hostAborted = false;
+    const fake = abortableSession(
+      (emit) => { emit(thinkDelta("想了 450 字")); },
+      (emit) => { emit(abortedCallEnd()); emit({ type: "agent_settled" } as RuntimeEvent); },
+    );
+    const running = runTurn({
+      session: fake.session, db, agentId: "bm", projectId: "p1", message: "问一句", timeoutMs: 5_000,
+      idleTimeoutMs: 10_000, aborted: () => hostAborted,
+    });
+    await new Promise<void>((r) => setTimeout(r, 20));
+    hostAborted = true;
+    await fake.session.abort();
+    const result = await running;
+    expect(result.providerError).toBeUndefined();
+    expect(result.unanswered).toBeNull();
+  });
+
+  it("负样本:没人掐过的回合里 provider 真的拒了 ⇒ 照常分类(探针在、但没人掐过,不算数)", async () => {
+    const { result } = await turn((emit) => {
+      emit(abortedCallEnd("429 Too Many Requests: rate limit exceeded"));
+    }, { aborted: () => false });
+    expect(result.providerError?.kind).toBe("rate_limit");
+    // 打断**之前**就到了的真实故障照常留着(真 SDK 先报错、后掐的顺序;宿主后来才掐的)
+    let hostAborted = false;
+    const fake = abortableSession(
+      (emit) => { emit(abortedCallEnd("429 Too Many Requests: rate limit exceeded")); },
+      (emit) => { emit({ type: "agent_settled" } as RuntimeEvent); },
+    );
+    const running = runTurn({
+      session: fake.session, db, agentId: "bm", projectId: "p1", message: "问一句", timeoutMs: 5_000,
+      idleTimeoutMs: 10_000, aborted: () => hostAborted,
+    });
+    await new Promise<void>((r) => setTimeout(r, 20));
+    hostAborted = true;
+    await fake.session.abort();
+    const after = await running;
+    expect(after.providerError?.kind, "掐之前到的故障不许被「后来有人掐过」抹掉").toBe("rate_limit");
+  });
+});

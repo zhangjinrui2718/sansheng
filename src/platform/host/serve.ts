@@ -88,7 +88,6 @@ import {
   listProviders,
   providerEnvKey,
   resolveModel,
-  syncActiveProviderApiKeyEnv,
 } from "../runtime/agentRuntime/pi/providers.js";
 import {
   classifyProviderFailure,
@@ -507,12 +506,14 @@ export function decideFailover(input: FailoverInput): FailoverDecision {
  * ② **不是刚故障过的那家**(`failedProviderIds`)—— 否则两家来回打;
  * ③ **有 apiKey**;
  * ④ **有凭据通道**(`providerEnvKey` 有映射)——
- *    ⚠️ **这一条是 2026-10-22 复核补上的**:三生的凭据**只**经 env 通道进 SDK
+ *    ⚠️ **这一条是 2026-10-22 复核补上的**:当时三生的凭据**只**经 env 通道进 SDK
  *    (`syncActiveProviderApiKeyEnv`),`agentDir/auth.json` 三生从不写
- *    ⇒ 没有 env 映射的 provider 切过去**必然也拿不到 key**(它只有
- *    `log.warn`,不报错)⇒ 那次降级是白降:故障照旧,而且这一家被记进
- *    `failedProviderIds` ⇒ 后面**再也不会**选它 ⇒ 一台本来能用的 provider
- *    被一次无谓的降级废掉了。
+ *    ⇒ 没有 env 映射的 provider 切过去**必然也拿不到 key** ⇒ 那次降级是白降:
+ *    故障照旧,而且这一家被记进 `failedProviderIds` ⇒ 后面**再也不会**选它。
+ *    **2026-11-28 起凭据走运行期内存**(`ModelRuntime.setRuntimeApiKey`),这条过滤
+ *    在机制上已不是必需;**保留**是因为没有 env 映射的那几家(amazon-bedrock /
+ *    azure / github-copilot / huggingface / openai-codex / typesafe)本来就不靠
+ *    「一个简单 key」—— 降级过去多半也用不了,放开它要单独验证。
  * ⑤ **模型解析得出来**(`resolveModel` 非 null)—— 模型不认识,切过去只是换个错。
  */
 export function failoverCandidatesOf(
@@ -1259,8 +1260,8 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
       currentProvider = null;
       return;
     }
-    // 凭据要先同步到 env 再解析 —— 与 bootPlatform 里同一条理由
-    syncActiveProviderApiKeyEnv(p.provider, p.apiKey);
+    // 凭据不在这里同步(2026-11-28):它随下一次建会话进 ModelRuntime 的内存
+    // (`getOrCreateSession` 把 `currentProvider.apiKey` 交给 `createPlatformSession`)。
     currentModel = resolveModel({
       provider: p.provider,
       modelId: p.modelId,
@@ -1327,13 +1328,16 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
   ): ProviderConfig | null {
     const candidates = failoverCandidates();
     if (candidates.length === 0) return null;
-    // ⚠️ **忙闩检查**:`syncActiveProviderApiKeyEnv` 改的是**进程级 env**,
-    // 在别的回合正跑时改会把它们打到(它们会拿错 key)。
-    // **宁可这次失败,不要误伤别的回合。**
+    // ⚠️ **忙闩检查**:还有别的回合在跑 ⇒ 不换家。
+    //
+    // 历史理由(2026-10-22):当时凭据经 `syncActiveProviderApiKeyEnv` 写**进程级 env**,
+    // 别的回合正跑时换家会把它们打到(拿错 key)。**2026-11-28 起凭据走 ModelRuntime 的
+    // 内存**(每家 provider 一个 key,互不覆盖),这个理由在机制上已不成立;
+    // 这道闸**保留**是保守起见 —— 放开它会改变降级的时序,要单独验证,不夹带在这里。
     if (busyGuard()) {
       log.warn(
         `platform: provider 降级被拒 —— 还有别的回合在跑(` +
-          `换 provider 要改进程级 env,在别的回合正跑时改会打到它们)`,
+          `保守起见:别的回合正跑时不换家;降级留到它们结束之后)`,
       );
       return null;
     }
@@ -1348,8 +1352,7 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
     // ⚠️ **记下故障过的那一家**:降过去之后它不再是候选(否则下一轮又切回去,
     // 两家来回打 —— A 刚限流过)。用户在界面上改设置时这个集合会清空。
     if (currentProvider !== null) failedProviderIds.add(currentProvider.id);
-    // 凭据先同步到 env —— 与 bootPlatform / reResolveModel 同一条理由。
-    syncActiveProviderApiKeyEnv(backup.provider, backup.apiKey);
+    // 凭据随下一次建会话进 ModelRuntime 的内存(见 `getOrCreateSession`)—— 不再写 env。
     currentProvider = backup;
     currentModel = resolveModel({
       provider: backup.provider,
@@ -2246,6 +2249,9 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
         cwd: sessionCwd(projectId),
         agentDir: booted.settings.agentDir ?? join(opts.dataDir, "agent"),
         model: currentModel,
+        // active provider 的明文 key:经 ModelRuntime 的内存进 SDK(`setRuntimeApiKey`),
+        // **不写 process.env** —— 会话里 spawn 的子进程(bash / 自己的 MCP 服务)继承不到它。
+        ...(currentProvider !== null ? { apiKey: currentProvider.apiKey } : {}),
         dataDir: opts.dataDir,
         // 思考档位(2026-11-16 接线):settings 里 active provider 的 thinkingLevel
         // 是「存了但从未传给会话」的孤儿字段 —— 从这里进 SDK(off 原样传,SDK 会
@@ -2581,6 +2587,9 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
         agentId,
         projectId,
         message: task,
+        // 宿主自己的中断(甲方按了停止)要让 `runTurn` 知道(2026-11-28 真机补):被掐掉的回合
+        // 不算「没有下文」,被掐掉的那次调用也不按 provider 故障处置 —— 那是平台掐的,不是模型的错。
+        aborted: () => aborted,
         ...(ownRole !== null ? { ownRepoRoot: agentWorkspaceRoot(workspaceRootOf(), ownRole) } : {}),
         // ── 用量那两行接线(见 `RunTurnOptions.sessionId` 的已知缺口)───────
         //
@@ -2966,6 +2975,8 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
         // 真机现场那个跑了 16 分钟的 worker 回合走的正是这里)。
         sessionId,
         onUsageRecorded: (row) => hub.emitUsageRecorded(row),
+        // 宿主自己的中断(甲方按了停止 / 整个上下文停掉)要传到 `runTurn`:与聊天那条路同一条接线。
+        aborted: () => aborted,
         // 自己的仓库的路径(040):**执行这条路才是工程师干活的地方** —— 只接
         // `runAgentTurn` 那条等于没接(第一版就是这么错的:工程师每一轮都读到
         // 「这一轮没有接到仓库路径」,而聊天 / 评审那条路是好的)。
@@ -3225,7 +3236,10 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
           ? "被中断"
           : execution.turn.timedOut
             ? "超时"
-            : "结束";
+            : execution.turn.finishedBy !== undefined
+              // 活干完即停(2026-11-28):既不是超时也不是中断 —— 是「事办完了,平台不再花钱」
+              ? "干完即停"
+              : "结束";
       return {
         workId,
         title: execution.work.title,

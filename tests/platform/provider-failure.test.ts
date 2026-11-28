@@ -305,7 +305,7 @@ describe("② decideFailover · 降级判据的六条纪律", () => {
     expect(decideFailover({ ...ok, hasBackup: false }).degrade).toBe(false);
   });
 
-  it("⑥还有别的回合在跑 ⇒ **不**降级(换 provider 要改进程级 env)", () => {
+  it("⑥还有别的回合在跑 ⇒ **不**降级(保守起见:凭据自 2026-11-28 走内存,这条闸保留待单独验证)", () => {
     expect(decideFailover({ ...ok, otherTurnRunning: true }).degrade).toBe(false);
     expect(decideFailover({ ...ok, otherTurnRunning: true }).reason).toContain("别的回合");
   });
@@ -443,11 +443,11 @@ function backupModelLabel(): string {
 
 /** 写一份 settings:一个或两个 provider。 */
 function writeSettings(opts: { backup: boolean; sameCredential?: boolean }): void {
-  // ⚠️ **只挑有 env 映射的 provider**(2026-10-22 复核补的):三生的凭据**只**经
-  // env 通道进 SDK(`syncActiveProviderApiKeyEnv`),`agentDir/auth.json` 三生从不写
-  // ⇒ 没有映射的 provider **根本拿不到 key**。夹具原来挑的是 `amazon-bedrock`
-  // (无映射)⇒ 它被降级候选的凭据通道判据排除 ⇒ 「切不回去」那条行为根本
-  // 不可能发生 ⇒ 断言它等于什么都没断言。
+  // ⚠️ **只挑有 env 映射的 provider**(2026-10-22 复核补的):降级候选的第 ④ 条判据是
+  // 「有凭据通道」(`providerEnvKey` 有映射)—— 夹具原来挑的是 `amazon-bedrock`
+  // (无映射)⇒ 它被那条判据排除 ⇒ 「切不回去」那条行为根本不可能发生 ⇒ 断言它等于
+  // 什么都没断言。(2026-11-28 起凭据走 ModelRuntime 的内存、不再经 env,那条过滤
+  // 在机制上已不是必需,但**保留着**—— 所以夹具仍要挑有映射的。)
   const ps = listProviders().filter((p) => p.models.length > 0 && providerEnvKey(p.id) !== undefined);
   const a = ps[0];
   const b = ps.find((p) => p.id !== a?.id);
@@ -668,7 +668,7 @@ describe("④ 宿主 · 工作路径:降级 / 终态", () => {
     expect(getWork(h.db!, "w1")?.status, "降级 ⇒ 活还在(不记 failed)").not.toBe("failed");
   });
 
-  it("负样本:还有别的回合在跑 ⇒ **不**降级(换 provider 要改进程级 env)", async () => {
+  it("负样本:还有别的回合在跑 ⇒ **不**降级(保守起见,见 decideFailover 的那条)", async () => {
     await startHost({ backup: true, maxCascadeRounds: 1 });
     seedProject("w1");
     // 占用**另一个角色**的忙闩 ⇒ 换 provider 会打到它。

@@ -18,7 +18,7 @@ import { insertAgent } from "../../src/platform/storage/repo/agents.js";
 import { insertProject, loadProjectForAuthz } from "../../src/platform/storage/repo/projects.js";
 import { insertWork } from "../../src/platform/storage/repo/works.js";
 import { insertReviewVerdict } from "../../src/platform/storage/repo/reviewVerdicts.js";
-import { dispatch } from "../../src/platform/tools/registry.js";
+import { dispatch, TOOL_INDEX } from "../../src/platform/tools/registry.js";
 import type { ToolRunContext } from "../../src/platform/tools/types.js";
 import { createGitWorkspace } from "../../src/platform/workspace/git.js";
 import type { WorkspacePort } from "../../src/platform/workspace/port.js";
@@ -832,6 +832,38 @@ describe("board_write · 先写文件、后插行(027 的顺序纪律)", () => {
       // 空正文与「读不到」长得一样,所以这句反证必须有:
       expect(read2.text).not.toMatch(/\n\n$/);
     }
+  });
+
+  it("`board_read` **按项目隔离**:别的项目的工件,与不存在的 id 得到同一句「找不到」(2026-11-28)", () => {
+    const w = dispatch("board_write", { kind: "note", title: "项目一的内部结论", body: "只有项目一看得到" }, ctxFor());
+    if (w instanceof Promise) throw new Error("board_write 必须是同步工具");
+    expect(w.ok).toBe(true);
+    const a = listArtifacts(db, projectId)[0]!;
+
+    // 另一个项目、另一个调用者(它自己的项目里没有这条工件)
+    const other = "pj_other";
+    insertProject(db, { id: other, name: "项目二", client: "乙", goal: "g", status: "active", createdAt: T0 });
+    const outsider = ctxFor({ project: loadProjectForAuthz(db, other)! });
+    const denied = dispatch("board_read", { artifactId: a.id }, outsider);
+    if (denied instanceof Promise) throw new Error("board_read 必须是同步工具");
+    expect(denied.ok).toBe(false);
+    // 与「不存在的 id」同一句:不暴露存在性(与 `knowledge_read` 同一道门)
+    const ghost = dispatch("board_read", { artifactId: "art_nope" }, outsider);
+    if (ghost instanceof Promise || ghost.ok || denied.ok) throw new Error("两条都该是失败的同步结果");
+    expect(denied.code).toBe("not_found");
+    expect(denied.message).toBe(ghost.message.replace("art_nope", a.id));
+    // 本项目的调用者照旧读得到
+    const mine = dispatch("board_read", { artifactId: a.id }, ctxFor());
+    if (mine instanceof Promise) throw new Error("board_read 必须是同步工具");
+    expect(mine.ok).toBe(true);
+    if (mine.ok) expect(mine.text).toContain("只有项目一看得到");
+    // 没有项目的调用者(接待会话):那里本来拿不到这个工具 —— 派发器第一道门就拒(下面第一条);
+    // 工具里那一道是纵深防御,要**绕过派发器直接调 `run`** 才够得着(第二条)
+    const gate = dispatch("board_read", { artifactId: a.id }, ctxFor({ project: null }));
+    if (gate instanceof Promise || gate.ok) throw new Error("没有项目的调用者不该读得到任何工件");
+    const bare = TOOL_INDEX.get("board_read")!.run({ artifactId: a.id }, ctxFor({ project: null }));
+    if (bare instanceof Promise || bare.ok) throw new Error("工具自己也不许把工件交给没有项目的调用者");
+    expect(bare.code).toBe("not_found");
   });
 
   it("没接工作区 ⇒ **拒绝并报装配错误**(不是静默不落盘)", () => {

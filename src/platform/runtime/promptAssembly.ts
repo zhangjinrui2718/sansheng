@@ -91,8 +91,15 @@ export function loadPromptUnits(
 
 // ── 角色简报(机械生成)────────────────────────────────────────
 
-/** 能力的可读名。用于简报里列「你能做什么」。 */
-const CAPABILITY_LABEL: Readonly<Partial<Record<Capability, string>>> = {
+/**
+ * 能力的可读名。用于简报里列「你能做什么」。
+ *
+ * ⚠️ **`Record`,不是 `Partial`**(2026-11-28):此前它是 `Partial`,漏掉一条能力时简报
+ * 只是少一行、不报错 —— `mcp.read` / `mcp.grant` / `work.review_verdict` /
+ * `schedule.manage` 四条就这样在角色简报里**一直没有说明文字**(没有任何检查会红;
+ * 质检的提示词甚至自己手写了一遍「你手上没有 code.*」来补)。现在缺一项 typecheck 当场红。
+ */
+const CAPABILITY_LABEL: Readonly<Record<Capability, string>> = {
   "project.open": "立项",
   "project.read": "查看项目全貌",
   "project.update": "调整项目名/目标/状态",
@@ -134,6 +141,12 @@ const CAPABILITY_LABEL: Readonly<Partial<Record<Capability, string>>> = {
   "own.write": "往自己仓库里写文件",
   "experience.read": "查自己的经验库",
   "experience.write": "记自己的经验库",
+  // 2026-11-28 补齐:这四条此前没有说明文字(类型是 `Partial`,漏了不报错)。
+  // ⚠️ `work.review_verdict` 的措辞同样避开「改代码」「执行命令」。
+  "mcp.read": "查看外部工具(MCP)的目录与各角色的授权",
+  "mcp.grant": "给某个角色开 / 关一个已登记的外部工具(MCP)",
+  "work.review_verdict": "给出审查结论(通过 / 不通过)",
+  "schedule.manage": "排一个到点的自我提醒",
 };
 
 /*
@@ -173,10 +186,8 @@ export function renderRoleBrief(role: ProjectRole): string {
     "## 你能做的事",
   ];
 
-  const caps = spec.ceiling
-    .map((c) => CAPABILITY_LABEL[c])
-    .filter((l): l is string => l !== undefined);
-  for (const l of caps) lines.push(`- ${l}`);
+  // `CAPABILITY_LABEL` 是 `Record<Capability, string>`:每条能力都有说明文字(缺项在类型上写不出来)。
+  for (const c of spec.ceiling) lines.push(`- ${CAPABILITY_LABEL[c]}`);
 
   lines.push("", "## 你**不能**做的事(工具层面就拿不到,不是靠自觉)");
   if (spec.boundaryDeny.length === 0) {

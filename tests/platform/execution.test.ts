@@ -25,7 +25,7 @@ import { listTurnUsage } from "../../src/platform/storage/repo/usage.js";
 import { listPendingDispatchEvents } from "../../src/platform/storage/repo/dispatch.js";
 import { collectPendingWork } from "../../src/platform/runtime/pendingWork.js";
 import {
-  runWorkItem, composeWorkPrompt, renderExecutionReport,
+  runWorkItem, composeWorkPrompt, renderExecutionReport, workFinishedByCall,
   type ExecutionResult, type RunWorkOptions,
 } from "../../src/platform/runtime/execution.js";
 import type { TurnTimeoutCause } from "../../src/platform/runtime/turn.js";
@@ -733,5 +733,118 @@ describe("runWorkItem · 用量落库归属", () => {
     const r = await run(w.id, saidDone());
     expect(r.outcome).toBe("refused");
     expect(listTurnUsage(db, "p1", { since: 0, until: Number.MAX_SAFE_INTEGER })).toEqual([]);
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════
+// 活干完即停(2026-11-28 真模型实验之后)
+// ══════════════════════════════════════════════════════════════════
+//
+// 真模型实验:工程师在 `work.update` 改成 done **之后**又花了几十次调用(读三生源码、
+// 翻服务日志);研究员一轮跑了 88 次工具。活已经做完,后面的全是白烧。
+// 现在工作项一到终态,平台就在那一步结束这一轮 —— 判据读库(不信参数),
+// `runTurn` 只负责「判完了就停」(它自己的测试在 turn.test.ts)。
+
+describe("活干完即停 · 判据 workFinishedByCall", () => {
+  it("三条同时成立才算:「是 work_update」×「调用没失败」×「库里这条工作项已是终态」", () => {
+    const w = mkWork({ status: "in_progress" });
+    expect(workFinishedByCall(db, w.id, { name: "work_update", isError: false }),
+      "还没到终态").toBeNull();
+    expect(workFinishedByCall(db, w.id, { name: "board_write", isError: false }),
+      "别的工具把活干完了也不算(判据只认状态写口)").toBeNull();
+    updateWorkStatus(db, w.id, "done", AT + 1);
+    expect(workFinishedByCall(db, w.id, { name: "board_write", isError: false }),
+      "已到终态之后别的工具成功返回也不算(判据只认 work_update 那一次调用)").toBeNull();
+    expect(workFinishedByCall(db, w.id, { name: "work_update", isError: true }),
+      "调用失败不算办完").toBeNull();
+    expect(workFinishedByCall(db, w.id, { name: "work_update", isError: false }))
+      .toContain("(done)");
+  });
+});
+
+describe("活干完即停 · runWorkItem 接线", () => {
+  /** 假会话:发一次 work_update 的工具事件(库里真改成 done),然后模型还想接着调工具。 */
+  function doneThenKeepsGoing(workId: string, onAbort: () => void): AgentSession {
+    const listeners: Array<(ev: AgentSessionEvent) => void> = [];
+    return {
+      subscribe(fn: (ev: AgentSessionEvent) => void) {
+        listeners.push(fn);
+        return () => { const i = listeners.indexOf(fn); if (i >= 0) listeners.splice(i, 1); };
+      },
+      async prompt() {
+        const emit = (ev: unknown) => { for (const l of [...listeners]) l(ev as AgentSessionEvent); };
+        emit({ type: "tool_start", toolCallId: "t1", toolName: "work_update", args: { workId, status: "done" } });
+        updateWorkStatus(db, workId, "done", AT + 1); // 工具的效果:库里的状态
+        emit({ type: "tool_end", toolCallId: "t1", toolName: "work_update", result: { ok: true }, isError: false });
+        // 模型没停:又调了一次工具(真机上它接着去读三生的源码、翻日志)
+        emit({ type: "tool_start", toolCallId: "t2", toolName: "bash", args: { command: "ls" } });
+        emit({ type: "tool_end", toolCallId: "t2", toolName: "bash", result: { ok: true }, isError: false });
+        emit({ type: "agent_settled" });
+      },
+      abort() { onAbort(); },
+      dispose() {},
+      getActiveToolNames() { return []; },
+    } as unknown as AgentSession;
+  }
+
+  it("工作项到终态 ⇒ 平台 abort 一次、`finishedBy` 带回、结局按库判 done —— 不是超时也不是中断", async () => {
+    const w = mkWork({ status: "in_progress" });
+    let aborts = 0;
+    const r = await runWorkItem({
+      session: doneThenKeepsGoing(w.id, () => { aborts += 1; }),
+      db, workId: w.id, timeoutMs: 1000, injectPending: false,
+    });
+    expect(aborts, "活干完那一步就该 abort(不再买下一次模型调用)").toBe(1);
+    expect(r.turn.finishedBy).toContain("(done)");
+    expect(r.finishedBy).toBe(r.turn.finishedBy);
+    expect(r.turn.timedOut).toBe(false);
+    expect(r.turn.timeout, "不是被打断 / 超时").toBeUndefined();
+    expect(r.outcome).toBe("converged");
+    expect(renderExecutionReport(r)).toContain("平台在这一步结束了这一轮");
+  });
+
+  it("另一条工作项被标成 done 不算(只认本回合执行的那条)", async () => {
+    const mine = mkWork({ status: "in_progress" });
+    const other = mkWork({ status: "in_progress" });
+    let aborts = 0;
+    const listeners: Array<(ev: AgentSessionEvent) => void> = [];
+    const session = {
+      subscribe(fn: (ev: AgentSessionEvent) => void) { listeners.push(fn); return () => {}; },
+      async prompt() {
+        const emit = (ev: unknown) => { for (const l of [...listeners]) l(ev as AgentSessionEvent); };
+        emit({ type: "tool_start", toolCallId: "t1", toolName: "work_update", args: { workId: other.id, status: "done" } });
+        updateWorkStatus(db, other.id, "done", AT + 1);
+        emit({ type: "tool_end", toolCallId: "t1", toolName: "work_update", result: { ok: true }, isError: false });
+        emit({ type: "agent_settled" });
+      },
+      abort() { aborts += 1; },
+      dispose() {},
+      getActiveToolNames() { return []; },
+    } as unknown as AgentSession;
+    const r = await runWorkItem({ session, db, workId: mine.id, timeoutMs: 1000, injectPending: false });
+    expect(aborts).toBe(0);
+    expect(r.turn.finishedBy).toBeUndefined();
+    expect(r.outcome, "本回合那条还 in_progress ⇒ 如实未收敛").toBe("unconverged");
+  });
+
+  it("`stopWhenDone: false` 关掉它(演「标完 done 还继续折腾」的测试用)", async () => {
+    const w = mkWork({ status: "in_progress" });
+    let aborts = 0;
+    const r = await runWorkItem({
+      session: doneThenKeepsGoing(w.id, () => { aborts += 1; }),
+      db, workId: w.id, timeoutMs: 1000, injectPending: false, stopWhenDone: false,
+    });
+    expect(aborts).toBe(0);
+    expect(r.turn.finishedBy).toBeUndefined();
+  });
+
+  it("任务正文把顺序讲清:`work.update` 是这一轮的最后一个动作,工件与经验都在它之前", () => {
+    const w = mkWork();
+    const p = composeWorkPrompt(getWork(db, w.id)!);
+    expect(p).toContain("**那是这一轮的最后一个动作**");
+    expect(p).toContain("状态一变成终态,平台就在这一步结束这一轮");
+    expect(p).toContain("要写的工件、要记的经验,都放在它**之前**做完");
+    // 收工提醒(记经验)与这条顺序说的是同一件事
+    expect(p).toContain("experience_save");
   });
 });

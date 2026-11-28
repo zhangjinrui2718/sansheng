@@ -105,6 +105,13 @@ function makeFakeSession(): {
     },
     async abort() {
       state.abortCalls += 1;
+      // 真 SDK 被掐掉时先为被掐掉的那次请求发一条用量全 0 的助手消息,再发收敛信号(2026-11-28 真机实测)。
+      for (const l of [...listeners]) {
+        l({
+          type: "message_end",
+          message: { role: "assistant", model: "fake-model", stopReason: "aborted", usage: { input: 0, output: 0, cacheRead: 0 } },
+        } as AgentSessionEvent);
+      }
       for (const l of [...listeners]) l({ type: "agent_settled" } as AgentSessionEvent);
     },
     dispose() {
@@ -119,8 +126,11 @@ async function startHost(): Promise<{
   fake: ReturnType<typeof makeFakeSession>;
   send: (cmd: unknown) => void;
   live: () => Promise<IntakeLiveView>;
+  /** 这条 WS 收到的全部事件(断言「中断不该报 error」时要看)。 */
+  events: Array<Record<string, unknown>>;
 }> {
   const fake = makeFakeSession();
+  const events: Array<Record<string, unknown>> = [];
   const createSession: CreateSessionFn = async () => ({ session: fake.session });
   host = createPlatformHost({
     dataDir,
@@ -142,8 +152,16 @@ async function startHost(): Promise<{
     ws!.once("open", () => resolve());
     ws!.once("error", reject);
   });
+  ws!.on("message", (raw: unknown) => {
+    try {
+      events.push(JSON.parse(String(raw)) as Record<string, unknown>);
+    } catch {
+      /* 非 JSON 的帧不是这条测试关心的事 */
+    }
+  });
   return {
     fake,
+    events,
     send: (cmd: unknown) => ws!.send(JSON.stringify(cmd)),
     live: async () => {
       const res = await fetch(`${baseUrl}/api/intake/live`);
@@ -201,5 +219,22 @@ describe("中断 · 运行态快照与它必须对得上", () => {
       await new Promise((r) => setTimeout(r, 10));
     }
     throw new Error("中断之后,快照里那一轮始终没消失");
+  });
+
+  it("模型还没开口就被中断 ⇒ **不报「这一回合没有回答甲方」**(2026-11-28 真机:按一次停止就弹一条 error)", async () => {
+    const { fake, send, events } = await startHost();
+    send({ type: "send", projectId: null, content: "你好" });
+    await waitFor("回合真的开始跑", () => fake.state.promptCalls === 1);
+
+    send({ type: "interrupt", projectId: null });
+    await waitFor("abort() 真的被调到", () => fake.state.abortCalls === 1);
+    await waitFor("回合收尾(agent_end)", () => events.some((e) => e.type === "agent_end"));
+    // 收尾之后的广播(error 与 agent_end 在同一个同步段里发出,这里再让出一拍)
+    await new Promise((r) => setTimeout(r, 50));
+    const errors = events
+      .filter((e) => e.type === "error")
+      .map((e) => (e.error as { code?: unknown }).code);
+    // 中断不是故障:甲方自己按的停止,不该被告知「模型没回答」或「供应商出错」
+    expect(errors).toEqual([]);
   });
 });

@@ -261,6 +261,11 @@ export interface KnownGap {
 
 export const KNOWN_GAPS: readonly KnownGap[] = [
   {
+    what: "内置的跑命令工具没有沙箱",
+    why: "以你的账号权限运行:读得到工作区、连得了网、看得到你 shell 里的环境变量。要不要隔离、怎么隔离是单独的设计决定。2026-11-28 起它不再继承 provider 密钥",
+    where: "docs/SECURITY-NOTES.md §4 · runtime/agentRuntime/pi/session.ts 的工具面",
+  },
+  {
     what: "自己的 MCP 服务不是沙箱",
     why: "用户裁决「不需要我放行」:他写进自己仓库的 MCP 服务直接进他自己的会话,以你的账号权限运行 —— 与他本来就有的跑命令能力同一个量级;你只有「停用」这一个刹车",
     where: "mcp/solve.ts 的 solveOwnMcp · docs/DESIGN-PLATFORM.md「自己的仓库与经验库」",
@@ -287,7 +292,7 @@ export const KNOWN_GAPS: readonly KnownGap[] = [
   },
   {
     what: "供应商降级是平台级的",
-    why: "降级改的是进程级 env;换 provider = 这个项目里所有会话一起换,没有 per-session",
+    why: "换 provider = 这个项目里所有会话一起换(降级后丢弃全部会话),没有 per-session。凭据自 2026-11-28 起走运行期内存、不再经进程级环境变量,但没有做成按会话选 provider",
     where: "src/platform/host/serve.ts 的 decideFailover / failoverCandidatesOf",
   },
   {

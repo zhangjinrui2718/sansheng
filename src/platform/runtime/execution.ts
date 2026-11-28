@@ -143,6 +143,11 @@ export interface ExecutionResult {
    * 记录过一份处置)。
    */
   readonly timeoutDisposition?: TimeoutDisposition;
+  /**
+   * **平台在活干完的那一步结束了这一回合**(2026-11-28;即 `TurnResult.finishedBy`)。
+   * **可选**:没有它 = 这一轮是模型自己收尾 / 被打断 / 超时收尾。
+   */
+  readonly finishedBy?: string;
 }
 
 export interface RunWorkOptions {
@@ -211,6 +216,17 @@ export interface RunWorkOptions {
    * 有仓库的角色才给;没有的不传(那一段整段不出)。
    */
   readonly ownRepoRoot?: string;
+  /**
+   * **活干完即停**(2026-11-28,缺省开):本回合执行的那条工作项一到终态,平台就结束这一轮
+   * (见 `workFinishedByCall`)。测试要演「模型标完 done 还继续折腾」时关掉它。
+   */
+  readonly stopWhenDone?: boolean;
+  /**
+   * **宿主自己发起的中断**(2026-11-28 真机补)—— 透传给 `runTurn.aborted`:甲方按「停止」时
+   * 是宿主直接掐的会话,`runTurn` 自己不知道;不传的后果见那边的注释(被掐掉的回合被算到模型头上)。
+   * 与 `sessionId` / 看门狗 / `ownRepoRoot` 同一条:**两条路都要接**。
+   */
+  readonly aborted?: () => boolean;
 }
 
 /**
@@ -293,7 +309,9 @@ export function composeWorkPrompt(
       : []),
     "",
     "---",
-    "完成后**直接调 `work.update` 把状态改成 done**(或 failed);",
+    "完成后**直接调 `work.update` 把状态改成 done**(或 failed)——",
+    "**那是这一轮的最后一个动作**:状态一变成终态,平台就在这一步结束这一轮,之后你调不了任何工具;",
+    "要写的工件、要记的经验,都放在它**之前**做完;",
     "中途受阻就调 `blocker_open` 登记阻塞,并把工作项改成 blocked;",
     "有需要产出的东西(证据、结论、笔记)直接调 `board_write` —— " +
       "**工件就是你的交付物**,不需要另外写一段总结来「汇报」。",
@@ -331,6 +349,27 @@ export function composeWorkPrompt(
  * 会话由调用方建(这样同一次会话可以连续做多个工作项,省去反复建会话),
  * 这里只负责「跑它、判定、带现场回来」。
  */
+/**
+ * **活干完即停的判据**(2026-11-28):这次工具调用是不是把**本回合执行的那条工作项**送进了终态。
+ *
+ * 三条都成立才算:① 这次调用是 `work.update`;② 它没失败;③ **库里**这条工作项的状态是终态
+ * (读库,不信参数 —— 参数说 done 而写口拒了,不算办完)。返回一句说明(进轨迹标记行与
+ * `TurnResult.finishedBy`),不是则 `null`。
+ *
+ * 只认**本回合的那条**:同一轮里顺手把别的 work 标成 done 不算(那些由排空器另起一轮)。
+ * 为什么要有它:真模型实验里,工程师在 done 之后又花几十次调用去读三生源码、翻日志。
+ */
+export function workFinishedByCall(
+  db: Database.Database,
+  workId: string,
+  call: { readonly name: string; readonly isError: boolean },
+): string | null {
+  if (call.name !== "work_update" || call.isError) return null;
+  const w = getWork(db, workId);
+  if (w === null || !isTerminalWorkStatus(w.status)) return null;
+  return `工作项 ${workId} 已到终态(${w.status})`;
+}
+
 export async function runWorkItem(opts: RunWorkOptions): Promise<ExecutionResult> {
   const before = getWork(opts.db, opts.workId);
   if (before === null) {
@@ -387,6 +426,12 @@ export async function runWorkItem(opts: RunWorkOptions): Promise<ExecutionResult
     // 它。不传的话「这个回合花的钱是投在哪件活上」在库里永远是 NULL(静默丢字段)。
     workId: opts.workId,
     ...(opts.ownRepoRoot !== undefined ? { ownRepoRoot: opts.ownRepoRoot } : {}),
+    ...(opts.aborted !== undefined ? { aborted: opts.aborted } : {}),
+    // 活干完即停(2026-11-28):判据读库,`runTurn` 只管「判完了就停」。
+    ...(opts.stopWhenDone === false
+      ? {}
+      : { stopAfterTool: (call: { readonly name: string; readonly isError: boolean }) =>
+          workFinishedByCall(opts.db, before.id, call) }),
     ...(opts.timeoutMs !== undefined ? { timeoutMs: opts.timeoutMs } : {}),
     ...(opts.wallClockTimeoutMs !== undefined
       ? { wallClockTimeoutMs: opts.wallClockTimeoutMs }
@@ -446,6 +491,7 @@ export async function runWorkItem(opts: RunWorkOptions): Promise<ExecutionResult
     producedArtifacts,
     raisedBlockers,
     ...(timeoutDisposition !== undefined ? { timeoutDisposition } : {}),
+    ...(turn.finishedBy !== undefined ? { finishedBy: turn.finishedBy } : {}),
   };
 }
 
@@ -560,6 +606,9 @@ export function renderExecutionReport(r: ExecutionResult): string {
     lines.push(`超时处置: ${TIMEOUT_DISPOSITION_LABEL[r.timeoutDisposition]}`);
   }
   if (r.turn.timedOut) lines.push("⚠️ 回合超时收尾 —— 结局判定可能不准");
+  if (r.turn.finishedBy !== undefined) {
+    lines.push(`✓ ${r.turn.finishedBy} —— 平台在这一步结束了这一轮(之后没有再调模型)`);
+  }
   if (r.turn.text.trim() !== "") {
     lines.push("", "它最后说:", r.turn.text.trim());
   }

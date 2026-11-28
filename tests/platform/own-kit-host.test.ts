@@ -22,10 +22,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { serve } from "@hono/node-server";
 import type { Server } from "node:http";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentSession, AgentSessionEvent } from "@earendil-works/pi-coding-agent";
+import { WebSocket } from "ws";
 import { createPlatformHost, type PlatformHost } from "../../src/platform/host/serve.js";
 import { attachHub } from "../../src/platform/transport/hub.js";
 import { listProviders } from "../../src/platform/runtime/agentRuntime/pi/providers.js";
@@ -93,7 +94,17 @@ interface FakeSession {
   /** 第一次收到任务时记下它是谁的会话(角色名)。 */
   role: string | null;
   disposed: boolean;
+  /** 平台有没有 `abort()` 过这条会话(活干完即停 / 打断都走它)。 */
+  aborted: boolean;
 }
+
+/**
+ * 正在跑的那一轮的事件出口 —— `call()` 给 `work_update` 补发工具事件时用。
+ *
+ * 为什么只给 `work_update` 补:平台判「活干完即停」看的是**工具结束事件**(轨迹行也在这里落)。
+ * 别的工具不补,既有断言里「一轮调了几次工具」的口径不变。
+ */
+let currentEmit: ((ev: AgentSessionEvent) => void) | null = null;
 
 interface Harness {
   readonly db: Database.Database;
@@ -101,6 +112,8 @@ interface Harness {
   readonly sessions: FakeSession[];
   /** 每次 `createSession` 收到的工具 allowlist(断言 `mcp__` 模式在不在);与 `sessions` 同序同长。 */
   readonly allowlists: string[][];
+  /** 每次 `createSession` 收到的凭据通道(有没有带 `modelRuntime`;2026-11-28)。 */
+  readonly credentialChannels: Array<"runtime" | "sdk_default">;
   readonly drainNow: () => void;
   readonly baseUrl: string;
   readonly projectId: string;
@@ -114,6 +127,7 @@ async function startHost(act: Act): Promise<Harness> {
   const prompts: Harness["prompts"] = [];
   const sessions: FakeSession[] = [];
   const allowlists: string[][] = [];
+  const credentialChannels: Array<"runtime" | "sdk_default"> = [];
   seq = 0;
   let dbRef: Database.Database | undefined;
   let projectId = "";
@@ -129,12 +143,23 @@ async function startHost(act: Act): Promise<Harness> {
     };
     const r = dispatch(tool, args, ctx);
     if (r instanceof Promise) throw new Error("这些工具都是同步的");
+    // `work_update` 补一对工具事件(pi 方言,与真适配层看到的一样)—— 平台据此判「活干完即停」
+    // 并落轨迹行;真 SDK 会自己发,假会话不会。
+    if (tool === "work_update" && currentEmit !== null) {
+      const id = `t${++seq}`;
+      currentEmit({ type: "tool_execution_start", toolCallId: id, toolName: tool, args } as AgentSessionEvent);
+      currentEmit({
+        type: "tool_execution_end", toolCallId: id, toolName: tool,
+        result: { content: [{ type: "text", text: r.ok ? r.text : r.message }], details: { ok: r.ok } },
+        isError: !r.ok,
+      } as AgentSessionEvent);
+    }
     return r;
   };
   const makeSession = (): FakeSession => {
     const listeners = new Set<(ev: AgentSessionEvent) => void>();
     const emit = (ev: AgentSessionEvent): void => { for (const l of [...listeners]) l(ev); };
-    const record: FakeSession = { session: undefined as unknown as AgentSession, role: null, disposed: false };
+    const record: FakeSession = { session: undefined as unknown as AgentSession, role: null, disposed: false, aborted: false };
     record.session = {
       subscribe(fn: (ev: AgentSessionEvent) => void) {
         listeners.add(fn);
@@ -144,12 +169,32 @@ async function startHost(act: Act): Promise<Harness> {
         const m = /你是:[^\n]*?\(`([a-z_]+)`\)/.exec(text);
         record.role = m?.[1] ?? "unknown";
         prompts.push({ role: record.role, text });
-        const reply = await act({ role: record.role, text, call });
+        const previousEmit = currentEmit;
+        currentEmit = emit;
+        let reply: string | Promise<string>;
+        try {
+          reply = await act({ role: record.role, text, call });
+        } finally {
+          currentEmit = previousEmit;
+        }
         emit({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: reply } } as AgentSessionEvent);
         emit({ type: "agent_settled" } as AgentSessionEvent);
         return { messages: [] };
       },
-      async abort() { emit({ type: "agent_settled" } as AgentSessionEvent); },
+      async abort() {
+        record.aborted = true;
+        // 真 SDK 被掐掉之后补的那条消息(2026-11-28 真机实测,pi 1.2.0):为被掐掉的这次请求发一条
+        // `stopReason:"error"` 的助手消息(原文如此,用量全 0、没有正文)。它**不是** provider 故障 ——
+        // 平台若把它当故障,轨迹里会多一行 `provider_error`,写在一个办成了的回合上。
+        emit({
+          type: "message_end",
+          message: {
+            role: "assistant", model: "fake-model", stopReason: "error",
+            errorMessage: "This operation was aborted", usage: { input: 0, output: 0, cacheRead: 0 }, content: [],
+          },
+        } as AgentSessionEvent);
+        emit({ type: "agent_settled" } as AgentSessionEvent);
+      },
       dispose() { record.disposed = true; },
     } as unknown as AgentSession;
     sessions.push(record);
@@ -157,6 +202,7 @@ async function startHost(act: Act): Promise<Harness> {
   };
   const createSession: CreateSessionFn = async (opts) => {
     allowlists.push([...(opts.tools ?? [])]);
+    credentialChannels.push(opts.modelRuntime !== undefined ? "runtime" : "sdk_default");
     return { session: makeSession().session };
   };
   host = createPlatformHost({
@@ -178,7 +224,7 @@ async function startHost(act: Act): Promise<Harness> {
   expect(created.status, "建项目").toBe(201);
   projectId = ((await created.json()) as { project: { id: string } }).project.id;
   return {
-    db, prompts, sessions, allowlists, projectId,
+    db, prompts, sessions, allowlists, credentialChannels, projectId,
     baseUrl: `http://127.0.0.1:${addr.port}`,
     drainNow: () => {
       void (host as unknown as { dispatchTimer: { runNow: (why: string) => Promise<unknown> } }).dispatchTimer.runNow("test");
@@ -362,6 +408,122 @@ describe("自己的仓库 · 换会话看「MCP 内容变没变」,不看「平�
     await new Promise((r) => setTimeout(r, 80));
     expect(cwSessions(h)).toHaveLength(1);
     expect(cwSessions(h)[0]?.disposed).toBe(false);
+  });
+});
+
+describe("活干完即停 · 宿主级(真宿主 + 假会话,工作项到终态的那一步平台结束这一轮)", () => {
+  it("工程师标完 done 还接着调工具 ⇒ 平台 abort 这条会话;轨迹里有标记行;收尾提交写着「干完即停」", async () => {
+    const workIds: string[] = [];
+    let afterDone = 0;
+    let h: Harness | null = null;
+    h = await startHost(({ role, text, call }) => {
+      if (role !== "coding_worker" || !text.includes("# 工作项")) return "好的";
+      const open = workIds.find((id) => workStatus(h as Harness, id) !== "done");
+      if (open !== undefined) {
+        // 项目仓里留一个文件:收尾的 housekeeping 提交只在「有东西可提」时才产生提交,
+        // 而这一条断言要看的就是那次提交的说明文字。
+        mkdirSync(join(workRoot, "projects", (h as Harness).projectId, "work", open), { recursive: true });
+        writeFileSync(join(workRoot, "projects", (h as Harness).projectId, "work", open, "note.md"), "现场");
+        call("work_update", { workId: open, status: "done" }, "coding_worker");
+      }
+      // 真机上它接着去读源码、翻日志 —— 这里用一次经验检索代表「标完 done 还继续」
+      call("experience_search", { query: "接着折腾" }, "coding_worker");
+      afterDone += 1;
+      return "做完了";
+    });
+    workIds.push(assignWork(h, "干完就停"));
+    h.drainNow();
+    await waitFor(h, "工作项做完", () => workStatus(h, workIds[0] ?? "") === "done");
+    await waitFor(h, "平台在这一步 abort 了这条会话", () => cwSessions(h)[0]?.aborted === true);
+    // 轨迹:工具行之后是标记行、再是收口行 —— **没有 `provider_error`**:假会话的 abort 照真 SDK
+    // 补了一条「This operation was aborted」的 error,平台不许把它记成供应商故障。
+    const kinds = h.db.prepare(
+      "SELECT kind FROM turn_events WHERE agent_id = 'cw' AND work_id = ? ORDER BY seq",
+    ).all(workIds[0]) as Array<{ kind: string }>;
+    expect(kinds.map((k) => k.kind)).toEqual(["tool", "marker", "turn_end"]);
+    expect(h.db.prepare("SELECT COUNT(*) AS n FROM turn_events WHERE kind = 'provider_error'").get())
+      .toEqual({ n: 0 });
+    const marker = h.db.prepare(
+      "SELECT result_summary FROM turn_events WHERE agent_id = 'cw' AND work_id = ? AND kind = 'marker'",
+    ).get(workIds[0]) as { result_summary: string };
+    expect(marker.result_summary).toContain("平台在此结束这一轮");
+    // 收尾提交的说明:不是「结束」也不是「超时」
+    const pid = h.projectId;
+    const projectRoot = join(workRoot, "projects", pid);
+    expect(git(projectRoot, "log", "--format=%s", "-1")).toContain("回合结束(干完即停)");
+    expect(afterDone, "模型那边照旧把自己这一轮的调用做完(假会话不会被 abort 拦住)").toBeGreaterThan(0);
+  });
+});
+
+describe("被中断的执行回合 · 宿主级(2026-11-28 真机:平台掐掉的调用被算成 provider 故障 ⇒ 活被记 failed)", () => {
+  it("甲方停掉正在执行工作项的那一轮(掐在工具边界上,SDK 报 error)⇒ 活**不记 failed**、没有 error 广播、轨迹里没有 provider_error", async () => {
+    let h: Harness | null = null;
+    h = await startHost(async ({ role, text, call }) => {
+      if (role !== "coding_worker" || !text.includes("# 工作项")) return "好的";
+      call("experience_search", { query: "先查一步" }, role);
+      // 真 SDK 是被掐之后 `prompt()` 才返回(并补一条 error)—— 假会话的 abort 已经照它补了,
+      // 这里等平台真的 abort 这条会话再收尾,时序才对得上。
+      await new Promise<void>((resolve) => {
+        const tick = (): void => {
+          if (cwSessions(h as Harness)[0]?.aborted) resolve();
+          else setTimeout(tick, 10);
+        };
+        tick();
+      });
+      return "";
+    });
+    const workId = assignWork(h, "干到一半被停掉");
+    const ws = new WebSocket(h.baseUrl.replace("http://", "ws://") + "/ws");
+    const events: Array<Record<string, unknown>> = [];
+    await new Promise<void>((resolve, reject) => {
+      ws.once("open", () => resolve());
+      ws.once("error", reject);
+    });
+    ws.on("message", (raw: unknown) => {
+      try {
+        events.push(JSON.parse(String(raw)) as Record<string, unknown>);
+      } catch {
+        /* 非 JSON 的帧不是这条测试关心的事 */
+      }
+    });
+    try {
+      h.drainNow();
+      await waitFor(h, "工程师的回合跑起来", () => cwSessions(h).length >= 1 && h.prompts.some((p) => p.role === "coding_worker"));
+      const endsBefore = events.filter((e) => e.type === "agent_end").length;
+      // 不带 channel = 停掉这个项目里正在跑的每一个回合(CLI / 测试用的那个超集)
+      ws.send(JSON.stringify({ type: "interrupt", projectId: h.projectId }));
+      await waitFor(h, "回合收尾(agent_end)", () => events.filter((e) => e.type === "agent_end").length > endsBefore);
+      await new Promise((r) => setTimeout(r, 150));
+      // 被**人**停掉的活不是 provider 拒的:留在原状态等下一次派发,而不是被记成终态
+      expect(workStatus(h, workId)).not.toBe("failed");
+      expect(events.filter((e) => e.type === "error")).toEqual([]);
+      expect(h.db.prepare("SELECT COUNT(*) AS n FROM turn_events WHERE kind = 'provider_error'").get())
+        .toEqual({ n: 0 });
+    } finally {
+      ws.close();
+    }
+  });
+});
+
+describe("provider 凭据 · 宿主级(2026-11-28):key 经 ModelRuntime 的内存进 SDK,`process.env` 没被写", () => {
+  it("真宿主里建出来的每条会话都带着平台自建的 ModelRuntime;settings 里的 key 没有出现在 env 里", async () => {
+    const h = await startHost(({ role, text, call }) => {
+      if (role === "coding_worker" && text.includes("# 工作项")) {
+        call("work_update", { workId: workIds[0], status: "done" }, "coding_worker");
+      }
+      return "好的";
+    });
+    const workIds: string[] = [];
+    workIds.push(assignWork(h, "看一眼凭据通道"));
+    h.drainNow();
+    await waitFor(h, "工作项做完", () => workStatus(h, workIds[0] ?? "") === "done");
+    await waitFor(h, "至少建了一条会话", () => h.credentialChannels.length >= 1);
+    expect([...new Set(h.credentialChannels)]).toEqual(["runtime"]);
+    // settings.json 里的那个占位 key(settings 写的是 "test-key-not-used")从未进过 env
+    const leaked = Object.entries(process.env)
+      .filter(([, v]) => typeof v === "string" && v.includes("test-key-not-used"))
+      .map(([k]) => k);
+    expect(leaked).toEqual([]);
   });
 });
 

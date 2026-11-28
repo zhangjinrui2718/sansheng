@@ -107,6 +107,26 @@ describe("renderRoleBrief · 从 ROLE_SPECS 机械生成", () => {
     expect(b).not.toContain("执行命令");
   });
 
+  it("每条能力在简报里都有说明文字 —— 「你能做的事」的行数 === ceiling 的条数(2026-11-28)", () => {
+    // 此前标签表是 `Partial`:漏一条只是少一行、不报错。`mcp.read` / `mcp.grant` /
+    // `work.review_verdict` / `schedule.manage` 四条就这样一直没有说明文字,没有任何检查会红。
+    // 现在表是 `Record<Capability, string>`(缺项 typecheck 红);这里再从**渲染结果**上数一遍 ——
+    // 类型管的是「表里有没有」,数行数管的是「渲染时有没有被丢掉」(旧实现就有一个 `.filter(l => l !== undefined)`)。
+    for (const role of PROJECT_ROLES) {
+      const b = renderRoleBrief(role);
+      const section = b.split("## 你能做的事\n")[1]?.split("\n## ")[0] ?? "";
+      const bullets = section.split("\n").filter((l) => l.startsWith("- "));
+      expect(bullets.length, `${role}:ceiling 有 ${ROLE_SPECS[role].ceiling.length} 条,简报只列了 ${bullets.length} 行`)
+        .toBe(ROLE_SPECS[role].ceiling.length);
+      for (const l of bullets) expect(l.length, `${role}:有一行是空的说明`).toBeGreaterThan(3);
+    }
+    // 四条此前缺席的,各在持有它的角色简报里
+    expect(renderRoleBrief("business_manager")).toContain("外部工具(MCP)的目录");
+    expect(renderRoleBrief("project_manager")).toContain("开 / 关一个已登记的外部工具(MCP)");
+    expect(renderRoleBrief("quality_reviewer")).toContain("给出审查结论(通过 / 不通过)");
+    expect(renderRoleBrief("business_manager")).toContain("排一个到点的自我提醒");
+  });
+
   it("简报列出该角色拿不到的工具(boundaryDeny)", () => {
     const b = renderRoleBrief("research_worker");
     expect(b).toContain("tell_client");

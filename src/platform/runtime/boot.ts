@@ -21,7 +21,7 @@
 import { join } from "node:path";
 import { Keyring } from "../infra/keyring.js";
 import { SettingsStore, type ProviderConfig, type Settings } from "../infra/settings.js";
-import { resolveModel, syncActiveProviderApiKeyEnv } from "./agentRuntime/pi/providers.js";
+import { resolveModel } from "./agentRuntime/pi/providers.js";
 import { openPlatformDb } from "../storage/db.js";
 import { SqliteMemory } from "../memory/sqliteMemory.js";
 import { createLoggingClientChannel } from "../client/port.js";
@@ -102,16 +102,11 @@ export function bootPlatform(opts: BootOptions): BootedPlatform {
   const provider = settingsStore.activeProvider() ?? null;
   let model: PlatformModel | null = null;
   if (provider !== null) {
-    // **必须先同步凭据到 env**,再解析模型。
-    //
-    // `createAgentSession` 内部自建 `ModelRuntime.create({ authPath })`,而
-    // Sansheng 不写 agentDir/auth.json —— 凭据实际来自 env。首跑冒烟就卡在这里:
-    // 「No API key found for minimax-cn」,而 settings 里明明配了。
-    //
-    // 这条 env 泄漏无法完全避免(Pi session 的工具会 spawn 子进程,那些子进程
-    // 也必须有凭据)。旧系统的处置是把它收敛到「只有 active provider、只在建
-    // session 前」,这里沿用同一处置。
-    syncActiveProviderApiKeyEnv(provider.provider, provider.apiKey);
+    // ⚠️ **这里不往 process.env 写凭据**(2026-11-28 起)。首跑冒烟当年卡在
+    // 「No API key found for minimax-cn」时,处置是把 key 同步进 env 让 SDK 自建的
+    // ModelRuntime 读得到 —— 代价是会话里 spawn 的每个子进程(bash / MCP)都继承它。
+    // 现在凭据随**建会话**进平台自建的 ModelRuntime 的内存
+    // (`createPlatformSession` 的 `apiKey` ⇒ `setRuntimeApiKey`),boot 只解析模型。
     model = resolveModel({
       provider: provider.provider,
       modelId: provider.modelId,

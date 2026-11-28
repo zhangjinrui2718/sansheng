@@ -123,8 +123,13 @@ const boardRead: PlatformTool = {
     const id = requireString(args, "artifactId");
     if (!id.ok) return id.result;
     const a = getArtifact(ctx.db, id.value);
-    if (a === null) {
-      return fail("not_found", `找不到工件 ${id.value}(可能已被清理,或 id 属于别的项目)`);
+    // ⚠️ **项目隔离(2026-11-28)**:`artifactId` 是「地址」,而地址可能是别的项目的 ——
+    // 与 `knowledge_read` 同一道门:不属于调用者所在项目的工件,对调用者来说与「没有」
+    // 长得一样(不暴露存在性)。此前这里只按 id 取行,项目 A 的甲方原文(写成工件之后)
+    // 项目 B 的角色读得到 —— 那是跨项目可见性门上的一个洞(语料那扇门 2026-11-14 关了,
+    // 这扇一直没关)。接待会话(`ctx.project === null`)拿不到 `blackboard.read`,这里是纵深防御。
+    if (a === null || ctx.project === null || a.projectId !== ctx.project.id) {
+      return fail("not_found", `找不到属于你所在项目的工件 ${id.value}(可能已被清理,或 id 属于别的项目)`);
     }
     const out = listLinks(ctx.db, id.value);
     const inb = listBackLinks(ctx.db, id.value);

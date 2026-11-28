@@ -389,6 +389,23 @@ describe("BC1 工具 · work_*", () => {
     expect(e.alternatives).toContain("blocked");
   });
 
+  it("work_update 写到终态 ⇒ 结果里说明「活干完即停」,而且**对每种调用者都成立**(写明条件,不说「你这一轮到此为止」)", () => {
+    const t = okText(call(ids.pm, "work_create", {
+      title: "A", goal: "g", assigneeRole: "research_worker", assigneeSpec: "algorithm",
+    }));
+    const w = t.match(/已创建 (\S+?)「/)![1]!;
+    // 非终态是常态:一个字都不提
+    expect(okText(call(ids.wkAlgo, "work_update", { workId: w, status: "in_progress" }))).not.toContain("已到终态");
+    expect(okText(call(ids.wkAlgo, "work_update", { workId: w, status: "blocked" }))).not.toContain("已到终态");
+    okText(call(ids.wkAlgo, "work_update", { workId: w, status: "in_progress" }));
+    const done = okText(call(ids.wkAlgo, "work_update", { workId: w, status: "done" }));
+    expect(done).toContain("这条工作项已到终态");
+    // ⚠️ 工具层不知道调用者这一轮在干什么(项目经理退役失败项也走这里)⇒ 必须写明条件。
+    expect(done).toContain("如果这一轮就是在执行它");
+    expect(done, "条件要能让模型自己对上号:任务开头的那一行").toContain(`# 工作项 ${w}`);
+    expect(done).toContain("之后再调的工具不会被执行");
+  });
+
   it("work_assign 改派走同一套歧义检查", () => {
     const t = okText(call(ids.pm, "work_create", {
       title: "A", goal: "g", assigneeRole: "research_worker", assigneeSpec: "algorithm",

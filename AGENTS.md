@@ -148,7 +148,7 @@
   (`SKILL.md` + 可选脚本 / `mcp.json`),角色自己写、**不经放行**下一轮生效(用户裁决),人只有「停用」这一个刹车
   (成员页角色 harness 卡);经验库按角色隔离、跨项目,每轮开工前把最相关的三条旧经验摆在任务前面。
   同批关掉了 SDK 对项目目录的自动装载(`.pi/`、`AGENTS.md`):**会话里进什么只由平台决定**。
-- 基线:**3057 passed / 4 failed / 175 test files**(2026-11-28 真模型实验之后、三处修复并入时实测,在分支 `feat/own-kit` 上;该分支已快进并入 master)。4 条红:3 条是 model-catalog(工作区里 pi-ai 版本漂移,先于 2026-11-22 批次存在);1 条是 `d1-d4-parallel-projects` 的 ③b —— **全量负载下才红,单跑恒绿**(「职责」那批之前就有这条记录)。
+- 基线:**3086 passed / 4 failed / 176 test files**(2026-11-28「真模型实验之后修掉的四个问题」+ abort 路径三处误报修完时实测,在分支 `feat/own-kit` 上;该分支已快进并入 master)。4 条红:3 条是 model-catalog(工作区里 pi-ai 版本漂移,先于 2026-11-22 批次存在);1 条是 `d1-d4-parallel-projects` 的 ③b —— **全量负载下才红,单跑恒绿**(「职责」那批之前就有这条记录)。
 - **角色中文名只有一处**:`src/platform/runtime/org.ts` 的 `ORG`(播种 / `roleDisplayName()` /
   `RoleHarnessView.displayName` / **系统提示里的「# 你的角色:X」**全走它);
   前端兜底表 `web/src/lib/vocab.ts` 的 `ROLE_LABEL` 必须逐项相同,由
@@ -553,9 +553,10 @@ dev/prod + CI/CD」,09:54 业务经理只回了一句「我先看下你之前留
 
 `settings.providers[]` 本来就支持多 provider(`infra/settings.ts` 的 `ProviderConfig` / `activeProvider()`),但 `runtime/boot.ts` 只取 `activeProviderId` 那一个 ⇒ 限流时不会切。降级链是**平台级**的,不是 per-session:
 
-- 候选 = `failoverCandidatesOf(providers, currentId, failedProviderIds)`(**纯函数**,`host/serve.ts`):除当前外的 provider,只留 `apiKey !== ""`、**有 env 凭据通道**(`providerEnvKey` 有映射)、`resolveModel()` 非 null 的,**轮转**(避免每次都打同一家);
-  ⚠️ **「有 env 凭据通道」这一条是复核补上的**:三生的凭据**只**经 env 通道进 SDK(`syncActiveProviderApiKeyEnv`),`agentDir/auth.json` 三生从不写 ⇒ 没有 env 映射的 provider(`amazon-bedrock` / `azure` / `github-copilot` / `huggingface` / `openai-codex` / `typesafe`)切过去**必然也拿不到 key**(它只有 `log.warn`,不报错)⇒ 那次降级是白降,而且这一家被记进 `failedProviderIds` ⇒ **后面再也不会选它** ⇒ 一台本来能用的 provider 被一次无谓的降级废掉了;
-- ⚠️ **忙闩检查**:`hub.runningTurns()` 里还有别的回合 ⇒ **不降级**。理由:`syncActiveProviderApiKeyEnv` 改的是**进程级 env**,在别的回合正跑时改会把它们打到 ⇒ **宁可这次失败,不要误伤别的回合**;
+- 候选 = `failoverCandidatesOf(providers, currentId, failedProviderIds)`(**纯函数**,`host/serve.ts`):除当前外的 provider,只留 `apiKey !== ""`、**有 env 映射**(`providerEnvKey` 有映射)、`resolveModel()` 非 null 的,**轮转**(避免每次都打同一家);
+  ⚠️ **「有 env 映射」这一条是复核补上的**:当时三生的凭据**只**经 env 通道进 SDK,`agentDir/auth.json` 三生从不写 ⇒ 没有 env 映射的 provider(`amazon-bedrock` / `azure` / `github-copilot` / `huggingface` / `openai-codex` / `typesafe`)切过去**必然也拿不到 key**(它只有 `log.warn`,不报错)⇒ 那次降级是白降,而且这一家被记进 `failedProviderIds` ⇒ **后面再也不会选它** ⇒ 一台本来能用的 provider 被一次无谓的降级废掉了;
+  ⚠️ **2026-11-28 起凭据不再经 env**(见下「明文 key 不进 `process.env`」),这条过滤在机制上已不是必需;**保留**是因为没有 env 映射的那几家本来就不靠「一个简单 key」—— 降级过去多半也用不了,放开它要单独验证,不夹带在别的事里顺手改;
+- ⚠️ **忙闩检查**:`hub.runningTurns()` 里还有别的回合 ⇒ **不降级**。当初的理由是 `syncActiveProviderApiKeyEnv` 改的是**进程级 env**,在别的回合正跑时改会把它们打到 ⇒ **宁可这次失败,不要误伤别的回合**;那个理由随 env 通道一起退场了(现在每家 provider 一个 key,互不覆盖),这道闸**照旧保留** —— 放开它会改变降级的时序,同样要单独验证;
 - 降级后 `disposeAllSessions()` —— 旧会话绑的是旧模型,继续用会把请求发到已经限流的那家;
 - 降级**只发生在本回合没干过活时**(`turn.toolCalls.length === 0`):有工具调用就可能已有副作用(写文件、发消息、提交),**重跑不安全**;
 - `quota` / `auth` / 回合超时 / 回合被中断 ⇒ **一律不降级**(超时那条纪律:「自动重跑只是把同一段卡死行为再买一遍」);
@@ -1154,6 +1155,12 @@ SDK 默认把会话目录当成**受信任的项目**,于是项目仓里的 `.pi
   换会话判据的两条、收尾定时器一条、出处上限一条)。第一次整跑是 56/60 —— 四条漏网逐条查明:两条是判据弱
   (空白标题没测;「空操作不换会话」断言时池里恰好没有闲置会话),两条是变异不够坏(检索上限有工具层与仓储层
   两道闸,拿掉任何一层行为都不变 ⇒ 改成两层各测一次;`hasOwnKit` 与两个子判据重复 ⇒ 删掉)。
+  **真模型实验之后那批(F 组 30 条:活干完即停 12、凭据通道 6、`board_read` 隔离 3、能力说明 2、abort 路径误报 7)
+  并入后共 96 条**:一轮整跑 91/96,5 条漏网逐条查明 —— 3 条是**变异本身写坏了语法**(对象字面量里的展开
+  `...(x ? { a } : {})` 换成裸 `{}` ⇒ 编译失败,「红」了但不是判据咬的;改成 `...{}`),2 条是判据弱
+  (终态之后别的工具成功返回也不算,缺一条断言;`prompt()` 在 `abort()` 里**当场**以错误收尾 —— 原有假会话是
+  下一拍才抛,那一格根本没被问到)。补齐后重跑 5/5。runner 的测试清单同时加 6 个文件(执行 / 黑板 / 简报 / 工具 /
+  真中断 / 凭据通道)。
 - 界面走检:内置浏览器那次点不动 —— 页面一加载 React 根上就挂着一个 DefaultLane,**连既有的「收起左栏」也点不动**(环境问题,不是这一块的);换成无头 Chrome 真点一遍:停用两步确认、恢复一步、检索、删除两步确认、服务端状态同步,12 项通过(第 13 项是脚本自己读错了行,不是界面问题)。
 
 ### 默认值与没做的(如实记)
@@ -1192,12 +1199,87 @@ key 是用数据目录的 `.keyring` 加密的,只拷 `settings.json` 会得到 
 一条教训 —— 那是我的判据错了,不是平台的事实。经验库没有事实核查,平台的错会以经验的形式留下来。
 
 角色在活干完之后还会继续折腾(工程师两轮各花了十几次调用去读三生自己的源码、翻服务日志,想弄清工具面是怎么
-算出来的):`work_update done` 之后模型并不会停。这一批没有动。
+算出来的):`work_update done` 之后模型并不会停。—— **已修**,见下面「真模型实验之后修掉的四个问题」的 ①。
 
-摸底时发现、**这批不动**的既有问题(各记一笔,免得下次又从头找):`bash` 无沙箱且子进程继承 provider 密钥
-(`dist/core/tools/bash.js` 的 env 是 `{...process.env, PATH}`);`board_read` 不校验项目(读得到任意工件 id);
-`CAPABILITY_LABEL` 是 `Partial`,`mcp.read` / `mcp.grant` / `work.review_verdict` / `schedule.manage` 四条
-在角色简报里没有说明文字、也没有哨兵。
+### 真模型实验之后修掉的四个问题(2026-11-28 · 用户:「修复完问题,再推送」)
+
+实验收尾时点出的四件事,逐条落地。组织编排的核心(排空器 / 三道门 / 验收门)没有动。
+
+**① 活干完即停。** 判据只有一处:`execution.ts` 的 `workFinishedByCall`(**纯函数** —— 工具是 `work_update`、
+没报错、**且库里的这条工作项真的到了终态**;读库而不读调用参数,是因为工具可能没改成而回一段说明,
+「模型说要停」不等于「已经停了」)。接线 = `RunTurnOptions.stopAfterTool`(`turn.ts`):每次工具调用**结束时**
+问它一次,回了话 ⇒ `finishTurn` —— 与打断走**同一个取消入口**(`session.abort()`),但**既不是超时也不是中断**:
+不置 `timedOut`、不写 `timeout` 现场、不告警、工作项不记 `failed`;轨迹里落一行 `marker`(「…,平台在此结束这一轮
+(之后不再调模型)」),`TurnResult.finishedBy` 把那句说明带出去,宿主的回合标签多一档「干完即停」(收尾提交的说明里
+就是它)。只有 `runWorkItem` 接(执行者 / 返工那条路;`RunWorkOptions.stopWhenDone` 缺省开)—— 项目经理整合容器
+走的 `runAgentTurn` **不在此列**(他写完一条容器之后常还有下一条要处理)。
+⚠️ **提示词必须同时改,否则这一刀会砍掉正经活**:执行者的任务正文写明「状态一变成终态,平台就在这一步结束这一轮,
+之后你调不了任何工具;要写的工件、要记的经验,都放在它**之前**做完」;`work_update` 写到终态时的返回文案也带一句 ——
+⚠️ 工具层**不知道调用者这一轮在干什么**(项目经理退役失败项、执行者顺手取消别的条目都走这里,而那些回合不停),
+所以那句必须**对每种调用者都成立**:只陈述事实 + 写明条件(「如果这一轮就是在执行它(任务开头是 `# 工作项 <id>`)」),
+不许写成「你这一轮到此为止」。
+
+**② 明文 key 不进 `process.env`。** 在此之前 active provider 的 key 由 `syncActiveProviderApiKeyEnv()` 写进
+`process.env`(SDK 自建的 `ModelRuntime` 从 env 读),而会话里 spawn 的**每一个子进程**都继承得到它 —— 内置 `bash`、
+角色自己仓库里的 MCP 服务、docker;真模型实验里研究员开口第一件事就是 `env | grep KEY`(它自己打了码)。
+B6 当时留下的判断「这条 env 泄漏无法完全避免(子进程必须有凭据才能调 API)」**是错的**:子进程不需要凭据,
+需要凭据的是 SDK 的 `ModelRuntime`,而它有第三条路 —— `ModelRuntime.create` + `setRuntimeApiKey(providerId, key)`,
+凭据只活在内存里(SDK 自己报的来源是 `source: "runtime"`)。现在:每个 agentDir 一份 `ModelRuntime`
+(`providers.ts` 的 `platformModelRuntime`,与 SDK 自建的同参数 —— 用户手写的 `auth.json` / `models.json` 照旧读得到),
+`createPlatformSession` 建会话前 `armRuntimeApiKey`、再把这份 runtime 交给 `createAgentSession`。
+设置改了 / 降级换了家 ⇒ key 随**下一次建会话**进内存(降级后本来就 `disposeAllSessions()`),不再需要
+「先同步再解析」「切走时记得删」。`credentialChannel` 挂在会话的 wiring 上,**读它的只有测试** —— 它在宿主里恒为
+`runtime`,不是会变的状态,所以没有上屏。
+⚠️ **没做**:`bash` 仍然**没有沙箱**。子进程现在继承不到 key,但照样读得到工作区、连得了网、看得到用户 shell 的 env。
+要不要给工具一层隔离、怎么给,是单独的设计决定,不夹带在这里改。
+
+**③ `board_read` 按项目隔离。** `tools/blackboard.ts`:工件的 `projectId` 必须等于当前项目,否则回 `not_found`
+(与「不存在」**同一个答案** —— 不告诉别的项目的访客某个 id 存不存在);没有项目的接待会话读不到任何工件。
+
+**④ 能力说明文字补齐。** `promptAssembly.ts` 的 `CAPABILITY_LABEL` 从 `Partial` 改成
+`Record<Capability, string>`(缺项在类型上写不出来),`mcp.read` / `mcp.grant` / `work.review_verdict` /
+`schedule.manage` 四条补上说明。
+
+**这一批写测试时抓到的一件事(在夹具里,不在产品里)**:`steer.test.ts` 的假会话按「任务正文里**出现过**甲方第一句」
+判断是不是甲方触发的回合。② 让建会话多了一步真的读盘,宿主启动那一趟排空叫醒的项目经理于是可能建在甲方开口
+**之后** —— 它的新会话重放主对话,任务正文里就有「- 甲方:第一句…」这一行 ⇒ 假会话把项目经理那一轮挂起来
+(等一个永远不会来的放行),而它占着项目的排空闩 ⇒ 之后每次敲门都只被记成「跑完再查一遍」⇒ 业务经理的
+「带回」回合永远不来。夹具改成判「这句话是任务正文的**最后一段**」(`isClientTurn`):甲方亲口说的那句永远在末尾。
+教训与上面第 6、8 条同一条 —— **夹具按文本猜回合的来路,猜的都是时序**。
+
+**真模型复核(同一天,隔离实例,MiniMax-M3.1-Flash-Preview;约 10 个回合、每个两万上下 input token,临时库已删、没有逐笔留账)**
+
+| 验的是什么 | 结果 |
+|---|---|
+| 密钥经内存进 SDK | ✅ 真 provider 一问一答正常(没有 env、没有 `auth.json`,key 只可能来自运行期内存)。工程师在 `bash` 子进程里数 `env \| grep -ci 'MINIMAX\|API_KEY'` 得 **3**(两轮都是):`PATH`(你的 PATH 里有一段 `.minimax/bin`)+ SDK 给每次工具调用加的 `PI_PROVIDER=minimax-cn` 与 `PI_MODEL=MiniMax-…`(按 SDK 源码 `tools/bash.js` 的 `resolveSpawnContext`,这两个值都匹配 `MINIMAX`)。**不是 4** —— 平台写进 env 的那一个(`MINIMAX_CN_API_KEY`)不在了 |
+| 活干完即停 | ✅ 工程师在第 8 次(复测第 12 次)工具调用 `work_update done` 之后被平台结束:轨迹里紧跟一行标记、再是收口行,之后没有任何工具行;收尾提交写着「干完即停」;工作项 → 待审 → 整合 → 交付,后面的链路照常 |
+| 甲方在模型开口前按「停止」 | ✅(修之后)没有任何 error 广播 |
+
+复核第一遍照出三处误报,**都是同一件事 —— 平台自己掐掉的回合被算到模型 / 供应商头上**(第一处是 ① 带出来的,
+后两处早就有了;假会话发不出这种事件,所以此前测试里从来没见过):
+
+1. 真 SDK 被掐掉之后,为被掐掉的那次请求补一条 `stopReason:"error"` 的助手消息(原文
+   `This operation was aborted`,用量全 0、没有正文)⇒ 被当成 provider 故障:一行「被 provider 拒绝」WARN +
+   轨迹里的 `provider_error` 行,**写在一个办成了的回合上**。
+2. 甲方在模型开口前按「停止」⇒ 被报成「这一回合没有回答甲方」(一条 `unanswered_turn` 广播)。宿主是直接调
+   `session.abort()` 的(`abortThisTurn`),不经 `stopTurn`,`runTurn` 自己的 `abortRequested` 不知道。
+3. 被掐掉的回合用量是 0 ⇒ 每按一次停止一条「token 全为 0 —— 要么 SDK 的字段名变了」WARN。
+
+**修**:`RunTurnOptions.aborted`(宿主自己的中断;`runAgentTurn` 与 `runWorkItem` 两条路都接)+ `turn.ts` 的
+`platformAborted()`(`abortRequested || opts.aborted()`),三处判据都走它:被掐掉的 error 不按 provider 故障分类
+(**真实的故障在打断之前就到了,那一条照常分类**);这样的回合不算无下文;不触发全 0 用量告警。
+⚠️ `abortRequested` / `platformAborted` 的声明挪到了订阅之前 —— 事件处理器现在要用它。
+
+⚠️ **一条作废的验证,记下来免得再用**:`ps eww <pid>` 看服务进程的环境、据此说「key 不在 env 里」**不成立** ——
+macOS 的 `ps` 读的是进程 **exec 那一刻**的环境,运行期 `process.env[...] =` 写进去的它根本看不见。
+能作数的只有「从子进程里面数」(上表第一行)与源码哨兵。
+
+回归:`turn.test.ts`(51 → **62**:活干完即停 6 条 + 三处误报各一条正样本 + 一条自检 —— 不传探针时旧误报确实会出现,
+证明绿的是探针换来的 —— + 一条负样本:没掐过的真实故障、掐之前到的故障照常分类)· `execution.test.ts`(42 → **47**)·
+`interrupt-live.test.ts`(2 → **3**,真 WS:中断之后没有任何 error 广播)· `own-kit-host.test.ts`(8 → **11**;假会话的 `abort()`
+改成照真 SDK 补一条 error,轨迹断言「没有 `provider_error` 行」;新增「执行回合被甲方停掉 ⇒ 活不记 failed」)·
+`provider-key-channel.test.ts`(新,**6**;含源码哨兵)· `blackboard` / `prompt-assembly` / `tools` 各 +1。全批 +29 条,
+基线 3057 → 3086。
 
 ## 跨项目地址带项目坐标(2026-10-26 · Wave 2e)
 
@@ -2253,8 +2335,8 @@ help
 | 配置 | 读自 |
 |---|---|
 | provider / modelId / baseUrl | `<dataDir>/settings.json` |
-| API key | `<dataDir>/.keyring`(`boot.ts:95`;masterKey 是**明文 base64**) |
-| **凭据 → pi 的通道** | **环境变量**(`syncActiveProviderApiKeyEnv()`,`boot.ts:114`,建 session 前一次)—— pi 侧从 `agentDir/auth.json` **或 env** 取 |
+| API key | `<dataDir>/.keyring`(`boot.ts:98`;masterKey 是**明文 base64**) |
+| **凭据 → pi 的通道** | **运行期内存**(2026-11-28):`getOrCreateSession` 把 active provider 的明文 key 交给 `createPlatformSession`(`serve.ts:2254`),后者在它自建的 `ModelRuntime` 上 `setRuntimeApiKey`(`providers.ts` 的 `platformModelRuntime` / `armRuntimeApiKey`)再把这份 runtime 交给 SDK;`process.env` **一个字节都不写**(`tests/platform/provider-key-channel.test.ts` 有哨兵)。没给 key 的路径(注入假会话的测试)才走 SDK 自己的来源:`agentDir/auth.json` 或用户 shell 里的 env |
 | model 元数据 | pi-ai **内置 catalog**(见下) |
 | 提示词单元 | `<dataDir>/harness/system_prompts/{unitId}.md` |
 | 工具集合(L2) | `<dataDir>/harness/tools/{role}.json` |

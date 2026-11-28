@@ -136,6 +136,8 @@ export async function runPlatformRun(opts: PlatformRunOptions): Promise<boolean>
       cwd: opts.cwd,
       agentDir: booted.settings.agentDir ?? join(opts.dataDir, "agent"),
       model: booted.model,
+      // 凭据经 ModelRuntime 的内存进 SDK(不写 process.env);没配 provider 时没有它。
+      ...(booted.provider !== null ? { apiKey: booted.provider.apiKey } : {}),
       dataDir: opts.dataDir,
     });
     if (!created.ok) {

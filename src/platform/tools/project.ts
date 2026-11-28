@@ -12,7 +12,7 @@ import {
 import {
   insertWork, getWork, listWorks, updateWorkStatus, assignWork, setWorkPriority,
   setWorkDeps, checkWorkTransition, listDeps, listDependents, depState, isWorkStatus,
-  updateWorkAcceptance,
+  isTerminalWorkStatus, updateWorkAcceptance,
   clampWorkPriority, DEFAULT_WORK_PRIORITY, WORK_PRIORITY_MAX, WORK_PRIORITY_MIN,
   WORK_STATUSES, type WorkStatus, type WorkStatusChange,
 } from "../storage/repo/works.js";
@@ -949,6 +949,17 @@ const workUpdate: PlatformTool = {
       lines.unshift(`工作项 ${workId.value} → ${status}`);
       lines.push(...statusNote(r));
       if (status === "cancelled") lines.push(...cancelWarning(ctx.db, workId.value));
+      // 活干完即停(2026-11-28):执行那一轮(`runWorkItem`,任务开头是 `# 工作项 <id>`)里,
+      // 状态一变终态,平台就在这一步结束这一轮(`runtime/execution.ts` 的 `workFinishedByCall`)。
+      // ⚠️ 工具层**不知道调用者这一轮在干什么** —— 项目经理退役失败项、执行者顺手取消
+      // 别的条目,走的都是这里,而那些回合并不会停。所以这句话必须对每种调用者都成立:
+      // 只陈述事实 + 写明条件,不许写成「你这一轮到此为止」。
+      if (isTerminalWorkStatus(status)) {
+        lines.push(
+          `**这条工作项已到终态。**如果这一轮就是在执行它(任务开头是 \`# 工作项 ${workId.value}\`),` +
+            "平台会在这一步结束这一轮 —— 之后再调的工具不会被执行;该写的工件、该记的经验都应当在之前做完。",
+        );
+      }
     }
     return ok(lines.join("\n"));
   },

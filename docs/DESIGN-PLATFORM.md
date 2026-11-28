@@ -1429,7 +1429,7 @@ MCP(Model Context Protocol)让 agent 调用**外部系统**的工具。三层,�
 
 ```
 board_list(projectId, kind?, status?, author?, limit?)   ← 不再按 conversationId
-board_read(artifactId)
+board_read(artifactId)                                     ← 工件必须属于当前项目(2026-11-28;否则 not_found)
 ```
 
 这是本次升级最关键的一处签名破坏 —— 作用域从「对话」变成「项目」。
@@ -2992,4 +2992,25 @@ harness 仓库的 `commitAll` 整体吞进去,且 `/api/harness/restore` 能改�
 研究员在另一个项目里凭旧经验带出处作答。抓到并修掉:换会话的判据(上一节)、收尾等待的定时器从回合一开始就算
 (早就有的旧缺陷:跑得比 5 分钟久的回合即使正常收尾也被报成「超时收尾」;现在 `prompt()` 返回之后才起算)、
 调研条目的出处上限太短(300 → 600)。如实记两条:**平台的错会被角色记成「经验」**(第一遍里工程师把一个由
-判据错误造成的现象记成了教训,经验库没有事实核查);角色在 `work_update done` 之后不会停,会继续折腾。
+判据错误造成的现象记成了教训,经验库没有事实核查);角色在 `work_update done` 之后不会停,会继续折腾
+—— **已修**,见下一节。
+
+### 八、真模型实验之后修掉的四个问题(2026-11-28)
+
+用户:「修复完问题,再推送」。细节、判据落点与测试清单都在 `AGENTS.md` 同名一节,这里只记设计上的取舍。
+
+1. **活干完即停**。执行那一轮(`runWorkItem`)里,`work_update` 把**本回合那条**工作项写成终态 ⇒ 平台在
+   这一步结束回合(与打断同一个取消入口,但不算超时、不算中断、不记 `failed`,轨迹留一行标记)。
+   判据读库不读参数(「说要停」≠「已经停了」)。**只接执行那条路**:项目经理整合容器、质检出结论之后
+   常还有下一步,不在此列。配套改两处文案(任务正文、工具结果);工具结果那句**对每种调用者都成立**
+   —— 工具层不知道调用者这一轮在干什么,所以写明条件而不写「你到此为止」。
+2. **provider 密钥不进 `process.env`**。凭据经 `ModelRuntime.setRuntimeApiKey` 进 SDK 的内存;会话里 spawn 的
+   子进程(内置 `bash`、自己的 MCP 服务、docker)继承不到它。`bash` **仍然没有沙箱**(读得到工作区、连得了网)——
+   隔离是单独的设计决定,不夹带。`docs/SECURITY-NOTES.md` 按现行代码重核了一遍,记下三条现行代码里
+   **并不存在**的保护(库文件权限收紧、HTTP 的 Origin / Host 校验、工具沙箱)。
+3. **`board_read` 按项目隔离**:工件的 `projectId` 必须等于当前项目,否则 `not_found`(与「不存在」同一个答案)。
+4. **能力说明文字补齐**:`CAPABILITY_LABEL` 改成 `Record<Capability, string>`,四条缺的补上 —— 缺项在类型上写不出来。
+5. **平台自己掐掉的回合不算模型 / 供应商的错**(真模型复核照出来的,三处同源)。真 SDK 被 `abort()` 掐掉之后
+   会为被掐掉的那次请求补一条 `stopReason:"error"` 的助手消息;宿主直接掐的会话(`abortThisTurn`)又不经
+   `runTurn` 的 `stopTurn`。现在 `RunTurnOptions.aborted` 把宿主的中断告诉 `runTurn`,`platformAborted()`
+   一个判据管三处:不按 provider 故障分类、不算无下文、不触发全 0 用量告警。两条回合路径都接。

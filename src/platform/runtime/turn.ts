@@ -121,6 +121,16 @@ import { listSessionMessages } from "../storage/repo/sessions.js";
 import { insertTurnUsage, type TurnUsageRow } from "../storage/repo/usage.js";
 import { insertTurnEvents, type TurnEventRow } from "../storage/repo/turnEvents.js";
 
+/**
+ * 一次**已结束**的工具调用(给 `RunTurnOptions.stopAfterTool` 判「事办完了没有」)。
+ * `args` 是模型给的原样参数;`isError` = 这次调用有没有失败(失败的调用不算把事办完)。
+ */
+export interface TurnToolCall {
+  readonly name: string;
+  readonly args: Readonly<Record<string, unknown>>;
+  readonly isError: boolean;
+}
+
 /** 一次工具调用的现场记录。 */
 export interface ToolCallRecord {
   readonly name: string;
@@ -259,6 +269,13 @@ export interface TurnResult {
    * 平台打断的。
    */
   readonly timeout?: TurnTimeoutScene;
+  /**
+   * **平台在活干完的那一步结束了这一回合**(2026-11-28;值 = `stopAfterTool` 返回的那句说明)。
+   *
+   * **可选**:没有它 = 这一回合是模型自己停的,或者被打断 / 超时(那两条看 `timeout`)。
+   * 与它们三者都不同:既不是模型自己收尾,也不是出了事 —— 是「事办完了,不再花钱」。
+   */
+  readonly finishedBy?: string;
   /**
    * **这一回合花了多少 token**(已落库的那一份,与 `turn_usage` 那一行同源)。
    *
@@ -465,6 +482,28 @@ export interface RunTurnOptions {
    * 推送失败是传输问题,不是账目问题。
    */
   readonly onUsageRecorded?: (row: TurnUsageRow) => void;
+  /**
+   * **活干完即停**(2026-11-28 真模型实验之后):每次工具调用结束时问一次 —— 返回一句说明 ⇒
+   * **平台就在这一步结束这一轮**(`session.abort()`),不再买下一次模型调用;返回 `null` ⇒ 照常继续。
+   *
+   * 为什么要有它:真模型实验里,工程师在 `work.update` 改成 done **之后**又花了几十次调用
+   * (读三生自己的源码、翻服务日志、想弄清工具面是怎么算出来的);研究员一轮里跑了 88 次工具。
+   * 活已经做完,后面的全是白烧。提示词管不住这件事(它已经被告知「完成就停」),所以做成机制:
+   * **判据由调用方给**(读库里的结构化事实 —— `runWorkItem` 判「本回合执行的那条工作项到终态了没有」),
+   * `runTurn` 只负责「判完了就停」。聊天 / 汇报 / 评审那些路径不传它 ⇒ 行为逐字不变。
+   *
+   * ⚠️ 它**不是超时、也不是中断**:`timedOut` 不置真、没有 `turn.timeout` 现场、不广播 `turn_timeout`;
+   * 结果里单列 `finishedBy`。
+   */
+  readonly stopAfterTool?: (call: TurnToolCall) => string | null;
+  /**
+   * **宿主自己发起的中断**(2026-11-28 真机补)。甲方按「停止」时,宿主直接调
+   * `session.abort()`(`abortThisTurn`),**不经**下面的 `stopTurn` ⇒ `runTurn` 自己那个
+   * `abortRequested` 不知道这件事。真机现场:被掐掉之前一个字还没说的回合,收尾时被报成
+   * 「这一回合没有回答甲方」(一条 `unanswered_turn` 广播 + 一行 WARN + 轨迹里的标记)。
+   * 给了这个探针,「平台自己打断的不算模型的错、也不算 provider 的错」这几处判据就把它算进去。
+   */
+  readonly aborted?: () => boolean;
   /**
    * **这个角色自己仓库的绝对路径**(migration 040,2026-11-28)。
    *
@@ -837,7 +876,7 @@ export async function runTurn(opts: RunTurnOptions): Promise<TurnResult> {
   // 名字也在这里留一份:超时打断时「哪个工具正在跑」只能从这张表里看(7-N)。
   const inflight = new Map<
     string,
-    { name: string; startedAt: number; argsSummary: string }
+    { name: string; startedAt: number; argsSummary: string; args: Readonly<Record<string, unknown>> }
   >();
   /**
    * 本回合各次 LLM 调用的用量**快照**(不是引用 —— 见文件头那段)。
@@ -857,6 +896,20 @@ export async function runTurn(opts: RunTurnOptions): Promise<TurnResult> {
   let providerError: ProviderFailure | undefined;
   /** SDK 自己重试了几次(`auto_retry_start` 一次 = 一次重试)。 */
   let providerRetries = 0;
+
+  /**
+   * 平台有没有主动打断过这一回合:`abortRequested` 是 `runTurn` 自己调的(`stopTurn` / `finishTurn`),
+   * `opts.aborted` 是宿主直接掐的(甲方按了停止)。
+   *
+   * ⚠️ **声明在订阅之前**:下面的事件处理器要用它(被掐掉的那次调用不按 provider 故障处置),
+   * 放在订阅之后就是一个只差时序的 TDZ。
+   *
+   * 用在三处「自己掐的不算别人的错」上:被掐掉的那次调用 SDK 会报成 `error`
+   * (真机原文 `This operation was aborted`)⇒ 不按 provider 故障处置;这样的回合
+   * 不算「没有下文」;它的用量是 0 也不触发「SDK 字段名是不是变了」那条告警。
+   */
+  let abortRequested = false;
+  const platformAborted = (): boolean => abortRequested || opts.aborted?.() === true;
 
   // ── 待办注入 ──
   // 接待会话(projectId === null)**不注入**:还没有项目,没有项目内的待办可列;
@@ -982,6 +1035,23 @@ export async function runTurn(opts: RunTurnOptions): Promise<TurnResult> {
         argsSummary: record.argsSummary, resultSummary: record.resultSummary,
         isError: record.isError, durationMs: record.durationMs, createdAt: Date.now(),
       }]);
+      // ── 活干完即停:这次调用是不是把事办完了 ──────────────────────
+      // 在工具行落库**之后**、观察者广播之前判:轨迹里先有「办完的那次调用」,再有「平台在此结束」;
+      // 前端收到 `tool_end` 回查时两行都在。判据抛错不毁回合(与观察者同一条规矩),只留痕。
+      if (opts.stopAfterTool !== undefined) {
+        let verdict: string | null = null;
+        try {
+          verdict = opts.stopAfterTool({
+            name: record.name, args: started?.args ?? {}, isError: record.isError,
+          });
+        } catch (err: unknown) {
+          log.error(
+            `turn: stopAfterTool 抛错(${opts.agentId} · 工具 ${record.name})—— 这一轮照常继续:` +
+              (err instanceof Error ? err.message : String(err)),
+          );
+        }
+        if (verdict !== null) finishTurn(verdict);
+      }
     }
 
     try {
@@ -1028,6 +1098,18 @@ export async function runTurn(opts: RunTurnOptions): Promise<TurnResult> {
         typeof m.errorMessage === "string" &&
         m.errorMessage.trim() !== ""
       ) {
+        // ⚠️ **平台自己掐掉的那次调用不是 provider 故障**(2026-11-28 真机现场):活干完即停 / 看门狗 /
+        // 甲方按了停止之后,SDK 为被掐掉的那次请求补一条 `stopReason:"error"` 的助手消息
+        // (原文 `This operation was aborted`,用量全 0、没有正文)。按故障处置的后果:一条
+        // 「被 provider 拒绝」的 WARN、轨迹里一行 `provider_error`(写在一个**办成了**的回合上),
+        // 聊天那条路还会向甲方广播 `provider_error`。真实的故障在打断**之前**就到了 —— 那一条照常分类。
+        if (platformAborted()) {
+          log.muted(
+            `turn: ${opts.agentId} 的回合是被平台打断的,被掐掉的这次调用以 error 收尾` +
+              `(${m.errorMessage.slice(0, 120)})—— 不按 provider 故障处置`,
+          );
+          return;
+        }
         providerError = classifyProviderFailure(m.errorMessage);
         logProviderFailure(`turn: ${opts.agentId} 的回合被 provider 拒绝`, providerError);
         return;
@@ -1074,6 +1156,10 @@ export async function runTurn(opts: RunTurnOptions): Promise<TurnResult> {
         name: ev.toolName,
         startedAt: Date.now(),
         argsSummary: argsSummary(ev.args),
+        // 原始参数留给 `stopAfterTool`(判据要读结构化的 workId / status,不能读截断过的摘要)
+        args: ev.args !== null && typeof ev.args === "object" && !Array.isArray(ev.args)
+          ? (ev.args as Readonly<Record<string, unknown>>)
+          : {},
       });
       // 看门狗第三道:**次数**。已完成 `maxToolCalls` 次之后又要开始新的一次 ⇒
       // 「每一步都很快,但永不收敛」。判在**开始**而不是结束:恰好用满次数后
@@ -1111,7 +1197,7 @@ export async function runTurn(opts: RunTurnOptions): Promise<TurnResult> {
   /** 平台有没有主动打断过这一回合(墙钟或看门狗三道闸之一)。 */
   let stopped = false;
   let stopCause: TurnTimeoutCause = "wall_clock";
-  let abortRequested = false;
+  // (`abortRequested` / `platformAborted` 声明在订阅之前,见文件上面 providerRetries 那一段。)
   let abortError: string | null = null;
   let interruptedTool: TurnTimeoutScene["interruptedTool"] = null;
   let elapsedAtInterruptMs = 0;
@@ -1133,6 +1219,44 @@ export async function runTurn(opts: RunTurnOptions): Promise<TurnResult> {
     return running === null
       ? null
       : { name: running.name, argsSummary: running.argsSummary, runningMs: Date.now() - running.startedAt };
+  };
+
+  /**
+   * **活干完即停**(2026-11-28):`stopAfterTool` 说了「到此为止」时记下它返回的那句说明;
+   * `null` = 没停(模型自己收尾 / 被打断 / 超时)。
+   */
+  let finishedBy: string | null = null;
+
+  /**
+   * 在活干完的那一步结束这一轮 —— 与打断走同一个取消入口(`session.abort()`),
+   * 但**不是**超时也不是中断:不置 `timedOut`、不写 `timeout` 现场、不告警。
+   * 轨迹里落一行标记(为什么这一轮在这里结束,事后要看得出来),收尾等待立刻结束。
+   */
+  const finishTurn = (label: string): void => {
+    if (finishedBy !== null || stopped) return;
+    finishedBy = label;
+    log.muted(
+      `turn: ${label} —— 平台在此结束 ${opts.agentId} 的这一轮` +
+        `(已跑 ${Date.now() - startedAt}ms · 已完成工具 ${toolCalls.length} 次 · 之后不再调模型)`,
+    );
+    eventSeq += 1;
+    writeTurnEvents([{
+      id: nextEventId("te"), turnId,
+      projectId: pid, sessionId: opts.sessionId ?? null,
+      agentId: opts.agentId, workId: opts.workId ?? null,
+      seq: eventSeq, kind: "marker", tool: null,
+      argsSummary: "", resultSummary: `${label},平台在此结束这一轮(之后不再调模型)`,
+      isError: false, durationMs: null, createdAt: Date.now(),
+    }]);
+    // `abortRequested` 置真:「打断与超时一律不算无下文」,这里同理 —— 它不是「模型没说话」
+    abortRequested = true;
+    void requestSessionAbort(opts.session).then((err) => {
+      if (err === null) return;
+      abortError = err;
+      log.error(`turn: 活干完即停时 abort() 报错(${opts.agentId}):${err}`);
+    });
+    settled = true;
+    releaseStop();
   };
 
   /**
@@ -1357,7 +1481,9 @@ export async function runTurn(opts: RunTurnOptions): Promise<TurnResult> {
     if (total === null) return undefined;
 
     const rowId = (opts.newId ?? defaultUsageId)("tu");
-    warnIfAllZero(opts.agentId, total, usageCalls.length);
+    // 被打断的回合用量是 0 很正常(被掐掉的那次调用没买到 token)—— 这条告警只留给
+    // 「没被打断却全是 0」的回合,否则每按一次「停止」就有一条「SDK 字段名是不是变了」。
+    if (!platformAborted()) warnIfAllZero(opts.agentId, total, usageCalls.length);
 
     const row: TurnUsageRow = {
       id: rowId,
@@ -1421,9 +1547,10 @@ export async function runTurn(opts: RunTurnOptions): Promise<TurnResult> {
     // `prompt()` 自己失败(不是我们打断的)→ **立刻**抛给调用方。
     // 不能拖到收尾等待到点:那会把「provider 报错」变成「卡满 timeoutMs 才报错」,
     // 而且会先把 settled 置真、把错误伪装成一次超时收尾。
-    if (promptErrorMessage !== null && !stopped) throw promptErrorValue;
+    // 「活干完即停」与打断同一条判断:即停让 prompt() 以错误收尾**不是回合故障**。
+    if (promptErrorMessage !== null && !stopped && finishedBy === null) throw promptErrorValue;
 
-    if (stopped && !promptReturned) {
+    if ((stopped || finishedBy !== null) && !promptReturned) {
       // abort 已经发出,给 SDK 一个**有界**的收尾宽限。绝不无限等:
       // 一个卡死的回合会把排空器的 busy 闩一直握住(本缺陷的后果之一)。
       await Promise.race([promptPromise, delay(abortGraceMs)]);
@@ -1434,7 +1561,7 @@ export async function runTurn(opts: RunTurnOptions): Promise<TurnResult> {
         );
       }
     }
-    if (stopped && promptErrorMessage !== null) {
+    if ((stopped || finishedBy !== null) && promptErrorMessage !== null) {
       // 中断不是故障(与宿主 `interrupt` 同一条判断),但要留痕:错误文本进现场
       log.muted(
         `turn: ${opts.agentId} 的回合被平台打断(${turnStopLabel(stopCause)}),` +
@@ -1469,7 +1596,7 @@ export async function runTurn(opts: RunTurnOptions): Promise<TurnResult> {
     // 落成轨迹的 `unanswered` 标记 —— 返回值复用同一个变量,判据只有一份。
     turnText = text.join("");
     unanswered =
-      abortRequested || timedOut || providerError !== undefined
+      platformAborted() || timedOut || providerError !== undefined
         ? null
         : turnText.trim() === ""
           ? {
@@ -1505,6 +1632,7 @@ export async function runTurn(opts: RunTurnOptions): Promise<TurnResult> {
     unanswered,
     timedOut,
     ...(stopped ? { timeout: timeoutScene() } : {}),
+    ...(finishedBy !== null ? { finishedBy } : {}),
     ...(recordedUsage !== undefined ? { usage: recordedUsage } : {}),
     ...(providerError !== undefined ? { providerError } : {}),
     ...(providerError !== undefined || providerRetries > 0 ? { providerRetries } : {}),

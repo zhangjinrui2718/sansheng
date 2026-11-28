@@ -134,6 +134,8 @@ export async function runPlatformSmoke(opts: PlatformSmokeOptions): Promise<bool
       cwd: opts.cwd,
       agentDir: booted.settings.agentDir ?? join(opts.dataDir, "agent"),
       model: booted.model,
+      // 凭据经 ModelRuntime 的内存进 SDK(不写 process.env);没配 provider 时没有它。
+      ...(booted.provider !== null ? { apiKey: booted.provider.apiKey } : {}),
       // 提示词单元从真实数据目录读 —— 这一步不能省(7-B:落地了但没人读)
       dataDir: opts.dataDir,
     });

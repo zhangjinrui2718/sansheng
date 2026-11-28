@@ -33,6 +33,7 @@ import {
   type ResourceLoader,
 } from "@earendil-works/pi-coding-agent";
 import type { Model } from "@earendil-works/pi-ai";
+import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import type { ThinkingLevel } from "@shared/types/settings.js";
 import type { RuntimeSession, RuntimeSessionEventBase, RuntimeEvent } from "../types.js";
 import { normalizeSessionEvent } from "./events.js";
@@ -58,6 +59,7 @@ import { classifyToolset, toSdkTools } from "./toolsAdapter.js";
 import { composeSystemPrompt } from "../../promptAssembly.js";
 import { dispatch } from "../../../tools/registry.js";
 import { toLoadedMcpConfig } from "./mcpConfig.js";
+import { armRuntimeApiKey, platformModelRuntime } from "./providers.js";
 import { log } from "../../../../shared/log.js";
 
 /**
@@ -159,6 +161,11 @@ export interface CreateSessionFn {
      * 而那正是「声称已接线但实际未接线」的形态)。
      */
     extensionFactories?: readonly ExtensionFactory[];
+    /**
+     * 平台自建的 `ModelRuntime`(2026-11-28):凭据经 `setRuntimeApiKey` 进它的内存,
+     * `process.env` 里不再有 provider 的明文 key。给了 `apiKey` 才会有它。
+     */
+    modelRuntime?: ModelRuntime;
   }): Promise<{ session: AgentSession }>;
 }
 
@@ -194,6 +201,14 @@ export interface PlatformSessionOptions {
   readonly dataDir?: string;
   /** 测试 seam:替换 resourceLoader 构造(避免真读盘 + reload) */
   readonly makeResourceLoader?: (systemPrompt: string) => Promise<ResourceLoader>;
+  /**
+   * **active provider 的明文 key**(2026-11-28)。给了它 ⇒ 建会话前交给平台自建的
+   * `ModelRuntime`(`setRuntimeApiKey`,只进内存),并把那份 runtime 交给 SDK;
+   * **`process.env` 一个字节都不写** ⇒ 会话里 spawn 的子进程(bash / 自己的 MCP 服务 /
+   * docker)继承不到 key。不给 ⇒ 交给 SDK 自己的来源(`agentDir/auth.json`、用户 shell
+   * 里的 env)—— 注入假会话的测试多半走这条。
+   */
+  readonly apiKey?: string;
 }
 
 export type PlatformSessionFailure =
@@ -251,6 +266,12 @@ export type PlatformSessionResult =
          * "unavailable"` 同一条纪律:**宁可没有,也不伪造一个「已连接」**。
          */
         readonly mcpConnectionState: "unavailable";
+        /**
+         * 凭据是怎么交给 SDK 的(2026-11-28):`runtime` = 平台自建的 ModelRuntime 的内存
+         * (`setRuntimeApiKey`),`process.env` 没有被写;`sdk_default` = 没给 `apiKey`,
+         * 走 SDK 自己的来源。挂在 wiring 上是因为「key 给了但没接到」在别处看不出来。
+         */
+        readonly credentialChannel: "runtime" | "sdk_default";
         /**
          * `bindExtensions` 失败的原因(坑 2)。
          *
@@ -464,6 +485,17 @@ export async function createPlatformSession(
     resourceLoader = loader;
   }
 
+  // 3.7 凭据(2026-11-28):给了 apiKey ⇒ 平台自建的 ModelRuntime + 运行期 key,
+  //     **不写 process.env**(以前靠 env,bash / MCP 之类的子进程全都继承得到明文 key)。
+  let modelRuntime: ModelRuntime | undefined;
+  let credentialChannel: "runtime" | "sdk_default" = "sdk_default";
+  if (opts.model !== undefined && opts.apiKey !== undefined) {
+    modelRuntime = await platformModelRuntime(opts.agentDir);
+    if (await armRuntimeApiKey(modelRuntime, opts.model.provider, opts.apiKey)) {
+      credentialChannel = "runtime";
+    }
+  }
+
   // 4. 建会话
   const create = opts.createSession ?? createAgentSession;
   const created = await create({
@@ -489,6 +521,7 @@ export async function createPlatformSession(
     // 外部注入的 resourceLoader(测试 seam)里**不会**有我们算的扩展工厂,
     // 所以它们必须同时交给会话本身 —— 否则 seam 一换,MCP 就静默消失。
     extensionFactories,
+    ...(modelRuntime !== undefined ? { modelRuntime } : {}),
   });
 
   // 5. 坑 2:显式绑定。**失败必须报进 wiring**,不能静默吞掉,也不能让建会话失败。
@@ -528,6 +561,7 @@ export async function createPlatformSession(
       ownMcpServers: [...plan.mcp.ownTools],
       mcpUnresolvedSecrets: [...mcpConfig.unresolved],
       mcpConnectionState: mcpConfig.connectionState,
+      credentialChannel,
       ...(mcpBindError !== undefined ? { mcpBindError } : {}),
     },
   };

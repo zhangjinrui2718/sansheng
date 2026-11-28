@@ -152,8 +152,21 @@ describe("normalizeSessionEvent · 补话回执的翻译(真的适配层)", () =
 // ② 端到端:真宿主 + 真 WS + 真的适配层 + 假的 SDK 队列
 // ══════════════════════════════════════════════════════════════════
 
-/** 甲方第一句话的标记:任务正文里带着它 ⇒ 这一轮是甲方触发的回合。 */
+/** 甲方第一句话的标记:任务正文**以它收尾** ⇒ 这一轮是甲方触发的回合(见 `isClientTurn`)。 */
 const TURN_MARKER = "第一句,先忙你的";
+
+/**
+ * 这份任务正文是不是**甲方触发的回合** —— 判「这句话是现在说的」,不判「正文里出现过它」。
+ *
+ * ⚠️ 新会话会重放主对话的最近消息(`renderConversationHistory`),重放出来的是这样一行:
+ * `- 甲方：第一句,先忙你的`。宿主启动时那一趟排空叫醒的项目经理如果恰好建在甲方开口之后,
+ * 它的任务正文里**也有**这句话 —— 按「出现过」判,假会话会把项目经理那一轮当成甲方触发的
+ * 回合挂起来(等一个永远不会来的放行),而它占着这个项目的排空闩 ⇒ 之后每一次敲门都只被
+ * 记成「跑完再查一遍」⇒ 业务经理的「带回」回合永远不来(2026-11-28 实测:建会话多了一步
+ * 真的读盘,这个原本只差一个微任务的先后就翻了)。
+ * 甲方亲口说的那句永远是任务正文的**最后一段**(`runAgentTurn` 把它接在上下文与历史之后)。
+ */
+const isClientTurn = (text: string): boolean => text.trimEnd().endsWith(TURN_MARKER);
 
 interface Harness {
   /** 每一轮收到的任务正文(按到达顺序)。 */
@@ -219,7 +232,7 @@ function makeSession(h: Harness): AgentSession {
         await gate();
         return { messages: [] };
       }
-      if (text.includes(TURN_MARKER)) {
+      if (isClientTurn(text)) {
         // 甲方触发的回合:先跑一批工具调用(挂着,等测试放行)……
         emit({ type: "tool_execution_start", toolCallId: "t1", toolName: "bash", args: { command: "ls" } } as AgentSessionEvent);
         await gate();
@@ -383,7 +396,8 @@ function seedProject(workId: string | null): void {
 /** 发第一句(占住业务经理的闩),等它的回合真正跑起来。 */
 async function startUserTurn(): Promise<void> {
   send({ type: "send", projectId: pid, content: TURN_MARKER });
-  await waitFor("业务经理的甲方回合跑起来", () => h.prompts.some((p) => p.includes(TURN_MARKER)));
+  // ⚠️ 判「现在说的」而不是「正文里出现过」:启动那一趟排空叫醒的项目经理可能重放了这句话。
+  await waitFor("业务经理的甲方回合跑起来", () => h.prompts.some(isClientTurn));
 }
 
 /** 放行当前挂着的回合,等它收尾。 */
@@ -566,7 +580,7 @@ describe("补话 · 端到端", () => {
     void host!.dispatchTimer.runNow().catch(() => undefined);
     await waitFor("工作项记 failed", () => getWork(db(), "w1")?.status === "failed");
     await waitFor("业务经理的汇报回合挂起(它在跑内部任务)", () =>
-      h.prompts.some((p) => !p.includes("# 工作项 ") && !p.includes(TURN_MARKER) &&
+      h.prompts.some((p) => !p.includes("# 工作项 ") && !isClientTurn(p) &&
         /你是:.*?\(`business_manager`\)/.test(p)),
     );
 
