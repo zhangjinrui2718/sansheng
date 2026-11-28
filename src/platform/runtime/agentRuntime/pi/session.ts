@@ -261,6 +261,66 @@ export type PlatformSessionResult =
     }
   | PlatformSessionFailure;
 
+/** `DefaultResourceLoader` 的构造参数 —— SDK 没从包根导出这个名字,从构造器上取。 */
+export type SessionResourceLoaderOptions = ConstructorParameters<typeof DefaultResourceLoader>[0];
+
+/**
+ * 会话装载策略(2026-11-28)—— **会话里进什么,只由平台决定**。
+ *
+ * 背景(读 SDK 源码 `dist/core/resource-loader.js` / `package-manager.js` 得出):
+ * SDK 默认把会话目录当成「受信任的项目」,于是项目仓里这些文件会**不经任何人点头**
+ * 自动进**每一个角色**的会话(含没有任何代码能力的质检):
+ *
+ *   - `.pi/extensions/*.js` —— **当代码执行**的扩展;
+ *   - `.pi/skills`、`.agents/skills`(含各级上级目录)、`~/.agents/skills`、`<agentDir>/skills`;
+ *   - `.pi/settings.json` / `.pi/prompts`;
+ *   - `AGENTS.md` / `CLAUDE.md` —— 会话目录、**每一级上级目录直到 `/`**、`<agentDir>`。
+ *
+ * 而会话目录就是项目仓根 —— 角色天天往里写文件。也就是说:项目仓里出现一个
+ * `.pi/extensions/x.js`,就等于某个角色(或它从网上抄回来的一段内容)替平台给全体角色
+ * 加了工具。三生从没决定过要这条通道;「自己的仓库」(角色给自己写工具的那条路)
+ * 上线之后,它更成了绕过「看得见、停得了」的后门。
+ *
+ * ⇒ 三个 `no*` 关掉磁盘自动发现,**只保留平台显式传进去的东西**(内联的
+ * `extensionFactories` —— MCP 与 tool_search —— 与 `noExtensions` 无关:SDK 把
+ * 「内联工厂」与「磁盘上的扩展」当两条路,`loadProjectTrustExtensions()` 里
+ * `includeInlineFactories: true` 写得很清楚)。
+ *
+ * ⚠️ **抽成导出的纯函数**是为了让测试拿**真 SDK 的 `DefaultResourceLoader`** 配一份
+ * 临时目录来验(「写了个开关但没接到装载上」与「接上了」在假会话里长得一样)。
+ */
+export function sessionResourceLoaderOptions(opts: {
+  cwd: string;
+  agentDir: string;
+  appendSystemPrompt: (base: readonly string[]) => string[];
+  extensionFactories: readonly ExtensionFactory[];
+}): SessionResourceLoaderOptions {
+  return {
+    cwd: opts.cwd,
+    agentDir: opts.agentDir,
+    // **append 语义**:保留 SDK 默认的 preamble / 工具说明 / 规则段,
+    // 只把角色提示追加在其后。整体替换会丢掉 SDK 自己那份工具协议说明,
+    // 而 8-F 的教训正是「工具协议段必须渲染参数清单」。
+    appendSystemPromptOverride: opts.appendSystemPrompt,
+    // ⚠️ 坑 1:不传这一项 ⇒ SDK 会话里**没有 MCP 扩展**。
+    extensionFactories: [...opts.extensionFactories],
+    noExtensions: true,
+    noSkills: true,
+    noContextFiles: true,
+  };
+}
+
+/**
+ * 装载资源,并把「项目目录」钉成**不受信任**。
+ *
+ * `resolveProjectTrust` 是 SDK 自己留的那个口子(`resource-loader.js:356-366`):
+ * 它先用「不受信任」跑一遍引导,再按这个回调的返回值决定项目级配置(.pi/settings、
+ * 包、技能)读不读。恒 `false` = 项目目录里的东西一样都不读。
+ */
+export async function reloadSessionResources(loader: ResourceLoader): Promise<void> {
+  await loader.reload({ resolveProjectTrust: async () => false });
+}
+
 /**
  * 为一个 agent 在某个项目里建立会话。
  *
@@ -367,31 +427,39 @@ export async function createPlatformSession(
     }),
   ];
 
+  /** 角色提示(简报 + 单元);空串 = 没有可注入的(没给 dataDir,或单元全缺)。 */
+  let rolePrompt = "";
   if (opts.dataDir !== undefined) {
     const composed = composeSystemPrompt(opts.dataDir, plan.agent.role);
+    rolePrompt = composed.text.trim() === "" ? "" : composed.text;
     loadedPromptUnits = [...composed.loadedUnits];
     missingPromptUnits = [...composed.missingUnits];
     systemPromptChars = composed.text.length;
-    if (composed.text.trim() !== "") {
-      if (opts.makeResourceLoader !== undefined) {
-        resourceLoader = await opts.makeResourceLoader(composed.text);
-      } else {
-        const loader = new DefaultResourceLoader({
-          cwd: opts.cwd,
-          agentDir: opts.agentDir,
-          // **append 语义**:保留 SDK 默认的 preamble / 工具说明 / 规则段,
-          // 只把角色提示追加在其后。整体替换会丢掉 SDK 自己那份工具协议说明,
-          // 而 8-F 的教训正是「工具协议段必须渲染参数清单」。
-          appendSystemPromptOverride: (base: readonly string[]) => [...base, composed.text],
-          // ⚠️ 坑 1:不传这一项 ⇒ SDK 会话里**没有 MCP 扩展**。
-          extensionFactories,
-        });
-        // 外部传入 resourceLoader 时 SDK **不代为 reload**(它只 reload 自建的)
-        // —— 不显式 reload 的话提示词不会生效,又是一个静默死接线。
-        await loader.reload();
-        resourceLoader = loader;
-      }
+    // 外部注入 resourceLoader(测试 seam)时由测试全权决定装载,**平台不另建一份**。
+    if (rolePrompt !== "" && opts.makeResourceLoader !== undefined) {
+      resourceLoader = await opts.makeResourceLoader(composed.text);
     }
+  }
+
+  if (resourceLoader === undefined && opts.makeResourceLoader === undefined) {
+    // ⚠️ **没有测试 seam 就一定自己建** —— 包括「角色提示为空」的时候。
+    //    不建 ⇒ 交给 SDK 自建的默认装载器,而那一份按默认策略**信任项目目录**
+    //    (`sessionResourceLoaderOptions` 的注释:项目仓里的 `.pi/`、`AGENTS.md`
+    //    会自动进会话)。「单元全缺」与「装载策略失效」是两件事,不许绑在一起。
+    const loader = new DefaultResourceLoader(
+      sessionResourceLoaderOptions({
+        cwd: opts.cwd,
+        agentDir: opts.agentDir,
+        appendSystemPrompt: (base: readonly string[]) => (rolePrompt === "" ? [...base] : [...base, rolePrompt]),
+        extensionFactories,
+      }),
+    );
+    // SDK **不代为 reload** 外部传入的 resourceLoader —— 不显式 reload 的话
+    // 提示词与扩展都不会生效,又是一个静默死接线。
+    // ⚠️ reload 的参数是装载策略的一半(`sessionResourceLoaderOptions` 的注释):
+    // 不带 `resolveProjectTrust` ⇒ SDK 默认信任项目目录。
+    await reloadSessionResources(loader);
+    resourceLoader = loader;
   }
 
   // 4. 建会话
