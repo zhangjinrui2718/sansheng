@@ -533,8 +533,14 @@ export function RoleHarnessDisclosure({
             角色(业务经理 / 项目经理,以及比前端旧的后端)整块不出,而不是画一块空的。 */}
         {hasOwnKit && found?.own !== undefined && (
           <Disclosure summary={`自己的工具与经验${ownKitSummarySuffix(found.own)}`}>
-            <Help id="harness.own" />
-            <OwnKitSection model={ownKit} />
+            {/* `?` 与内容并排:单独占一行时,折叠块一展开先看到的是一个孤零零的问号
+                (走检时看到的)。 */}
+            <div className="flex items-start gap-1">
+              <Help id="harness.own" />
+              <div className="min-w-0 flex-1">
+                <OwnKitSection model={ownKit} />
+              </div>
+            </div>
           </Disclosure>
         )}
       </article>

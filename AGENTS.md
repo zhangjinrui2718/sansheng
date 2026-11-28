@@ -148,7 +148,7 @@
   (`SKILL.md` + 可选脚本 / `mcp.json`),角色自己写、**不经放行**下一轮生效(用户裁决),人只有「停用」这一个刹车
   (成员页角色 harness 卡);经验库按角色隔离、跨项目,每轮开工前把最相关的三条旧经验摆在任务前面。
   同批关掉了 SDK 对项目目录的自动装载(`.pi/`、`AGENTS.md`):**会话里进什么只由平台决定**。
-- 基线:**2972 passed / 3 failed(model-catalog,工作区里 pi-ai 版本漂移,先于 2026-11-22 批次存在)/ 168 test files**(2026-11-28「职责」批次之后,在分支 `feat/duties` 上实测;**该批尚未并入 master、未推送**)· 两条 typecheck 0 error · `check:design` E1–E14 全绿(5 角色)。
+- 基线:**3051 passed / 4 failed / 175 test files**(2026-11-28「自己的仓库与经验库」批次之后,在分支 `feat/own-kit` 上实测;**它与它下面的 `feat/duties` 都尚未并入 master、未推送**)。4 条红:3 条是 model-catalog(工作区里 pi-ai 版本漂移,先于 2026-11-22 批次存在);1 条是 `d1-d4-parallel-projects` 的 ③b —— **全量负载下才红,单跑恒绿**(2026-11-28 两次全量都红、两次单跑都绿;「职责」那批之前就有这条记录)。· 两条 typecheck 0 error · `check:design` E1–E14 全绿(5 角色)。
 - **角色中文名只有一处**:`src/platform/runtime/org.ts` 的 `ORG`(播种 / `roleDisplayName()` /
   `RoleHarnessView.displayName` / **系统提示里的「# 你的角色:X」**全走它);
   前端兜底表 `web/src/lib/vocab.ts` 的 `ROLE_LABEL` 必须逐项相同,由
@@ -1133,6 +1133,12 @@ SDK 默认把会话目录当成**受信任的项目**,于是项目仓里的 `.pi
    现在 `.git` 在就只花一次 `existsSync`(与 `ensureProjectRepo` 同形)。
 4. **工具名两处都能定**:frontmatter 的 `name` 与目录名都能定名字 ⇒ 取消前者。
 5. **夹具一次派三条活**:排空器一趟会把能做的活全做掉,分不清「停用前 / 后」⇒ 一条一条派。
+
+### 回归与变异
+
+- 新测试:`session-load-policy`(5)· `agent-notes`(19)· `own-repo`(17)· `own-kit-context`(15)· `own-mcp`(8)· `own-kit-host`(6,真宿主 + 假会话 + 真 HTTP + 真 git)· web `own-kit-section`(10);`reset.test` 补两张新表的播种与「清行之后全文索引也空」的断言。
+- 变异自检:`.probe/mutation-own-kit.py` **61 条,一轮整跑 61/61 实测变红**。第一轮是 56/60 —— 四条漏网逐条查明:两条是判据弱(空白标题没测;「空操作不换会话」断言时池里恰好没有闲置会话),两条是变异不够坏(检索上限有工具层与仓储层两道闸,拿掉任何一层行为都不变 ⇒ 改成两层各测一次;`hasOwnKit` 与两个子判据重复 ⇒ 删掉)。
+- 界面走检:内置浏览器那次点不动 —— 页面一加载 React 根上就挂着一个 DefaultLane,**连既有的「收起左栏」也点不动**(环境问题,不是这一块的);换成无头 Chrome 真点一遍:停用两步确认、恢复一步、检索、删除两步确认、服务端状态同步,12 项通过(第 13 项是脚本自己读错了行,不是界面问题)。
 
 ### 默认值与没做的(如实记)
 
