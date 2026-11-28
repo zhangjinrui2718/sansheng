@@ -52,12 +52,6 @@ export interface OwnKitContext {
   readonly summary: string;
 }
 
-/** 这个角色有没有「自己的东西」可注入(两项能力任一)。 */
-export function hasOwnKit(role: ProjectRole): boolean {
-  const ceiling = ROLE_SPECS[role].ceiling;
-  return ceiling.includes("experience.read") || ownsRepo(role);
-}
-
 /** 经验库那一段。`null` = 这个角色没有经验库(整段不出)。 */
 function notesSection(db: Database.Database, agentId: string, query: string): string | null {
   let lines: string[];
@@ -160,7 +154,9 @@ export function renderOwnKit(
 ): OwnKitContext {
   const me = getAgent(db, agentId);
   const role = me !== null && isProjectRole(me.role) ? me.role : null;
-  if (role === null || !hasOwnKit(role)) return { text: "", summary: "(没有自己的仓库与经验库)" };
+  // 没有这组能力的角色(业务经理 / 项目经理)两个子段都是 null ⇒ 整段不出。
+  // ⚠️ 不在这里另写一个「有没有」的判据:那会是第三份会漂的判断 —— 下面两行本来就是判据。
+  if (role === null) return { text: "", summary: "(没有自己的仓库与经验库)" };
 
   const ceiling = ROLE_SPECS[role].ceiling;
   const notes = ceiling.includes("experience.read") ? notesSection(db, agentId, opts.query) : null;

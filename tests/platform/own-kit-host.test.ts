@@ -341,13 +341,6 @@ describe("自己的工具 · 停用端点与换会话", () => {
     const offBody = await json<{ tool: { state: string; disabledAt: number | null }; changed: boolean }>(off);
     expect(offBody.tool.state).toBe("disabled");
     expect(offBody.changed).toBe(true);
-    // 幂等:再停一次不算改动,也**不换会话**(没改动却丢会话 = 把一个空操作说成了生效)
-    const disposedBefore = cwSessions(h).filter((x) => x.disposed).length;
-    const again = await toggle(h, "coding_worker", "rag", { disabled: true });
-    expect((await json<{ changed: boolean }>(again)).changed).toBe(false);
-    await new Promise((r) => setTimeout(r, 60));
-    expect(cwSessions(h).filter((x) => x.disposed).length).toBe(disposedBefore);
-
     // 第 2 轮:新会话的工具面里没有它,任务里写着停用
     workIds.push(assignWork(h, "停用之后的一轮"));
     h.drainNow();
@@ -356,6 +349,14 @@ describe("自己的工具 · 停用端点与换会话", () => {
     const second = cwSessions(h)[1] as FakeSession;
     expect(allowlistOf(h, second).some((t) => t.startsWith("mcp__own_"))).toBe(false);
     expect(cwPrompts(h)[1] ?? "").toMatch(/`rag`\(MCP 服务\):甲方停用了/);
+
+    // 幂等:再停一次不算改动,也**不换会话** —— 此刻第 2 条会话正闲置在池里,
+    // 这一条断言才真的在问「空操作有没有把一条活着的会话丢掉」。
+    expect(second.disposed).toBe(false);
+    const again = await toggle(h, "coding_worker", "rag", { disabled: true });
+    expect((await json<{ changed: boolean }>(again)).changed).toBe(false);
+    await new Promise((r) => setTimeout(r, 80));
+    expect(second.disposed, "没改动行却丢了会话").toBe(false);
 
     // 恢复 ⇒ 在池里的那条会话被丢掉;下一轮工具面里又有它
     const on = await toggle(h, "coding_worker", "rag", { disabled: false });

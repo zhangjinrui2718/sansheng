@@ -178,6 +178,10 @@ describe("experience_save · 记一条", () => {
     expect(call("experience_save", { kind: "lesson", title: "标".repeat(81), content: "c" }, "wk").ok).toBe(false);
     expect(call("experience_save", { kind: "lesson", title: "t", content: "字".repeat(8001) }, "wk").ok).toBe(false);
     expect(call("experience_save", { kind: "lesson", title: "t", content: "   " }, "wk").ok).toBe(false);
+    // 标题只有空白也一样拒收(`requireString` 只拒空串 —— 一串空白它能过)
+    const blankTitle = call("experience_save", { kind: "lesson", title: "   ", content: "正文" }, "wk");
+    expect(blankTitle.ok).toBe(false);
+    if (!blankTitle.ok) expect(blankTitle.message).toContain("title");
     expect(countActiveAgentNotes(db, "wk")).toBe(0);
   });
 
@@ -261,6 +265,9 @@ describe("experience_search / experience_read · 查与读", () => {
     // limit 再大也不超过 20:先灌 25 条
     for (let i = 0; i < 25; i += 1) insertAgentNote(db, { id: `an_x${i}`, agentId: "wk", now: clock, note: { kind: "lesson", title: `批量${i}`, content: "重试", source: null, sourceProjectId: null } });
     expect(okText(call("experience_search", { query: "重试", limit: 999 }, "wk"))).toContain("命中 20 条");
+    // 两层上限各测一次:工具层(上面那句)与仓储层(下面这句)—— 只测一层时,
+    // 拿掉另一层的变异不会被抓住(2026-11-28 实测漏网)。仓储层是最后一道,直接问它。
+    expect(searchAgentNotes(db, buildMatchQuery("重试")!, { agentId: "wk", limit: 999 })).toHaveLength(20);
   });
 
   it("① 读:只读得到自己的;退休的读得到并写明状态与原因", () => {
