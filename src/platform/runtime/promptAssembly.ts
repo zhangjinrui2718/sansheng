@@ -128,6 +128,12 @@ const CAPABILITY_LABEL: Readonly<Partial<Record<Capability, string>>> = {
   "code.exec": "执行命令",
   "work.report": "汇报进度",
   "duty.run": "职责的功课:开工列功课、收工写自省",
+  // 040(2026-11-28)。⚠️ 措辞避开「改代码」「执行命令」—— `tests/platform/prompt-assembly`
+  // 用这两个词钉住「质检简报里不出现代码能力」;这两个能力只够得着**自己的仓库**。
+  "own.read": "读自己仓库里的文件",
+  "own.write": "往自己仓库里写文件",
+  "experience.read": "查自己的经验库",
+  "experience.write": "记自己的经验库",
 };
 
 /*

@@ -68,6 +68,11 @@ export const PLATFORM_DATA_TABLES: readonly string[] = [
   // 2026-11-27(职责,039):`duty_runs` 引 `duties`,`duties` 引 `projects` ⇒ 子先于父。
   "duty_runs",
   "duties",
+  // 2026-11-28(自己的仓库与经验库,040):`agent_notes` 引 `agents`(CASCADE)与
+  // `projects`(SET NULL),`agent_tool_disables` 引 `agents`(CASCADE)⇒ 排在 `agents` 之前。
+  // 全文索引 `agent_notes_fts*` 由触发器随行同步,影子表进下面的不重置清单。
+  "agent_notes",
+  "agent_tool_disables",
   // BC-020 甲方提问台账
   //
   // ⚠️ 它同时引 `artifacts` 与 `projects` ⇒ 必须排在**两者之前**(外键安全顺序:
@@ -124,6 +129,7 @@ export const PLATFORM_DATA_TABLES: readonly string[] = [
  * 它们由 FTS5 自己维护,**不能直接 DELETE** —— 索引与 `knowledge_chunks` 的同步
  * 靠 migration 028 那三个触发器;清 `knowledge_chunks` 的行时索引条目会被一并摘掉。
  * 直接动影子表 = 让索引与行对不上,而那种不一致没有判据会报。
+ * `agent_notes_fts*`(040)同一条理由、同一套触发器。
  */
 export const NON_RESET_TABLES: readonly string[] = [
   "schema_version",
@@ -132,6 +138,11 @@ export const NON_RESET_TABLES: readonly string[] = [
   "knowledge_fts_data",
   "knowledge_fts_docsize",
   "knowledge_fts_idx",
+  "agent_notes_fts",
+  "agent_notes_fts_config",
+  "agent_notes_fts_data",
+  "agent_notes_fts_docsize",
+  "agent_notes_fts_idx",
 ];
 
 export interface ResetReport {

@@ -255,7 +255,7 @@
 
 ### 4.4 Capability Ceiling
 
-`project.read` · `work.create` · `work.update` · `work.read` · `work.list` · `collab.ask` · `collab.escalate` · `collab.answer` · `collab.read` · `collab.meeting.read` · `collab.meeting.respond` · `blackboard.read` · `blackboard.write` · `change.propose` · `change.review` · `change.read` · `blocker.open` · `blocker.update` · `blocker.read` · `memory.read` · `knowledge.read` · `code.read` · `code.exec` · `work.report`
+`project.read` · `work.create` · `work.update` · `work.read` · `work.list` · `collab.ask` · `collab.escalate` · `collab.answer` · `collab.read` · `collab.meeting.read` · `collab.meeting.respond` · `blackboard.read` · `blackboard.write` · `change.propose` · `change.review` · `change.read` · `blocker.open` · `blocker.update` · `blocker.read` · `memory.read` · `knowledge.read` · `code.read` · `code.exec` · `work.report` · `own.read` · `own.write` · `experience.read` · `experience.write`
 
 **writeKinds**:`["evidence", "hypothesis", "work_brief", "note", "deliverable"]`
 
@@ -283,13 +283,14 @@
     "change_propose", "change_review", "change_list", "change_read",
     "blocker_open", "blocker_update", "blocker_list", "blocker_read",
     "memory_search", "knowledge_search", "knowledge_read",
-    "read", "grep", "find", "ls", "bash"
+    "read", "grep", "find", "ls", "bash",
+    "own_read", "own_write", "experience_save", "experience_retire", "experience_search", "experience_read"
   ],
   "deny": ["tell_client", "ask_client", "convene", "meeting_conclude", "project_update", "project_close", "edit", "write"]
 }
 ```
 
-**33 个工具。** `deny` 里显式写了八项,都是**它拿不到且不该拿到**的:对甲方说话的两个、发起与收尾会议的两个、改项目范围的两个,以及**写文件的两个**(那是编码工的活)。写进 `deny` 是为了**让用户在 UI 上一眼看到边界**,而不是只看到一串没有的绿 chip。这是有意的可见性设计。
+**39 个工具**(2026-11-28 起含自己的仓库两条 + 经验库四条,见 §13)。`deny` 里显式写了八项,都是**它拿不到且不该拿到**的:对甲方说话的两个、发起与收尾会议的两个、改项目范围的两个,以及**写文件的两个**(那是编码工的活)。写进 `deny` 是为了**让用户在 UI 上一眼看到边界**,而不是只看到一串没有的绿 chip。这是有意的可见性设计。
 
 ### 4.6 提示词单元
 
@@ -300,6 +301,7 @@
 | `research_worker.protocol` | 交付物与依据分开写;HTML 报告的四条硬约束;不交口头结论 |
 | `collaboration.ask` | **卡住时你求助的对象是上游,不是甲方**;必须带 hypothesis 全文 + 候选项 + 说清要什么 |
 | `change.propose` | 发现需求不合理时的上报规约 |
+| `own_kit.core` | 自己的东西:经验库(什么时候记、怎么记、调研必带出处)与自己的仓库(什么时候做成工具、`SKILL.md` 与 `mcp.json` 怎么写、下一轮生效)。三执行角色共享(040) |
 
 ### 4.7 失败模式 —— 这一段是全项目最贵的历史沉淀
 
@@ -340,7 +342,7 @@
 
 ### 5.4 Capability Ceiling
 
-`project.read` · `work.create` · `work.update` · `work.read` · `work.list` · `collab.ask` · `collab.escalate` · `collab.answer` · `collab.read` · `collab.meeting.read` · `collab.meeting.respond` · `blackboard.read` · `blackboard.write` · `change.propose` · `change.review` · `change.read` · `blocker.open` · `blocker.update` · `blocker.read` · `memory.read` · `knowledge.read` · `code.read` · `code.write` · `code.exec` · `work.report`
+`project.read` · `work.create` · `work.update` · `work.read` · `work.list` · `collab.ask` · `collab.escalate` · `collab.answer` · `collab.read` · `collab.meeting.read` · `collab.meeting.respond` · `blackboard.read` · `blackboard.write` · `change.propose` · `change.review` · `change.read` · `blocker.open` · `blocker.update` · `blocker.read` · `memory.read` · `knowledge.read` · `code.read` · `code.write` · `code.exec` · `work.report` · `own.read` · `own.write` · `experience.read` · `experience.write`
 
 **writeKinds**:`["evidence", "hypothesis", "work_brief", "note", "deliverable"]`
 
@@ -361,13 +363,14 @@
     "change_propose", "change_review", "change_list", "change_read",
     "blocker_open", "blocker_update", "blocker_list", "blocker_read",
     "memory_search", "knowledge_search", "knowledge_read",
-    "read", "grep", "find", "ls", "edit", "write", "bash"
+    "read", "grep", "find", "ls", "edit", "write", "bash",
+    "own_read", "own_write", "experience_save", "experience_retire", "experience_search", "experience_read"
   ],
   "deny": ["tell_client", "ask_client", "convene", "meeting_conclude", "project_update", "project_close"]
 }
 ```
 
-**35 个工具。** `deny` 里六项:对甲方说话的两个、发起与收尾会议的两个、改项目范围的两个。
+**41 个工具**(2026-11-28 起含自己的仓库两条 + 经验库四条,见 §13)。`deny` 里六项:对甲方说话的两个、发起与收尾会议的两个、改项目范围的两个。
 
 ### 5.6 提示词单元
 
@@ -378,6 +381,7 @@
 | `coding_worker.protocol` | 交付物坐标 = 平台核实过的事实;正文写什么(含「还没验证的部分」);不交口头结论 |
 | `collaboration.ask` | 卡住时求助的是上游,不是甲方 |
 | `change.propose` | 发现需求不合理时的上报规约 |
+| `own_kit.core` | 自己的东西:经验库(什么时候记、怎么记、调研必带出处)与自己的仓库(什么时候做成工具、`SKILL.md` 与 `mcp.json` 怎么写、下一轮生效)。三执行角色共享(040) |
 
 ### 5.7 失败模式
 
@@ -408,14 +412,14 @@
 
 ### 6.3 明确不做
 
-- ❌ 不碰代码 —— 只读不写,审的是产出物不是源码
+- ❌ 不碰代码 —— 只读不写,审的是产出物不是源码(2026-11-28 起唯一的例外是**自己的仓库**:`own_read` / `own_write` 被 `resolveInside` 限定在 `<工作根>/roles/quality_reviewer/` 之内,读不到、更改不了被审的产出;它仍然没有 `code.*`。见 §13)
 - ❌ 不拆工作
 - ❌ **不见甲方** —— 审查结论由业务经理转达
 - ❌ **不能自己修** —— 只能提意见,修复是执行角色(研究工 / 编码工)的事
 
 ### 6.4 Capability Ceiling
 
-`project.read` · `work.read` · `work.list` · `collab.ask` · `collab.escalate` · `collab.answer` · `collab.read` · `collab.meeting.read` · `collab.meeting.respond` · `blackboard.read` · `blackboard.write`(**仅 `review_finding`**)· `change.review` · `change.read` · `blocker.open` · `blocker.read` · `memory.read` · `knowledge.read` · `work.review_verdict`(migration 021)
+`project.read` · `work.read` · `work.list` · `collab.ask` · `collab.escalate` · `collab.answer` · `collab.read` · `collab.meeting.read` · `collab.meeting.respond` · `blackboard.read` · `blackboard.write`(**仅 `review_finding`**)· `change.review` · `change.read` · `blocker.open` · `blocker.read` · `memory.read` · `knowledge.read` · `work.review_verdict`(migration 021) · `own.read` · `own.write` · `experience.read` · `experience.write`
 
 **writeKinds**:`["review_finding"]` —— **只允许写这一种工件**。这是三重门控(capability × scope × writeKind)里最窄的一个,设计上有意为之:审查员能发言,但不能污染其他记录。
 
@@ -437,7 +441,8 @@
     "change_review", "change_list", "change_read",
     "blocker_open", "blocker_list", "blocker_read",
     "memory_search", "knowledge_search", "knowledge_read",
-    "review_verdict"
+    "review_verdict",
+    "own_read", "own_write", "experience_save", "experience_retire", "experience_search", "experience_read"
   ],
   "deny": ["convene", "meeting_conclude", "read", "grep", "find", "ls",
            "edit", "write", "bash", "tell_client", "ask_client",
@@ -445,7 +450,7 @@
 }
 ```
 
-**24 个工具。** `deny` 显式列出代码工具、会议主持、项目范围与工作分派 —— 审查员可以**参加**会议但不能**发起或收尾**,可以**看**工作项但不能**创建或改派**。
+**30 个工具**(2026-11-28 起含自己的仓库两条 + 经验库四条,见 §13)。`deny` 显式列出代码工具、会议主持、项目范围与工作分派 —— 审查员可以**参加**会议但不能**发起或收尾**,可以**看**工作项但不能**创建或改派**。
 
 ### 6.6 提示词单元
 
@@ -454,6 +459,7 @@
 | `quality_reviewer.core` | 角色定义:独立把关;审产出不审源码;只提意见不自己修 |
 | `quality_reviewer.protocol` | 审查判据:对照原始目标与验收判据(**含判据成立的前提假设**,前提可疑要拦并指名是哪条);结论必须有据;通过与不通过都要写清理由 |
 | `collaboration.ask` | 升级规约:严重问题才升级,一般问题走 `review_finding` |
+| `own_kit.core` | 自己的东西:经验库与自己的仓库(三执行角色共享,040)。对质检多一句:它只写说明类工具,**不写 `mcp.json`**(它试跑不了) |
 
 ### 6.7 失败模式
 
@@ -514,13 +520,17 @@
 | `work.review_verdict` | — | — | — | — | ✅ |
 | `schedule.manage` | ✅ | — | — | — | — |
 | `duty.run` | ✅ | — | — | — | — |
+| `own.read` | — | — | ✅ | ✅ | ✅ |
+| `own.write` | — | — | ✅ | ✅ | ✅ |
+| `experience.read` | — | — | ✅ | ✅ | ✅ |
+| `experience.write` | — | — | ✅ | ✅ | ✅ |
 | `code.read` | — | — | ✅ | ✅ | — |
 | `code.write` | — | — | — | ✅ | — |
 | `code.exec` | — | — | ✅ | ✅ | — |
 | **`client.ask`** | **✅** | — | — | — | — |
 | **`client.message`** | **✅** | — | — | — | — |
 
-**共 39 条 capability。** 读这张表最该看的是**最后两行** —— 整个组织里只有一个角色能跟甲方说话,这不是提示词里的约定,是这张表的形状决定的。
+**共 43 条 capability。** 读这张表最该看的是**最后两行** —— 整个组织里只有一个角色能跟甲方说话,这不是提示词里的约定,是这张表的形状决定的。
 
 三处值得单独注意:
 
@@ -534,6 +544,10 @@
   ⚠️ 注意表里**没有**「新增 server 定义」这一行:定义 = 任意命令执行 / 任意出网,
   是**人的资产**,平台刻意不提供工具(与 `POST /api/artifacts/:id/verdict` 同款处置,
   理由见设计 1 §3.5)。
+  ⚠️ **2026-11-28(040)修订**:上面「一条都不加」照旧成立 —— 三个执行角色与质检仍然没有
+  `mcp.read` / `mcp.grant`。多出来的是另一个来源:角色**自己仓库**里的 MCP 服务不经放行、
+  直接进他自己的会话(用户裁决「自己的 rag 和代码仓库不需要我放行」),动不了人登记的目录。
+  理由与刹车见 §13。
 
 `memory.write` 只给业务经理,理由见 §11。
 
@@ -584,6 +598,8 @@
 ### 11.1 是什么
 
 **记忆 = 关于「用户」的长期知识,不是任何 agent 自己的记忆。**
+
+> 2026-11-28(040):「agent 自己的记忆」现在有了另一个落点 —— **经验库**(`agent_notes`,关于这个角色自己的手艺,角色自己写、按角色隔离、跨项目),以及**自己的仓库**。它们与记忆是三套东西,谁也不是谁的延伸(见 §13)。
 
 五个角色共享同一个用户,也就共享同一份记忆。它记的是:用户是谁、偏好什么、项目背景是什么。这跟 agent 的「上下文」不是一回事 —— 上下文随回合消失,记忆跨回合、跨项目存在。(2026-11-16:首版写「四个角色」,2026-10-08 执行角色一分为二后是五个。)
 
@@ -658,7 +674,7 @@
 
 2. **质检审查员的独立性怎么保证?** 它与项目经理是平级还是有汇报关系?若同一模型扮演两者,「审自己的活」的风险是模型层面的,机制层管不了。 — **仍未决,且已确认机制层无解**
 
-   现在的机制只能做到三件事:`quality_reviewer` 没有 `code.write`(所以它不能顺手改)、只能写 `review_finding`(所以它的产出形态是受限的)、没有 `client.*`(所以它不能直接对甲方下结论)。但「它会不会认真审」是模型行为,不是权限问题。**这条要在 prompt 层解决,而且解决不彻底** —— 如实记着比假装解决了强。
+   现在的机制只能做到三件事:`quality_reviewer` 没有 `code.write`(所以它不能顺手改;2026-11-28 起它能写**自己的仓库**,那对工具够不着被审的产出)、只能写 `review_finding`(所以它的产出形态是受限的)、没有 `client.*`(所以它不能直接对甲方下结论)。但「它会不会认真审」是模型行为,不是权限问题。**这条要在 prompt 层解决,而且解决不彻底** —— 如实记着比假装解决了强。
 
 3. **周期对焦的触发方式**:定时器自动发起,还是业务经理手动召集?前者需要一个调度器,本次设计未包含。 — **仍未决;已记为设计 1 §12 #6「调度器的巡检策略」**
 
@@ -671,3 +687,28 @@
 5. **横向沟通要不要留痕约束?** 现在 `ask_role` 横向畅通,但「同级之间聊了什么」是否需要默认落一条记录、还是仅在升级时才强制落库?留痕太密会淹没审计面,太疏则横向协调变成黑箱。 — **仍未决;与设计 1 §12 #3「横向沟通的留痕密度」同题**
 
 6. **记忆的平台侧自动沉淀要不要重建?**(2026-11-13 新增;§11.3 / §11.4 已按此更正)。旧系统的 `extractFragments` / `sedimentTurn` 随批次 15 删除后**没有重建** —— 「正则快路径 + LLM 兜底、覆盖业务经理漏掉的」从未落地,今天记忆的唯一写口是业务经理的 `memory_remember`,漏记就是漏记。仍未决:要不要一个平台侧的兜底写口;若做,判据(哪些话算「关于用户」)比机制难。
+
+---
+
+## 13. 自己的仓库与经验库(2026-11-28 · migration 040)
+
+**用户原话**:「给工程师、质检员、研究员两类专属的 harness 内容……一个独立的代码仓库,这个代码仓库他可以
+自己开发 tools 或者 mcp 放进去,他能够根据要经常解决的问题或者职责,去拓宽自己的能力。」
+**用户裁决**:「自己的 rag 和代码仓库不需要我放行。」全文(判据、格式、进会话的方式、已知不实之处)在
+设计 1 末尾「自己的仓库与经验库」一节;这里只写**对三个执行角色各自意味着什么**。
+
+| | 研究工 | 编码工 | 质检 |
+|---|---|---|---|
+| 经验库(记 / 查 / 退休) | ✅ | ✅ | ✅ |
+| 自己的仓库(读 / 写) | ✅ | ✅ | ✅ —— 「不碰代码」的唯一例外,够不着被审的产出 |
+| 说明类工具(`SKILL.md` + 脚本) | ✅ 脚本用 `bash` 跑 | ✅ | ✅ 只有说明与清单(它没有跑命令的能力) |
+| MCP 服务(`mcp.json`) | ✅ | ✅ | ❌ 不生效(它试跑不了;平台不替它启动一个从没跑通过的进程) |
+| 仍然没有 | `code.write`(不产出产品代码) | — | 全部 `code.*`、`work.update` |
+
+- **每轮摆在角色面前的**(`runtime/ownKitContext.ts`):与这一轮任务最相关的三条旧经验 + 自己仓库的位置与
+  工具清单(在用 / 甲方停用了 / 格式不对,三种长得不一样)。
+- **收工提醒**(`composeWorkPrompt` 与质检的 `renderPendingReviews`):「有值得下次复用的就 `experience_save`」。
+- **不放行,只有刹车**:写完下一轮生效;甲方在成员页的角色 harness 卡里能停用 / 恢复、能删经验条目。
+
+**默认值(用户没有逐项作答,按推荐值落地)**:质检只写说明类工具;关掉会话的自动装载口(SDK 默认把项目仓里的
+`.pi/` 配置与 `AGENTS.md` 自动带进每个角色的会话 —— 现在会话里进什么只由平台决定)。

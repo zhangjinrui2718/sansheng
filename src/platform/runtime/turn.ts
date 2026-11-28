@@ -111,6 +111,7 @@ import {
   collectPendingWork, renderPendingWork, summarizePendingWork,
 } from "./pendingWork.js";
 import { renderProjectContext } from "./projectContext.js";
+import { renderOwnKit } from "./ownKitContext.js";
 import {
   classifyProviderFailure,
   logProviderFailure,
@@ -464,6 +465,14 @@ export interface RunTurnOptions {
    * 推送失败是传输问题,不是账目问题。
    */
   readonly onUsageRecorded?: (row: TurnUsageRow) => void;
+  /**
+   * **这个角色自己仓库的绝对路径**(migration 040,2026-11-28)。
+   *
+   * 给了才会在回合消息里列「你自己的仓库与工具」里的仓库那一段(`ownKitContext.ts`);
+   * 没给而角色有仓库 ⇒ 那一段如实写「这一轮没有接到仓库路径」。
+   * 没有仓库的角色(业务经理 / 项目经理)不受这个参数影响 —— 整段不出。
+   */
+  readonly ownRepoRoot?: string;
 }
 
 /**
@@ -870,6 +879,12 @@ export async function runTurn(opts: RunTurnOptions): Promise<TurnResult> {
   // 会把建立那一刻的快照当成永久事实(理由全文见 projectContext.ts 文件头)。
   // 接待会话返回空串,这里无脑拼接 —— 那条路径的行为与改动前完全一致。
   const ctx = renderProjectContext(opts.db, opts.agentId, pid);
+  // 「你自己的东西」(经验库 + 自己的仓库,040):与项目上下文同一个位置、同一条理由 ——
+  // 每回合现算的现场。没有这组能力的角色拿到空串,拼出来的文本逐字不变。
+  const ownKit = renderOwnKit(opts.db, opts.agentId, {
+    query: opts.message,
+    ...(opts.ownRepoRoot !== undefined ? { repoRoot: opts.ownRepoRoot } : {}),
+  });
   const body = composeTurnMessage(pendingBlock, opts.message);
   // 此前对话在最外层、项目上下文之内 —— 它是「这之前发生过什么」,比项目快照更早。
   const history =
@@ -881,7 +896,8 @@ export async function runTurn(opts: RunTurnOptions): Promise<TurnResult> {
         })
       : "";
   const withHistory = history === "" ? body : `${history}\n\n---\n\n${body}`;
-  const payload = ctx.text === "" ? withHistory : `${ctx.text}\n\n${withHistory}`;
+  // 顺序:我在哪(项目)→ 我以前记过什么、手上有什么 → 这之前发生过什么 → 干什么。
+  const payload = [ctx.text, ownKit.text, withHistory].filter((s) => s !== "").join("\n\n");
 
   /**
    * 「最后一次工具结果之后有没有正文」—— `unanswered` 的第二条判据。

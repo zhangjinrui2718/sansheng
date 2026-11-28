@@ -40,6 +40,8 @@ import { REVIEW_TOOLS } from "./review.js";
 import { NUDGE_CAPABILITIES } from "../runtime/dispatcher.js";
 import { SCHEDULE_TOOLS } from "./schedule.js";
 import { DUTY_TOOLS } from "./duty.js";
+import { OWN_TOOLS } from "./own.js";
+import { EXPERIENCE_TOOLS } from "./experience.js";
 import { fail, type PlatformTool, type ToolResult, type ToolRunContext } from "./types.js";
 
 /** 已实现的全部平台工具。BC2 / BC7 的工具在各自批次落地后并入这里。 */
@@ -52,6 +54,8 @@ export const ALL_PLATFORM_TOOLS: readonly PlatformTool[] = [
   ...KNOWLEDGE_TOOLS,
   // MCP:只碰**授权文件**。⚠️ 这里刻意**没有**「新增 / 修改 server 定义」的工具 ——
   // 那会让某个模型能替甲方决定平台执行哪条命令(见 tools/mcp.ts 文件头)。
+  // (040:角色**自己仓库**里的 MCP 服务不经这里 —— 它由 `mcp/solve.ts` 扫仓库得出,
+  //  动不了人登记的那份目录。)
   ...MCP_TOOLS,
   ...CLIENT_TOOLS,
   ...REVIEW_TOOLS,
@@ -59,6 +63,9 @@ export const ALL_PLATFORM_TOOLS: readonly PlatformTool[] = [
   ...SCHEDULE_TOOLS,
   // 039:职责的功课(duty.run,只给业务经理)。
   ...DUTY_TOOLS,
+  // 040:自己的仓库(own_read / own_write)与经验库(experience_*)—— 三个执行角色都有。
+  ...OWN_TOOLS,
+  ...EXPERIENCE_TOOLS,
 ];
 
 /** 工具名 → 工具定义 */

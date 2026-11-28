@@ -50,6 +50,8 @@ import { insertTurnEvents } from "../../src/platform/storage/repo/turnEvents.js"
 import { insertQueuedClientMessage } from "../../src/platform/storage/repo/queuedClientMessages.js";
 import { insertWakeup } from "../../src/platform/storage/repo/wakeups.js";
 import { insertDuty, insertDutyRun } from "../../src/platform/storage/repo/duties.js";
+import { insertAgentNote } from "../../src/platform/storage/repo/agentNotes.js";
+import { setOwnToolDisabled } from "../../src/platform/storage/repo/agentTools.js";
 import { insertBlocker } from "../../src/platform/storage/repo/blockers.js";
 import { insertChange } from "../../src/platform/storage/repo/changes.js";
 import { insertAsk } from "../../src/platform/storage/repo/asks.js";
@@ -315,6 +317,13 @@ async function seedEverything(): Promise<{ project: string; work: string; agent:
   db.prepare(
     `INSERT INTO memory_profile (id, payload_json, updated_at) VALUES (?, ?, ?)`,
   ).run("persona", JSON.stringify({ name: "三生" }), NOW);
+  // 2026-11-28(自己的仓库与经验库,040)两张新表:质检的一条经验,与它一条被停用的工具。
+  // 全文索引 `agent_notes_fts` 由触发器随行同步 —— 清行之后索引必须也是空的(下面断言)。
+  insertAgentNote(db, {
+    id: "an_test", agentId: reviewer, now: NOW,
+    note: { kind: "lesson", title: "夹具经验", content: "审 HTML 报告先看有没有脚本", source: null, sourceProjectId: project },
+  });
+  setOwnToolDisabled(db, { id: "atd_test", agentId: reviewer, toolName: "check-report", disabled: true, now: NOW });
 
   return { project, work: root, agent };
 }
@@ -350,6 +359,10 @@ describe("② 行为:在真形状的库上真的清干净(含 turn_usage / dispa
     }
     // 负样本:不是「什么都没清也算过」—— 上面那一圈如果表不存在会抛,不会静默跳过
     expect(listAgents(db)).toEqual([]);
+    // 全文索引是影子表(不直接 DELETE):行清掉之后,索引必须也空了 —— 否则重置后
+    // 「搜得到一条已经不存在的经验」,而那种不一致没有任何判据会报。
+    expect((db.prepare(`SELECT COUNT(*) AS n FROM agent_notes_fts`).get() as { n: number }).n).toBe(0);
+    expect((db.prepare(`SELECT COUNT(*) AS n FROM knowledge_fts`).get() as { n: number }).n).toBe(0);
   });
 
   it("不该动的**不动**:`schema_version` 保留(重置数据不回退 schema)", async () => {

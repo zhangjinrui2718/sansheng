@@ -58,6 +58,9 @@ export type Capability =
   //     (`POST /api/mcp/servers`),**任何角色的 ceiling 里都没有对应工具**。
   //     理由与 `POST /api/artifacts/:id/verdict` 同款:做成工具就意味着某个
   //     模型能替甲方决定「平台可以执行哪条命令、可以向哪个地址出网」。
+  //     **唯一的例外(用户裁决 2026-11-28)**:角色**自己仓库**里的 MCP 服务
+  //     (`tools/<名字>/mcp.json`)不经放行,直接进**他自己的**会话;人能停用。
+  //     它动不了上面那份人的目录 —— 这是「他的东西」与「人的资产」的分界。
   //   · server **授权**(谁能用哪个)= agent 可做,这就是下面这两条。
   //
   // 而**真正把工具交到模型面前**的那一步在 SDK 侧:授权解析出来的 server 会
@@ -84,7 +87,17 @@ export type Capability =
   // ── 039(2026-11-27):职责的功课 —— 开工列功课、收工写自省(`duty_run_open` /
   // `duty_run_close`)。只给业务经理:职责本身只有人能建能改(HTTP),模型只写
   // 「每一轮怎么做、做得怎么样」。
-  | "duty.run";
+  | "duty.run"
+  // ── 040(2026-11-28):自己的仓库与经验库 —— 三个执行角色各自的长线家底,
+  // **不属于任何项目**。用户裁决(2026-11-28):「自己的 rag 和代码仓库不需要我放行」
+  // ⇒ 他写进去的东西直接进**他自己的**会话,人只保留「停用」这一个刹车。
+  //   · `own.read` / `own.write` —— 读写**自己仓库里**的文件(`<工作目录>/roles/<角色>/`
+  //     根下,`WorkspacePort.resolveInside` 限定;项目仓的 `code.write` 一点没放开);
+  //   · `experience.read` / `experience.write` —— 自己的经验库(按角色隔离)。
+  | "own.read"
+  | "own.write"
+  | "experience.read"
+  | "experience.write";
 
 /** 闭合集数组形式 —— 遍历/校验用。顺序与设计文档一致。 */
 export const CAPABILITIES = [
@@ -127,6 +140,10 @@ export const CAPABILITIES = [
   "work.review_verdict",
   "schedule.manage",
   "duty.run",
+  "own.read",
+  "own.write",
+  "experience.read",
+  "experience.write",
 ] as const satisfies readonly Capability[];
 
 /**
@@ -194,6 +211,10 @@ export const CAPABILITY_GROUP: Readonly<Record<Capability, string>> = {
   "work.review_verdict": "审查",
   "schedule.manage": "定时",
   "duty.run": "职责",
+  "own.read": "自己的仓库",
+  "own.write": "自己的仓库",
+  "experience.read": "经验库",
+  "experience.write": "经验库",
 };
 
 /** 一个能力的中文分组(界面用)。键是闭合联合,所以这里不会漏项。 */
@@ -227,7 +248,9 @@ export type PlatformToolName =
   | "report"
   | "review_verdict"
   | "wakeup_create" | "wakeup_list" | "wakeup_cancel"
-  | "duty_run_open" | "duty_run_close";
+  | "duty_run_open" | "duty_run_close"
+  | "own_read" | "own_write"
+  | "experience_save" | "experience_retire" | "experience_search" | "experience_read";
 
 export type ToolName = SdkToolName | PlatformToolName;
 
@@ -300,6 +323,13 @@ export const CAPABILITY_TOOLS: Readonly<Record<Capability, readonly ToolName[]>>
   "work.review_verdict": ["review_verdict"],
   "schedule.manage": ["wakeup_create", "wakeup_list", "wakeup_cancel"],
   "duty.run": ["duty_run_open", "duty_run_close"],
+  // 040:自己的仓库(读 / 写两个工具,都只够得着自己仓库里)与经验库
+  // (写:记一条 / 退休一条;读:检索 / 读全文 —— 与 knowledge 同一条
+  // 「列表不该连带拿到正文」的粒度纪律)。
+  "own.read": ["own_read"],
+  "own.write": ["own_write"],
+  "experience.read": ["experience_search", "experience_read"],
+  "experience.write": ["experience_save", "experience_retire"],
 };
 
 /** SDK 内置工具名集合。**必须先于 PLATFORM_TOOLS 初始化** —— 后者在模块加载期

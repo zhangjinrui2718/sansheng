@@ -3137,6 +3137,13 @@ function renderPendingReviews(db: Database.Database, todo: DriverTodo): string {
         : "  **验收判据**:未给(037 结构化判据为空)—— 只能对照上面的 goal 判断",
     );
   }
+  // 收工提醒(040):质检每轮看到的判据与毛病都是它自己的手艺素材 —— 不提一句,
+  // 经验库就永远是空的(没有任何提示词单元能替「此刻刚踩完坑」这个时机)。
+  lines.push(
+    "",
+    "审完若攒下了值得下次复用的检查点(这类产出常出的毛病),`experience_save` 记进你自己的经验库;" +
+      "攒多了可以写进你自己的仓库,做成一份检查清单。",
+  );
   return lines.join("\n");
 }
 

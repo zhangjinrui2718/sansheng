@@ -72,11 +72,13 @@ describe("每个工具都有 brief(名称 / 来源 / 能力 / 分组 / 作用)",
       expect(b.group, `${t} 落到了「未分类」—— 能力↔工具表脱节了`).not.toBe("未分类");
       expect(b.purpose.trim().length, `${t} 没有作用说明`).toBeGreaterThan(0);
     }
-    // 非空自检:上面那一圈真的转了 51 个工具(44 平台 + 7 SDK)
+    // 非空自检:上面那一圈真的转了 52 个工具(45 平台 + 7 SDK)
     // 45 → 48:2026-10-16 的 MCP 三条(mcp_list / mcp_grant / mcp_revoke)。
     // 48 → 51:2026-11-22 的定时唤醒三条(wakeup_create / wakeup_list / wakeup_cancel,038)。
     // 51 → 53:2026-11-27 的职责功课两条(duty_run_open / duty_run_close,039)。
-    expect(ALL_TOOLS.length).toBe(53);
+    // 53 → 59:2026-11-28 的自己的仓库两条(own_read / own_write)与经验库四条
+    // (experience_*,040)。
+    expect(ALL_TOOLS.length).toBe(59);
   });
 
   it("**平台工具的作用 === 注册表里的 description**(不是这里另抄的一份)", () => {
@@ -84,9 +86,9 @@ describe("每个工具都有 brief(名称 / 来源 / 能力 / 分组 / 作用)",
       expect(toolBrief(name).purpose, `${name} 的说明与注册表分叉了`).toBe(tool.description);
     }
     // 正样本:注册表本身非空,否则上面那圈是空转
-    // 38 → 41 → 44(038 唤醒三条)→ 46(039 职责功课两条):同上。**手工数** ——
-    // 它是「有没有人偷偷加工具」的哨兵。
-    expect(TOOL_INDEX.size).toBe(46);
+    // 38 → 41 → 44(038 唤醒三条)→ 46(039 职责功课两条)→ 52(040 自己的仓库两条 +
+    // 经验库四条):同上。**手工数** —— 它是「有没有人偷偷加工具」的哨兵。
+    expect(TOOL_INDEX.size).toBe(52);
   });
 
   it("SDK 内置 7 个:各有一句**中文**说明(照抄英文描述不算补)", () => {

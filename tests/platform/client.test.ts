@@ -161,7 +161,9 @@ describe("能力面已完整(BC5 接线前置)", () => {
     // 写成 40 会让这条哨兵当场变红 —— 而它红的方式恰好说明它是有用的。
     // 这个数**必须手工跟着改** —— 若从代码自动推导,它就永远等于自己,
     // 那一刻它就不再是「有没有人偷偷加了工具」的哨兵了。
-    expect(registrySnapshot().implemented).toBe(46);
+    // 46 → 52:2026-11-28 的自己的仓库两条(own_read / own_write)与经验库四条
+    // (experience_save / experience_retire / experience_search / experience_read,040)。
+    expect(registrySnapshot().implemented).toBe(52);
   });
 
   it("client 工具已注册", () => {

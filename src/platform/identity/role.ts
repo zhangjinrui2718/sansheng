@@ -191,7 +191,9 @@ export type PromptUnitId =
   | "collaboration.ask"
   | "collaboration.convene"
   | "change.propose"
-  | "methodology.core";
+  | "methodology.core"
+  /** 040(2026-11-28):自己的仓库与经验库 —— 三个执行角色共用的一个单元。 */
+  | "own_kit.core";
 
 /**
  * 一个角色的完整规格 = 架构上界 + 写面白名单 + 客户可见性 + 边界可见性。
@@ -318,6 +320,10 @@ export const ROLE_SPECS: Readonly<Record<ProjectRole, RoleSpec>> = {
       "memory.read", "knowledge.read",
       "code.read", "code.exec",
       "work.report",
+      // 040(2026-11-28):自己的仓库 + 经验库。`own_write` 只够得着
+      // `<工作目录>/roles/research_worker/` —— 「不产出产品代码」(无 `code.write`)
+      // 这条边界原样成立,它只是不必再靠 shell 重定向往自己仓库里写文件。
+      "own.read", "own.write", "experience.read", "experience.write",
     ],
     // `deliverable` 从 2026-10-08 起**三个角色都持有**(研究工交 HTML 报告、
     // 编码工交代码服务、项目经理做整合交付)。这不是「放松了」——
@@ -328,6 +334,7 @@ export const ROLE_SPECS: Readonly<Record<ProjectRole, RoleSpec>> = {
 
       "research_worker.core", "research_worker.protocol",
       "collaboration.ask", "change.propose",
+      "own_kit.core",
     ],
     // 边界:不能见甲方、不能主持或收尾会议、不能改项目范围、不产出产品代码
     boundaryDeny: [
@@ -356,12 +363,15 @@ export const ROLE_SPECS: Readonly<Record<ProjectRole, RoleSpec>> = {
       "memory.read", "knowledge.read",
       "code.read", "code.write", "code.exec",
       "work.report",
+      // 040(2026-11-28):自己的仓库 + 经验库。
+      "own.read", "own.write", "experience.read", "experience.write",
     ],
     writeKinds: ["evidence", "hypothesis", "work_brief", "note", "deliverable"],
     promptUnits: [  "methodology.core",
 
       "coding_worker.core", "coding_worker.protocol",
       "collaboration.ask", "change.propose",
+      "own_kit.core",
     ],
     // 边界:与研究工相同 —— 不见甲方、不主持或收尾会议、不改项目范围
     boundaryDeny: [
@@ -392,10 +402,17 @@ export const ROLE_SPECS: Readonly<Record<ProjectRole, RoleSpec>> = {
       // 不能「自己去改它」。重开工作项是**平台**读到 fail 之后做的
       // (走 `works.status` 唯一写口),不是质检自己改状态。
       "work.review_verdict",
+      // 040(2026-11-28):自己的仓库 + 经验库。**「不碰代码」这条边界只开一个口子**:
+      // `own_write` 被 `resolveInside` 限定在 `<工作目录>/roles/quality_reviewer/`
+      // 之内 —— 它读不到、更改不了被审的产出;它仍然没有 `code.*`(读不了源码、
+      // 跑不了命令),独立性照旧是机制保证的。它能往里放的只有说明类工具
+      // (审查清单、做法),`mcp.json` 对它不生效(没法试跑,见 `harness/ownTools.ts`)。
+      "own.read", "own.write", "experience.read", "experience.write",
     ],
     writeKinds: ["review_finding"],
     promptUnits: [
       "quality_reviewer.core", "quality_reviewer.protocol", "collaboration.ask",
+      "own_kit.core",
     ],
     // 边界:不碰代码、不发起也不收尾会议、不改项目范围、不创建或改派工作
     boundaryDeny: [
