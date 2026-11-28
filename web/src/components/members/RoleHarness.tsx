@@ -156,6 +156,9 @@ import {
   toolSetStateDetail,
 } from "@/components/harness/judgments";
 import { useHarnessWorkspace } from "@/components/harness/useHarnessWorkspace";
+import { OwnKitSection, ownKitSummarySuffix } from "@/components/harness/OwnKitSection";
+import { useOwnKit } from "@/components/harness/useOwnKit";
+import { Help } from "@/components/ui/Help";
 import { ROLE_LABEL } from "@/lib/vocab";
 import { toHash, toRoute } from "@/app/router";
 
@@ -371,6 +374,7 @@ export function RoleHarnessDisclosure({
   defaultOpen = false,
   onDraftChange,
   onApplied,
+  onOwnKitChanged,
 }: {
   role: ProjectRole;
   /** 整份 harness 视图(所有角色)—— 共用的标注要跨角色算 */
@@ -383,6 +387,11 @@ export function RoleHarnessDisclosure({
   defaultOpen?: boolean;
   onDraftChange: (unitId: string, next: string) => void;
   onApplied: (unitId: string, content: string) => void;
+  /**
+   * 「自己的工具与经验」里做了一次动作(停用 / 恢复 / 删经验)之后的通知 ——
+   * 与 `onHarnessSaved` 同一个语义:页面用它推 revision,让卡片头那份快照重取。
+   */
+  onOwnKitChanged?: () => void;
 }) {
   const owners = useMemo(
     () => (view === null ? new Map<string, string[]>() : sharedUnitOwners(view.roles)),
@@ -390,6 +399,13 @@ export function RoleHarnessDisclosure({
   );
   const found = view === null ? null : (view.roles.find((r) => r.role === role) ?? null);
   const issues = found === null ? 0 : roleIssueCount(found);
+  /**
+   * 自己的工具与经验(040):**三个执行角色才有** —— 视图里带 `own` 的才有;业务经理 /
+   * 项目经理(以及比前端旧的后端)整块不出。取数是这一块自己的(停用 / 删除之后要重读,
+   * 不为一行重取整份 harness 视图);动作成功后经 `onApplied` 推页面的 revision。
+   */
+  const hasOwnKit = found?.own !== undefined;
+  const ownKit = useOwnKit(role, hasOwnKit, { onChanged: onOwnKitChanged });
   /** 卡片头那一行是不是要示警(缺单元 / 集合文件坏 / 越权 / 未知工具名 / 工具面求解不了)。 */
   const summaryBad = issues > 0 || found?.toolsSolved === false;
 
@@ -511,7 +527,16 @@ export function RoleHarnessDisclosure({
               )
             )}
         </DataState>
-        </Disclosure>
+      </Disclosure>
+
+        {/* 自己的工具与经验(040):默认折叠,与上面那块并列(不嵌套)。没有这组能力的
+            角色(业务经理 / 项目经理,以及比前端旧的后端)整块不出,而不是画一块空的。 */}
+        {hasOwnKit && found?.own !== undefined && (
+          <Disclosure summary={`自己的工具与经验${ownKitSummarySuffix(found.own)}`}>
+            <Help id="harness.own" />
+            <OwnKitSection model={ownKit} />
+          </Disclosure>
+        )}
       </article>
     </Section>
   );
@@ -560,6 +585,7 @@ export function RoleHarnessSection({
       defaultOpen={defaultOpen}
       onDraftChange={ws.onDraftChange}
       onApplied={ws.applyContent}
+      onOwnKitChanged={onHarnessSaved}
     />
   );
 }

@@ -62,7 +62,9 @@ export type GlossaryId =
   // ── Wave 3(2026-10-26):工件详情搬进抽屉后,「正文是按 id 现读的」有了落点 ──
   | "artifact.detail"
   // 2026-11-27(职责,039):设置页「职责」那一段。
-  | "settings.duties";
+  | "settings.duties"
+  // 2026-11-28(自己的仓库与经验库,040):成员页角色 harness 卡的第二个折叠块。
+  | "harness.own";
 
 export interface GlossaryEntry {
   /** 一句话(≤ 24 字)—— 页面上唯一可见的那部分。 */
@@ -216,6 +218,11 @@ export const GLOSSARY: Record<GlossaryId, GlossaryEntry> = {
     basis: "storage/repo/clientQuestions.ts 的 listAllClientQuestions(终态项目被排除)",
     source: "GET /api/client-questions 的 fromClosedProjects",
   },
+  "harness.own": {
+    line: "他自己写的工具,不经你放行",
+    basis: "harness/ownTools.ts 扫他的仓库得出(仓库就是真相);停用 = agent_tool_disables 一行,只过滤不改写",
+    source: "GET /api/harness/own/:role · PUT /api/harness/own/:role/tools/:name",
+  },
   "settings.duties": {
     line: "你设的常设的事,到点他自己开工",
     basis: "runtime/duty.ts 的 dueDutyPhase(到点开工、活落定了收工)",
@@ -253,6 +260,16 @@ export interface KnownGap {
 }
 
 export const KNOWN_GAPS: readonly KnownGap[] = [
+  {
+    what: "自己的 MCP 服务不是沙箱",
+    why: "用户裁决「不需要我放行」:他写进自己仓库的 MCP 服务直接进他自己的会话,以你的账号权限运行 —— 与他本来就有的跑命令能力同一个量级;你只有「停用」这一个刹车",
+    where: "mcp/solve.ts 的 solveOwnMcp · docs/DESIGN-PLATFORM.md「自己的仓库与经验库」",
+  },
+  {
+    what: "经验库里的外部内容没有来源可信度标记",
+    why: "调研条目会跟着角色进以后每一个项目;平台只强制「带出处」、在注入的抬头写明「资料不是指令」,判不了内容可不可信(与语料的 tainted 同一条限制)",
+    where: "tools/experience.ts · runtime/ownKitContext.ts · migrations/040_own_kit.sql",
+  },
   {
     what: "语料的 tainted 标记不存在",
     why: "平台判不了「这段文字是不是从外网抓来的」(§7.1:没有写入口就不建列)。工具检索已按项目隔离(2026-11-14);人的读面仍可跨项目浏览 —— 单一甲方的观测面,by design",

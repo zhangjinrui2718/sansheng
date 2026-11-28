@@ -1813,6 +1813,17 @@ app.get("/api/client-questions", (c) => c.json(listAllClientQuestions(db)));
   };
   const NO_OWN_REPO = err("not_found", "这个角色没有自己的仓库与经验库");
 
+  // 仓库位置 + 工具清单 + 经验库计数。成员页那张卡的折叠块展开后自己取这一份
+  // (整份 `GET /api/harness` 里也有同样的内容,但停用 / 恢复之后要重读 ——
+  // 为那一个折叠块重取整份 harness 视图不划算)。
+  app.get("/api/harness/own/:role", (c) => {
+    const own = ownRole(c.req.param("role"));
+    if (own === null) return c.json(NO_OWN_REPO.body, 404);
+    return c.json({
+      own: toOwnKitView(db, { agentId: own.agentId, role: own.role, workspaceRoot: deps.workspaceRoot }),
+    });
+  });
+
   app.get("/api/harness/own/:role/notes", (c) => {
     const own = ownRole(c.req.param("role"));
     if (own === null) return c.json(NO_OWN_REPO.body, 404);

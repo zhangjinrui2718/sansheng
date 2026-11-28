@@ -140,6 +140,11 @@ const BASELINE: Record<string, number> = {
   "components/harness/PromptUnitEditor.tsx": 395,
   "components/harness/judgments.ts": 144,
   "components/harness/useHarnessWorkspace.ts": 0,
+  // 2026-11-28(自己的仓库与经验库,040):成员页角色 harness 卡的第二个折叠块 ——
+  // 仓库位置、工具清单(在用 / 已停用 / 格式不对 + 原因)、停用 / 恢复两步确认、
+  // 经验条目(检索 / 展开 / 删除两步确认)、两块读面各自的四态话。没有悬停。
+  "components/harness/OwnKitSection.tsx": 193,
+  "components/harness/useOwnKit.ts": 0,
   //    HarnessManage 139:新页面的屏上字数(段落标题 / 全局状态 / 左列与三段骨架;
   //    状态词全部来自共享判据,这里没有第二套)。四项合计 +245 = 总量基线的增量。
   "routes/HarnessManage.tsx": 139,
@@ -234,7 +239,7 @@ const BASELINE: Record<string, number> = {
 const TOTAL_BASELINE = Object.values(BASELINE).reduce((a, b) => a + b, 0);
 
 describe("可见文字预算:屏上的中文只许减不许增", () => {
-  it("① 每个文件 ≤ 基线,总量 ≤ 9346", () => {
+  it("① 每个文件 ≤ 基线,总量 ≤ 10218", () => {
     const over: string[] = [];
     let total = 0;
     for (const abs of walk(WEB_SRC)) {
@@ -273,7 +278,9 @@ describe("可见文字预算:屏上的中文只许减不许增", () => {
     // 2026-11-27(职责,039):9,753 → 9,767(+14:成员页的待办名「职责到点:开工列功课 /
     // 收工写自省」)→ 10,017(+250:设置页「职责」那一段 143 + 它的判据里的屏上话 105 +
     // 左栏「职责」标记 2)。这是新功能的全部界面文字,不是放水:那一段没有悬停、没有解释段。
-    expect(total).toBeLessThanOrEqual(10017);
+    // 2026-11-28(自己的仓库与经验库,040):10,017 → 10,218(+201:OwnKitSection +193 ——
+    // 折叠块的全部界面文字;RoleHarness 的折叠块标题 +8,仍在它自己的基线内)。没有悬停。
+    expect(total).toBeLessThanOrEqual(10218);
   });
 
   it("② 基线表覆盖所有文件(不许有文件悄悄逃出仪器)", () => {

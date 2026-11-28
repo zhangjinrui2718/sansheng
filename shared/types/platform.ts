@@ -2381,8 +2381,10 @@ export function eventProjectId(ev: ServerEvent): string | null {
 //   POST   /api/harness/units/:unitId/reset   { confirm:"reset" } → { ok, content }
 //   GET    /api/harness/units/:unitId/backups → { backups: [{file,path}] }
 //   ── 自己的仓库与经验库(migration 040;三个执行角色才有,其余角色 404)──
+//   GET    /api/harness/own/:role           → { own: OwnKitView }
+//                                                (仓库位置 / 工具清单 / 经验库计数;
+//                                                 整份 GET /api/harness 的 roles[].own 里也有同一份)
 //   GET    /api/harness/own/:role/notes?q=&limit= → { notes: AgentNoteView[], counts: { lesson, research } }
-//                                                (仓库与工具清单在 GET /api/harness 的 roles[].own 里)
 //   DELETE /api/harness/own/:role/notes/:id  → { ok }         (人删一条经验;模型只能退休)
 //   PUT    /api/harness/own/:role/tools/:name { disabled }     → { tool: OwnToolView }
 //                                                (踩刹车 / 松刹车;改了就换掉这个角色的常驻会话)

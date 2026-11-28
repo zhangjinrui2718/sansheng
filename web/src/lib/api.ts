@@ -33,6 +33,7 @@
  */
 import type {
   AgentConversationsResponse,
+  AgentNoteView,
   AgentTurnEventsResponse,
   AppConfigResponse,
   ArtifactAcceptanceView,
@@ -49,6 +50,9 @@ import type {
   DutyCadenceView,
   DutyView,
   HarnessView,
+  OwnKitView,
+  OwnToolView,
+  ProjectRole,
   HealthResponse,
   IntakeMessagesResponse,
   MemberConversationsResponse,
@@ -924,5 +928,46 @@ export function updateDuty(id: string, body: DutyUpdateInput): Promise<{ duty: D
 export function runDutyNow(id: string): Promise<{ duty: DutyView }> {
   return request(`/duties/${encodeURIComponent(id)}/run-now`, {
     method: "POST", body: JSON.stringify({}),
+  });
+}
+
+// ── 自己的仓库与经验库(migration 040)────────────────────────────
+//
+// 三个执行角色各自的东西;业务经理与项目经理没有(服务端 404,界面整段不出)。
+// 这里**没有审批** —— 用户裁决「自己的 rag 和代码仓库不需要我放行」;
+// 人能做的只有踩刹车(停用 / 恢复一条工具)与删一条经验。
+
+/** 仓库位置、工具清单(在用 / 已停用 / 格式不对)、经验库计数。 */
+export function getOwnKit(role: ProjectRole): Promise<{ own: OwnKitView }> {
+  return request(`/harness/own/${encodeURIComponent(role)}`);
+}
+
+/**
+ * 经验条目。`q` 空 = 最近条目(连退休的一起列);`q` 有值 = 按相关度。
+ * 检索词太短时后端 400 —— 调用方要如实显示那句话,别说成「没有结果」。
+ */
+export function listOwnNotes(role: ProjectRole, q = ""): Promise<{ notes: AgentNoteView[]; counts: { lesson: number; research: number } }> {
+  const p = new URLSearchParams();
+  if (q.trim() !== "") p.set("q", q.trim());
+  const qs = p.toString();
+  return request(`/harness/own/${encodeURIComponent(role)}/notes${qs === "" ? "" : `?${qs}`}`);
+}
+
+/** 删一条经验(只有人能删;模型只能退休)。不是这个角色的条目与不存在同样回 404。 */
+export function deleteOwnNote(role: ProjectRole, id: string): Promise<{ ok: true }> {
+  return request(`/harness/own/${encodeURIComponent(role)}/notes/${encodeURIComponent(id)}`, { method: "DELETE" });
+}
+
+/**
+ * 停用 / 恢复一条自己的工具。返回的 `tool` 是服务端回读的那一份;
+ * `changed` 为 false = 这次没改动行(重复停用),服务端不会为此换会话。
+ */
+export function setOwnToolDisabled(
+  role: ProjectRole,
+  name: string,
+  disabled: boolean,
+): Promise<{ tool: OwnToolView; changed: boolean }> {
+  return request(`/harness/own/${encodeURIComponent(role)}/tools/${encodeURIComponent(name)}`, {
+    method: "PUT", body: JSON.stringify({ disabled }),
   });
 }
