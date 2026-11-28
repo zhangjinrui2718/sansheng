@@ -33,6 +33,7 @@
  * 缺说明书、`mcp.json` 不合法 —— 这些**如实报出原因**(`problem`),既给他下一轮的
  * 上下文(好去修),也给人读面(看得见)。悄悄跳过 = 一个静默失效的工具。
  */
+import { createHash } from "node:crypto";
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { basename, join } from "node:path";
 import { parseMcpCatalog, type McpServerDef } from "../mcp/config.js";
@@ -303,4 +304,97 @@ export function scanOwnTools(root: string, opts: { readonly canExec: boolean }):
     });
   }
   return { root, state: "ready", tools: out };
+}
+
+// ── MCP 指纹(「这条会话该不该换」的唯一判据)──────────────────────
+
+/** 指纹最多读多少个文件 / 单个文件多大以内才读内容(防一个数据集把收尾拖住)。 */
+const FINGERPRINT_MAX_FILES = 200;
+const FINGERPRINT_MAX_FILE_BYTES = 1024 * 1024;
+
+/**
+ * 列一个目录下的全部文件(相对路径排序;跳过依赖与缓存目录,不跟软链)。
+ * 超出 `FINGERPRINT_MAX_FILES` 时截断并如实带回 `truncated`。
+ */
+function listFilesBounded(dir: string): { files: string[]; truncated: boolean } {
+  const files: string[] = [];
+  let truncated = false;
+  const walk = (cur: string, rel: string): void => {
+    let ents;
+    try {
+      ents = readdirSync(cur, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const e of ents.sort((a, b) => a.name.localeCompare(b.name))) {
+      if (files.length >= FINGERPRINT_MAX_FILES) { truncated = true; return; }
+      const r = rel === "" ? e.name : `${rel}/${e.name}`;
+      if (e.isDirectory()) {
+        if (SKIP_DIRS.has(e.name) || e.name.startsWith(".")) continue;
+        walk(join(cur, e.name), r);
+      } else if (e.isFile()) {
+        files.push(r);
+      }
+    }
+  };
+  walk(dir, "");
+  files.sort();
+  return { files, truncated };
+}
+
+/**
+ * 自己仓库里**与 MCP 有关的内容**的指纹:每条 MCP 工具一个 `名字:内容哈希`,按名字排。
+ *
+ * ── 为什么需要它(2026-11-28 真模型实验)────────────────────────
+ *
+ * 「要不要换会话」原先看「平台这一轮收尾有没有产生新提交」。工程师第一轮写完
+ * `textstats` 之后**自己把仓库提交了**,平台收尾时没有东西可提 ⇒ 没换会话 ⇒
+ * 第二轮他的工具面上根本没有那个 MCP 工具,却被告知它在 —— 他花了三十多次调用
+ * 到处找。判据于是换成:**仓库里现在是什么** 与 **这条会话建的时候是什么** 比对。
+ * 谁提交的、有没有提交,都不重要。
+ *
+ * 只看带 `mcp.json` 的目录(说明类工具每轮由上下文现列,不需要换会话);
+ * `mcp.json` 不合法也算进去(从不合法改成合法、或者反过来,都得换)。
+ * 仓库目录不在 ⇒ `null`;仓库在、没有 MCP 工具(连 tools/ 都还没建)⇒ `""` —— 两者必须分开。
+ */
+export function ownMcpFingerprint(root: string): string | null {
+  // ⚠️ 「仓库目录在、还没有 tools/」是 **""(没有 MCP 工具)**,不是 null —— 与 `scanOwnTools` 的
+  // `state: "ready", tools: []` 同一条口径。写成 null 的话,角色写出第一个文件(哪怕只是
+  // 说明类工具)的那一轮,指纹就从 null 变成 "",于是每条会话都被当成过期而换掉。
+  if (!isDirectory(root)) return null;
+  const toolsDir = join(root, OWN_TOOLS_DIR);
+  if (!isDirectory(toolsDir)) return "";
+  let ents;
+  try {
+    ents = readdirSync(toolsDir, { withFileTypes: true });
+  } catch {
+    return null;
+  }
+  const parts: string[] = [];
+  for (const e of ents.sort((a, b) => a.name.localeCompare(b.name))) {
+    if (!e.isDirectory() || e.name.startsWith(".")) continue;
+    const dir = join(toolsDir, e.name);
+    if (!existsSync(join(dir, OWN_MCP_FILE))) continue;
+    const h = createHash("sha256");
+    const { files, truncated } = listFilesBounded(dir);
+    for (const rel of files) {
+      let size = -1;
+      try {
+        size = statSync(join(dir, rel)).size;
+      } catch {
+        /* 读不到的文件按「名字 + 未知大小」入账 */
+      }
+      h.update(`${rel}\0${size}\0`);
+      if (size >= 0 && size <= FINGERPRINT_MAX_FILE_BYTES) {
+        try {
+          h.update(readFileSync(join(dir, rel)));
+        } catch {
+          /* 同上 */
+        }
+      }
+    }
+    h.update(String(truncated));
+    parts.push(`${e.name}:${h.digest("hex").slice(0, 16)}`);
+  }
+  return parts.join("|");
 }

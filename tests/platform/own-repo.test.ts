@@ -25,7 +25,7 @@ import { insertProject, loadProjectForAuthz } from "../../src/platform/storage/r
 import { agentWorkspaceRoot, projectWorkspaceRoot } from "../../src/platform/workspace/root.js";
 import { createGitWorkspace } from "../../src/platform/workspace/git.js";
 import {
-  OWN_REPO_ROLES, canRunOwnMcp, ownMcpServerName, ownsRepo, parseSkillFrontmatter,
+  OWN_REPO_ROLES, canRunOwnMcp, ownMcpFingerprint, ownMcpServerName, ownsRepo, parseSkillFrontmatter,
   scanOwnTools, validateOwnMcp,
 } from "../../src/platform/harness/ownTools.js";
 import { setOwnToolDisabled } from "../../src/platform/storage/repo/agentTools.js";
@@ -197,6 +197,39 @@ describe("scanOwnTools · 仓库就是真相", () => {
     put(root, "tools/alpha/mcp.json", JSON.stringify({ command: "python" }));
     expect(scanOwnTools(root, { canExec: false }).tools[0]?.problem).toContain("跑命令");
     expect(scanOwnTools(root, { canExec: true }).tools[0]?.problem).toBeNull();
+  });
+});
+
+describe("ownMcpFingerprint · 「这条会话该不该换」的判据", () => {
+  it("目录不在 = null;没有 MCP 工具 = 空串(两件事分开);有 = 名字:哈希", () => {
+    const root = agentWorkspaceRoot(workRoot, "coding_worker");
+    expect(ownMcpFingerprint(root)).toBeNull();
+    mkdirSync(root, { recursive: true });
+    expect(ownMcpFingerprint(root)).toBe("");
+    put(root, "tools/alpha/SKILL.md", SKILL());
+    expect(ownMcpFingerprint(root), "说明类工具不进指纹(它们不需要换会话)").toBe("");
+    put(root, "tools/alpha/mcp.json", JSON.stringify({ command: "python" }));
+    expect(ownMcpFingerprint(root)).toMatch(/^alpha:[0-9a-f]{16}$/);
+    put(root, "tools/beta/mcp.json", "{ not json");
+    const two = ownMcpFingerprint(root) ?? "";
+    expect(two.split("|").map((x) => x.split(":")[0])).toEqual(["alpha", "beta"]);
+  });
+
+  it("内容变了指纹就变(服务器代码 / mcp.json / 删掉);依赖目录里的变化不算", () => {
+    const root = agentWorkspaceRoot(workRoot, "coding_worker");
+    put(root, "tools/rag/SKILL.md", SKILL());
+    put(root, "tools/rag/mcp.json", JSON.stringify({ command: "python", args: ["server.py"] }));
+    put(root, "tools/rag/server.py", "print(1)");
+    const a = ownMcpFingerprint(root);
+    put(root, "tools/rag/node_modules/dep/index.js", "// 依赖变了");
+    expect(ownMcpFingerprint(root)).toBe(a);
+    put(root, "tools/rag/server.py", "print(2)");
+    const b = ownMcpFingerprint(root);
+    expect(b).not.toBe(a);
+    put(root, "tools/rag/mcp.json", JSON.stringify({ command: "node" }));
+    expect(ownMcpFingerprint(root)).not.toBe(b);
+    rmSync(join(root, "tools", "rag", "mcp.json"));
+    expect(ownMcpFingerprint(root)).toBe("");
   });
 });
 

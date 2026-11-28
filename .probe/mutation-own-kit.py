@@ -26,6 +26,8 @@ TESTS = [
     "tests/platform/own-kit-context.test.ts",
     "tests/platform/own-mcp.test.ts",
     "tests/platform/own-kit-host.test.ts",
+    # 收尾等待的定时器从 prompt() 返回之后才起算(2026-11-28 真模型实验抓到的旧缺陷)
+    "tests/platform/turn.test.ts",
     "tests/platform/reset.test.ts",
     "tests/web/own-kit-section.test.ts",
 ]
@@ -37,6 +39,7 @@ def J(*lines: str) -> str:
 
 
 SESS = "src/platform/runtime/agentRuntime/pi/session.ts"
+SESS_TURN = "src/platform/runtime/turn.ts"
 OWN = "src/platform/harness/ownTools.ts"
 NOTES = "src/platform/storage/repo/agentNotes.ts"
 EXP = "src/platform/tools/experience.ts"
@@ -80,6 +83,11 @@ MUTATIONS = [
      'return { root, state: "ready", tools: [] };', "仓库目录不在也说成「读到了、没有工具」"),
     ("S10", OWN, "export const OWN_TOOL_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,47}$/;",
      "export const OWN_TOOL_NAME_RE = /^.+$/;", "工具目录名不校验(带空格 / 斜杠也认)"),
+    ("S11", OWN, "          h.update(readFileSync(join(dir, rel)));", "",
+     "指纹不读文件内容(改了服务器代码也算没变)"),
+    ("S12", OWN, "    if (!existsSync(join(dir, OWN_MCP_FILE))) continue;",
+     "    if (!existsSync(join(dir, OWN_MCP_FILE)) && !existsSync(join(dir, OWN_SKILL_FILE))) continue;",
+     "说明类工具也进指纹(每写一个说明类工具就换一次会话)"),
     # ── N:经验库仓储 ──────────────────────────────────────────────
     ("N1", NOTES, "WHERE agent_notes_fts MATCH ? AND n.agent_id = ? AND n.status = 'active'${kindFilter}",
      "WHERE agent_notes_fts MATCH ? AND (n.agent_id = ? OR 1 = 1) AND n.status = 'active'${kindFilter}",
@@ -114,6 +122,8 @@ MUTATIONS = [
     ("E9", EXP, "active === 0", "active > 0", "「库是空的」与「没命中」两句说反"),
     ("E10", EXP, ": (prior !== null ? prior.sourceProjectId : (ctx.project?.id ?? null));", ": null;",
      "来源项目不落库"),
+    ("E11", EXP, "const SOURCE_MAX = 600;", "const SOURCE_MAX = 60;",
+     "出处上限又缩回去(几处官方出处并列就被拒)"),
     # ── O:own_read / own_write ─────────────────────────────────────
     ("O1", OWNTOOL, "if (isGitInternal(at.rel)) {", "if (isGitInternal(at.rel) && false) {", "能往 .git/ 里写"),
     ("O2", OWNTOOL, "if (content.value.length > WRITE_MAX) {", "if (content.value.length > WRITE_MAX * 1000) {",
@@ -151,12 +161,18 @@ MUTATIONS = [
     ("M4", SOLVE, "cwd: t.dir,", "cwd: root,", "进程工作目录不在工具目录(相对路径的脚本找不到)"),
     ("M5", PICFG, "...(entry.cwd !== undefined ? { cwd: entry.cwd } : {}),", "...({} as Record<string, never>),",
      "cwd 算出来了却没交给 pi"),
+    ("T1", SESS_TURN, "  let timer: ReturnType<typeof setTimeout> | undefined;\n",
+     "  let timer: ReturnType<typeof setTimeout> | undefined = setTimeout(() => { timedOut = true; settled = true; }, timeoutMs);\n",
+     "收尾等待的定时器又从回合一开始就走(正常收尾的长回合被说成超时)"),
     # ── H:宿主与 HTTP ─────────────────────────────────────────────
     ("H1", SERVE, J('        // 「这一轮没有接到仓库路径」,而聊天 / 评审那条路是好的)。',
                    "        ...(ownRole !== null ? { ownRepoRoot: agentWorkspaceRoot(workspaceRootOf(), ownRole) } : {}),"),
      J('        // 「这一轮没有接到仓库路径」,而聊天 / 评审那条路是好的)。'),
      "执行那条路没接自己的仓库路径(工程师干活走的正是这条)"),
-    ("H2", SERVE, '.tools.some((t) => t.kind === "mcp")) {', '.tools.length < 0) {', "写了 MCP 服务也不换会话(下一轮工具面里没有它)"),
+    ("H2", SERVE, "ownMcpBuilt.get(k) !== now", "false",
+     "自己仓库里与 MCP 有关的内容变了也不换会话(下一轮工具面里没有它)"),
+    ("H10", SERVE, "    ownMcpBuilt.set(key, ownMcpFingerprintOf(agentId));\n", "",
+     "不记下「这条会话是用哪一版仓库建的」⇒ 每一轮都把会话当成过期换掉"),
     ("H3", SERVE, 'if (!existsSync(join(root, ".git"))) {', "if (true) {",
      "每轮收尾都重新 initRepo(改动以「三生平台」的身份被提交)"),
     ("H4", SERVE, "if (inflight.has(key)) {", "if (inflight.has(key) && false) {",

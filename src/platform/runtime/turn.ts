@@ -1305,12 +1305,24 @@ export async function runTurn(opts: RunTurnOptions): Promise<TurnResult> {
     if (inflight.size === 0 && now - lastEventAt >= idleMs) stopTurn("idle");
   }, watchdogTickMs(idleMs, toolMs));
 
-  // `timeoutMs` 的定时器**保持原样**:它护的是「prompt() 返回之后等收敛事件」
-  // 那段等待。它与上面那个墙钟上界是两件事,不合并(见文件头)。
-  const timer = setTimeout(() => {
-    timedOut = true;
-    settled = true;
-  }, timeoutMs);
+  // `timeoutMs` 护的是「prompt() 返回之后等收敛事件」那段等待。它与上面那个墙钟上界
+  // 是两件事,不合并(见文件头)。
+  //
+  // ⚠️ **它从 prompt() 返回(或被宽限放掉)之后才起算**,所以这里只声明、到下面才 `setTimeout`。
+  // 2026-11-28 真模型实验:定时器原来在回合一开始就登记,于是任何一个跑得比 `timeoutMs`
+  // (缺省 5 分钟)久的回合,哪怕模型还在正常干活,到第 5 分钟就被标成 `timedOut`——
+  // 研究员一个 13 分半、以正常答复收尾的回合,被广播成「工作项 … 的回合超时收尾」、
+  // 回合边界的提交说明里也写着「超时」,而它根本没超时。「让回合可以跑得久」那一批
+  // 把总时长上界改成不设之后,这个误报才从「超过 10 分钟的回合才遇到」变成「每个长回合都有」。
+  // 它不打断任何东西(处置只认 `turn.timeout`,那是 `stopTurn` 才写的),所以后果止于
+  // 一条假告警、一句假说明,和 `settled: false` 这个假事实。
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const armSettleTimer = (): void => {
+    timer = setTimeout(() => {
+      timedOut = true;
+      settled = true;
+    }, timeoutMs);
+  };
 
   /**
    * 把这一回合的用量落成**一行**(`turn_usage` 是回合级的,见 `migrations/018`)。
@@ -1430,11 +1442,13 @@ export async function runTurn(opts: RunTurnOptions): Promise<TurnResult> {
       );
     }
 
+    // prompt() 已经返回(或宽限到点不再等)⇒ **现在**才开始算「等收敛事件」的上界。
+    armSettleTimer();
     while (!settled) await new Promise((r) => setTimeout(r, 50));
   } finally {
     if (wallClockTimer !== undefined) clearTimeout(wallClockTimer);
     clearInterval(watchdogTimer);
-    clearTimeout(timer);
+    if (timer !== undefined) clearTimeout(timer);
     // 先退订再写账:晚到的 `message_end` 不该落进**上一个**回合的账
     // (`message_end` → 求和 → 落库 是一个同步块,中间不会插进新事件)。
     unsub();

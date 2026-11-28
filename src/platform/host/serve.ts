@@ -80,7 +80,7 @@ import {
 import { agentWorkspaceRoot, projectWorkspaceRoot } from "../workspace/root.js";
 import { unavailableWorkspace } from "../workspace/git.js";
 import type { WorkspacePort } from "../workspace/port.js";
-import { OWN_REPO_ROLES, canRunOwnMcp, ownsRepo, scanOwnTools } from "../harness/ownTools.js";
+import { OWN_REPO_ROLES, canRunOwnMcp, ownMcpFingerprint, ownsRepo } from "../harness/ownTools.js";
 import { log } from "../../shared/log.js";
 import { applySettingsPatch, toPublicSettings } from "../infra/settingsApply.js";
 import type { ProviderConfig } from "../infra/settings.js";
@@ -923,17 +923,27 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
     return a !== null && isProjectRole(a.role) && ownsRepo(a.role) ? a.role : null;
   }
 
+  /** 这个 agent 自己仓库里与 MCP 有关内容的指纹;没有仓库的角色是 `null`。 */
+  function ownMcpFingerprintOf(agentId: string): string | null {
+    const role = ownRepoRootOf(agentId);
+    return role === null ? null : ownMcpFingerprint(agentWorkspaceRoot(workspaceRootOf(), role));
+  }
+
   /**
    * 回合收尾:提交自己的仓库,并在需要时换掉这个角色的常驻会话。
    *
    * 与 `housekeepingCommit` 并列、互不依赖:那个管项目仓,这个管角色自己的仓库;
    * 项目仓那边提前 return(项目行没了 / 建仓失败)不影响这边。
    *
-   * **换会话的判据只有一条**:这一轮自己的仓库有新提交,且里面有 MCP 服务 ⇒
-   * 丢掉这个角色的常驻会话。MCP 的配置是在**建会话那一刻**定下的(平台完全接管
-   * `loadConfig`,返回的是一份常量),不换会话,他刚写好 / 刚改过的服务要等到下次
-   * 重启才生效 —— 而他下一轮只会看到「工具不在」。说明类工具不换:它们每轮由
+   * **换会话的判据只有一条**:仓库里与 MCP 有关的内容(`ownMcpFingerprint`)与这条会话
+   * **建的时候**不一样 ⇒ 丢掉这个角色的常驻会话。MCP 的配置是在**建会话那一刻**定下的
+   * (平台完全接管 `loadConfig`,返回的是一份常量),不换会话,他刚写好 / 刚改过的服务要
+   * 等到下次重启才生效 —— 而他下一轮只会看到「工具不在」。说明类工具不换:它们每轮由
    * 上下文现列(`runtime/ownKitContext.ts`),本来就跟得上。
+   *
+   * ⚠️ 判据**不看「这一轮有没有新提交」**:2026-11-28 真模型实验里工程师写完工具后自己
+   * 把仓库提交了,平台没有东西可提 ⇒ 第一版(看新提交)没换会话。谁提交的、提交没提交
+   * 都不重要,重要的是仓库现在的内容。
    */
   function housekeepingOwnRepo(agentId: string, outcome: string, projectId: string | null): void {
     const role = ownRepoRootOf(agentId);
@@ -967,10 +977,21 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
         .join("、");
       reportOwnRepoProblem(projectId, agentId, "自己的仓库有文件没有进版本库", `${items}(仓库 ${root})`);
     }
-    if (!r.value.committed) return;
-    log.muted(`platform: ${name} 自己的仓库已提交 ${r.value.sha?.slice(0, 8) ?? ""}(${outcome})`);
-    if (scanOwnTools(root, { canExec: canRunOwnMcp(role) }).tools.some((t) => t.kind === "mcp")) {
-      disposeAgentSessions(agentId, "自己的仓库里有 MCP 服务且刚有新提交");
+    if (r.value.committed) {
+      log.muted(`platform: ${name} 自己的仓库已提交 ${r.value.sha?.slice(0, 8) ?? ""}(${outcome})`);
+    }
+
+    // ── 换会话:按「仓库里与 MCP 有关的内容」比对,不按「这次有没有新提交」──────────
+    //
+    // ⚠️ 第一版的判据是「平台这次提交了新东西 && 里面有 MCP 服务」。2026-11-28 真模型实验
+    // 当场戳穿:工程师写完 textstats 后**自己把仓库提交了**,平台收尾没有东西可提 ⇒ 没换
+    // 会话 ⇒ 下一轮他的工具面上根本没有那个工具,却被告知它在(他花了三十多次调用到处找)。
+    // 谁提交的、有没有提交都不重要 —— 重要的是「仓库现在是什么」对「这条会话建的时候是什么」。
+    const now = ownMcpFingerprintOf(agentId);
+    const suffix = `::${agentId}`;
+    const stale = [...sessions.keys()].filter((k) => k.endsWith(suffix) && ownMcpBuilt.get(k) !== now);
+    if (stale.length > 0) {
+      disposeAgentSessions(agentId, `自己仓库里与 MCP 有关的内容变了(${stale.length} 条会话的工具面过期)`);
     }
   }
 
@@ -1585,6 +1606,14 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
    * 正常的回合变成一次中断 —— 那是「点了一下停用」绝不该带来的后果。
    */
   const deferredDisposes = new Set<string>();
+  /**
+   * 每条常驻会话**建的时候**自己仓库里与 MCP 有关内容的指纹(键 = 会话池的键)。
+   *
+   * MCP 的工具面是建会话那一刻定下的;回合收尾拿「现在的指纹」跟这里记的比,不一样
+   * 就换会话(`housekeepingOwnRepo`)。它是「这条会话是用哪一版仓库建的」这个事实,
+   * 不是跨回合的判定状态 —— 判定永远在收尾那一刻现比。
+   */
+  const ownMcpBuilt = new Map<string, string | null>();
   function disposeAgentSessions(agentId: string, why: string): void {
     const suffix = `::${agentId}`;
     let n = 0;
@@ -2234,6 +2263,8 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
       return { ok: false, code: "session_failed", message: `${created.reason}:${created.detail}` };
     }
     sessions.set(key, created.session);
+    // 记下「这条会话是用哪一版自己仓库建的」(有仓库的角色才有内容;没有的角色是 null)。
+    ownMcpBuilt.set(key, ownMcpFingerprintOf(agentId));
     log.muted(
       `platform: 建了 ${agentId} 在${channelLabel(projectId)}的会话` +
         `(工具面 ${created.plan.tools.length} 个 · 系统提示 ${created.wiring.systemPromptChars} 字符` +

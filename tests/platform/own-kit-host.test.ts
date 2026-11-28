@@ -308,6 +308,63 @@ describe("自己的仓库 · 宿主级:启动建仓、每轮注入、收尾提�
   });
 });
 
+describe("自己的仓库 · 换会话看「MCP 内容变没变」,不看「平台有没有新提交」", () => {
+  /** 模型自己提交(2026-11-28 真机上工程师就这么干)—— 平台收尾就没有东西可提了。 */
+  const roleCommits = (h: Harness): void => {
+    const root = cwOwn(h);
+    git(root, "add", "-A");
+    git(root, "-c", "user.name=test", "-c", "user.email=test@test", "commit", "-m", "模型自己提交的");
+  };
+
+  it("②b 他自己把仓库提交了 ⇒ 平台没有新提交,但 MCP 内容变了 ⇒ 照样换会话,下一轮工具面上有它", async () => {
+    const workIds: string[] = [];
+    let h: Harness | null = null;
+    let wrote = false;
+    h = await startHost(({ role, text, call }) => {
+      if (role !== "coding_worker" || !text.includes("# 工作项")) return "好的";
+      if (!wrote) {
+        wrote = true;
+        call("own_write", { path: "tools/rag/SKILL.md", content: SKILL }, "coding_worker");
+        call("own_write", { path: "tools/rag/mcp.json", content: RAG_JSON }, "coding_worker");
+        roleCommits(h as Harness);
+      }
+      const open = workIds.find((id) => workStatus(h as Harness, id) !== "done");
+      if (open !== undefined) call("work_update", { workId: open, status: "done" }, "coding_worker");
+      return "做完了";
+    });
+    workIds.push(assignWork(h, "写 MCP 并自己提交"), assignWork(h, "下一轮"));
+    h.drainNow();
+    await waitFor(h, "第 1 轮跑完、会话被换掉(平台这次没有新提交)", () => workStatus(h, workIds[0] ?? "") === "done" && cwSessions(h)[0]?.disposed === true);
+    await waitFor(h, "第 2 轮跑完", () => workStatus(h, workIds[1] ?? "") === "done");
+    await waitFor(h, "第 2 条会话建出来", () => cwSessions(h).length >= 2);
+    expect(allowlistOf(h, cwSessions(h)[0] as FakeSession).some((t) => t.startsWith("mcp__own_"))).toBe(false);
+    expect(allowlistOf(h, cwSessions(h)[1] as FakeSession)).toContain("mcp__own_coding_worker_rag__*");
+  });
+
+  it("②c 只动了与 MCP 无关的文件(说明类工具)⇒ 不换会话", async () => {
+    const workIds: string[] = [];
+    let h: Harness | null = null;
+    let wrote = false;
+    h = await startHost(({ role, text, call }) => {
+      if (role !== "coding_worker" || !text.includes("# 工作项")) return "好的";
+      if (!wrote) {
+        wrote = true;
+        call("own_write", { path: "tools/extract/SKILL.md", content: SKILL }, "coding_worker");
+        roleCommits(h as Harness);
+      }
+      const open = workIds.find((id) => workStatus(h as Harness, id) !== "done");
+      if (open !== undefined) call("work_update", { workId: open, status: "done" }, "coding_worker");
+      return "做完了";
+    });
+    workIds.push(assignWork(h, "写说明类工具"), assignWork(h, "下一轮"));
+    h.drainNow();
+    await waitFor(h, "两轮都跑完", () => workIds.every((id) => workStatus(h as Harness, id) === "done"));
+    await new Promise((r) => setTimeout(r, 80));
+    expect(cwSessions(h)).toHaveLength(1);
+    expect(cwSessions(h)[0]?.disposed).toBe(false);
+  });
+});
+
 // ── ③ 停用端点 ────────────────────────────────────────────────
 
 describe("自己的工具 · 停用端点与换会话", () => {

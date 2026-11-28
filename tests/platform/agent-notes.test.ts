@@ -185,6 +185,15 @@ describe("experience_save · 记一条", () => {
     expect(countActiveAgentNotes(db, "wk")).toBe(0);
   });
 
+  it("出处可以长到 600 字符(几处官方出处并列),再长拒收", async () => {
+    const long = "https://example.com/" + "a".repeat(500);
+    const okR = await call("experience_save", { kind: "research", title: "多出处", content: "正文", source: long }, "wk");
+    expect(okR.ok, okR.ok ? "" : okR.message).toBe(true);
+    const tooLong = await call("experience_save", { kind: "research", title: "太长", content: "正文", source: "b".repeat(601) }, "wk");
+    expect(tooLong.ok).toBe(false);
+    if (!tooLong.ok) expect(tooLong.message).toContain("source");
+  });
+
   it("① 别人的 noteId 与不存在的 noteId 得到**同一句**失败(不暴露存在性)", () => {
     const cwId = idOf(call("experience_save", { kind: "lesson", title: "cw 的", content: "别人的条目" }, "cw"));
     const asWk = call("experience_save", { kind: "lesson", title: "改", content: "改", noteId: cwId }, "wk");

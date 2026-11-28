@@ -66,6 +66,8 @@ function fakeSession(
     throwAfterAbort?: boolean;
     /** `abort()` 自己抛错(测「abort 失败不静默」) */
     abortThrows?: boolean;
+    /** `prompt()` 先挂这么久再跑剧本(测「跑得比 timeoutMs 久、但正常收尾的回合」) */
+    promptDelayMs?: number;
   } = {},
 ): FakeSession {
   const listeners: Array<(ev: AgentSessionEvent) => void> = [];
@@ -91,6 +93,7 @@ function fakeSession(
       if (opts.throwOnSubscribeFn === true) {
         // 观察者抛错不该毁掉回合 —— 由 onEvent 那条测试触发
       }
+      if (opts.promptDelayMs !== undefined) await new Promise<void>((r) => setTimeout(r, opts.promptDelayMs));
       const r = script(emit, text);
       if (r !== "never") {
         emit({ type: "agent_settled" });
@@ -142,8 +145,9 @@ const toolEnd = (id: string, name: string, result: unknown, extras: { isError?: 
 async function turn(
   script: Parameters<typeof fakeSession>[0],
   over: Partial<Parameters<typeof runTurn>[0]> = {},
+  fakeOpts: Parameters<typeof fakeSession>[1] = {},
 ): Promise<{ result: TurnResult; fake: FakeSession }> {
-  const fake = fakeSession(script);
+  const fake = fakeSession(script, fakeOpts);
   const result = await runTurn({
     session: fake.session, db, agentId: "pm", projectId: "p1",
     message: "做点事", timeoutMs: 2000,
@@ -605,6 +609,21 @@ describe("runTurn · timeoutMs 的旧语义(收尾等待)没有被改坏", () =>
     expect(result.settled).toBe(false);
     expect(fake.aborts, "收尾等待超时不该打断会话").toBe(0);
     expect(result.timeout, "没有墙钟现场 = 不是墙钟打断的").toBeUndefined();
+  });
+
+  it("收尾等待的上界从 prompt() **返回之后**起算:跑得比 timeoutMs 久、但正常收尾的回合**不是超时**", async () => {
+    // 2026-11-28 真模型实验:研究员一个 13 分半、以正常答复收尾的回合,被报成
+    // 「工作项 … 的回合超时收尾」、提交说明里也写着「超时」—— 因为那个 5 分钟的
+    // 定时器从回合一开始就在走,prompt 还在跑它就先把 timedOut 置了真。
+    // 它护的只是「prompt() 返回之后等收敛事件」那段等待,所以必须等 prompt 返回才起算。
+    const { result, fake } = await turn((emit) => {
+      emit(textDelta("做完了"));
+    }, { timeoutMs: 40, idleTimeoutMs: 10_000 }, { promptDelayMs: 160 });
+    expect(result.timedOut, "正常收尾的长回合不许被说成超时").toBe(false);
+    expect(result.settled).toBe(true);
+    expect(result.text).toBe("做完了");
+    expect(result.timeout).toBeUndefined();
+    expect(fake.aborts).toBe(0);
   });
 
   it("非正数的墙钟上界取默认值(坏值取默认;2026-11-25 起默认 = 不设,见下面看门狗那组)", async () => {

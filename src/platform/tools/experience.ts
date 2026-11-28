@@ -49,7 +49,9 @@ import {
 export const EXPERIENCE_MAX_ACTIVE = 500;
 const TITLE_MAX = 80;
 const CONTENT_MAX = 8000;
-const SOURCE_MAX = 300;
+// 出处常常是几个网址并列:2026-11-28 真模型实验里研究员一条调研写了三处官方出处(313 字符),
+// 被这个上限拒了第一次 —— 放宽到 600(正文 8000 不变)。
+const SOURCE_MAX = 600;
 const REASON_MAX = 300;
 const SEARCH_LIMIT_DEFAULT = 5;
 const SEARCH_LIMIT_MAX = 20;
