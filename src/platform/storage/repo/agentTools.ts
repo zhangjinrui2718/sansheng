@@ -36,8 +36,12 @@ export function listDisabledOwnTools(db: Database.Database, agentId: string): st
   return rows.map((r) => r.tool_name);
 }
 
-export function isOwnToolDisabled(db: Database.Database, agentId: string, toolName: string): boolean {
-  return listDisabledOwnTools(db, agentId).includes(toolName);
+/** 某个人的停用记录(带按下时刻 —— 人读面要显示「什么时候停的」)。 */
+export function listOwnToolDisableRows(db: Database.Database, agentId: string): AgentToolDisableRow[] {
+  const rows = db
+    .prepare(`SELECT id, agent_id, tool_name, disabled_at FROM agent_tool_disables WHERE agent_id = ? ORDER BY disabled_at ASC`)
+    .all(agentId) as RawDisable[];
+  return rows.map(rowToDisable);
 }
 
 /**

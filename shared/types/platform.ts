@@ -1194,6 +1194,60 @@ export interface RoleHarnessView {
   unknownTools: string[];
   /** L2 集合文件的真实状态(见 ToolSetFileView) */
   toolSet: ToolSetFileView;
+  /**
+   * 自己的仓库与经验库(migration 040,2026-11-28)—— 三个执行角色才有。
+   *
+   * `undefined` = 这个角色没有(业务经理 / 项目经理)⇒ 界面整段不出。
+   * 有仓库但读不到时 `repoState: "unavailable"` + `problem`、`notes: null` ——
+   * **那是「读不到」,不是「没有工具」**,界面必须分开说。
+   */
+  own?: OwnKitView;
+}
+
+/** 自己的仓库里的一条工具(扫仓库扫出来的,见 `harness/ownTools.ts`)。 */
+export interface OwnToolView {
+  /** = 工具目录名 */
+  name: string;
+  /** skill = 说明 + 脚本(平台不启动任何进程);mcp = MCP 服务(平台在他的会话里启动) */
+  kind: "skill" | "mcp";
+  /** `SKILL.md` 里的 description;读不到时为空串 */
+  description: string;
+  /** usable = 在用;disabled = 甲方停用了;invalid = 格式不对(看 `problem`) */
+  state: "usable" | "disabled" | "invalid";
+  /** `invalid` 时是一句可执行的原因;其余为 null */
+  problem: string | null;
+  /** 甲方按下刹车的时刻;没停用过为 null */
+  disabledAt: number | null;
+  /** 工具目录下的文件数(不含依赖与缓存目录) */
+  fileCount: number;
+}
+
+/** 一个角色的「自己的东西」:仓库 + 经验库计数。 */
+export interface OwnKitView {
+  /** 自己的仓库根的绝对路径;算不出来时为空串 */
+  repoDir: string;
+  /** ready = 目录在;missing = 目录还没建出来;unavailable = 这次算不出来(没有装配工作区 / 扫描抛错) */
+  repoState: "ready" | "missing" | "unavailable";
+  /** 读不到的原因(`repoState === "unavailable"` 时有) */
+  problem?: string;
+  readonly tools: OwnToolView[];
+  /** 经验库在用条数(按类型);`null` = 读不到 */
+  notes: { lesson: number; research: number } | null;
+}
+
+/** 经验库里的一条(人读面;成员页的角色 harness 卡)。 */
+export interface AgentNoteView {
+  id: string;
+  kind: "lesson" | "research";
+  title: string;
+  content: string;
+  /** 出处;`research` 类必有 */
+  source: string | null;
+  sourceProjectId: string | null;
+  status: "active" | "retired";
+  retireReason: string | null;
+  createdAt: number;
+  updatedAt: number;
 }
 
 export interface HarnessView {
@@ -2326,6 +2380,12 @@ export function eventProjectId(ev: ServerEvent): string | null {
 //   PUT    /api/harness/units/:unitId         { content }        → { ok, content, backupPath? }
 //   POST   /api/harness/units/:unitId/reset   { confirm:"reset" } → { ok, content }
 //   GET    /api/harness/units/:unitId/backups → { backups: [{file,path}] }
+//   ── 自己的仓库与经验库(migration 040;三个执行角色才有,其余角色 404)──
+//   GET    /api/harness/own/:role/notes?q=&limit= → { notes: AgentNoteView[], counts: { lesson, research } }
+//                                                (仓库与工具清单在 GET /api/harness 的 roles[].own 里)
+//   DELETE /api/harness/own/:role/notes/:id  → { ok }         (人删一条经验;模型只能退休)
+//   PUT    /api/harness/own/:role/tools/:name { disabled }     → { tool: OwnToolView }
+//                                                (踩刹车 / 松刹车;改了就换掉这个角色的常驻会话)
 //   ── 记忆画像(结构化摘要;与 fragments 互补)──
 //   GET    /api/profile                       → { entries: Record<string, unknown> }
 //   PUT    /api/profile/:key                  { value }           → { ok, key, value, updatedAt }

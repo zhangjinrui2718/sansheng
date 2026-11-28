@@ -86,6 +86,9 @@ function toPiConfig(
     ...base,
     ...(entry.def.args !== undefined ? { args: [...entry.def.args] } : {}),
     ...(Object.keys(resolved.env).length > 0 ? { env: { ...resolved.env } } : {}),
+    // 自己仓库里的 MCP 服务(040):进程的工作目录钉在那个工具目录 —— 相对路径的脚本与
+    // 数据按它解析,而不是按项目仓(会话 cwd)。人的目录没有这一项,行为不变。
+    ...(entry.cwd !== undefined ? { cwd: entry.cwd } : {}),
     ...(entry.def.timeout !== undefined ? { timeout: entry.def.timeout } : {}),
     ...(entry.def.description !== undefined ? { description: entry.def.description } : {}),
   };
@@ -118,15 +121,16 @@ export function toLoadedMcpConfig(
   const servers: McpServerEntry[] = [];
 
   for (const entry of solution.servers) {
+    // 自己仓库里的服务不带凭据(`validateOwnMcp` 已拒 `${变量}` 引用)⇒ 不去查 secrets。
     const resolved =
-      dataDir !== undefined && store !== undefined
-        ? withResolvedSecrets(dataDir, entry.def, store)
-        : { env: entry.def.env ?? {}, headers: entry.def.headers ?? {}, unresolved: [] as string[] };
+      entry.origin === "own" || dataDir === undefined || store === undefined
+        ? { env: entry.def.env ?? {}, headers: entry.def.headers ?? {}, unresolved: [] as string[] }
+        : withResolvedSecrets(dataDir, entry.def, store);
     for (const u of resolved.unresolved) unresolved.push(`${entry.name}:${u}`);
     servers.push({
       name: entry.name,
       config: toPiConfig(entry, resolved),
-      source: MCP_CONFIG_SOURCE,
+      source: entry.source ?? MCP_CONFIG_SOURCE,
     });
   }
 
@@ -156,7 +160,8 @@ export function describeMcpSolution(solution: McpSolution): string {
     lines.push("  server:无");
   } else {
     for (const s of solution.servers) {
-      lines.push(`  server:${s.name} · ${s.granted ? "已授权(enabled/direct)" : "未授权(enabled:false/hidden)"}`);
+      const origin = s.origin === "own" ? " · 自己仓库" : "";
+      lines.push(`  server:${s.name} · ${s.granted ? "已授权(enabled/direct)" : "未授权(enabled:false/hidden)"}${origin}`);
     }
   }
   if (solution.patterns.length > 0) lines.push(`  allowlist 模式:${solution.patterns.join(", ")}`);
@@ -165,6 +170,7 @@ export function describeMcpSolution(solution: McpSolution): string {
   }
   if (solution.catalogProblem !== undefined) lines.push(`  ⚠️ 目录文件:${solution.catalogProblem}`);
   if (solution.problem !== undefined) lines.push(`  ⚠️ 授权文件:${solution.problem}`);
+  if (solution.ownProblem !== undefined) lines.push(`  ⚠️ 自己仓库的 MCP 服务:${solution.ownProblem}`);
   lines.push("  连接状态:读不到(平台不解析 pi 的 mcp.log —— 宁可没有,也不伪造)");
   return lines.join("\n");
 }

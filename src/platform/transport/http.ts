@@ -38,7 +38,13 @@ import {
   artifactBodyPaths,
   type IndexedBodyPath,
 } from "../storage/repo/artifacts.js";
-import { projectWorkspaceRoot } from "../workspace/root.js";
+import { agentWorkspaceRoot, projectWorkspaceRoot } from "../workspace/root.js";
+import { canRunOwnMcp, ownsRepo, scanOwnTools } from "../harness/ownTools.js";
+import { toAgentNoteView, toOwnKitView, toOwnToolView } from "./ownKitView.js";
+import {
+  countAgentNotesByKind, deleteAgentNote, getAgentNote, listAgentNotes,
+} from "../storage/repo/agentNotes.js";
+import { listOwnToolDisableRows, setOwnToolDisabled } from "../storage/repo/agentTools.js";
 import { scanWorkspace, type WorkspaceScan } from "../workspace/scan.js";
 import type { WorkspacePort } from "../workspace/port.js";
 import type { CodeServicePort } from "../codeservice/port.js";
@@ -198,6 +204,16 @@ export interface HttpDeps {
    * 建立失败落成一条**可见**通知(`reportWorkspaceProblem`)。
    */
   readonly ensureWorkspace?: (projectId: string) => void;
+  /**
+   * **工作根**(绝对路径,040)—— 自己的仓库的读面要它来算 `<工作根>/roles/<角色>/`。
+   * 可选:没给(只挂 HTTP 的装配)时那半边如实回 `unavailable`,不是「他没有工具」。
+   */
+  readonly workspaceRoot?: string;
+  /**
+   * 自己的工具被停用 / 恢复之后的通知(040)—— 宿主用它换掉这个角色的常驻会话
+   * (MCP 的工具面是建会话那一刻定下的,不换会话「停用」要等到下次重启才生效)。
+   */
+  readonly onOwnToolToggled?: (agentId: string) => void;
   /** 设置读写(复用旧 store —— 它是基础设施,不是旧系统的领域逻辑) */
   readonly settings: {
     read: () => unknown;
@@ -1699,7 +1715,7 @@ app.get("/api/client-questions", (c) => c.json(listAllClientQuestions(db)));
 
   // ── harness(只读)────────────────────────────────────────────
 
-  app.get("/api/harness", (c) => c.json(buildHarnessView(db, deps.dataDir)));
+  app.get("/api/harness", (c) => c.json(buildHarnessView(db, deps.dataDir, deps.workspaceRoot)));
 
   // ── 重置(维护端点)────────────────────────────────────────────
   //
@@ -1781,6 +1797,88 @@ app.get("/api/client-questions", (c) => c.json(listAllClientQuestions(db)));
   app.get("/api/harness/units/:unitId/backups", (c) =>
     c.json({ backups: listBackups(deps.dataDir, c.req.param("unitId")) }),
   );
+
+  // ── 自己的仓库与经验库(040,2026-11-28)──────────────────────────
+  //
+  // 三个端点都是**人**的面:停用 / 恢复一条工具(踩刹车、松刹车)、看与删经验条目。
+  // 没有对应的平台工具 —— 用户裁决「自己的 rag 和代码仓库不需要我放行」,所以这里
+  // 没有任何「审批」;而「删除经验」只留给人(模型只能退休,不能删)。
+  // 工具清单与仓库位置不单开端点:它们在 `GET /api/harness` 的 `roles[].own` 里
+  // (成员页那张卡本来就取那一份,再开一个等于让它多一次请求)。
+  /** 路由参数指向的角色有没有自己的仓库;有就给出它的 agent id(`null` ⇒ 404)。 */
+  const ownRole = (raw: string): { role: ProjectRole; agentId: string } | null => {
+    if (!isProjectRole(raw) || !ownsRepo(raw)) return null;
+    const agent = listAgents(db).find((a) => a.role === raw);
+    return agent === undefined ? null : { role: raw, agentId: agent.id };
+  };
+  const NO_OWN_REPO = err("not_found", "这个角色没有自己的仓库与经验库");
+
+  app.get("/api/harness/own/:role/notes", (c) => {
+    const own = ownRole(c.req.param("role"));
+    if (own === null) return c.json(NO_OWN_REPO.body, 404);
+    const q = (c.req.query("q") ?? "").trim();
+    const limitRaw = Number(c.req.query("limit") ?? 20);
+    const limit = Number.isFinite(limitRaw) ? limitRaw : 20;
+    const built = q === "" ? undefined : buildMatchQuery(q);
+    if (q !== "" && built === null) {
+      return c.json(err("invalid_args", "检索词太短:中文至少 2 个字、英文至少 2 个字符").body, 400);
+    }
+    const match = built === null ? undefined : built;
+    try {
+      const notes = listAgentNotes(db, {
+        agentId: own.agentId,
+        limit,
+        // `q` 为空 = 按时间倒序浏览;给了 = 按相关度。人读面连退休的一起列(看得见他退休了什么)。
+        ...(match !== undefined ? { matchQuery: match } : {}),
+        status: "all",
+      }).map(toAgentNoteView);
+      const counts = countAgentNotesByKind(db, own.agentId);
+      return c.json({ notes, counts: { lesson: counts.lesson, research: counts.research } });
+    } catch (e) {
+      // 读不到就说读不到(500 + 原因),不回一个空数组 —— 「0 条」是另一件事。
+      return c.json(err("internal", `经验库读不到:${e instanceof Error ? e.message : String(e)}`).body, 500);
+    }
+  });
+
+  app.delete("/api/harness/own/:role/notes/:id", (c) => {
+    const own = ownRole(c.req.param("role"));
+    if (own === null) return c.json(NO_OWN_REPO.body, 404);
+    const id = c.req.param("id");
+    // 不是这个角色的条目与不存在的,得到同一种回答(不暴露存在性;与工具面同一道门)
+    const n = getAgentNote(db, id);
+    if (n === null || n.agentId !== own.agentId) {
+      return c.json(err("not_found", `这个角色没有 noteId=${id} 这条经验`).body, 404);
+    }
+    deleteAgentNote(db, id);
+    return c.json({ ok: true });
+  });
+
+  app.put("/api/harness/own/:role/tools/:name", async (c) => {
+    const own = ownRole(c.req.param("role"));
+    if (own === null) return c.json(NO_OWN_REPO.body, 404);
+    const body = (await c.req.json().catch(() => null)) as { disabled?: unknown } | null;
+    if (typeof body?.disabled !== "boolean") {
+      return c.json(err("invalid_args", "请求体要写成 {\"disabled\": true} 或 {\"disabled\": false}").body, 400);
+    }
+    if (deps.workspaceRoot === undefined) {
+      return c.json(err("internal", "这次运行没有装配工作区 —— 读不到他的仓库,没法核对这条工具在不在").body, 500);
+    }
+    const name = c.req.param("name");
+    // 工具必须真的在仓库里(扫一遍):名字拼错不静默生效 —— 否则「停用了一条不存在的
+    // 工具」在界面上与「停用成功了」长得一样。
+    const tool = scanOwnTools(agentWorkspaceRoot(deps.workspaceRoot, own.role), { canExec: canRunOwnMcp(own.role) })
+      .tools.find((t) => t.name === name);
+    if (tool === undefined) {
+      return c.json(err("not_found", `他的仓库里没有叫「${name}」的工具目录`).body, 404);
+    }
+    const changed = setOwnToolDisabled(db, {
+      id: deps.newId("atd"), agentId: own.agentId, toolName: name, disabled: body.disabled, now: deps.now(),
+    });
+    // 只在真的改了行时才换会话:没改动却丢会话,是把一个空操作说成了生效。
+    if (changed) deps.onOwnToolToggled?.(own.agentId);
+    const row = listOwnToolDisableRows(db, own.agentId).find((r) => r.toolName === name);
+    return c.json({ tool: toOwnToolView(tool, row?.disabledAt ?? null), changed });
+  });
 
   // ── harness 的 git 历史(A2',2026-11-15)────────────────────────
   //
@@ -2316,7 +2414,15 @@ app.get("/api/client-questions", (c) => c.json(listAllClientQuestions(db)));
  *    在此之前这个视图只显示 ceiling,于是「用户改了 `harness/tools/*.json` 却看不到
  *    任何变化」在界面上无法与「已经生效」区分 —— 又一个「声称有、实际没有」。
  */
-export function buildHarnessView(db: Database.Database, dataDir: string): HarnessView {
+export function buildHarnessView(
+  db: Database.Database,
+  dataDir: string,
+  /**
+   * 工作根(040):给了才算得出 `<工作根>/roles/<角色>/` 并扫他的工具。
+   * 没给(只挂 HTTP 的装配 / 部分测试)⇒ 有仓库的角色那半边如实回 `unavailable`。
+   */
+  workspaceRoot?: string,
+): HarnessView {
   const roles: RoleHarnessView[] = [];
 
   for (const role of PROJECT_ROLES) {
@@ -2393,6 +2499,10 @@ export function buildHarnessView(db: Database.Database, dataDir: string): Harnes
         removedByToolSet: [...removedByToolSet].sort(),
         ...(toolSet.problem !== undefined ? { problem: toolSet.problem.detail } : {}),
       },
+      // 自己的仓库与经验库(040):三个执行角色才有;没有的角色不带这个字段。
+      ...(ownsRepo(role) && agent !== undefined
+        ? { own: toOwnKitView(db, { agentId: agent.id, role, workspaceRoot }) }
+        : {}),
     });
   }
 

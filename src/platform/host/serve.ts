@@ -39,7 +39,7 @@ import { bootPlatform, type BootedPlatform } from "../runtime/boot.js";
 import { createPlatformSession, type CreateSessionFn } from "../runtime/agentRuntime/pi/session.js";
 import { runTurn, type TurnResult, type ToolCallRecord } from "../runtime/turn.js";
 import { runWorkItem } from "../runtime/execution.js";
-import { ORG, ensureOrg, orgReady, syncOrgForExistingProjects } from "../runtime/org.js";
+import { ORG, ensureOrg, orgReady, roleDisplayName, syncOrgForExistingProjects } from "../runtime/org.js";
 import {
   describeReport,
   reindexAllKnowledge,
@@ -67,7 +67,7 @@ import {
 } from "../runtime/steer.js";
 import { cancelExhaustedWakeups } from "../storage/repo/wakeups.js";
 import { settleExhaustedDuty } from "../storage/repo/duties.js";
-import { ROLE_SPECS } from "../identity/role.js";
+import { ROLE_SPECS, isProjectRole, type ProjectRole } from "../identity/role.js";
 import { resolveClientQuestion } from "../tools/client.js";
 import { listProjectSummaries, type LiveCollectOptions } from "../transport/views.js";
 import { seedPromptUnits, type FactoryDirs } from "../harness/write.js";
@@ -77,9 +77,10 @@ import { getAgent } from "../storage/repo/agents.js";
 import {
   artifactBodyPaths, getArtifact, setArtifactCommitSha, updateArtifactBody,
 } from "../storage/repo/artifacts.js";
-import { projectWorkspaceRoot } from "../workspace/root.js";
+import { agentWorkspaceRoot, projectWorkspaceRoot } from "../workspace/root.js";
 import { unavailableWorkspace } from "../workspace/git.js";
 import type { WorkspacePort } from "../workspace/port.js";
+import { OWN_REPO_ROLES, canRunOwnMcp, ownsRepo, scanOwnTools } from "../harness/ownTools.js";
 import { log } from "../../shared/log.js";
 import { applySettingsPatch, toPublicSettings } from "../infra/settingsApply.js";
 import type { ProviderConfig } from "../infra/settings.js";
@@ -631,6 +632,17 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
     for (const r of reports) log.muted(`platform: 知识语料 ${describeReport(r)}`);
   }
 
+  // ── 自己的仓库(040):启动时把三个执行角色的仓库建出来 ──────────────────
+  //
+  // 为什么在启动:每轮的任务前要写出仓库的**绝对路径**(`runtime/ownKitContext.ts`),
+  // 路径指向一个不存在的目录,模型的第一反应是「先建目录」而不是「往里写」。
+  // `initRepo` 幂等(已有仓只补缺的文件);回合收尾还有一道兜底。建不出来只落日志
+  // —— 此刻没有项目可以挂系统消息,而卡上会如实显示「目录还没建出来」。
+  for (const role of OWN_REPO_ROLES) {
+    const problem = ensureOwnRepo(role);
+    if (problem !== null) log.error(`platform: ${roleDisplayName(role)}自己的仓库没建出来 —— ${problem}`);
+  }
+
   /**
    * 语料索引的装配 —— 与工具层**同一份依赖**(工作区端口 + 工作根)。
    *
@@ -824,6 +836,157 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
     return existsSync(join(root, ".git"));
   }
 
+  // ── 自己的仓库(migration 040,2026-11-28)────────────────────────
+  //
+  // `<工作根>/roles/<角色>/`:三个执行角色各自的工具箱,**不属于任何项目**。
+  // 算式只有一处(`workspace/root.ts` 的 `agentWorkspaceRoot`);谁能有仓库也只有
+  // 一处判据(`harness/ownTools.ts` 的 `ownsRepo` = ceiling 里有 `own.write`)。
+  // 格式、进会话的方式、刹车见 `docs/DESIGN-PLATFORM.md` 末尾那一节。
+
+  /**
+   * 自己的仓库的 `.gitignore` —— 项目仓那四条秘密规则**原样**,再加依赖与缓存:
+   * 一个 MCP 服务目录里带 `node_modules/` 是常态,那不是「他的工具的内容」。
+   */
+  // 写成函数而不是模块级常量:启动时(本函数靠前的位置)就会调 `ensureOwnRepo`,
+  // 常量声明在后面 ⇒ TDZ(真机上一启动就抛 `Cannot access before initialization`)。
+  function ownRepoGitignore(): string {
+    return [
+    "# 秘密:永不提交,并在提交时告警",
+    ".env",
+    "*.key",
+    "*.pem",
+    "secrets/",
+    "",
+    "# 依赖与缓存(不是工具的内容)",
+    "node_modules/",
+    ".venv/",
+    "__pycache__/",
+    "*.pyc",
+    "",
+    "# 平台暂存",
+    ".platform-tmp/",
+    "",
+    ].join("\n");
+  }
+
+  /** 自己的仓库的 README —— 平台写的是「这里放什么、怎么放」,只在缺失时写。 */
+  function ownRepoReadme(role: ProjectRole): string {
+    return [
+      `# ${roleDisplayName(role)}自己的仓库`,
+      "",
+      "> 不属于任何项目。以后每个项目都用得上的东西放这里:工具、做法、常翻的资料。",
+      "> 项目收口了,这个仓库还在。",
+      "",
+      "## 一个工具一个目录",
+      "",
+      "```",
+      "tools/<名字>/",
+      "├── SKILL.md      ← 说明书(必需):开头一段 frontmatter 里必须有 description",
+      "├── …            ← 可选:脚本、数据",
+      "└── mcp.json     ← 可选:有它 = 这是一个 MCP 服务(本地进程)",
+      "```",
+      "",
+      "- 目录名就是工具的名字(小写字母、数字、连字符)。",
+      "- 写完就是你的,下一轮起生效;不需要谁放行。",
+      "- 每轮结束平台提交一次这个仓库(密钥文件、依赖目录、超过 10 MB 的单文件不进版本库)。",
+      "",
+      "这个文件只在**缺失时**由平台写入:改过它之后平台不会再覆盖。",
+      "",
+    ].join("\n");
+  }
+
+  /**
+   * 建自己的仓库(幂等):`git init` + 写 `.gitignore` / `README.md` + 首次提交。
+   *
+   * 启动时对三个有仓库的角色各跑一次;回合收尾时兜底再查一次 `.git` 在不在。
+   * 失败返回一句原因(启动时只有日志可落;回合收尾时由调用方落进项目内部会话)。
+   */
+  function ensureOwnRepo(role: ProjectRole): string | null {
+    const root = agentWorkspaceRoot(workspaceRootOf(), role);
+    try {
+      mkdirSync(root, { recursive: true });
+    } catch (e) {
+      return `建目录失败 ${root}:${e instanceof Error ? e.message : String(e)}`;
+    }
+    const r = workspacePort().initRepo({ root, gitignore: ownRepoGitignore(), readme: ownRepoReadme(role) });
+    return r.ok ? null : `建仓失败 ${root}:${r.problem}`;
+  }
+
+  /**
+   * 这个 agent 有没有自己的仓库;有就给出绝对路径。
+   *
+   * `null` = 没有(业务经理 / 项目经理,或角色未知)—— 调用方据此整段不做,
+   * 不猜、不给一个空目录。
+   */
+  function ownRepoRootOf(agentId: string): ProjectRole | null {
+    const a = getAgent(db, agentId);
+    return a !== null && isProjectRole(a.role) && ownsRepo(a.role) ? a.role : null;
+  }
+
+  /**
+   * 回合收尾:提交自己的仓库,并在需要时换掉这个角色的常驻会话。
+   *
+   * 与 `housekeepingCommit` 并列、互不依赖:那个管项目仓,这个管角色自己的仓库;
+   * 项目仓那边提前 return(项目行没了 / 建仓失败)不影响这边。
+   *
+   * **换会话的判据只有一条**:这一轮自己的仓库有新提交,且里面有 MCP 服务 ⇒
+   * 丢掉这个角色的常驻会话。MCP 的配置是在**建会话那一刻**定下的(平台完全接管
+   * `loadConfig`,返回的是一份常量),不换会话,他刚写好 / 刚改过的服务要等到下次
+   * 重启才生效 —— 而他下一轮只会看到「工具不在」。说明类工具不换:它们每轮由
+   * 上下文现列(`runtime/ownKitContext.ts`),本来就跟得上。
+   */
+  function housekeepingOwnRepo(agentId: string, outcome: string, projectId: string | null): void {
+    const role = ownRepoRootOf(agentId);
+    if (role === null) return;
+    const root = agentWorkspaceRoot(workspaceRootOf(), role);
+    // 仓在就只花一次 `existsSync`(启动时建过;库重置、工作目录改过才需要兜底建)。
+    // ⚠️ **不能每次都调 `initRepo`**:它会把工作树里的改动以「三生平台」的身份提交掉
+    // (`initRepo` 结尾无条件 commit),下面那次以角色为作者的提交就永远没有东西可提 ——
+    // 「归属由 git 承载」这条就静默失效了。第一版正是这么错的,宿主级测试当场抓到。
+    if (!existsSync(join(root, ".git"))) {
+      const problem0 = ensureOwnRepo(role);
+      if (problem0 !== null) {
+        reportOwnRepoProblem(projectId, agentId, "自己的仓库建不出来", problem0);
+        return;
+      }
+    }
+    const member = ORG.find((m) => m.id === agentId);
+    const name = member?.name ?? getAgent(db, agentId)?.displayName ?? agentId;
+    const r = workspacePort().commit({
+      root,
+      author: `${name} <${agentId}@sansheng.local>`,
+      message: `housekeeping: ${name} 的回合结束(${outcome})`,
+    });
+    if (!r.ok) {
+      reportOwnRepoProblem(projectId, agentId, "自己的仓库提交失败", `${r.problem}(仓库 ${root})`);
+      return;
+    }
+    if (r.value.excluded.length > 0) {
+      const items = r.value.excluded
+        .map((e) => `${e.path}(${e.reason === "secret" ? "秘密" : "超大"})`)
+        .join("、");
+      reportOwnRepoProblem(projectId, agentId, "自己的仓库有文件没有进版本库", `${items}(仓库 ${root})`);
+    }
+    if (!r.value.committed) return;
+    log.muted(`platform: ${name} 自己的仓库已提交 ${r.value.sha?.slice(0, 8) ?? ""}(${outcome})`);
+    if (scanOwnTools(root, { canExec: canRunOwnMcp(role) }).tools.some((t) => t.kind === "mcp")) {
+      disposeAgentSessions(agentId, "自己的仓库里有 MCP 服务且刚有新提交");
+    }
+  }
+
+  /**
+   * 自己的仓库的问题落进**这个项目**的内部会话(与项目仓的问题同一个落点、同一种
+   * 「同一条只播一次」),但去重的键按 `(项目, 角色)` 记 —— 否则会与项目仓那条
+   * 互相覆盖:项目仓没问题时会把键清掉,自己仓库的同一条问题就每轮重播一次。
+   */
+  function reportOwnRepoProblem(projectId: string | null, agentId: string, title: string, detail: string): void {
+    if (projectId === null) {
+      log.warn(`platform: ${agentId} ${title}:${detail}`);
+      return;
+    }
+    reportWorkspaceProblem(projectId, title, detail, `${projectId}#own:${agentId}`);
+  }
+
   /**
    * 索引**向 git 收敛**(设计 §3.4 第 1 步):对索引里登记的每一条正文路径重算
    * `sha256` / `bytes`,与行里记的不一致就把它拉回事实。
@@ -909,11 +1072,15 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
    * 而报多了就没人看了。日志每回合照留;问题变了或恢复正常之后再来会重新播报。
    */
   const announcedWorkspaceProblems = new Map<string, string>();
-  function reportWorkspaceProblem(projectId: string, title: string, detail: string): void {
+  /**
+   * @param dedupeKey 去重的键,缺省 = 项目自己。角色自己的仓库的问题按 `(项目, 角色)`
+   *   记(`housekeepingOwnRepo`)—— 与项目仓那条互不覆盖。
+   */
+  function reportWorkspaceProblem(projectId: string, title: string, detail: string, dedupeKey: string = projectId): void {
     const line = `⚠️ 工作区${title}:${detail}`;
     log.warn(`platform: 项目 ${projectId} ${line}`);
-    if (announcedWorkspaceProblems.get(projectId) === line) return;
-    announcedWorkspaceProblems.set(projectId, line);
+    if (announcedWorkspaceProblems.get(dedupeKey) === line) return;
+    announcedWorkspaceProblems.set(dedupeKey, line);
     const sessionId = ensureSession(db, projectId, now(), newId, "internal");
     appendSessionMessage(db, {
       id: newId("m"),
@@ -1405,6 +1572,62 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
     log.muted(
       `platform: 已丢弃${channelLabel(projectId)}上 ${agentId} 在会话 ${sessionId} 的常驻会话(${why})`,
     );
+  }
+
+  /**
+   * 丢掉**某一个角色**在所有项目、所有对话线上的常驻会话(2026-11-28,自己的仓库)。
+   *
+   * 他的 MCP 工具面是建会话那一刻定下的:自己的仓库里刚有新提交且含 MCP 服务、
+   * 或甲方停用 / 恢复了他的某个工具 ⇒ 旧会话的工具面已经不对,必须换一条。
+   *
+   * ⚠️ **他正在跑的那一轮不打断**:那条会话记进 `deferredDisposes`,等这一轮
+   * 收尾时再丢(`flushDeferredDisposes`,两个回合出口都调)。此刻硬丢会把一次
+   * 正常的回合变成一次中断 —— 那是「点了一下停用」绝不该带来的后果。
+   */
+  const deferredDisposes = new Set<string>();
+  function disposeAgentSessions(agentId: string, why: string): void {
+    const suffix = `::${agentId}`;
+    let n = 0;
+    for (const key of [...sessions.keys()]) {
+      if (!key.endsWith(suffix)) continue;
+      if (inflight.has(key)) {
+        deferredDisposes.add(key);
+        continue;
+      }
+      const s = sessions.get(key);
+      if (s !== undefined) {
+        try {
+          s.dispose();
+        } catch {
+          /* dispose 失败不影响「这条会话已经不该再用」这个事实 */
+        }
+      }
+      sessions.delete(key);
+      n += 1;
+    }
+    if (n > 0) log.muted(`platform: 已丢弃 ${agentId} 的 ${n} 条常驻会话(${why})`);
+  }
+
+  /** 回合收尾时把「这一轮跑完再丢」的那几条真丢掉(见 `disposeAgentSessions`)。 */
+  function flushDeferredDisposes(): void {
+    if (deferredDisposes.size === 0) return;
+    const keys = [...deferredDisposes];
+    deferredDisposes.clear();
+    let n = 0;
+    for (const key of keys) {
+      if (inflight.has(key)) continue; // 另一轮又开始了:留给那一轮的收尾
+      const s = sessions.get(key);
+      if (s !== undefined) {
+        try {
+          s.dispose();
+        } catch {
+          /* 同上 */
+        }
+      }
+      sessions.delete(key);
+      n += 1;
+    }
+    if (n > 0) log.muted(`platform: 回合收尾后丢弃了 ${n} 条常驻会话`);
   }
 
   /** 丢掉全部常驻会话(设置变更 / 数据重置 / 关闭)。 */
@@ -2317,6 +2540,9 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
     // fire-and-forget 处理的,中断消息会在这个回合还卡在 await 里的时候就被处理掉。
     // 这正是「死接线」得以藏身的缝隙。
 
+    // 自己的仓库的路径(040):有仓库的角色才给 —— 业务经理 / 项目经理不给,
+    // 他们收到的文本逐字不变(没有这组能力的角色,那一段整段不出)。
+    const ownRole = ownRepoRootOf(agentId);
     try {
       const turn = await runTurn({
         session,
@@ -2324,6 +2550,7 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
         agentId,
         projectId,
         message: task,
+        ...(ownRole !== null ? { ownRepoRoot: agentWorkspaceRoot(workspaceRootOf(), ownRole) } : {}),
         // ── 用量那两行接线(见 `RunTurnOptions.sessionId` 的已知缺口)───────
         //
         // `sessionId` 就在作用域里(`ensureSession` 刚算出来的那条),`runTurn`
@@ -2618,6 +2845,11 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
       // 产出的东西(它可能已经写了代码,只是没来得及收尾)就永远不进版本库,
       // 而屏幕上「这回合超时了」与「它的产出没被提交」长得完全不一样。
       housekeepingCommit(projectId, agentId, outcomeLabel);
+      // 角色自己的仓库(040):同一个边界、同一条理由 —— 他刚写进仓库的东西也要
+      // 进版本库;里面有 MCP 服务且刚有新提交 ⇒ 换一条会话。之后再把「这一轮
+      // 跑完再丢」的会话真丢掉(见 `disposeAgentSessions`)。
+      housekeepingOwnRepo(agentId, outcomeLabel, projectId);
+      flushDeferredDisposes();
     }
   }
 
@@ -2635,6 +2867,8 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
   ): Promise<DrainWorkReport> {
     const before = getWork(db, workId);
     const title = before?.title ?? workId;
+    // 自己的仓库(040):有仓库的角色才把路径交给这一轮(见 `runWorkItem` 的 `ownRepoRoot`)。
+    const ownRole = ownRepoRootOf(agentId);
     // ── **派发时就建工作目录**(设计 §2)──────────────────────────────
     //
     // `<项目根>/work/<workId>/` 在派发这条工作项时建好,并把**绝对路径**写进任务
@@ -2701,6 +2935,10 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
         // 真机现场那个跑了 16 分钟的 worker 回合走的正是这里)。
         sessionId,
         onUsageRecorded: (row) => hub.emitUsageRecorded(row),
+        // 自己的仓库的路径(040):**执行这条路才是工程师干活的地方** —— 只接
+        // `runAgentTurn` 那条等于没接(第一版就是这么错的:工程师每一轮都读到
+        // 「这一轮没有接到仓库路径」,而聊天 / 评审那条路是好的)。
+        ...(ownRole !== null ? { ownRepoRoot: agentWorkspaceRoot(workspaceRootOf(), ownRole) } : {}),
         ...(opts.turnTimeoutMs !== undefined ? { timeoutMs: opts.turnTimeoutMs } : {}),
         // 同一根线也要接在**执行**这条路上:worker 卡在 curl 文档 16 分钟那次
         // 真机现场走的正是这里,只接 `runAgentTurn` 等于没接。
@@ -3006,6 +3244,9 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
       // 成功 / 失败 / 超时 / 被拒绝四条路都做)。worker 写的代码正是这里进的仓 ——
       // 设计 §3.1 的「agent 交代码,平台交其余」两半都由它收尾。
       housekeepingCommit(projectId, agentId, outcomeLabel);
+      // 自己的仓库(040):与 `runAgentTurn` 的 finally 同一处收尾。
+      housekeepingOwnRepo(agentId, outcomeLabel, projectId);
+      flushDeferredDisposes();
     }
   }
 
@@ -3572,6 +3813,10 @@ export function createPlatformHost(opts: ServeOptions): PlatformHost {
     // ⚠️ 传的是**同一份实现**(`ensureWorkspace`):README / `.gitignore` 文案只有一处,
     // 复制一份就是漂移的开始。
     ensureWorkspace,
+    // 自己的仓库(040):读面要工作根(算 `<工作根>/roles/<角色>/`),停用 / 恢复一条
+    // 工具后要换掉这个角色的常驻会话(MCP 的工具面是建会话那一刻定下的)。
+    workspaceRoot: workspaceRootOf(),
+    onOwnToolToggled: (agentId) => disposeAgentSessions(agentId, "自己的工具被停用 / 恢复"),
     live: {
       turns: () => hub.runningTurns(),
       dispatch: () => ({

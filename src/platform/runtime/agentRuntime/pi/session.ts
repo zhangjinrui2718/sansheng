@@ -241,6 +241,8 @@ export type PlatformSessionResult =
         readonly mcpPatterns: readonly string[];
         /** 授权里有、目录里没有的 server 名。**不静默生效**,必须看得见。 */
         readonly mcpUnknownServers: readonly string[];
+        /** 自己仓库里本次连上的 MCP 服务(工具目录名,040);没有就是空。 */
+        readonly ownMcpServers: readonly string[];
         /** 解不开的 secret(`enc:` 前缀不对 / keyring 不是同一个)。**只含键名**。 */
         readonly mcpUnresolvedSecrets: readonly string[];
         /**
@@ -522,6 +524,8 @@ export async function createPlatformSession(
       mcpServers: grantedServers,
       mcpPatterns: [...plan.mcp.patterns],
       mcpUnknownServers: [...plan.mcp.unknownServers],
+      /** 自己仓库里本次连上的 MCP 服务(040)—— 「写好了却没连上」必须看得见。 */
+      ownMcpServers: [...plan.mcp.ownTools],
       mcpUnresolvedSecrets: [...mcpConfig.unresolved],
       mcpConnectionState: mcpConfig.connectionState,
       ...(mcpBindError !== undefined ? { mcpBindError } : {}),

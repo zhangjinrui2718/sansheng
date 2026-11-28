@@ -202,6 +202,15 @@ export interface RunWorkOptions {
    * 派发时建好并透传进任务正文(`composeWorkPrompt` 的 `workDir`)。见那里的注释。
    */
   readonly workDir?: string;
+  /**
+   * **这个角色自己仓库的绝对路径**(040,2026-11-28)—— 透传给 `runTurn.ownRepoRoot`:
+   * 每轮把「你自己的仓库」的位置与工具清单拼进任务。
+   *
+   * ⚠️ **两条路都要接**(与 `sessionId` / 看门狗同一条教训):执行者干活走的就是这里,
+   * 只接 `runAgentTurn`(聊天 / 汇报 / 评审)等于没接 —— 工程师的每一轮都读不到自己的仓库。
+   * 有仓库的角色才给;没有的不传(那一段整段不出)。
+   */
+  readonly ownRepoRoot?: string;
 }
 
 /**
@@ -377,6 +386,7 @@ export async function runWorkItem(opts: RunWorkOptions): Promise<ExecutionResult
     // **工作项是知道的** —— `runTurn` 不知道自己在干哪个工作项,而这里手里就是
     // 它。不传的话「这个回合花的钱是投在哪件活上」在库里永远是 NULL(静默丢字段)。
     workId: opts.workId,
+    ...(opts.ownRepoRoot !== undefined ? { ownRepoRoot: opts.ownRepoRoot } : {}),
     ...(opts.timeoutMs !== undefined ? { timeoutMs: opts.timeoutMs } : {}),
     ...(opts.wallClockTimeoutMs !== undefined
       ? { wallClockTimeoutMs: opts.wallClockTimeoutMs }
